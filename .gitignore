@@ -1,0 +1,47 @@
+# Dependencies
+node_modules/
+vendor/
+
+# Build output
+dist/
+build/
+web/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Database
+*.db
+*.db-wal
+*.db-shm
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code (local-only)
+.claude/
+
+# Superpowers docs (local-only)
+docs/superpowers/
+
+# Test coverage
+coverage/
+*.out
+
+# Logs
+*.log

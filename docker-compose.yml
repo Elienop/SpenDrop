@@ -1,0 +1,15 @@
+services:
+  spendrop:
+    build: .
+    container_name: spendrop
+    ports:
+      - "8080:8080"
+    volumes:
+      - spendrop-data:/app/data
+    environment:
+      - PORT=8080
+      - DB_PATH=/app/data/spendrop.db
+    restart: unless-stopped
+
+volumes:
+  spendrop-data:
