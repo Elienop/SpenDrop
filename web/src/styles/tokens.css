@@ -1,0 +1,200 @@
+/* SpenDrop Design Tokens
+ * This is the ONLY file allowed to contain hex values.
+ * All other CSS files must use var() references to semantic tokens.
+ */
+
+/* ===== PRIMITIVES ===== */
+:root {
+  /* Graphite scale (cool blue undertone) */
+  --gray-50:  #F5F5F6;
+  --gray-100: #E8E8EA;
+  --gray-200: #D1D1D5;
+  --gray-300: #A9A9B0;
+  --gray-400: #78787F;
+  --gray-500: #58585F;
+  --gray-600: #39393F;
+  --gray-700: #2A2A30;
+  --gray-800: #1E1E23;
+  --gray-900: #141418;
+  --gray-950: #0C0C10;
+
+  /* Indigo scale */
+  --indigo-50:  #EEF2FF;
+  --indigo-100: #E0E7FF;
+  --indigo-200: #C7D2FE;
+  --indigo-300: #A5B4FC;
+  --indigo-400: #818CF8;
+  --indigo-500: #6366F1;
+  --indigo-600: #4F46E5;
+  --indigo-700: #4338CA;
+  --indigo-800: #3730A3;
+  --indigo-900: #312E81;
+
+  /* Functional hues */
+  --green-400: #7EC89B;
+  --green-600: #2D9D5E;
+  --red-400:   #E88B9C;
+  --red-600:   #D4556B;
+  --amber-400: #E8A87C;
+  --amber-600: #C97A3E;
+  --blue-400:  #7CAFD4;
+  --blue-600:  #3B82F6;
+
+  /* Neutrals */
+  --white: #FFFFFF;
+
+  /* ===== TYPOGRAPHY ===== */
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* Type scale — size */
+  --type-heading-lg-size: 24px;
+  --type-heading-md-size: 20px;
+  --type-heading-sm-size: 16px;
+  --type-body-lg-size: 16px;
+  --type-body-md-size: 14px;
+  --type-body-sm-size: 12px;
+  --type-label-lg-size: 14px;
+  --type-label-md-size: 12px;
+  --type-label-sm-size: 11px;
+  --type-amount-size: 16px;
+
+  /* Type scale — weight */
+  --type-heading-lg-weight: 600;
+  --type-heading-md-weight: 600;
+  --type-heading-sm-weight: 600;
+  --type-body-lg-weight: 400;
+  --type-body-md-weight: 400;
+  --type-body-sm-weight: 400;
+  --type-label-lg-weight: 500;
+  --type-label-md-weight: 500;
+  --type-label-sm-weight: 500;
+  --type-amount-weight: 500;
+
+  /* Type scale — line-height */
+  --type-heading-lg-line-height: 32px;
+  --type-heading-md-line-height: 28px;
+  --type-heading-sm-line-height: 24px;
+  --type-body-lg-line-height: 24px;
+  --type-body-md-line-height: 20px;
+  --type-body-sm-line-height: 16px;
+  --type-label-lg-line-height: 20px;
+  --type-label-md-line-height: 16px;
+  --type-label-sm-line-height: 16px;
+  --type-amount-line-height: 24px;
+
+  /* ===== SPACING (4px base) ===== */
+  --space-0:  0;
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ===== SHAPE ===== */
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-2xl:  28px;
+  --radius-full: 9999px;
+
+  /* ===== MOTION ===== */
+  --ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+
+  --duration-fast:   150ms;
+  --duration-normal: 250ms;
+  --duration-slow:   350ms;
+  --duration-page:   400ms;
+
+  /* ===== SEMANTIC TOKENS (Dark Theme — Default) ===== */
+
+  /* Surfaces */
+  --surface-base:    var(--gray-950);
+  --surface-raised:  var(--gray-900);
+  --surface-overlay: var(--gray-800);
+  --surface-sunken:  var(--gray-950);
+  --surface-hover:   var(--gray-700);
+
+  /* Text */
+  --text-primary:   var(--gray-50);
+  --text-secondary: var(--gray-400);
+  --text-tertiary:  var(--gray-500);
+  --text-inverse:   var(--gray-950);
+
+  /* Brand / Interactive */
+  --color-primary:       var(--indigo-400);
+  --color-primary-hover: var(--indigo-300);
+
+  /* Semantic colors */
+  --color-expense: var(--red-400);
+  --color-income:  var(--green-400);
+  --color-warning: var(--amber-400);
+  --color-info:    var(--blue-400);
+  --color-error:   var(--red-400);
+
+  /* Borders */
+  --border-default: var(--gray-700);
+  --border-muted:   var(--gray-800);
+
+  /* Focus */
+  --focus-ring: var(--indigo-500);
+
+  /* Overlay */
+  --backdrop: color-mix(in srgb, var(--gray-950) 60%, transparent);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--gray-950) 20%, transparent);
+  --shadow-md: 0 4px 8px color-mix(in srgb, var(--gray-950) 25%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, var(--gray-950) 30%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in srgb, var(--gray-950) 40%, transparent);
+
+  /* Opacity utilities */
+  --primary-a8:  color-mix(in srgb, var(--color-primary) 8%, transparent);
+  --primary-a15: color-mix(in srgb, var(--color-primary) 15%, transparent);
+  --primary-a50: color-mix(in srgb, var(--color-primary) 50%, transparent);
+  --expense-a15: color-mix(in srgb, var(--color-expense) 15%, transparent);
+  --income-a15:  color-mix(in srgb, var(--color-income) 15%, transparent);
+}
+
+/* ===== LIGHT THEME OVERRIDES ===== */
+[data-theme="light"] {
+  --surface-base:    var(--gray-50);
+  --surface-raised:  var(--white);
+  --surface-overlay: var(--white);
+  --surface-sunken:  var(--gray-100);
+  --surface-hover:   var(--gray-200);
+
+  --text-primary:   var(--gray-900);
+  --text-secondary: var(--gray-600);
+  --text-tertiary:  var(--gray-500);
+  --text-inverse:   var(--gray-50);
+
+  --color-primary:       var(--indigo-600);
+  --color-primary-hover: var(--indigo-700);
+
+  --color-expense: var(--red-600);
+  --color-income:  var(--green-600);
+  --color-warning: var(--amber-600);
+  --color-info:    var(--blue-600);
+  --color-error:   var(--red-600);
+
+  --border-default: var(--gray-200);
+  --border-muted:   var(--gray-100);
+
+  --focus-ring: var(--indigo-500);
+
+  --backdrop: color-mix(in srgb, var(--gray-950) 40%, transparent);
+
+  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--gray-950) 5%, transparent);
+  --shadow-md: 0 4px 8px color-mix(in srgb, var(--gray-950) 8%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, var(--gray-950) 12%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in srgb, var(--gray-950) 16%, transparent);
+}
