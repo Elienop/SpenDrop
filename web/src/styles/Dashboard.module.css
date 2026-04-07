@@ -38,7 +38,7 @@
 
 .heroCard {
   background: transparent;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-muted);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
   display: flex;
@@ -58,6 +58,7 @@
   font-weight: var(--type-display-weight);
   line-height: var(--type-display-line-height);
   color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
 }
 
 .heroSub {
@@ -81,12 +82,14 @@
   font-size: var(--type-display-size);
   font-weight: var(--type-display-weight);
   line-height: var(--type-display-line-height);
+  font-variant-numeric: tabular-nums;
 }
 
 .savingsAmounts {
   font-size: var(--type-body-md-size);
   color: var(--text-secondary);
   text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .savingsBar {
@@ -111,7 +114,7 @@
 /* ===== Cash Flow ===== */
 .cashFlow {
   background: transparent;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-muted);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
 }
@@ -166,6 +169,7 @@
   font-weight: 600;
   color: var(--text-primary);
   margin-left: var(--space-1);
+  font-variant-numeric: tabular-nums;
 }
 
 .cfToggle {
@@ -210,7 +214,7 @@
 
 .card {
   background: transparent;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--border-muted);
   border-radius: var(--radius-lg);
   padding: var(--space-6);
 }
@@ -307,6 +311,7 @@
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .catBar {
@@ -378,6 +383,7 @@
   font-weight: 600;
   text-align: right;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .expense {

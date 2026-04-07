@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { useTheme } from './useTheme';
 
 interface ChartTheme {
   axisStroke: string;
@@ -19,6 +20,8 @@ function getCSSVar(name: string, fallback: string): string {
 }
 
 export function useChartTheme(): ChartTheme {
+  const { resolvedTheme } = useTheme();
+
   return useMemo(() => ({
     axisStroke: getCSSVar('--text-tertiary', '#58585F'),
     gridStroke: getCSSVar('--border-muted', '#1E1E23'),
@@ -36,5 +39,5 @@ export function useChartTheme(): ChartTheme {
       getCSSVar('--color-info', '#7CAFD4'),
       getCSSVar('--text-tertiary', '#58585F'),
     ],
-  }), []);
+  }), [resolvedTheme]);
 }

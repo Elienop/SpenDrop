@@ -339,7 +339,7 @@ export function Dashboard() {
               <Bar
                 dataKey="expense"
                 fill={chartTheme.expenseColor}
-                radius={[0, 0, 4, 4]}
+                radius={[4, 4, 0, 0]}
                 name="Expenses"
               />
             </BarChart>

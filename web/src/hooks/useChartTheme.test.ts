@@ -1,5 +1,10 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi } from 'vitest';
 import { renderHook } from '@testing-library/react';
+
+vi.mock('./useTheme', () => ({
+  useTheme: () => ({ theme: 'dark', resolvedTheme: 'dark', setTheme: vi.fn() }),
+}));
+
 import { useChartTheme } from './useChartTheme';
 
 describe('useChartTheme', () => {
