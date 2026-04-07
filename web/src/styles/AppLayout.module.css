@@ -4,8 +4,18 @@
 }
 
 .main {
-  margin-left: 64px;
   flex: 1;
-  padding: var(--space-6);
-  transition: margin-left var(--duration-slow) var(--ease-decelerate);
+  padding-left: calc(64px + var(--space-10));
+  padding-right: var(--space-10);
+  padding-top: var(--space-8);
+  padding-bottom: var(--space-8);
+  max-width: calc(1400px + 64px);
+  margin: 0 auto;
+  transition: padding-left var(--duration-slow) var(--ease-accelerate);
+}
+
+.mainExpanded {
+  padding-left: calc(240px + var(--space-10));
+  max-width: calc(1400px + 240px);
+  transition: padding-left var(--duration-slow) var(--ease-decelerate);
 }
