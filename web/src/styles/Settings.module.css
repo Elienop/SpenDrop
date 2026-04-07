@@ -1,0 +1,254 @@
+/* Settings page styles */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* Tab Navigation */
+.tabs {
+  display: flex;
+  gap: var(--space-xs);
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: var(--space-xs);
+  overflow-x: auto;
+}
+
+.tab {
+  padding: var(--space-sm) var(--space-md);
+  color: var(--color-text-secondary);
+  font-weight: 500;
+  font-size: 0.9375rem;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+  transition: all var(--transition);
+  white-space: nowrap;
+  min-height: 44px;
+}
+
+.tab:hover {
+  color: var(--color-text);
+  background-color: var(--bg-card);
+}
+
+.tabActive {
+  color: var(--color-primary);
+  border-bottom: 2px solid var(--color-primary);
+}
+
+/* Section Card */
+.card {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+}
+
+.sectionTitle {
+  margin-bottom: var(--space-lg);
+}
+
+/* Form Elements */
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  margin-bottom: var(--space-md);
+}
+
+.formLabel {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.formInput {
+  padding: var(--space-sm) var(--space-md);
+  min-height: 44px;
+  max-width: 300px;
+}
+
+.formRow {
+  display: flex;
+  gap: var(--space-md);
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+
+.saveButton {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  min-height: 44px;
+  transition: background-color var(--transition);
+  margin-top: var(--space-sm);
+}
+
+.saveButton:hover:not(:disabled) {
+  background-color: #3db890;
+}
+
+.saveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Currency Table */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: var(--space-md);
+}
+
+.table th {
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table td {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.875rem;
+}
+
+.table tr:hover {
+  background-color: var(--bg-surface);
+}
+
+.tableInput {
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+  width: 100px;
+}
+
+.baseBadge {
+  display: inline-block;
+  padding: 2px var(--space-sm);
+  background-color: rgba(78, 204, 163, 0.15);
+  color: var(--color-primary);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+/* Action Buttons */
+.actionButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  min-height: 32px;
+}
+
+.editButton {
+  color: var(--color-info);
+}
+
+.editButton:hover {
+  background-color: rgba(123, 104, 238, 0.1);
+}
+
+.deleteButton {
+  color: var(--color-danger);
+}
+
+.deleteButton:hover {
+  background-color: rgba(233, 69, 96, 0.1);
+}
+
+/* Add Form (inline) */
+.addForm {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: flex-end;
+  flex-wrap: wrap;
+  padding: var(--space-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  margin-top: var(--space-md);
+}
+
+.addFormField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.addFormLabel {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.addFormInput {
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.addButton {
+  padding: var(--space-xs) var(--space-md);
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+  font-weight: 600;
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+}
+
+/* Role select */
+.roleSelect {
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+  min-width: 100px;
+}
+
+/* States */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+  color: var(--color-text-secondary);
+}
+
+.error {
+  padding: var(--space-md);
+  background-color: rgba(233, 69, 96, 0.1);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  color: var(--color-danger);
+}
+
+.success {
+  padding: var(--space-sm) var(--space-md);
+  background-color: rgba(78, 204, 163, 0.1);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+  color: var(--color-primary);
+  font-size: 0.875rem;
+}
+
+.infoText {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+/* Divider */
+.divider {
+  border: none;
+  border-top: 1px solid var(--border-color);
+  margin: var(--space-lg) 0;
+}

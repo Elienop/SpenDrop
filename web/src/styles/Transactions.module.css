@@ -1,0 +1,526 @@
+/* Transactions page styles */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+/* Filter Bar */
+.filterBar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+}
+
+.filterRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  flex-wrap: wrap;
+}
+
+.datePresets {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.presetButton {
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  transition: all var(--transition);
+  min-height: 36px;
+}
+
+.presetButton:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.dateInputs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.dateSeparator {
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+}
+
+.filterInput {
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.typeToggle {
+  display: flex;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.typeButton {
+  padding: var(--space-xs) var(--space-md);
+  background-color: var(--bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  border-right: 1px solid var(--border-color);
+  transition: all var(--transition);
+  min-height: 36px;
+}
+
+.typeButton:last-child {
+  border-right: none;
+}
+
+.typeButton:hover {
+  color: var(--color-text);
+}
+
+.typeActive {
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+}
+
+.filterSelect {
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+  min-width: 150px;
+}
+
+.searchInput {
+  flex: 1;
+  min-width: 200px;
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.clearButton {
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text-secondary);
+  font-size: 0.875rem;
+  transition: color var(--transition);
+  min-height: 36px;
+}
+
+.clearButton:hover {
+  color: var(--color-danger);
+}
+
+/* Transaction Entry (rapid add) */
+.entryForm {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-sm);
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-md);
+  flex-wrap: wrap;
+}
+
+.entryField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+  flex: 1;
+  min-width: 120px;
+}
+
+.entryLabel {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.entryInput,
+.entrySelect {
+  padding: var(--space-sm) var(--space-sm);
+  min-height: 44px;
+  font-size: 0.875rem;
+}
+
+.addButton {
+  padding: var(--space-sm) var(--space-lg);
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  min-height: 44px;
+  transition: background-color var(--transition);
+}
+
+.addButton:hover:not(:disabled) {
+  background-color: #3db890;
+}
+
+.addButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Transaction Table */
+.tableWrapper {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.table th {
+  text-align: left;
+  padding: var(--space-sm) var(--space-md);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table td {
+  padding: var(--space-sm) var(--space-md);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 0.875rem;
+}
+
+.row:hover {
+  background-color: var(--bg-surface);
+}
+
+.editRow {
+  background-color: var(--bg-surface);
+}
+
+.expense {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.income {
+  color: var(--color-primary);
+  font-weight: 600;
+}
+
+/* Category Badge */
+.badge {
+  display: inline-block;
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #fff;
+}
+
+/* Action buttons */
+.actionCell {
+  white-space: nowrap;
+}
+
+.editButton,
+.deleteButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  min-height: 32px;
+}
+
+.editButton {
+  color: var(--color-info);
+}
+
+.editButton:hover {
+  background-color: rgba(123, 104, 238, 0.1);
+}
+
+.deleteButton {
+  color: var(--color-danger);
+}
+
+.deleteButton:hover {
+  background-color: rgba(233, 69, 96, 0.1);
+}
+
+.editActions {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.saveButton {
+  padding: var(--space-xs) var(--space-sm);
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  min-height: 32px;
+}
+
+.cancelButton {
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  min-height: 32px;
+}
+
+.editInput,
+.editSelect {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.875rem;
+  width: 100%;
+  min-height: 36px;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-md);
+  padding: var(--space-md);
+}
+
+.pageButton {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  transition: all var(--transition);
+  min-height: 44px;
+}
+
+.pageButton:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.pageButton:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.pageInfo {
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+}
+
+/* States */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+  color: var(--color-text-secondary);
+}
+
+.error {
+  padding: var(--space-md);
+  background-color: rgba(233, 69, 96, 0.1);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  color: var(--color-danger);
+}
+
+.emptyState {
+  text-align: center;
+  padding: var(--space-xl);
+  color: var(--color-text-secondary);
+}
+
+/* Tag Input */
+.tagInputWrapper {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  padding: var(--space-xs);
+  min-height: 36px;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  cursor: text;
+}
+
+.tagInputWrapper:focus-within {
+  border-color: var(--color-primary);
+}
+
+.tagPill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  background-color: rgba(78, 204, 163, 0.15);
+  color: var(--color-primary);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.tagRemove {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  cursor: pointer;
+  font-size: 0.875rem;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.tagRemove:hover {
+  opacity: 1;
+}
+
+.tagInput {
+  flex: 1;
+  min-width: 60px;
+  border: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 0.875rem;
+  outline: none;
+  padding: 2px 4px;
+}
+
+/* Multi-category select */
+.multiSelect {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-width: 100%;
+}
+
+.categoryChip {
+  padding: 2px var(--space-sm);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  background-color: var(--bg-surface);
+  transition: all var(--transition);
+  cursor: pointer;
+}
+
+.categoryChip:hover {
+  border-color: var(--color-primary);
+}
+
+.categoryChipActive {
+  color: #fff;
+}
+
+/* Amount range */
+.amountRange {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+/* Saved filters */
+.savedFilters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  align-items: center;
+}
+
+.savedFilterChip {
+  display: inline-flex;
+  align-items: center;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.savedFilterButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8125rem;
+  color: var(--color-text);
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: background-color var(--transition);
+}
+
+.savedFilterButton:hover {
+  background-color: rgba(78, 204, 163, 0.1);
+}
+
+.savedFilterDelete {
+  padding: var(--space-xs) 6px;
+  font-size: 0.875rem;
+  color: var(--color-text-secondary);
+  background: none;
+  border: none;
+  border-left: 1px solid var(--border-color);
+  cursor: pointer;
+}
+
+.savedFilterDelete:hover {
+  color: var(--color-danger);
+  background-color: rgba(233, 69, 96, 0.1);
+}
+
+.saveFilterButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8125rem;
+  color: var(--color-primary);
+  border: 1px dashed var(--color-primary);
+  border-radius: var(--radius-sm);
+  background: none;
+  cursor: pointer;
+  transition: background-color var(--transition);
+}
+
+.saveFilterButton:hover {
+  background-color: rgba(78, 204, 163, 0.1);
+}
+
+/* Page Header */
+.pageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.exportButton {
+  padding: var(--space-sm) var(--space-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--color-text);
+  font-size: 0.875rem;
+  transition: all var(--transition);
+  min-height: 36px;
+}
+
+.exportButton:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}

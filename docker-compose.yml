@@ -3,7 +3,7 @@ services:
     build: .
     container_name: spendrop
     ports:
-      - "8080:8080"
+      - "3535:8080"
     volumes:
       - spendrop-data:/app/data
     environment:
