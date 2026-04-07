@@ -118,14 +118,14 @@ describe('Sidebar', () => {
   });
 
   test('renders collapsed by default', () => {
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    renderSidebar();
     const sidebar = screen.getByRole('complementary');
     expect(sidebar.className).not.toContain('expanded');
   });
 
   test('does not expand on mouse hover', async () => {
     const user = userEvent.setup();
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    renderSidebar();
     const sidebar = screen.getByRole('complementary');
     await user.hover(sidebar);
     expect(sidebar.className).not.toContain('expanded');
@@ -133,7 +133,7 @@ describe('Sidebar', () => {
 
   test('expands when toggle button is clicked', async () => {
     const user = userEvent.setup();
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    renderSidebar();
     const toggle = screen.getByLabelText('Toggle sidebar');
     await user.click(toggle);
     const sidebar = screen.getByRole('complementary');
@@ -142,7 +142,7 @@ describe('Sidebar', () => {
 
   test('persists expanded state to localStorage', async () => {
     const user = userEvent.setup();
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    renderSidebar();
     const toggle = screen.getByLabelText('Toggle sidebar');
     await user.click(toggle);
     expect(localStorage.getItem('spendrop-sidebar')).toBe('true');
@@ -150,7 +150,7 @@ describe('Sidebar', () => {
 
   test('reads initial state from localStorage', () => {
     localStorage.setItem('spendrop-sidebar', 'true');
-    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    renderSidebar();
     const sidebar = screen.getByRole('complementary');
     expect(sidebar.className).toContain('expanded');
   });
