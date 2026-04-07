@@ -1,11 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/elienop/spendrop/internal/database"
 )
 
 func TestNewRouter_HealthEndpoint_Returns200(t *testing.T) {
@@ -75,6 +78,7 @@ func TestNewRouter_AuthLogout_Returns200(t *testing.T) {
 	router := NewRouter(q, db)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
@@ -161,12 +165,25 @@ func TestNewRouter_ProtectedRoute_WithoutAuth_Returns401(t *testing.T) {
 	}
 }
 
-func TestNewRouter_StubRoutes_ReturnNotImplemented(t *testing.T) {
+func TestNewRouter_AdminRoutes_WithoutAuth_Returns401(t *testing.T) {
 	q, db := setupTestDB(t)
 	router := NewRouter(q, db)
 
-	// Register and get session cookie for authenticated requests
-	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNewRouter_AdminRoutes_AsAdmin_Succeeds(t *testing.T) {
+	q, db := setupTestDB(t)
+	router := NewRouter(q, db)
+
+	// Register first user (admin)
+	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)
 	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
 	regRec := httptest.NewRecorder()
 	router.ServeHTTP(regRec, regReq)
@@ -182,139 +199,14 @@ func TestNewRouter_StubRoutes_ReturnNotImplemented(t *testing.T) {
 		t.Fatal("no session cookie from register")
 	}
 
-	// Stub endpoints should return 501 Not Implemented when authed
-	endpoints := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/api/transactions"},
-		{http.MethodPost, "/api/transactions"},
-		{http.MethodPost, "/api/transactions/batch"},
-		{http.MethodGet, "/api/categories"},
-		{http.MethodPost, "/api/categories"},
-		{http.MethodPost, "/api/categories/reorder"},
-		{http.MethodGet, "/api/currencies"},
-		{http.MethodPost, "/api/currencies"},
-		{http.MethodGet, "/api/budgets"},
-		{http.MethodGet, "/api/savings-goals"},
-		{http.MethodGet, "/api/dashboard/summary"},
-		{http.MethodGet, "/api/dashboard/trend"},
-		{http.MethodGet, "/api/dashboard/categories"},
-		{http.MethodGet, "/api/settings/default-budget"},
-		{http.MethodPut, "/api/settings/default-budget"},
-	}
-
-	for _, ep := range endpoints {
-		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
-			req := httptest.NewRequest(ep.method, ep.path, nil)
-			req.AddCookie(sessionCookie)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusNotImplemented {
-				t.Errorf("expected 501, got %d; body: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
-func TestNewRouter_StubRoutes_WithURLParams_ReturnNotImplemented(t *testing.T) {
-	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
-
-	// Register and get session
-	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
-	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
-	regRec := httptest.NewRecorder()
-	router.ServeHTTP(regRec, regReq)
-
-	var sessionCookie *http.Cookie
-	for _, c := range regRec.Result().Cookies() {
-		if c.Name == "session" {
-			sessionCookie = c
-			break
-		}
-	}
-
-	endpoints := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodPut, "/api/transactions/123"},
-		{http.MethodDelete, "/api/transactions/123"},
-		{http.MethodPut, "/api/categories/5"},
-		{http.MethodPatch, "/api/categories/5"},
-		{http.MethodPut, "/api/currencies/EUR"},
-		{http.MethodPut, "/api/budgets/2026/04"},
-		{http.MethodPut, "/api/savings-goals/2026"},
-	}
-
-	for _, ep := range endpoints {
-		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
-			req := httptest.NewRequest(ep.method, ep.path, nil)
-			req.AddCookie(sessionCookie)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusNotImplemented {
-				t.Errorf("expected 501, got %d; body: %s", rec.Code, rec.Body.String())
-			}
-		})
-	}
-}
-
-func TestNewRouter_AdminRoutes_WithoutAuth_Returns401(t *testing.T) {
-	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
-
+	// Admin should be able to list users
 	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
+	req.AddCookie(sessionCookie)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestNewRouter_AdminRoutes_AsAdmin_Returns501(t *testing.T) {
-	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
-
-	// Register first user (admin)
-	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)
-	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
-	regRec := httptest.NewRecorder()
-	router.ServeHTTP(regRec, regReq)
-
-	var sessionCookie *http.Cookie
-	for _, c := range regRec.Result().Cookies() {
-		if c.Name == "session" {
-			sessionCookie = c
-			break
-		}
-	}
-
-	endpoints := []struct {
-		method string
-		path   string
-	}{
-		{http.MethodGet, "/api/users"},
-		{http.MethodPost, "/api/users"},
-		{http.MethodPut, "/api/users/1"},
-		{http.MethodDelete, "/api/users/1"},
-	}
-
-	for _, ep := range endpoints {
-		t.Run(ep.method+" "+ep.path, func(t *testing.T) {
-			req := httptest.NewRequest(ep.method, ep.path, nil)
-			req.AddCookie(sessionCookie)
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			if rec.Code != http.StatusNotImplemented {
-				t.Errorf("expected 501, got %d; body: %s", rec.Code, rec.Body.String())
-			}
-		})
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -327,12 +219,26 @@ func TestNewRouter_AdminRoutes_AsMember_Returns403(t *testing.T) {
 	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
 	regRec := httptest.NewRecorder()
 	router.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("first register failed: %d; body: %s", regRec.Code, regRec.Body.String())
+	}
+
+	// Enable registration so second user can register
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
+	}
 
 	// Register second user (member)
 	regBody2 := strings.NewReader(`{"username":"member","password":"longpassword"}`)
 	regReq2 := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody2)
 	regRec2 := httptest.NewRecorder()
 	router.ServeHTTP(regRec2, regReq2)
+	if regRec2.Code != http.StatusCreated {
+		t.Fatalf("second register failed: %d; body: %s", regRec2.Code, regRec2.Body.String())
+	}
 
 	var sessionCookie *http.Cookie
 	for _, c := range regRec2.Result().Cookies() {
@@ -340,6 +246,9 @@ func TestNewRouter_AdminRoutes_AsMember_Returns403(t *testing.T) {
 			sessionCookie = c
 			break
 		}
+	}
+	if sessionCookie == nil {
+		t.Fatal("no session cookie from member register")
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
