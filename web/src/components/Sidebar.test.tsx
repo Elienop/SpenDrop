@@ -41,6 +41,7 @@ describe('Sidebar', () => {
   const mockSetTheme = vi.fn();
 
   beforeEach(() => {
+    localStorage.clear();
     vi.clearAllMocks();
     mockedUseAuth.mockReturnValue({
       user: mockUser,
@@ -114,5 +115,43 @@ describe('Sidebar', () => {
   test('displays user avatar initial', () => {
     renderSidebar();
     expect(screen.getByText('A')).toBeInTheDocument();
+  });
+
+  test('renders collapsed by default', () => {
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).not.toContain('expanded');
+  });
+
+  test('does not expand on mouse hover', async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const sidebar = screen.getByRole('complementary');
+    await user.hover(sidebar);
+    expect(sidebar.className).not.toContain('expanded');
+  });
+
+  test('expands when toggle button is clicked', async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const toggle = screen.getByLabelText('Toggle sidebar');
+    await user.click(toggle);
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).toContain('expanded');
+  });
+
+  test('persists expanded state to localStorage', async () => {
+    const user = userEvent.setup();
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const toggle = screen.getByLabelText('Toggle sidebar');
+    await user.click(toggle);
+    expect(localStorage.getItem('spendrop-sidebar')).toBe('true');
+  });
+
+  test('reads initial state from localStorage', () => {
+    localStorage.setItem('spendrop-sidebar', 'true');
+    render(<MemoryRouter><Sidebar /></MemoryRouter>);
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).toContain('expanded');
   });
 });

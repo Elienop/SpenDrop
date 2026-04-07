@@ -10,6 +10,7 @@ import {
   Sun,
   Monitor,
   PanelLeftClose,
+  PanelLeftOpen,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
@@ -30,9 +31,20 @@ const themeOrder: Array<'dark' | 'light' | 'system'> = ['dark', 'light', 'system
 export function Sidebar() {
   const { user, logout } = useAuth();
   const { theme, setTheme } = useTheme();
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(() => {
+    return localStorage.getItem('spendrop-sidebar') === 'true';
+  });
 
   const ThemeIcon = themeIcons[theme];
+
+  const toggleSidebar = () => {
+    setExpanded(prev => {
+      const next = !prev;
+      localStorage.setItem('spendrop-sidebar', String(next));
+      window.dispatchEvent(new Event('sidebar-toggle'));
+      return next;
+    });
+  };
 
   const cycleTheme = () => {
     const idx = themeOrder.indexOf(theme);
@@ -44,20 +56,19 @@ export function Sidebar() {
   return (
     <aside
       className={`${styles.sidebar}${expanded ? ` ${styles.expanded}` : ''}`}
-      onMouseEnter={() => setExpanded(true)}
-      onMouseLeave={() => setExpanded(false)}
     >
       <div className={styles.header}>
         <span className={styles.logoMark}>S</span>
         <span className={styles.logoText}>SpenDrop</span>
-        <button
-          className={styles.toggleButton}
-          onClick={() => setExpanded(false)}
-          aria-label="Collapse sidebar"
-        >
-          <PanelLeftClose size={18} />
-        </button>
       </div>
+
+      <button
+        className={styles.toggleButton}
+        onClick={toggleSidebar}
+        aria-label="Toggle sidebar"
+      >
+        {expanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+      </button>
 
       <nav className={styles.nav} aria-label="Main navigation">
         <ul className={styles.navList}>

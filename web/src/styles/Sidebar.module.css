@@ -55,28 +55,24 @@
 }
 
 .toggleButton {
-  position: absolute;
-  top: var(--space-5);
-  right: var(--space-4);
-  width: 24px;
-  height: 24px;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-secondary);
-  border-radius: var(--radius-sm);
-  opacity: 0;
-  transition: opacity var(--duration-fast) var(--ease-standard),
-              background-color var(--duration-fast) var(--ease-standard);
+  cursor: pointer;
+  margin: 0 auto var(--space-2);
+  transition: color var(--duration-fast) var(--ease-standard),
+              background var(--duration-fast) var(--ease-standard);
 }
 
 .toggleButton:hover {
-  background-color: var(--surface-hover);
   color: var(--text-primary);
-}
-
-.sidebar.expanded .toggleButton {
-  opacity: 1;
+  background: var(--primary-a8);
 }
 
 .nav {
