@@ -37,7 +37,7 @@
 }
 
 .kpiCard {
-  background-color: var(--surface-raised);
+  background: transparent;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-6);
@@ -72,7 +72,7 @@
 }
 
 .chartCard {
-  background-color: var(--surface-raised);
+  background: transparent;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-6);
@@ -89,7 +89,7 @@
 
 /* Recent transactions */
 .recentSection {
-  background-color: var(--surface-raised);
+  background: transparent;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-6);

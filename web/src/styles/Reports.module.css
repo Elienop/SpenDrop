@@ -28,7 +28,7 @@
 }
 
 .section {
-  background-color: var(--surface-raised);
+  background: transparent;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-6);

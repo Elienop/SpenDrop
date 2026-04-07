@@ -38,10 +38,28 @@
 
 /* Section Card */
 .card {
-  background-color: var(--surface-raised);
+  background: transparent;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   padding: var(--space-6);
+}
+
+/* Grouped section dividers */
+.sectionGroup {
+  border-top: 1px solid var(--border-muted);
+}
+
+.sectionGroup:last-child {
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.sectionItem {
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.sectionItem:last-child {
+  border-bottom: none;
 }
 
 .sectionTitle {
