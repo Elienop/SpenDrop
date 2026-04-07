@@ -5,43 +5,43 @@
 
 /* ===== PRIMITIVES ===== */
 :root {
-  /* Graphite scale (cool blue undertone) */
-  --gray-50:  #F5F5F6;
-  --gray-100: #E8E8EA;
-  --gray-200: #D1D1D5;
-  --gray-300: #A9A9B0;
-  --gray-400: #78787F;
-  --gray-500: #58585F;
-  --gray-600: #39393F;
-  --gray-700: #2A2A30;
-  --gray-800: #1E1E23;
-  --gray-900: #141418;
-  --gray-950: #0C0C10;
+  /* Graphite scale (warm neutral) */
+  --gray-50:  #F2F2F0;
+  --gray-100: #E5E5E2;
+  --gray-200: #CBCBC6;
+  --gray-300: #A3A39C;
+  --gray-400: #76766F;
+  --gray-500: #5A5A54;
+  --gray-600: #3D3D38;
+  --gray-700: #2D2D29;
+  --gray-800: #22221F;
+  --gray-900: #1A1A17;
+  --gray-950: #121210;
 
-  /* Indigo scale */
-  --indigo-50:  #EEF2FF;
-  --indigo-100: #E0E7FF;
-  --indigo-200: #C7D2FE;
-  --indigo-300: #A5B4FC;
-  --indigo-400: #818CF8;
-  --indigo-500: #6366F1;
-  --indigo-600: #4F46E5;
-  --indigo-700: #4338CA;
-  --indigo-800: #3730A3;
-  --indigo-900: #312E81;
+  /* Sage-indigo scale */
+  --indigo-50:  #F0F2ED;
+  --indigo-100: #DEE3D8;
+  --indigo-200: #BCC8B0;
+  --indigo-300: #96A888;
+  --indigo-400: #7A8F6C;
+  --indigo-500: #5E7350;
+  --indigo-600: #4A5E3E;
+  --indigo-700: #3B4C32;
+  --indigo-800: #2D3A26;
+  --indigo-900: #1F281B;
 
-  /* Functional hues */
-  --green-400: #7EC89B;
-  --green-600: #2D9D5E;
-  --red-400:   #E88B9C;
-  --red-600:   #D4556B;
-  --amber-400: #E8A87C;
-  --amber-600: #C97A3E;
-  --blue-400:  #7CAFD4;
-  --blue-600:  #3B82F6;
+  /* Functional hues (washed, soft) */
+  --green-400: #8EBF9A;
+  --green-600: #4A9462;
+  --red-400:   #C9897A;
+  --red-600:   #A8604F;
+  --amber-400: #C4A87A;
+  --amber-600: #9E7E48;
+  --blue-400:  #7BA8B8;
+  --blue-600:  #4A849B;
 
   /* Neutrals */
-  --white: #FFFFFF;
+  --white: #FAFAF8;
 
   /* ===== TYPOGRAPHY ===== */
   --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -120,11 +120,11 @@
   /* ===== SEMANTIC TOKENS (Dark Theme — Default) ===== */
 
   /* Surfaces */
-  --surface-base:    var(--gray-950);
-  --surface-raised:  var(--gray-900);
-  --surface-overlay: var(--gray-800);
+  --surface-base:    var(--gray-900);
+  --surface-raised:  var(--gray-800);
+  --surface-overlay: var(--gray-700);
   --surface-sunken:  var(--gray-950);
-  --surface-hover:   var(--gray-700);
+  --surface-hover:   var(--gray-600);
 
   /* Text */
   --text-primary:   var(--gray-50);

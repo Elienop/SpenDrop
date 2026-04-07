@@ -9,12 +9,10 @@
   flex-direction: column;
   border-right: 1px solid var(--border-muted);
   z-index: 100;
-  transition: width var(--duration-slow) var(--ease-accelerate);
 }
 
 .sidebar.expanded {
   width: 240px;
-  transition: width var(--duration-slow) var(--ease-decelerate);
 }
 
 /* ===== Header ===== */
@@ -54,7 +52,6 @@
   color: var(--text-primary);
   white-space: nowrap;
   opacity: 0;
-  transition: opacity var(--duration-normal) var(--ease-standard);
 }
 
 .sidebar.expanded .logoText {
@@ -157,7 +154,6 @@
   opacity: 0;
   width: 0;
   overflow: hidden;
-  transition: opacity var(--duration-normal) var(--ease-standard);
 }
 
 .sidebar.expanded .navLabel {
@@ -238,7 +234,6 @@
   text-overflow: ellipsis;
   opacity: 0;
   width: 0;
-  transition: opacity var(--duration-normal) var(--ease-standard);
 }
 
 .sidebar.expanded .userName {

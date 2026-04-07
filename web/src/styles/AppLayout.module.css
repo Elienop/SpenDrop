@@ -7,11 +7,9 @@
   flex: 1;
   padding: var(--space-8) var(--space-10) var(--space-8) calc(64px + var(--space-10));
   max-width: calc(1400px + 64px);
-  transition: padding-left var(--duration-slow) var(--ease-accelerate);
 }
 
 .mainExpanded {
   padding-left: calc(240px + var(--space-10));
   max-width: calc(1400px + 240px);
-  transition: padding-left var(--duration-slow) var(--ease-decelerate);
 }
