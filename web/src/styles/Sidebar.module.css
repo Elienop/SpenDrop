@@ -18,11 +18,12 @@
   transition: width var(--duration-slow) var(--ease-decelerate);
 }
 
+/* ===== Header ===== */
 .header {
   display: flex;
   align-items: center;
   height: 64px;
-  padding: 0 var(--space-5);
+  padding: 0;
   gap: var(--space-3);
   flex-shrink: 0;
 }
@@ -39,6 +40,11 @@
   font-size: var(--type-label-lg-size);
   font-weight: 600;
   color: var(--color-primary);
+  margin-left: 18px;
+}
+
+.sidebar.expanded .logoMark {
+  margin-left: var(--space-4);
 }
 
 .logoText {
@@ -54,6 +60,7 @@
   opacity: 1;
 }
 
+/* ===== Toggle Button ===== */
 .toggleButton {
   width: 40px;
   height: 40px;
@@ -66,6 +73,7 @@
   justify-content: center;
   cursor: pointer;
   margin: 0 auto var(--space-2);
+  flex-shrink: 0;
   transition: color var(--duration-fast) var(--ease-standard),
               background var(--duration-fast) var(--ease-standard);
 }
@@ -75,6 +83,12 @@
   background: var(--primary-a8);
 }
 
+.sidebar.expanded .toggleButton {
+  margin-left: auto;
+  margin-right: var(--space-3);
+}
+
+/* ===== Navigation ===== */
 .nav {
   flex: 1;
   padding: var(--space-2) 0;
@@ -85,15 +99,17 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
-  padding: 0 var(--space-3);
+  padding: 0;
 }
 
 .navLink {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: 0;
   height: 40px;
-  padding: 0 var(--space-3);
+  padding: 0;
+  margin: 0 var(--space-3);
   color: var(--text-secondary);
   font-size: var(--type-label-lg-size);
   font-weight: var(--type-label-lg-weight);
@@ -110,6 +126,12 @@
   color: var(--text-primary);
   background-color: var(--surface-hover);
   opacity: 1;
+}
+
+.sidebar.expanded .navLink {
+  justify-content: flex-start;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
 }
 
 .active {
@@ -132,13 +154,17 @@
 
 .navLabel {
   opacity: 0;
+  width: 0;
+  overflow: hidden;
   transition: opacity var(--duration-normal) var(--ease-standard);
 }
 
 .sidebar.expanded .navLabel {
   opacity: 1;
+  width: auto;
 }
 
+/* ===== Bottom Section ===== */
 .bottomSection {
   padding: var(--space-3);
   border-top: 1px solid var(--border-muted);
@@ -150,9 +176,10 @@
 .themeToggle {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: 0;
   height: 40px;
-  padding: 0 var(--space-3);
+  padding: 0;
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   transition: color var(--duration-fast) var(--ease-standard),
@@ -164,13 +191,26 @@
   background-color: var(--surface-hover);
 }
 
+.sidebar.expanded .themeToggle {
+  justify-content: flex-start;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
+}
+
 .userRow {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: 0;
   height: 40px;
-  padding: 0 var(--space-3);
+  padding: 0;
   overflow: hidden;
+}
+
+.sidebar.expanded .userRow {
+  justify-content: flex-start;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
 }
 
 .avatar {
@@ -195,19 +235,22 @@
   overflow: hidden;
   text-overflow: ellipsis;
   opacity: 0;
+  width: 0;
   transition: opacity var(--duration-normal) var(--ease-standard);
 }
 
 .sidebar.expanded .userName {
   opacity: 1;
+  width: auto;
 }
 
 .logoutButton {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
+  justify-content: center;
+  gap: 0;
   height: 40px;
-  padding: 0 var(--space-3);
+  padding: 0;
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   transition: color var(--duration-fast) var(--ease-standard),
@@ -217,4 +260,10 @@
 .logoutButton:hover {
   color: var(--color-expense);
   background-color: var(--expense-a15);
+}
+
+.sidebar.expanded .logoutButton {
+  justify-content: flex-start;
+  gap: var(--space-3);
+  padding: 0 var(--space-3);
 }
