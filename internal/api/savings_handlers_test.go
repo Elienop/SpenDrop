@@ -106,12 +106,30 @@ func TestHandleSetSavingsGoal_InvalidYear_Returns400(t *testing.T) {
 	}
 }
 
-func TestHandleSetSavingsGoal_ZeroAmount_Returns400(t *testing.T) {
+func TestHandleSetSavingsGoal_ZeroAmount_Succeeds(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"target_amount":0}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026", body)
+	req = withUserAndURLParam(req, user, "year", "2026")
+	rec := httptest.NewRecorder()
+
+	h.handleSetSavingsGoal(rec, req)
+
+	// Zero is valid — means "no savings goal this year"
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleSetSavingsGoal_NegativeAmount_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "admin")
+
+	body := strings.NewReader(`{"target_amount":-100}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026", body)
 	req = withUserAndURLParam(req, user, "year", "2026")
 	rec := httptest.NewRecorder()
