@@ -23,21 +23,21 @@ export function useChartTheme(): ChartTheme {
   const { resolvedTheme } = useTheme();
 
   return useMemo(() => ({
-    axisStroke: getCSSVar('--text-tertiary', '#5A5A54'),
-    gridStroke: getCSSVar('--border-muted', '#22221F'),
-    tooltipBg: getCSSVar('--surface-overlay', '#2D2D29'),
-    tooltipBorder: getCSSVar('--border-default', '#2D2D29'),
-    tooltipText: getCSSVar('--text-primary', '#F2F2F0'),
-    hoverBg: getCSSVar('--primary-a8', 'rgba(122,143,108,0.08)'),
-    incomeColor: getCSSVar('--color-income', '#8EBF9A'),
-    expenseColor: getCSSVar('--color-expense', '#C9897A'),
+    axisStroke: getCSSVar('--text-tertiary', '#6E7785'),
+    gridStroke: getCSSVar('--border-muted', '#2E3034'),
+    tooltipBg: getCSSVar('--surface-overlay', '#3A3E44'),
+    tooltipBorder: getCSSVar('--border-default', '#3A3E44'),
+    tooltipText: getCSSVar('--text-primary', '#D8E0E8'),
+    hoverBg: getCSSVar('--primary-a8', 'rgba(239,243,162,0.08)'),
+    incomeColor: getCSSVar('--color-income', '#B5DAA9'),
+    expenseColor: getCSSVar('--color-expense', '#D4918A'),
     categoryColors: [
-      getCSSVar('--color-primary', '#7A8F6C'),
-      getCSSVar('--color-income', '#8EBF9A'),
-      getCSSVar('--color-expense', '#C9897A'),
-      getCSSVar('--color-warning', '#C4A87A'),
-      getCSSVar('--color-info', '#7BA8B8'),
-      getCSSVar('--text-tertiary', '#5A5A54'),
+      getCSSVar('--color-primary', '#EFF3A2'),
+      getCSSVar('--color-income', '#B5DAA9'),
+      getCSSVar('--color-expense', '#D4918A'),
+      getCSSVar('--color-warning', '#D4C08A'),
+      getCSSVar('--color-info', '#8AB4C8'),
+      getCSSVar('--text-tertiary', '#6E7785'),
     ],
   }), [resolvedTheme]);
 }

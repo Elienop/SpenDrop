@@ -5,43 +5,40 @@
 
 /* ===== PRIMITIVES ===== */
 :root {
-  /* Graphite scale (warm neutral) */
-  --gray-50:  #F2F2F0;
-  --gray-100: #E5E5E2;
-  --gray-200: #CBCBC6;
-  --gray-300: #A3A39C;
-  --gray-400: #76766F;
-  --gray-500: #5A5A54;
-  --gray-600: #3D3D38;
-  --gray-700: #2D2D29;
-  --gray-800: #22221F;
-  --gray-900: #1A1A17;
-  --gray-950: #121210;
+  /* Neutral scale (cool slate) */
+  --gray-50:  #D8E0E8;
+  --gray-100: #C4CCD6;
+  --gray-200: #A8B2BE;
+  --gray-300: #8C95A2;
+  --gray-400: #6E7785;
+  --gray-500: #545C68;
+  --gray-600: #3A3E44;
+  --gray-700: #2E3034;
+  --gray-800: #252527;
+  --gray-900: #1E1E20;
+  --gray-950: #171719;
 
-  /* Sage-indigo scale */
-  --indigo-50:  #F0F2ED;
-  --indigo-100: #DEE3D8;
-  --indigo-200: #BCC8B0;
-  --indigo-300: #96A888;
-  --indigo-400: #7A8F6C;
-  --indigo-500: #5E7350;
-  --indigo-600: #4A5E3E;
-  --indigo-700: #3B4C32;
-  --indigo-800: #2D3A26;
-  --indigo-900: #1F281B;
+  /* Accent scale (lime-yellow) */
+  --accent-50:  #FAFCE8;
+  --accent-100: #F5F8CD;
+  --accent-200: #EFF3A2;
+  --accent-300: #E4EB78;
+  --accent-400: #D4DC52;
+  --accent-500: #B8C038;
+  --accent-600: #939A2A;
 
   /* Functional hues (washed, soft) */
-  --green-400: #8EBF9A;
-  --green-600: #4A9462;
-  --red-400:   #C9897A;
-  --red-600:   #A8604F;
-  --amber-400: #C4A87A;
-  --amber-600: #9E7E48;
-  --blue-400:  #7BA8B8;
-  --blue-600:  #4A849B;
+  --green-400: #B5DAA9;
+  --green-600: #6AAF5C;
+  --red-400:   #D4918A;
+  --red-600:   #B86B62;
+  --amber-400: #D4C08A;
+  --amber-600: #B89E62;
+  --blue-400:  #8AB4C8;
+  --blue-600:  #5A92AC;
 
   /* Neutrals */
-  --white: #FAFAF8;
+  --white: #F0F4F8;
 
   /* ===== TYPOGRAPHY ===== */
   --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -120,21 +117,21 @@
   /* ===== SEMANTIC TOKENS (Dark Theme — Default) ===== */
 
   /* Surfaces */
-  --surface-base:    var(--gray-900);
-  --surface-raised:  var(--gray-800);
-  --surface-overlay: var(--gray-700);
-  --surface-sunken:  var(--gray-950);
+  --surface-base:    var(--gray-800);
+  --surface-raised:  var(--gray-700);
+  --surface-overlay: var(--gray-600);
+  --surface-sunken:  var(--gray-900);
   --surface-hover:   var(--gray-600);
 
   /* Text */
   --text-primary:   var(--gray-50);
-  --text-secondary: var(--gray-400);
-  --text-tertiary:  var(--gray-500);
-  --text-inverse:   var(--gray-950);
+  --text-secondary: var(--gray-300);
+  --text-tertiary:  var(--gray-400);
+  --text-inverse:   var(--gray-900);
 
   /* Brand / Interactive */
-  --color-primary:       var(--indigo-400);
-  --color-primary-hover: var(--indigo-300);
+  --color-primary:       var(--accent-200);
+  --color-primary-hover: var(--accent-100);
 
   /* Semantic colors */
   --color-expense: var(--red-400);
@@ -144,11 +141,11 @@
   --color-error:   var(--red-400);
 
   /* Borders */
-  --border-default: var(--gray-700);
-  --border-muted:   var(--gray-800);
+  --border-default: var(--gray-600);
+  --border-muted:   var(--gray-700);
 
   /* Focus */
-  --focus-ring: var(--indigo-500);
+  --focus-ring: var(--accent-400);
 
   /* Overlay */
   --backdrop: color-mix(in srgb, var(--gray-950) 60%, transparent);
@@ -169,19 +166,19 @@
 
 /* ===== LIGHT THEME OVERRIDES ===== */
 [data-theme="light"] {
-  --surface-base:    var(--gray-50);
-  --surface-raised:  var(--white);
-  --surface-overlay: var(--white);
-  --surface-sunken:  var(--gray-100);
-  --surface-hover:   var(--gray-200);
+  --surface-base:    var(--white);
+  --surface-raised:  #FFFFFF;
+  --surface-overlay: #FFFFFF;
+  --surface-sunken:  var(--gray-50);
+  --surface-hover:   var(--gray-100);
 
   --text-primary:   var(--gray-900);
-  --text-secondary: var(--gray-600);
-  --text-tertiary:  var(--gray-500);
+  --text-secondary: var(--gray-500);
+  --text-tertiary:  var(--gray-400);
   --text-inverse:   var(--gray-50);
 
-  --color-primary:       var(--indigo-600);
-  --color-primary-hover: var(--indigo-700);
+  --color-primary:       var(--accent-500);
+  --color-primary-hover: var(--accent-600);
 
   --color-expense: var(--red-600);
   --color-income:  var(--green-600);
@@ -192,7 +189,7 @@
   --border-default: var(--gray-200);
   --border-muted:   var(--gray-100);
 
-  --focus-ring: var(--indigo-500);
+  --focus-ring: var(--accent-500);
 
   --backdrop: color-mix(in srgb, var(--gray-950) 40%, transparent);
 
