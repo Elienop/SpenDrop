@@ -39,7 +39,7 @@
 .heroCard {
   background: transparent;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   padding: var(--space-6);
   display: flex;
   flex-direction: column;
@@ -94,13 +94,13 @@
   width: 100%;
   height: 4px;
   background: var(--border-muted);
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-sm);
   overflow: hidden;
 }
 
 .savingsBarFill {
   height: 100%;
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-sm);
   transition: width var(--duration-normal) var(--ease-standard);
 }
 
@@ -113,7 +113,7 @@
 .cashFlow {
   background: transparent;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   padding: var(--space-6);
 }
 
@@ -193,8 +193,8 @@
 }
 
 .cfToggleBtnActive {
-  background: var(--surface-overlay);
-  color: var(--text-primary);
+  background: var(--primary-a15);
+  color: var(--color-primary);
 }
 
 .cfChartWrap {
@@ -212,7 +212,7 @@
 .card {
   background: transparent;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   padding: var(--space-6);
 }
 

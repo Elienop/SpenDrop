@@ -311,23 +311,24 @@ export function Dashboard() {
               <CartesianGrid
                 strokeDasharray="3 3"
                 stroke={chartTheme.gridStroke}
+                strokeOpacity={0.4}
                 vertical={false}
               />
               <XAxis
                 dataKey="name"
                 stroke={chartTheme.axisStroke}
-                tick={{ fontFamily: 'Inter Variable', fontSize: 12 }}
+                tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
                 tickLine={false}
                 axisLine={false}
               />
               <YAxis
                 stroke={chartTheme.axisStroke}
-                tick={{ fontFamily: 'Inter Variable', fontSize: 12 }}
+                tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
                 tickLine={false}
                 axisLine={false}
                 tickFormatter={(v: number) => `$${Math.abs(v / 1000).toFixed(0)}k`}
               />
-              <Tooltip content={<ChartTooltip />} />
+              <Tooltip content={<ChartTooltip />} cursor={{ fill: chartTheme.hoverBg }} />
               <ReferenceLine y={0} stroke={chartTheme.axisStroke} />
               <Bar
                 dataKey="income"
@@ -374,7 +375,7 @@ export function Dashboard() {
                       <Cell key={entry.name} fill={entry.color} />
                     ))}
                   </Pie>
-                  <Tooltip content={<ChartTooltip />} />
+                  <Tooltip content={<ChartTooltip />} cursor={{ fill: chartTheme.hoverBg }} />
                 </PieChart>
               </ResponsiveContainer>
               <div className={styles.donutCenter}>
