@@ -1,0 +1,45 @@
+.tooltip {
+  background: var(--surface-overlay);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-3);
+  pointer-events: none;
+}
+
+.label {
+  font-size: var(--type-label-sm-size);
+  font-weight: var(--type-label-sm-weight);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: 2px;
+}
+
+.row:last-child {
+  margin-bottom: 0;
+}
+
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.name {
+  font-size: var(--type-body-sm-size);
+  color: var(--text-secondary);
+  flex: 1;
+}
+
+.value {
+  font-size: var(--type-body-sm-size);
+  font-weight: 600;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
