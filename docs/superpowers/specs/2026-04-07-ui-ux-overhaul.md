@@ -44,17 +44,28 @@ Pages stretch full width on wide monitors, making content hard to scan.
 Add `max-width: 1400px` with centered alignment to the main content area.
 
 ### Implementation
+
+The sidebar is `position: fixed`, so `.main` uses `padding-left` to offset content past the sidebar, then constrains width and centers:
+
 ```css
 .main {
-  margin-left: 64px; /* or 240px when sidebar expanded */
-  max-width: 1400px;
-  margin-left: auto;
-  margin-right: auto;
-  padding: 32px 40px;
+  padding-left: calc(64px + var(--space-10)); /* sidebar width + page padding */
+  padding-right: var(--space-10);
+  padding-top: var(--space-8);
+  padding-bottom: var(--space-8);
+  max-width: calc(1400px + 64px); /* content max + sidebar */
+  margin: 0 auto;
+  transition: padding-left var(--duration-slow) var(--ease-decelerate);
+}
+
+/* When sidebar is expanded */
+.mainExpanded {
+  padding-left: calc(240px + var(--space-10));
+  max-width: calc(1400px + 240px);
 }
 ```
 
-The sidebar is `position: fixed`, so `.main` uses `padding-left` equal to sidebar width, then centers within the remaining viewport. When sidebar expands, the padding-left adjusts via CSS transition.
+The `transition` on `padding-left` keeps main content reflow in sync with the sidebar expand/collapse animation. Use `--ease-decelerate` for expand (sidebar growing), `--ease-accelerate` for collapse (sidebar shrinking) — toggled via a class or CSS variable.
 
 ### Files
 - `web/src/styles/AppLayout.module.css` — add `max-width`, center alignment, sidebar-width-aware padding
@@ -76,9 +87,16 @@ Returns an object with resolved colors for:
 - `tooltipBg` — `--surface-overlay`
 - `tooltipBorder` — `--border-default`
 - `tooltipText` — `--text-primary`
+- `hoverBg` — `--primary-a8` (used for bar chart cursor highlight)
 - `incomeColor` — `--color-income`
 - `expenseColor` — `--color-expense`
-- `categoryColors` — array of 6 palette colors for donut/pie segments
+- `categoryColors` — ordered array of 6 colors for donut/pie segments:
+  1. `--color-primary` (indigo) — largest category
+  2. `--color-income` (green)
+  3. `--color-expense` (red/rose)
+  4. `--color-warning` (amber)
+  5. `--color-info` (blue)
+  6. `--text-tertiary` (gray) — "Other" bucket
 
 ### Recharts Configuration
 ```tsx
@@ -199,9 +217,18 @@ The separator line sits at the bottom of the tab container. The selected tab's c
 
 The key is `margin-bottom: -1px` which pulls the tab's bottom border down to overlap the container's border-bottom.
 
+### Shared Tabs Component
+
+Since both Settings and Categories use tabs, create a reusable component:
+
+- `web/src/components/Tabs.tsx` — `<Tabs>` component accepting `tabs: { key: string, label: string }[]`, `activeKey`, `onTabChange`
+- `web/src/styles/Tabs.module.css` — shared tab row + tab item styles using the overlapping pattern above
+
 ### Files
-- Any component using tabs (Settings, Categories, potentially Dashboard)
-- Create shared tab styles or a `<Tabs>` component if multiple pages use them
+- `web/src/components/Tabs.tsx` — new shared component
+- `web/src/styles/Tabs.module.css` — new shared styles
+- `web/src/pages/Settings.tsx` — replace inline tab implementation with `<Tabs>`
+- `web/src/pages/Categories.tsx` — replace inline tab implementation with `<Tabs>`
 
 ---
 
@@ -245,15 +272,32 @@ The key is `margin-bottom: -1px` which pulls the tab's bottom border down to ove
 Two equal-width border-only cards.
 
 **Total Balance (left):**
+
+Computed as `total_income - total_spent` from the existing `DashboardSummary` API response. No backend changes needed — the subtraction is done in the frontend component. Delta from last month is computed by comparing current and previous month summaries (both already available via the month/year selectors).
+
 - Label: `--type-body-sm`, `--text-secondary`
-- Value: 36px, weight 700, `--text-primary`, `tabular-nums`
-- Sub: `--type-body-sm`, `--text-tertiary`, with green `+$X` delta
+- Value: `--type-heading-lg-size` scaled up to 36px (add `--type-display` token: 36px/700/40px), `--text-primary`, `tabular-nums`
+- Sub: `--type-body-sm`, `--text-tertiary`, with `--color-income` colored `+$X` delta
 
 **Savings Goal (right):**
+
+Uses `savings_goal_progress` (percentage), `savings_ytd` (current), and `savings_goal` (target) from the existing `DashboardSummary` API response.
+
 - Label: `--type-body-sm`, `--text-secondary`
-- Row: percentage (36px, weight 700, `--color-warning`) on left, `$current / $target` (`--text-secondary`) on right, same baseline
-- Progress bar: 4px height, `--border-muted` track, `--color-warning` fill, `--radius-sm` corners
+- Row: percentage (`--type-display` 36px/700, color varies: `--color-income` if ≥75%, `--color-warning` if 25-74%, `--color-expense` if <25%) on left, `$current / $target` (`--text-secondary`) on right, same baseline
+- Progress bar: `--space-1` height (4px), `--border-muted` track, fill color matches percentage color, `--radius-sm` corners
 - Sub: `--type-body-sm`, `--text-tertiary`, remaining amount
+
+### New Token
+
+Add to `tokens.css`:
+```css
+:root {
+  --type-display-size: 36px;
+  --type-display-weight: 700;
+  --type-display-line-height: 40px;
+}
+```
 
 ### 6.2 Cash Flow Section
 
@@ -265,6 +309,11 @@ Single border-only card containing everything.
 - The color-coded income/expense values **are** the legend — no separate legend below the chart
 - Monthly/Yearly toggle: pill button group with `--primary-a15` active state
 
+**Monthly/Yearly toggle behavior:**
+- **Monthly (default):** Shows last 12 months of data. Each bar pair = one month. X-axis labels = 3-letter month abbreviations. Income/expense summary values = current selected month's totals.
+- **Yearly:** Shows up to 5 years of data. Each bar pair = one year. X-axis labels = 4-digit years. Income/expense summary values = current selected year's totals.
+- Both views use the same API data structure — monthly view filters by the selected year, yearly view aggregates across years. The `useDashboard` hook already accepts month/year params; yearly view passes `month=0` (or omits it) to get full-year aggregation. If the backend doesn't support yearly aggregation yet, the frontend computes it client-side from 12-month data.
+
 **Chart area:**
 - Recharts `<BarChart>` with bidirectional bars (income positive up, expenses negative down)
 - Bar config: `radius={[4, 4, 0, 0]}`, solid colors (green for income, red for expenses), no gradients
@@ -274,7 +323,7 @@ Single border-only card containing everything.
 - Grid: horizontal only, subtle dotted lines
 - Hover: subtle column highlight via `cursor={{ fill: primaryA8 }}`
 - Tooltip: compact dark tooltip (month, income value, expense value), follows cursor, small
-- `aspect-ratio` on container to prevent stretching — chart should never distort
+- Chart container: `aspect-ratio: 3 / 1` to prevent stretching — chart should never distort
 
 ### 6.3 Bottom Grid — Categories + Transactions
 
@@ -302,7 +351,28 @@ Single border-only card containing everything.
 
 ---
 
-## 7. Responsive Behavior
+## 7. Loading & Error States
+
+### Loading
+While `useDashboard` returns `loading: true`:
+- Hero cards: show skeleton pulse placeholders (gray rectangles animating opacity) for value and sub-text areas
+- Cash Flow chart: show skeleton placeholder matching chart aspect ratio (`3:1`)
+- Bottom grid cards: show skeleton for donut chart area and table rows (6 rows of skeleton lines)
+- Skeleton color: `--border-muted` background with `--surface-hover` pulse via CSS `@keyframes`
+
+### Error
+If API calls fail:
+- Show a centered error message within the card: "Failed to load data" in `--text-tertiary` with a "Retry" button (`--color-primary` outlined style)
+- Do not show empty charts or broken layouts
+
+### Empty State
+If no transactions exist for the selected month:
+- Charts show empty state with "No data for this month" centered text
+- Transaction table shows: "No transactions yet" in `--text-tertiary`
+
+---
+
+## 8. Responsive Behavior
 
 | Breakpoint | Layout Changes |
 |------------|---------------|
@@ -310,14 +380,26 @@ Single border-only card containing everything.
 | 768-1200px | Hero row stays 2-col, bottom grid becomes single column (categories above transactions) |
 | < 768px | Everything single column, sidebar always collapsed |
 
+These breakpoints supersede the 1024px breakpoint from the design system spec. The 1200px threshold better accommodates the dashboard's 2fr/3fr bottom grid which needs more horizontal space than simpler layouts.
+
 ---
 
-## 8. Files Summary
+## 9. Superseded Sections
+
+This spec supersedes the following sections of the frontend design system spec (`2026-04-07-frontend-design-system.md`):
+- **Section 5.2 Cards** — replaced by border-only card pattern (Section 4 of this spec)
+- **Section 7 Dashboard Layout** — entirely replaced by Section 6 of this spec. The 4-card KPI row, two-column chart section, and budget progress section are replaced with the hero row + cash flow + bottom grid layout. The existing `web/src/components/KPICard.tsx` component should be removed as it's no longer used.
+
+---
+
+## 10. Files Summary
 
 ### New Files
 - `web/src/hooks/useChartTheme.ts` — chart theme hook resolving CSS vars
 - `web/src/components/ChartTooltip.tsx` — reusable dark-themed chart tooltip
 - `web/src/styles/ChartTooltip.module.css` — tooltip styles
+- `web/src/components/Tabs.tsx` — shared tab component
+- `web/src/styles/Tabs.module.css` — shared tab styles
 
 ### Modified Files
 - `web/src/components/Sidebar.tsx` — toggle pin behavior, localStorage persistence
@@ -336,10 +418,10 @@ Single border-only card containing everything.
 
 ---
 
-## 9. Non-Goals
+## 11. Non-Goals
 
 - No light mode changes in this overhaul (dark-first, light follows later)
 - No new pages or routes
-- No backend changes
+- No backend changes — all new dashboard values (Total Balance, yearly aggregation) are computed client-side from existing API responses
 - No new npm dependencies (Recharts already installed, Lucide already installed)
 - No mobile-first responsive — desktop-first with reasonable tablet/mobile fallbacks
