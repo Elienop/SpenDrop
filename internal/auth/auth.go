@@ -8,7 +8,11 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const bcryptCost = 12
+var bcryptCost = 12
+
+// SetBcryptCostForTesting lowers the bcrypt cost to speed up tests.
+// Must be called before any password hashing (e.g. in an init() func).
+func SetBcryptCostForTesting() { bcryptCost = 4 }
 
 func HashPassword(password string) (string, error) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)

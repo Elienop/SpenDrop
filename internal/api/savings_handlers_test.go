@@ -66,7 +66,7 @@ func TestHandleGetSavingsGoals_NoAuth_Returns401(t *testing.T) {
 func TestHandleSetSavingsGoal_UpsertsGoal(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"target_amount":15000}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026", body)
@@ -92,7 +92,7 @@ func TestHandleSetSavingsGoal_UpsertsGoal(t *testing.T) {
 func TestHandleSetSavingsGoal_InvalidYear_Returns400(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"target_amount":15000}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/savings-goals/abc", body)
@@ -109,7 +109,7 @@ func TestHandleSetSavingsGoal_InvalidYear_Returns400(t *testing.T) {
 func TestHandleSetSavingsGoal_ZeroAmount_Returns400(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"target_amount":0}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026", body)

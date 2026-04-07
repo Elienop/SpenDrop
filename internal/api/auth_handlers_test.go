@@ -15,6 +15,10 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
+func init() {
+	auth.SetBcryptCostForTesting()
+}
+
 // setupTestDB creates an in-memory SQLite database with migrations applied.
 func setupTestDB(t *testing.T) (*database.Queries, *sql.DB) {
 	t.Helper()
