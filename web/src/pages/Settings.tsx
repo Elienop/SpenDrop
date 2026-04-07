@@ -12,6 +12,7 @@ import type {
   User,
 } from '../api/types';
 import styles from '../styles/Settings.module.css';
+import { Tabs } from '../components/Tabs';
 
 type SettingsTab = 'general' | 'currencies' | 'savings' | 'users' | 'data';
 
@@ -962,24 +963,11 @@ export function Settings() {
     <div className={styles.page}>
       <h1>Settings</h1>
 
-      <div className={styles.tabs} role="tablist">
-        {tabs
-          .filter((t) => !t.adminOnly || isAdmin)
-          .map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === t.key}
-              className={`${styles.tab} ${
-                activeTab === t.key ? styles.tabActive : ''
-              }`}
-              onClick={() => setActiveTab(t.key)}
-            >
-              {t.label}
-            </button>
-          ))}
-      </div>
+      <Tabs
+        tabs={tabs.filter(t => !t.adminOnly || isAdmin)}
+        activeKey={activeTab}
+        onTabChange={(key) => setActiveTab(key as SettingsTab)}
+      />
 
       {activeTab === 'general' && <GeneralSection />}
       {activeTab === 'currencies' && <CurrenciesSection />}
