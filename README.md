@@ -12,7 +12,9 @@ Self-hosted household expense tracker. Track monthly and yearly expenses with bu
 - Category management with drag-and-drop reorder
 - Multi-user household access (admin + member roles)
 - Dark and light theme with system preference support
-- Collapsible sidebar navigation (icon rail / expanded)
+- Sidebar with toggle pin (click to expand/collapse), state persisted in localStorage
+- Max-width 1400px centered layout for wide-screen readability
+- Dark-themed charts (Recharts) with a custom `ChartTooltip` and `useChartTheme()` hook
 - Token-driven design system with stylelint enforcement
 
 ## Tech Stack
@@ -94,6 +96,8 @@ SpenDrop uses a token-driven design system with the Graphite Indigo palette. See
 - Only `tokens.css` may define color values
 - Use semantic tokens (`--surface-raised`) not primitives (`--gray-900`)
 - Three theme modes: dark (default), light, system
+- Cards use a border-only pattern: `transparent` background + `1px solid var(--border-muted)` border (not surface-raised + shadow)
+- Use the shared `<Tabs>` component for tab navigation and `useChartTheme()` for Recharts theming
 
 ## Project Structure
 

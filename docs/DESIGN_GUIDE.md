@@ -180,23 +180,85 @@ Each role has three sub-tokens: `-size`, `-weight`, `-line-height`.
 ### Sidebar
 
 - **Collapsed:** 64px, icon-only
-- **Expanded:** 240px, icon + label (on mouse hover)
+- **Expanded:** 240px, icon + label
+- Expand/collapse is triggered by a **toggle button** (no hover — explicit click only)
+- State persists in `localStorage` under key `spendrop-sidebar` (`"true"` / `"false"`)
+- A `sidebar-toggle` event is dispatched on `window` after each toggle (for layout recalculation)
 - Transition uses different easing for expand vs collapse
 - 5 nav items: Dashboard, Reports, Transactions, Categories, Settings
-- Bottom section: theme toggle, user avatar, logout
+- Bottom section: theme toggle (cycles dark → light → system), user avatar, logout
 - Icons: Lucide React, 24px, stroke-width 2
 
 ### Cards
 
+**Current pattern (border-only card):**
+
 ```css
 .card {
-  background-color: var(--surface-raised);
-  border: 1px solid var(--border-default);
+  background: transparent;
+  border: 1px solid var(--border-muted);
   border-radius: var(--radius-lg);
   padding: var(--space-5);
-  box-shadow: var(--shadow-sm);
 }
 ```
+
+This supersedes the previous surface-raised card pattern (`background-color: var(--surface-raised); box-shadow: var(--shadow-sm)`). Use the border-only pattern for all new cards. The transparent background keeps visual weight low and relies on the border to define boundaries.
+
+### Tabs
+
+Use the shared `<Tabs>` component at `web/src/components/Tabs.tsx`.
+
+```tsx
+import { Tabs } from '../components/Tabs';
+
+<Tabs
+  tabs={[{ key: 'monthly', label: 'Monthly' }, { key: 'yearly', label: 'Yearly' }]}
+  activeKey={activeTab}
+  onTabChange={setActiveTab}
+/>
+```
+
+The component applies an **overlapping underline** technique: the active tab renders a 2px bottom border via `border-bottom: 2px solid var(--color-primary)` while `margin-bottom: -1px` causes it to overlap the container's `border-bottom: 1px solid var(--border-muted)`. This produces a seamless connected underline without a visible gap between the tab indicator and the container border.
+
+The tab row uses `role="tablist"` / `role="tab"` / `aria-selected` for accessibility.
+
+### Chart Theming
+
+Use the `useChartTheme()` hook (`web/src/hooks/useChartTheme.ts`) to get resolved CSS token values for Recharts components. This ensures charts respect the active theme (dark/light) and use consistent design tokens.
+
+```tsx
+import { useChartTheme } from '../hooks/useChartTheme';
+
+function MyChart() {
+  const chart = useChartTheme();
+  // ...
+}
+```
+
+**Available properties:**
+
+| Property | Token source | Usage |
+|----------|-------------|-------|
+| `axisStroke` | `--text-tertiary` | XAxis / YAxis `tick` fill |
+| `gridStroke` | `--border-muted` | CartesianGrid stroke |
+| `tooltipBg` | `--surface-overlay` | Tooltip background |
+| `tooltipBorder` | `--border-default` | Tooltip border |
+| `tooltipText` | `--text-primary` | Tooltip text color |
+| `hoverBg` | `--primary-a8` | Active bar / dot hover fill |
+| `incomeColor` | `--color-income` | Income series color |
+| `expenseColor` | `--color-expense` | Expense series color |
+| `categoryColors` | 6-slot palette | Multi-series category charts |
+
+**Usage with Recharts:**
+
+```tsx
+<XAxis tick={{ fill: chart.axisStroke, fontSize: 12 }} />
+<YAxis tick={{ fill: chart.axisStroke, fontSize: 12 }} />
+<CartesianGrid strokeDasharray="3 3" stroke={chart.gridStroke} />
+<Tooltip content={<ChartTooltip />} />
+```
+
+**`<ChartTooltip>` component** (`web/src/components/ChartTooltip.tsx`) is a pre-built Recharts custom tooltip. Pass it directly to the Recharts `<Tooltip content={} />` prop. It displays a label, a colored dot, and a formatted USD currency value per series row. Styling is handled via `ChartTooltip.module.css` using design tokens.
 
 ### Buttons
 
