@@ -10,7 +10,6 @@
   border-right: 1px solid var(--border-muted);
   z-index: 100;
   transition: width var(--duration-slow) var(--ease-accelerate);
-  overflow: hidden;
 }
 
 .sidebar.expanded {
@@ -20,12 +19,14 @@
 
 /* ===== Header ===== */
 .header {
+  position: relative;
   display: flex;
   align-items: center;
   height: 64px;
   padding: 0;
   gap: var(--space-3);
   flex-shrink: 0;
+  overflow: visible;
 }
 
 .logoMark {
@@ -62,37 +63,37 @@
 
 /* ===== Toggle Button ===== */
 .toggleButton {
-  width: 40px;
-  height: 40px;
-  border-radius: var(--radius-md);
-  border: none;
-  background: transparent;
+  position: absolute;
+  top: 50%;
+  right: -12px;
+  transform: translateY(-50%);
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-muted);
+  background: var(--surface-base);
   color: var(--text-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
-  margin: 0 auto var(--space-2);
-  flex-shrink: 0;
+  z-index: 101;
   transition: color var(--duration-fast) var(--ease-standard),
-              background var(--duration-fast) var(--ease-standard);
+              background var(--duration-fast) var(--ease-standard),
+              border-color var(--duration-fast) var(--ease-standard);
 }
 
 .toggleButton:hover {
-  color: var(--text-primary);
-  background: var(--primary-a8);
-}
-
-.sidebar.expanded .toggleButton {
-  margin-left: auto;
-  margin-right: var(--space-3);
+  color: var(--color-primary);
+  background: var(--surface-raised);
+  border-color: var(--border-default);
 }
 
 /* ===== Navigation ===== */
 .nav {
   flex: 1;
   padding: var(--space-2) 0;
-  overflow-y: auto;
+  overflow: hidden auto;
 }
 
 .navList {
@@ -171,6 +172,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  overflow: hidden;
 }
 
 .themeToggle {

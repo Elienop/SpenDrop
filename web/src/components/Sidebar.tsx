@@ -9,8 +9,8 @@ import {
   Moon,
   Sun,
   Monitor,
-  PanelLeftClose,
-  PanelLeftOpen,
+  ChevronLeft,
+  ChevronRight,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
@@ -60,15 +60,14 @@ export function Sidebar() {
       <div className={styles.header}>
         <span className={styles.logoMark}>S</span>
         <span className={styles.logoText}>SpenDrop</span>
+        <button
+          className={styles.toggleButton}
+          onClick={toggleSidebar}
+          aria-label="Toggle sidebar"
+        >
+          {expanded ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
+        </button>
       </div>
-
-      <button
-        className={styles.toggleButton}
-        onClick={toggleSidebar}
-        aria-label="Toggle sidebar"
-      >
-        {expanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
-      </button>
 
       <nav className={styles.nav} aria-label="Main navigation">
         <ul className={styles.navList}>
