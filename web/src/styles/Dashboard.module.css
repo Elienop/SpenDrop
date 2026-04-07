@@ -50,7 +50,6 @@
   font-size: var(--type-label-md-size);
   font-weight: var(--type-label-md-weight);
   color: var(--text-secondary);
-  text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
@@ -337,7 +336,6 @@
   color: var(--text-tertiary);
   padding: var(--space-2) var(--space-2);
   border-bottom: 1px solid var(--border-default);
-  text-transform: uppercase;
   letter-spacing: 0.05em;
 }
 
@@ -455,13 +453,13 @@
 }
 
 /* ===== Responsive ===== */
-@media (max-width: 1200px) {
+@media (width <= 1200px) {
   .bottomGrid {
     grid-template-columns: 1fr;
   }
 }
 
-@media (max-width: 768px) {
+@media (width <= 768px) {
   .heroRow {
     grid-template-columns: 1fr;
   }

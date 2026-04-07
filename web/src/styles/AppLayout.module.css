@@ -5,10 +5,7 @@
 
 .main {
   flex: 1;
-  padding-left: calc(64px + var(--space-10));
-  padding-right: var(--space-10);
-  padding-top: var(--space-8);
-  padding-bottom: var(--space-8);
+  padding: var(--space-8) var(--space-10) var(--space-8) calc(64px + var(--space-10));
   max-width: calc(1400px + 64px);
   margin: 0 auto;
   transition: padding-left var(--duration-slow) var(--ease-accelerate);
