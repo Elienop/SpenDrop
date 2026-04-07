@@ -1,44 +1,51 @@
 /* SpenDrop Design Tokens
  * This is the ONLY file allowed to contain hex values.
  * All other CSS files must use var() references to semantic tokens.
+ *
+ * 2-color system: dark neutral + lime-yellow accent
+ * Neutral: cool-tinted dark gray (slight blue undertone)
+ * Accent: #EFF3A2 (lime-yellow)
  */
 
 /* ===== PRIMITIVES ===== */
 :root {
-  /* Neutral scale (cool slate) */
-  --gray-50:  #D8E0E8;
-  --gray-100: #C4CCD6;
-  --gray-200: #A8B2BE;
-  --gray-300: #8C95A2;
-  --gray-400: #6E7785;
-  --gray-500: #545C68;
-  --gray-600: #3A3E44;
-  --gray-700: #2E3034;
-  --gray-800: #252527;
-  --gray-900: #1E1E20;
-  --gray-950: #171719;
+  /* Neutral scale (Radix-inspired 12-step, cool blue undertone) */
+  --neutral-1:  #111113;
+  --neutral-2:  #19191B;
+  --neutral-3:  #222225;
+  --neutral-4:  #2A2A2D;
+  --neutral-5:  #313136;
+  --neutral-6:  #3A3A40;
+  --neutral-7:  #48484F;
+  --neutral-8:  #606069;
+  --neutral-9:  #6E6E79;
+  --neutral-10: #7B7B85;
+  --neutral-11: #B0B0BA;
+  --neutral-12: #EEEEF0;
 
   /* Accent scale (lime-yellow) */
-  --accent-50:  #FAFCE8;
-  --accent-100: #F5F8CD;
-  --accent-200: #EFF3A2;
-  --accent-300: #E4EB78;
-  --accent-400: #D4DC52;
-  --accent-500: #B8C038;
-  --accent-600: #939A2A;
+  --accent-1:  #141413;
+  --accent-2:  #1D1D16;
+  --accent-3:  #2C2E1A;
+  --accent-4:  #3A3D1E;
+  --accent-5:  #484C24;
+  --accent-6:  #5A5E2E;
+  --accent-7:  #73783C;
+  --accent-8:  #959A54;
+  --accent-9:  #EFF3A2;
+  --accent-10: #F3F6B2;
+  --accent-11: #D4D872;
+  --accent-12: #F5F7C8;
 
-  /* Functional hues (washed, soft) */
-  --green-400: #B5DAA9;
-  --green-600: #6AAF5C;
-  --red-400:   #D4918A;
-  --red-600:   #B86B62;
-  --amber-400: #D4C08A;
-  --amber-600: #B89E62;
-  --blue-400:  #8AB4C8;
-  --blue-600:  #5A92AC;
-
-  /* Neutrals */
-  --white: #F0F4F8;
+  /* Semantic hues (muted, balanced) */
+  --green-dim:    #B5DAA9;
+  --green-bright: #6AAF5C;
+  --red-dim:      #D4918A;
+  --red-bright:   #C06B62;
+  --amber-dim:    #D4C08A;
+  --amber-bright: #B89E62;
+  --blue-dim:     #8AB4C8;
+  --blue-bright:  #5A92AC;
 
   /* ===== TYPOGRAPHY ===== */
   --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -51,7 +58,7 @@
   --type-body-lg-size: 16px;
   --type-body-md-size: 14px;
   --type-body-sm-size: 12px;
-  --type-label-lg-size: 14px;
+  --type-label-lg-size: 13px;
   --type-label-md-size: 12px;
   --type-label-sm-size: 11px;
   --type-amount-size: 16px;
@@ -117,84 +124,84 @@
   /* ===== SEMANTIC TOKENS (Dark Theme — Default) ===== */
 
   /* Surfaces */
-  --surface-base:    var(--gray-800);
-  --surface-raised:  var(--gray-700);
-  --surface-overlay: var(--gray-600);
-  --surface-sunken:  var(--gray-900);
-  --surface-hover:   var(--gray-600);
+  --surface-base:    var(--neutral-1);
+  --surface-raised:  var(--neutral-2);
+  --surface-overlay: var(--neutral-3);
+  --surface-sunken:  #0C0C0E;
+  --surface-hover:   var(--neutral-4);
 
   /* Text */
-  --text-primary:   var(--gray-50);
-  --text-secondary: var(--gray-300);
-  --text-tertiary:  var(--gray-400);
-  --text-inverse:   var(--gray-900);
+  --text-primary:   var(--neutral-12);
+  --text-secondary: var(--neutral-11);
+  --text-tertiary:  var(--neutral-9);
+  --text-inverse:   var(--neutral-1);
 
   /* Brand / Interactive */
-  --color-primary:       var(--accent-200);
-  --color-primary-hover: var(--accent-100);
+  --color-primary:       var(--accent-9);
+  --color-primary-hover: var(--accent-10);
 
   /* Semantic colors */
-  --color-expense: var(--red-400);
-  --color-income:  var(--green-400);
-  --color-warning: var(--amber-400);
-  --color-info:    var(--blue-400);
-  --color-error:   var(--red-400);
+  --color-expense: var(--red-dim);
+  --color-income:  var(--green-dim);
+  --color-warning: var(--amber-dim);
+  --color-info:    var(--blue-dim);
+  --color-error:   var(--red-dim);
 
   /* Borders */
-  --border-default: var(--gray-600);
-  --border-muted:   var(--gray-700);
+  --border-default: var(--neutral-6);
+  --border-muted:   var(--neutral-4);
 
   /* Focus */
-  --focus-ring: var(--accent-400);
+  --focus-ring: var(--accent-9);
 
   /* Overlay */
-  --backdrop: color-mix(in srgb, var(--gray-950) 60%, transparent);
+  --backdrop: color-mix(in srgb, var(--neutral-1) 60%, transparent);
 
   /* Shadows */
-  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--gray-950) 20%, transparent);
-  --shadow-md: 0 4px 8px color-mix(in srgb, var(--gray-950) 25%, transparent);
-  --shadow-lg: 0 8px 24px color-mix(in srgb, var(--gray-950) 30%, transparent);
-  --shadow-xl: 0 16px 48px color-mix(in srgb, var(--gray-950) 40%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 20%, transparent);
+  --shadow-md: 0 4px 8px color-mix(in srgb, #000000 25%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 30%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 40%, transparent);
 
   /* Opacity utilities */
-  --primary-a8:  color-mix(in srgb, var(--color-primary) 8%, transparent);
-  --primary-a15: color-mix(in srgb, var(--color-primary) 15%, transparent);
-  --primary-a50: color-mix(in srgb, var(--color-primary) 50%, transparent);
+  --primary-a8:  color-mix(in srgb, var(--accent-9) 8%, transparent);
+  --primary-a15: color-mix(in srgb, var(--accent-9) 15%, transparent);
+  --primary-a50: color-mix(in srgb, var(--accent-9) 50%, transparent);
   --expense-a15: color-mix(in srgb, var(--color-expense) 15%, transparent);
   --income-a15:  color-mix(in srgb, var(--color-income) 15%, transparent);
 }
 
 /* ===== LIGHT THEME OVERRIDES ===== */
 [data-theme="light"] {
-  --surface-base:    var(--white);
+  --surface-base:    #FAFAFA;
   --surface-raised:  #FFFFFF;
   --surface-overlay: #FFFFFF;
-  --surface-sunken:  var(--gray-50);
-  --surface-hover:   var(--gray-100);
+  --surface-sunken:  #F0F0F2;
+  --surface-hover:   #F0F0F2;
 
-  --text-primary:   var(--gray-900);
-  --text-secondary: var(--gray-500);
-  --text-tertiary:  var(--gray-400);
-  --text-inverse:   var(--gray-50);
+  --text-primary:   var(--neutral-1);
+  --text-secondary: var(--neutral-9);
+  --text-tertiary:  var(--neutral-8);
+  --text-inverse:   var(--neutral-12);
 
-  --color-primary:       var(--accent-500);
-  --color-primary-hover: var(--accent-600);
+  --color-primary:       var(--accent-6);
+  --color-primary-hover: var(--accent-7);
 
-  --color-expense: var(--red-600);
-  --color-income:  var(--green-600);
-  --color-warning: var(--amber-600);
-  --color-info:    var(--blue-600);
-  --color-error:   var(--red-600);
+  --color-expense: var(--red-bright);
+  --color-income:  var(--green-bright);
+  --color-warning: var(--amber-bright);
+  --color-info:    var(--blue-bright);
+  --color-error:   var(--red-bright);
 
-  --border-default: var(--gray-200);
-  --border-muted:   var(--gray-100);
+  --border-default: #D0D0D5;
+  --border-muted:   #E0E0E5;
 
-  --focus-ring: var(--accent-500);
+  --focus-ring: var(--accent-6);
 
-  --backdrop: color-mix(in srgb, var(--gray-950) 40%, transparent);
+  --backdrop: color-mix(in srgb, var(--neutral-1) 40%, transparent);
 
-  --shadow-sm: 0 1px 2px color-mix(in srgb, var(--gray-950) 5%, transparent);
-  --shadow-md: 0 4px 8px color-mix(in srgb, var(--gray-950) 8%, transparent);
-  --shadow-lg: 0 8px 24px color-mix(in srgb, var(--gray-950) 12%, transparent);
-  --shadow-xl: 0 16px 48px color-mix(in srgb, var(--gray-950) 16%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 5%, transparent);
+  --shadow-md: 0 4px 8px color-mix(in srgb, #000000 8%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 12%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 16%, transparent);
 }

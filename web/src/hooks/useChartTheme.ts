@@ -23,11 +23,11 @@ export function useChartTheme(): ChartTheme {
   const { resolvedTheme } = useTheme();
 
   return useMemo(() => ({
-    axisStroke: getCSSVar('--text-tertiary', '#6E7785'),
-    gridStroke: getCSSVar('--border-muted', '#2E3034'),
-    tooltipBg: getCSSVar('--surface-overlay', '#3A3E44'),
-    tooltipBorder: getCSSVar('--border-default', '#3A3E44'),
-    tooltipText: getCSSVar('--text-primary', '#D8E0E8'),
+    axisStroke: getCSSVar('--text-tertiary', '#6E6E79'),
+    gridStroke: getCSSVar('--border-muted', '#2A2A2D'),
+    tooltipBg: getCSSVar('--surface-overlay', '#222225'),
+    tooltipBorder: getCSSVar('--border-default', '#3A3A40'),
+    tooltipText: getCSSVar('--text-primary', '#EEEEF0'),
     hoverBg: getCSSVar('--primary-a8', 'rgba(239,243,162,0.08)'),
     incomeColor: getCSSVar('--color-income', '#B5DAA9'),
     expenseColor: getCSSVar('--color-expense', '#D4918A'),
@@ -37,7 +37,7 @@ export function useChartTheme(): ChartTheme {
       getCSSVar('--color-expense', '#D4918A'),
       getCSSVar('--color-warning', '#D4C08A'),
       getCSSVar('--color-info', '#8AB4C8'),
-      getCSSVar('--text-tertiary', '#6E7785'),
+      getCSSVar('--text-tertiary', '#6E6E79'),
     ],
   }), [resolvedTheme]);
 }

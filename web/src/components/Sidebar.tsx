@@ -81,7 +81,7 @@ export function Sidebar() {
                 }
               >
                 <span className={styles.navIcon} aria-hidden="true">
-                  <item.icon size={24} strokeWidth={2} />
+                  <item.icon size={20} strokeWidth={1.5} />
                 </span>
                 <span className={styles.navLabel}>{item.label}</span>
               </NavLink>
@@ -97,7 +97,7 @@ export function Sidebar() {
           aria-label={`Theme: ${theme}. Click to change.`}
         >
           <span className={styles.navIcon}>
-            <ThemeIcon size={24} strokeWidth={2} />
+            <ThemeIcon size={20} strokeWidth={1.5} />
           </span>
           <span className={styles.navLabel}>{theme.charAt(0).toUpperCase() + theme.slice(1)}</span>
         </button>
@@ -113,7 +113,7 @@ export function Sidebar() {
           aria-label="Log out"
         >
           <span className={styles.navIcon}>
-            <LogOut size={24} strokeWidth={2} />
+            <LogOut size={20} strokeWidth={1.5} />
           </span>
           <span className={styles.navLabel}>Log out</span>
         </button>

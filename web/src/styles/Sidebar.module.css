@@ -28,18 +28,18 @@
 }
 
 .logoMark {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   border-radius: var(--radius-md);
-  background-color: var(--surface-raised);
+  background-color: var(--accent-4);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  font-size: var(--type-label-lg-size);
+  font-size: var(--type-label-sm-size);
   font-weight: 600;
   color: var(--color-primary);
-  margin-left: 18px;
+  margin-left: 20px;
 }
 
 .sidebar.expanded .logoMark {
@@ -47,7 +47,7 @@
 }
 
 .logoText {
-  font-size: var(--type-heading-sm-size);
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-primary);
   white-space: nowrap;
@@ -105,7 +105,7 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 40px;
+  height: 36px;
   padding: 0;
   margin: 0 var(--space-3);
   color: var(--text-secondary);
@@ -142,8 +142,8 @@
 }
 
 .navIcon {
-  width: 24px;
-  height: 24px;
+  width: 20px;
+  height: 20px;
   flex-shrink: 0;
   display: flex;
   align-items: center;
@@ -176,7 +176,7 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 40px;
+  height: 36px;
   padding: 0;
   color: var(--text-secondary);
   border-radius: var(--radius-md);
@@ -200,7 +200,7 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 40px;
+  height: 36px;
   padding: 0;
   overflow: hidden;
 }
@@ -212,22 +212,22 @@
 }
 
 .avatar {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius-full);
-  background-color: var(--color-primary);
+  background-color: var(--accent-4);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   font-size: var(--type-label-sm-size);
   font-weight: var(--type-label-lg-weight);
-  color: var(--text-inverse);
+  color: var(--color-primary);
 }
 
 .userName {
-  font-size: var(--type-body-sm-size);
-  font-weight: var(--type-body-md-weight);
+  font-size: var(--type-label-lg-size);
+  font-weight: var(--type-label-lg-weight);
   color: var(--text-secondary);
   white-space: nowrap;
   overflow: hidden;
@@ -246,7 +246,7 @@
   align-items: center;
   justify-content: center;
   gap: 0;
-  height: 40px;
+  height: 36px;
   padding: 0;
   color: var(--text-secondary);
   border-radius: var(--radius-md);
