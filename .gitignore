@@ -11,6 +11,7 @@ web/dist/
 *.dll
 *.so
 *.dylib
+/spendrop
 
 # Database
 *.db
