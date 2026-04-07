@@ -37,8 +37,12 @@ Thumbs.db
 # Claude Code (local-only)
 .claude/
 
-# Superpowers docs (local-only)
+# Superpowers (local-only)
 docs/superpowers/
+.superpowers/
+
+# Reference templates (local-only)
+docs/templates/
 
 # Test coverage
 coverage/
