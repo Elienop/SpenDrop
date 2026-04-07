@@ -62,6 +62,7 @@ func TestLogoutCookie_SecureFlagDefaultsTrue(t *testing.T) {
 
 	// Logout
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(&http.Cookie{Name: "session", Value: sessionToken})
 	logoutRec := httptest.NewRecorder()
 	h.handleLogout(logoutRec, logoutReq)

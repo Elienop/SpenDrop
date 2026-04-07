@@ -119,7 +119,7 @@ func TestBuildTransactionWhereClause_TypeInvalid(t *testing.T) {
 func TestBuildTransactionWhereClause_Search(t *testing.T) {
 	q := url.Values{"search": {"groceries"}}
 	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.description LIKE ?" {
+	if where != " WHERE t.description LIKE ? ESCAPE '\\'" {
 		t.Errorf("unexpected where clause: %q", where)
 	}
 	if len(args) != 1 || args[0] != "%groceries%" {
@@ -183,7 +183,7 @@ func TestBuildTransactionWhereClause_MultipleFilters(t *testing.T) {
 		"amount_min": {"500"},
 	}
 	where, args := buildTransactionWhereClause(q)
-	expected := " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? AND t.amount >= ?"
+	expected := " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount >= ?"
 	if where != expected {
 		t.Errorf("unexpected where clause:\ngot:  %q\nwant: %q", where, expected)
 	}

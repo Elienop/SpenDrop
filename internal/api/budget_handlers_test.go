@@ -82,7 +82,7 @@ func TestHandleGetBudgets_NoAuth_Returns401(t *testing.T) {
 func TestHandleSetBudget_UpsertsBudget(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"amount":2500}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/budgets/2026/4", body)
@@ -108,7 +108,7 @@ func TestHandleSetBudget_UpsertsBudget(t *testing.T) {
 func TestHandleSetBudget_InvalidYear_Returns400(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"amount":2500}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/budgets/abc/4", body)
@@ -125,7 +125,7 @@ func TestHandleSetBudget_InvalidYear_Returns400(t *testing.T) {
 func TestHandleSetBudget_InvalidMonth_Returns400(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"amount":2500}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/budgets/2026/13", body)
@@ -142,7 +142,7 @@ func TestHandleSetBudget_InvalidMonth_Returns400(t *testing.T) {
 func TestHandleSetBudget_ZeroAmount_Returns400(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"amount":0}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/budgets/2026/4", body)
@@ -200,7 +200,7 @@ func TestHandleDefaultBudget_GET_ReturnsCurrentDefault(t *testing.T) {
 func TestHandleDefaultBudget_PUT_UpdatesDefault(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
+	user := seedTestUser(t, q, "alice", "admin")
 
 	body := strings.NewReader(`{"amount":3000}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/settings/default-budget", body)

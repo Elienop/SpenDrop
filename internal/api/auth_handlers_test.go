@@ -192,7 +192,8 @@ func TestHandleRegister_FirstUser_GetsAdminRole(t *testing.T) {
 }
 
 func TestHandleRegister_SecondUser_GetsMemberRole(t *testing.T) {
-	h := setupHandler(t)
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
 
 	// Create first user (admin)
 	body1 := strings.NewReader(`{"username":"alice","password":"longpassword","display_name":"Alice"}`)
@@ -201,6 +202,14 @@ func TestHandleRegister_SecondUser_GetsMemberRole(t *testing.T) {
 	h.handleRegister(rec1, req1)
 	if rec1.Code != http.StatusCreated {
 		t.Fatalf("first register failed: %d; body: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Enable registration so subsequent users can register
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
 	}
 
 	// Create second user (member)
@@ -280,12 +289,24 @@ func TestHandleRegister_ResponseExcludesPasswordHash(t *testing.T) {
 }
 
 func TestHandleRegister_DuplicateUsername_Returns409(t *testing.T) {
-	h := setupHandler(t)
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
 
 	body1 := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
 	req1 := httptest.NewRequest(http.MethodPost, "/api/auth/register", body1)
 	rec1 := httptest.NewRecorder()
 	h.handleRegister(rec1, req1)
+	if rec1.Code != http.StatusCreated {
+		t.Fatalf("first register failed: %d; body: %s", rec1.Code, rec1.Body.String())
+	}
+
+	// Enable registration so the second attempt reaches the duplicate-username check
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
+	}
 
 	body2 := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
 	req2 := httptest.NewRequest(http.MethodPost, "/api/auth/register", body2)
@@ -473,6 +494,7 @@ func TestHandleLogout_WithValidSession_Returns200(t *testing.T) {
 
 	// Logout
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(&http.Cookie{Name: "session", Value: sessionToken})
 	logoutRec := httptest.NewRecorder()
 	h.handleLogout(logoutRec, logoutReq)
@@ -507,6 +529,7 @@ func TestHandleLogout_ClearsCookie(t *testing.T) {
 
 	// Logout
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(&http.Cookie{Name: "session", Value: sessionToken})
 	logoutRec := httptest.NewRecorder()
 	h.handleLogout(logoutRec, logoutReq)
@@ -548,6 +571,7 @@ func TestHandleLogout_DeletesSessionFromDB(t *testing.T) {
 
 	// Logout
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(&http.Cookie{Name: "session", Value: sessionToken})
 	logoutRec := httptest.NewRecorder()
 	h.handleLogout(logoutRec, logoutReq)
@@ -567,6 +591,7 @@ func TestHandleLogout_NoCookie_Returns200(t *testing.T) {
 	h := setupHandler(t)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
+	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.handleLogout(rec, req)
 

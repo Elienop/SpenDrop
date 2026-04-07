@@ -93,11 +93,13 @@ func TestRequireAuth_InvalidToken_Returns401(t *testing.T) {
 func TestRequireAuth_ExpiredSession_Returns401(t *testing.T) {
 	q, _ := setupTestDB(t)
 	user := createTestUser(t, q, "member")
-	createTestSession(t, q, user.ID, "expired-tok", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+	// Token must be exactly 64 hex characters to pass the length check in RequireAuth
+	expiredTok := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	createTestSession(t, q, user.ID, expiredTok, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	handler := RequireAuth(q)(okHandler())
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: "expired-tok"})
+	req.AddCookie(&http.Cookie{Name: "session", Value: expiredTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -109,16 +111,18 @@ func TestRequireAuth_ExpiredSession_Returns401(t *testing.T) {
 func TestRequireAuth_ExpiredSession_DeletesSession(t *testing.T) {
 	q, _ := setupTestDB(t)
 	user := createTestUser(t, q, "member")
-	createTestSession(t, q, user.ID, "expired-tok-del", time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
+	// Token must be exactly 64 hex characters to pass the length check in RequireAuth
+	expiredTokDel := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	createTestSession(t, q, user.ID, expiredTokDel, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	handler := RequireAuth(q)(okHandler())
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: "expired-tok-del"})
+	req.AddCookie(&http.Cookie{Name: "session", Value: expiredTokDel})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
 	// Session should have been deleted
-	_, err := q.GetSession(context.Background(), "expired-tok-del")
+	_, err := q.GetSession(context.Background(), expiredTokDel)
 	if err != sql.ErrNoRows {
 		t.Errorf("expected expired session to be deleted, got err: %v", err)
 	}
@@ -127,7 +131,9 @@ func TestRequireAuth_ExpiredSession_DeletesSession(t *testing.T) {
 func TestRequireAuth_ValidSession_SetsUserContext(t *testing.T) {
 	q, _ := setupTestDB(t)
 	user := createTestUser(t, q, "member")
-	createTestSession(t, q, user.ID, "valid-tok", time.Now().Add(24*time.Hour).UTC())
+	// Token must be exactly 64 hex characters to pass the length check in RequireAuth
+	validTok := "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	createTestSession(t, q, user.ID, validTok, time.Now().Add(24*time.Hour).UTC())
 
 	var gotUser database.User
 	var gotOk bool
@@ -138,7 +144,7 @@ func TestRequireAuth_ValidSession_SetsUserContext(t *testing.T) {
 
 	handler := RequireAuth(q)(innerHandler)
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: "valid-tok"})
+	req.AddCookie(&http.Cookie{Name: "session", Value: validTok})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
@@ -159,11 +165,13 @@ func TestRequireAuth_ValidSession_SetsUserContext(t *testing.T) {
 func TestRequireAuth_ValidSession_CallsNext(t *testing.T) {
 	q, _ := setupTestDB(t)
 	user := createTestUser(t, q, "admin")
-	createTestSession(t, q, user.ID, "valid-tok-next", time.Now().Add(24*time.Hour).UTC())
+	// Token must be exactly 64 hex characters to pass the length check in RequireAuth
+	validTokNext := "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+	createTestSession(t, q, user.ID, validTokNext, time.Now().Add(24*time.Hour).UTC())
 
 	handler := RequireAuth(q)(okHandler())
 	req := httptest.NewRequest(http.MethodGet, "/api/test", nil)
-	req.AddCookie(&http.Cookie{Name: "session", Value: "valid-tok-next"})
+	req.AddCookie(&http.Cookie{Name: "session", Value: validTokNext})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 

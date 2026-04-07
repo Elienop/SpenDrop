@@ -13,6 +13,21 @@ import (
 	"github.com/xuri/excelize/v2"
 )
 
+// clearImportStore removes all entries from the package-level importStore.
+// Because importStore is a global sync.Map shared across all tests in the
+// process, entries from one test's upload linger into the next test.
+// User IDs also collide (each fresh test DB starts auto-increment from 1),
+// so a user in test N looks like the same user as the same-index user in
+// test M — causing the "too many pending imports" 429 when 3+ uploads
+// accumulate for what the store considers one user ID.
+// Call this at the top of any test that calls handleImportUpload.
+func clearImportStore() {
+	importStore.Range(func(key, _ any) bool {
+		importStore.Delete(key)
+		return true
+	})
+}
+
 // createTestXLSX builds an in-memory xlsx file with the given sheet name,
 // headers, and data rows, returning the bytes.
 func createTestXLSX(t *testing.T, sheetName string, headers []string, rows [][]string) []byte {
@@ -74,6 +89,7 @@ func postMultipartFile(t *testing.T, url string, xlsxData []byte) *http.Request 
 // --- handleImportUpload ---
 
 func TestHandleImportUpload_ValidFile_ReturnsPreview(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "importer", "member")
@@ -122,6 +138,7 @@ func TestHandleImportUpload_ValidFile_ReturnsPreview(t *testing.T) {
 }
 
 func TestHandleImportUpload_AlternateHeaders_Works(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "importer2", "member")
@@ -150,6 +167,7 @@ func TestHandleImportUpload_AlternateHeaders_Works(t *testing.T) {
 }
 
 func TestHandleImportUpload_MissingRequiredColumns_Returns400(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "importer3", "member")
@@ -173,6 +191,7 @@ func TestHandleImportUpload_MissingRequiredColumns_Returns400(t *testing.T) {
 }
 
 func TestHandleImportUpload_Unauthenticated_Returns401(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 
@@ -194,6 +213,7 @@ func TestHandleImportUpload_Unauthenticated_Returns401(t *testing.T) {
 }
 
 func TestHandleImportUpload_PreviewCappedAt10(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "importer4", "member")
@@ -232,6 +252,7 @@ func TestHandleImportUpload_PreviewCappedAt10(t *testing.T) {
 // --- handleImportConfirm ---
 
 func TestHandleImportConfirm_ValidImport_InsertsTransactions(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "confirmer", "member")
@@ -307,12 +328,15 @@ func TestHandleImportConfirm_ValidImport_InsertsTransactions(t *testing.T) {
 }
 
 func TestHandleImportConfirm_InvalidImportID_Returns404(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "confirmer2", "member")
 
+	// Must be exactly 32 hex chars to pass the length check and reach the
+	// store lookup, which then returns 404 because no such entry exists.
 	body, _ := json.Marshal(map[string]any{
-		"import_id":           "nonexistent",
+		"import_id":           "00000000000000000000000000000000",
 		"default_category_id": 1,
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(body))
@@ -327,6 +351,7 @@ func TestHandleImportConfirm_InvalidImportID_Returns404(t *testing.T) {
 }
 
 func TestHandleImportConfirm_WrongUser_Returns403(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user1 := seedTestUser(t, q, "uploader1", "member")
@@ -343,6 +368,9 @@ func TestHandleImportConfirm_WrongUser_Returns403(t *testing.T) {
 	uploadRec := httptest.NewRecorder()
 	h.handleImportUpload(uploadRec, uploadReq)
 
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
 	var uploadResp map[string]any
 	decodeResponse(t, uploadRec, &uploadResp)
 	importID := uploadResp["import_id"].(string)
@@ -364,6 +392,7 @@ func TestHandleImportConfirm_WrongUser_Returns403(t *testing.T) {
 }
 
 func TestHandleImportConfirm_MultipleDateFormats_Parsed(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "dateimporter", "member")
@@ -412,6 +441,7 @@ func TestHandleImportConfirm_MultipleDateFormats_Parsed(t *testing.T) {
 }
 
 func TestHandleImportConfirm_SkipsUnparseableDate(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "skipdate", "member")
@@ -459,6 +489,7 @@ func TestHandleImportConfirm_SkipsUnparseableDate(t *testing.T) {
 }
 
 func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "catmatcher", "member")
@@ -506,6 +537,7 @@ func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
 }
 
 func TestHandleImportConfirm_Unauthenticated_Returns401(t *testing.T) {
+	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 

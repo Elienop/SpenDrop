@@ -84,14 +84,14 @@ func TestRunMigrations_IsIdempotent(t *testing.T) {
 		t.Fatalf("second RunMigrations: %v", err)
 	}
 
-	// Should still have exactly one migration recorded
+	// Should still have exactly 3 migration records (one per migration file)
 	var count int
 	err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count)
 	if err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 1 {
-		t.Fatalf("expected 1 migration record, got %d", count)
+	if count != 3 {
+		t.Fatalf("expected 3 migration records, got %d", count)
 	}
 }
 
