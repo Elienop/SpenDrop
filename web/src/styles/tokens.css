@@ -58,6 +58,7 @@
   --type-label-md-size: 12px;
   --type-label-sm-size: 11px;
   --type-amount-size: 16px;
+  --type-display-size: 36px;
 
   /* Type scale — weight */
   --type-heading-lg-weight: 600;
@@ -70,6 +71,7 @@
   --type-label-md-weight: 500;
   --type-label-sm-weight: 500;
   --type-amount-weight: 500;
+  --type-display-weight: 700;
 
   /* Type scale — line-height */
   --type-heading-lg-line-height: 32px;
@@ -82,6 +84,7 @@
   --type-label-md-line-height: 16px;
   --type-label-sm-line-height: 16px;
   --type-amount-line-height: 24px;
+  --type-display-line-height: 40px;
 
   /* ===== SPACING (4px base) ===== */
   --space-0:  0;
