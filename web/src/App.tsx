@@ -8,18 +8,13 @@ import { Transactions } from './pages/Transactions';
 import { Categories } from './pages/Categories';
 import { Settings } from './pages/Settings';
 import { Reports } from './pages/Reports';
+import layoutStyles from './styles/AppLayout.module.css';
 
 function AppLayout() {
   return (
-    <div style={{ display: 'flex', minHeight: '100vh' }}>
+    <div className={layoutStyles.layout}>
       <Sidebar />
-      <main
-        style={{
-          marginLeft: '240px',
-          flex: 1,
-          padding: 'var(--space-lg)',
-        }}
-      >
+      <main className={layoutStyles.main}>
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/reports" element={<Reports />} />

@@ -8,10 +8,17 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }));
 
+// Mock useTheme
+vi.mock('../hooks/useTheme', () => ({
+  useTheme: vi.fn(),
+}));
+
 import { useAuth } from '../hooks/useAuth';
+import { useTheme } from '../hooks/useTheme';
 import { Sidebar } from './Sidebar';
 
 const mockedUseAuth = vi.mocked(useAuth);
+const mockedUseTheme = vi.mocked(useTheme);
 
 const mockUser = {
   id: 1,
@@ -31,6 +38,7 @@ function renderSidebar(currentPath = '/') {
 
 describe('Sidebar', () => {
   const mockLogout = vi.fn();
+  const mockSetTheme = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,6 +48,11 @@ describe('Sidebar', () => {
       login: vi.fn(),
       register: vi.fn(),
       logout: mockLogout,
+    });
+    mockedUseTheme.mockReturnValue({
+      theme: 'dark',
+      resolvedTheme: 'dark',
+      setTheme: mockSetTheme,
     });
   });
 
@@ -81,5 +94,25 @@ describe('Sidebar', () => {
   test('has semantic nav element', () => {
     renderSidebar();
     expect(screen.getByRole('navigation')).toBeInTheDocument();
+  });
+
+  test('has theme toggle button', () => {
+    renderSidebar();
+    expect(screen.getByRole('button', { name: /theme/i })).toBeInTheDocument();
+  });
+
+  test('cycles theme on toggle click', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+
+    const themeButton = screen.getByRole('button', { name: /theme/i });
+    await user.click(themeButton);
+
+    expect(mockSetTheme).toHaveBeenCalledWith('light');
+  });
+
+  test('displays user avatar initial', () => {
+    renderSidebar();
+    expect(screen.getByText('A')).toBeInTheDocument();
   });
 });

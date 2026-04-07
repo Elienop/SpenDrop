@@ -10,6 +10,15 @@ vi.mock('./hooks/useAuth', () => ({
   ),
 }));
 
+// Mock useTheme (Sidebar uses it)
+vi.mock('./hooks/useTheme', () => ({
+  useTheme: vi.fn().mockReturnValue({
+    theme: 'dark',
+    resolvedTheme: 'dark',
+    setTheme: vi.fn(),
+  }),
+}));
+
 // Mock the API client (real pages call api.get, etc.)
 vi.mock('./api/client', () => ({
   api: {

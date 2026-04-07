@@ -1,0 +1,11 @@
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main {
+  margin-left: 64px;
+  flex: 1;
+  padding: var(--space-6);
+  transition: margin-left var(--duration-slow) var(--ease-decelerate);
+}
