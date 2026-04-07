@@ -1,5 +1,5 @@
 /* SpenDrop Global Styles */
-@import './tokens.css';
+@import url('./tokens.css');
 
 /* CSS Reset */
 *,
