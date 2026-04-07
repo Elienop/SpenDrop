@@ -17,6 +17,8 @@ import {
   useIncomeExpenses,
   useTopMerchants,
 } from '../hooks/useReports';
+import { useChartTheme } from '../hooks/useChartTheme';
+import { ChartTooltip } from '../components/ChartTooltip';
 import styles from '../styles/Reports.module.css';
 
 const MONTH_NAMES = [
@@ -45,6 +47,8 @@ export function Reports() {
   const [merchantMonth, setMerchantMonth] = useState(now.getMonth() + 1);
 
   const yearOptions = Array.from({ length: 5 }, (_, i) => thisYear - i);
+
+  const theme = useChartTheme();
 
   const yoy = useYearOverYear(yoyYear);
   const catTrends = useCategoryTrends(trendMonths);
@@ -130,18 +134,20 @@ export function Reports() {
           <div className={styles.chartContainer}>
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={yoyData}>
-                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
-                <XAxis dataKey="name" stroke="var(--color-text-secondary)" />
-                <YAxis stroke="var(--color-text-secondary)" />
-                <Tooltip />
+                <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} strokeOpacity={0.4} vertical={false} />
+                <XAxis dataKey="name" tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={{ stroke: theme.gridStroke }} tickLine={false} />
+                <YAxis tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={false} tickLine={false} />
+                <Tooltip content={<ChartTooltip />} cursor={{ fill: theme.hoverBg }} />
                 <Legend />
                 <Bar
                   dataKey={`${yoy.data.current_year} Expenses`}
                   fill="var(--color-danger)"
+                  radius={[4, 4, 0, 0]}
                 />
                 <Bar
                   dataKey={`${yoy.data.previous_year} Expenses`}
                   fill="var(--color-info)"
+                  radius={[4, 4, 0, 0]}
                 />
               </BarChart>
             </ResponsiveContainer>
@@ -176,13 +182,13 @@ export function Reports() {
             <div className={styles.chartContainer}>
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={incExpData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
-                  <XAxis dataKey="name" stroke="var(--color-text-secondary)" />
-                  <YAxis stroke="var(--color-text-secondary)" />
-                  <Tooltip />
+                  <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} strokeOpacity={0.4} vertical={false} />
+                  <XAxis dataKey="name" tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={{ stroke: theme.gridStroke }} tickLine={false} />
+                  <YAxis tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<ChartTooltip />} cursor={{ fill: theme.hoverBg }} />
                   <Legend />
-                  <Bar dataKey="income" fill="var(--color-primary)" name="Income" />
-                  <Bar dataKey="expenses" fill="var(--color-danger)" name="Expenses" />
+                  <Bar dataKey="income" fill="var(--color-primary)" name="Income" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="expenses" fill="var(--color-danger)" name="Expenses" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </div>
@@ -200,10 +206,10 @@ export function Reports() {
             <div className={styles.chartContainer}>
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={catTrendData}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="var(--border-color)" />
-                  <XAxis dataKey="name" stroke="var(--color-text-secondary)" />
-                  <YAxis stroke="var(--color-text-secondary)" />
-                  <Tooltip />
+                  <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} strokeOpacity={0.4} vertical={false} />
+                  <XAxis dataKey="name" tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={{ stroke: theme.gridStroke }} tickLine={false} />
+                  <YAxis tick={{ fill: theme.axisStroke, fontSize: 12, fontFamily: 'Inter Variable' }} axisLine={false} tickLine={false} />
+                  <Tooltip content={<ChartTooltip />} cursor={{ fill: theme.hoverBg }} />
                   <Legend />
                   {expenseCategories.map((cat) => (
                     <Line
