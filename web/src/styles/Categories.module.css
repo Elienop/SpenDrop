@@ -1,0 +1,230 @@
+/* Categories page styles */
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-lg);
+}
+
+.section {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  padding: var(--space-lg);
+}
+
+.sectionTitle {
+  margin-bottom: var(--space-md);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--space-md);
+}
+
+/* Category Card */
+.card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  transition: border-color var(--transition);
+}
+
+.card:hover {
+  border-color: var(--color-primary);
+}
+
+.inactive {
+  opacity: 0.5;
+}
+
+.colorSwatch {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  flex-shrink: 0;
+}
+
+.cardInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.cardName {
+  font-weight: 600;
+  font-size: 0.9375rem;
+}
+
+.cardStatus {
+  font-size: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.cardActions {
+  display: flex;
+  gap: var(--space-xs);
+  align-items: center;
+}
+
+.editButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.8125rem;
+  color: var(--color-info);
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  min-height: 36px;
+  min-width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.editButton:hover {
+  background-color: rgba(123, 104, 238, 0.1);
+}
+
+.toggleButton {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: 0.75rem;
+  border-radius: var(--radius-sm);
+  transition: all var(--transition);
+  min-height: 36px;
+}
+
+.toggleActive {
+  color: var(--color-primary);
+}
+
+.toggleActive:hover {
+  background-color: rgba(78, 204, 163, 0.1);
+}
+
+.toggleInactive {
+  color: var(--color-text-secondary);
+}
+
+.toggleInactive:hover {
+  background-color: rgba(136, 136, 136, 0.1);
+}
+
+/* Add Category button */
+.addCard {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background-color: var(--bg-surface);
+  border: 2px dashed var(--border-color);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  transition: all var(--transition);
+  min-height: 72px;
+}
+
+.addCard:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* Edit form (inline) */
+.editForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+  padding: var(--space-md);
+  background-color: var(--bg-surface);
+  border: 1px solid var(--color-primary);
+  border-radius: var(--radius-md);
+}
+
+.editFormRow {
+  display: flex;
+  gap: var(--space-sm);
+  align-items: center;
+}
+
+.editInput {
+  flex: 1;
+  padding: var(--space-xs) var(--space-sm);
+  min-height: 36px;
+  font-size: 0.875rem;
+}
+
+.colorInput {
+  width: 44px;
+  height: 36px;
+  padding: 2px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.editFormActions {
+  display: flex;
+  gap: var(--space-xs);
+  justify-content: flex-end;
+}
+
+.saveButton {
+  padding: var(--space-xs) var(--space-md);
+  background-color: var(--color-primary);
+  color: var(--bg-surface);
+  font-weight: 600;
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+}
+
+.cancelButton {
+  padding: var(--space-xs) var(--space-md);
+  color: var(--color-text-secondary);
+  font-size: 0.8125rem;
+  border-radius: var(--radius-sm);
+  min-height: 36px;
+}
+
+/* Drag */
+.dragHandle {
+  cursor: grab;
+  padding: var(--space-xs);
+  color: var(--color-text-secondary);
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.dragHandle:active {
+  cursor: grabbing;
+}
+
+.dragging {
+  opacity: 0.5;
+  border-color: var(--color-primary);
+}
+
+/* States */
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-xl);
+  color: var(--color-text-secondary);
+}
+
+.error {
+  padding: var(--space-md);
+  background-color: rgba(233, 69, 96, 0.1);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius-md);
+  color: var(--color-danger);
+}
+
+.emptyState {
+  text-align: center;
+  padding: var(--space-lg);
+  color: var(--color-text-secondary);
+}
