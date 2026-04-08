@@ -14,7 +14,7 @@ A single row inside a glass card: `Search input | Type toggle | Filters button |
 
 - **Search input** — left-aligned, takes remaining space. Bound to `filters.search`. Magnifying glass icon prefix.
 - **Type toggle** — segmented control (All / Expenses / Income). Bound to `filters.type`. Same logic as current type buttons.
-- **Filters button** — toggles the filter panel open/closed. Shows a colored dot indicator when any non-search filter is active (date, category, amount, tags). Label changes to "Filters (N)" where N is the count of active filter groups.
+- **Filters button** — toggles the filter panel open/closed. Shows a `var(--color-primary)` dot indicator when any non-search filter is active. Label changes to "Filters (N)" where N is the count of active filter groups (date = `dateFrom` or `dateTo` set, category = `categoryIds` or `categoryId` set, amount = `amountMin` or `amountMax` set, tags = `tags` set — 4 possible groups max).
 - **+ Add button** — primary filled button. Toggles the entry form open/closed. Label changes to "Cancel" when the form is open.
 - Dividers (1px vertical lines) separate search, type toggle, and the right-side buttons.
 
@@ -22,9 +22,9 @@ A single row inside a glass card: `Search input | Type toggle | Filters button |
 
 When filters are applied and the filter panel is closed, show small dismissible chips summarizing active filters:
 
-- Date chip: e.g. "Mar 2026" or "Mar 1 - Apr 9"
-- Category chip: e.g. "Food, Transport" (comma-joined names)
-- Amount chip: e.g. "$50 - $200"
+- Date chip: "Mar 1 - Apr 9" when both set. "From Mar 1" when only `dateFrom`. "Until Apr 9" when only `dateTo`.
+- Category chip: active when `categoryIds` OR `categoryId` is non-empty. Displays comma-joined category names from the `categories` array using the IDs. Falls back to `categoryId` if `categoryIds` is empty.
+- Amount chip: "$50 - $200" when both set. "Min $50" when only min. "Max $200" when only max.
 - Tags chip: e.g. "groceries, dining"
 
 Each chip has an "x" button that clears that specific filter group. This replaces the current "Clear" button with something more informative and targeted.
@@ -50,11 +50,17 @@ Slides down below the toolbar when "Filters" is clicked. Glass card styling. Con
 - List of saved filter chips (click to load, x to delete)
 - "+ Save current" button (dashed border, same as current)
 
-Top-right of the panel: "Clear all" link button that resets all filters.
+Top-right of the panel: "Clear all" link button that resets all filters (including `categoryId`, `categoryIds`, `dateFrom`, `dateTo`, `amountMin`, `amountMax`, `tags`).
+
+The save filter button retains the current `window.prompt('Name this filter:')` approach for naming. No change from current behavior.
 
 ### Entry Form (expandable, below toolbar)
 
-The existing `TransactionEntry` component, rendered conditionally when `showEntry` is true. Slides down below the toolbar (or below the filter panel if both are open). No internal changes to the component.
+The existing `TransactionEntry` component, hidden/shown below the toolbar when `showEntry` is toggled. Uses CSS `display: none` when hidden (not conditional rendering) to preserve form state — the user may have a half-typed entry when they close/reopen. No internal changes to the component.
+
+### Transitions
+
+No slide animations. Panels show/hide instantly via `display: none` / `display: block`. This matches the project pattern of removing transition animations (see commit `af49f82`).
 
 ### Page Structure (top to bottom)
 
@@ -82,6 +88,37 @@ All filter state remains in `useTransactions` hook unchanged. No backend changes
 | `FilterBar` | `web/src/components/FilterBar.tsx` | **Delete** — replaced by FilterPanel |
 | `TransactionEntry` | `web/src/components/TransactionEntry.tsx` | **No change** |
 | `TransactionRow` | `web/src/components/TransactionRow.tsx` | **No change** |
+
+## Component Props
+
+**TransactionToolbar:**
+```ts
+interface TransactionToolbarProps {
+  search: string;
+  onSearchChange: (value: string) => void;
+  type: string;
+  onTypeChange: (value: string) => void;
+  activeFilterCount: number;
+  showFilters: boolean;
+  onToggleFilters: () => void;
+  showEntry: boolean;
+  onToggleEntry: () => void;
+}
+```
+
+**FilterPanel:**
+```ts
+interface FilterPanelProps {
+  filters: FilterValues;
+  setFilter: (key: keyof FilterValues, value: string) => void;
+  clearFilters: () => void;
+  categories: Category[];
+  savedFilters: SavedFilter[];
+  onSaveFilter: (name: string) => void;
+  onLoadFilter: (filter: SavedFilter) => void;
+  onDeleteFilter: (id: number) => void;
+}
+```
 
 ## Styles
 
@@ -136,12 +173,25 @@ New classes needed:
 
 ## Testing
 
-- Toolbar renders with search, type toggle, filters button, add button
-- Clicking Filters toggles filter panel visibility
-- Clicking + Add toggles entry form visibility
-- Filter panel tabs switch between Date/Category/Amount/Saved content
+### Existing tests to rewrite
+
+All 5 saved-filter tests in `Transactions.test.tsx` reference `FilterBar` markup that no longer exists. They must be rewritten to:
+1. Click the "Filters" toolbar button first to open the panel
+2. Switch to the "Saved" tab
+3. Then assert on saved filter chips, save button, load/delete behavior
+
+The "renders Export Excel button" and "export URL" tests remain valid — no changes needed.
+The "renders Tags column" test remains valid — no changes needed.
+
+### New tests
+
+- Toolbar renders with search input, type toggle (All/Expenses/Income), Filters button, + Add button
+- Clicking Filters button toggles filter panel visibility
+- Clicking + Add button toggles entry form visibility
+- + Add button label changes to "Cancel" when entry form is open
+- Filter panel tabs switch content (Date/Category/Amount/Saved)
 - Active filter chips appear when filters are set and panel is closed
-- Clicking chip x clears that filter group
-- All existing transaction CRUD still works
-- Export button still works
+- Clicking chip x clears that specific filter group
+- Filters button shows "(N)" count when filters are active
+- Accessibility: Filters button has `aria-expanded`, + Add button has `aria-expanded`
 - Run: `vitest run`, `tsc --noEmit`, `stylelint`
