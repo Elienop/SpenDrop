@@ -68,7 +68,7 @@ const SHORT_MONTHS = [
   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
 ];
 
-type CashFlowView = 'monthly' | 'yearly';
+type CashFlowView = '6m' | '12m';
 
 /* ── Budget bar gradient helpers ── */
 
@@ -85,7 +85,7 @@ export function Dashboard() {
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(now.getFullYear());
   const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
-  const [cashFlowView, setCashFlowView] = useState<CashFlowView>('monthly');
+  const [cashFlowView, setCashFlowView] = useState<CashFlowView>('6m');
   const { summary, trend, categories, loading, error } = useDashboard(
     selectedYear,
     selectedMonth,
@@ -110,32 +110,16 @@ export function Dashboard() {
   const totalExpense = summary?.total_spent ?? 0;
   const totalBalance = totalIncome - totalExpense;
 
-  // Cash flow chart data — 6M shows last 6 months only
-  const monthlyChartData = [...trend].reverse().slice(-6).map((item) => ({
-    name: SHORT_MONTHS[item.month - 1],
-    income: item.total_income,
-    expense: -item.total_spent,
-  }));
-
-  const yearlyChartData = (() => {
-    const byYear = new Map<number, { income: number; expense: number }>();
-    for (const item of trend) {
-      const existing = byYear.get(item.year) || { income: 0, expense: 0 };
-      existing.income += item.total_income;
-      existing.expense += item.total_spent;
-      byYear.set(item.year, existing);
-    }
-    return Array.from(byYear.entries())
-      .sort(([a], [b]) => a - b)
-      .slice(-5)
-      .map(([year, data]) => ({
-        name: String(year),
-        income: data.income,
-        expense: -data.expense,
-      }));
+  // Cash flow chart data
+  const chartData = (() => {
+    const sorted = [...trend].reverse();
+    const sliced = cashFlowView === '6m' ? sorted.slice(-6) : sorted;
+    return sliced.map((item) => ({
+      name: SHORT_MONTHS[item.month - 1],
+      income: item.total_income,
+      expense: -item.total_spent,
+    }));
   })();
-
-  const chartData = cashFlowView === 'monthly' ? monthlyChartData : yearlyChartData;
 
   // Categories — top 5 for donut + list
   const topCats = categories.slice(0, 5);
@@ -271,7 +255,6 @@ export function Dashboard() {
           </p>
         </div>
         <div className={styles.selectors}>
-          <span className={styles.selectLabel}>Month</span>
           <select
             id="dash-month"
             aria-label="Month"
@@ -284,7 +267,6 @@ export function Dashboard() {
             ))}
           </select>
 
-          <span className={styles.selectLabel}>Year</span>
           <select
             id="dash-year"
             aria-label="Year"
@@ -434,16 +416,16 @@ export function Dashboard() {
               </div>
               <div className={styles.cfToggle}>
                 <button
-                  className={`${styles.cfToggleBtn} ${cashFlowView === 'monthly' ? styles.cfToggleBtnActive : ''}`}
-                  onClick={() => setCashFlowView('monthly')}
+                  className={`${styles.cfToggleBtn} ${cashFlowView === '6m' ? styles.cfToggleBtnActive : ''}`}
+                  onClick={() => setCashFlowView('6m')}
                 >
                   6M
                 </button>
                 <button
-                  className={`${styles.cfToggleBtn} ${cashFlowView === 'yearly' ? styles.cfToggleBtnActive : ''}`}
-                  onClick={() => setCashFlowView('yearly')}
+                  className={`${styles.cfToggleBtn} ${cashFlowView === '12m' ? styles.cfToggleBtnActive : ''}`}
+                  onClick={() => setCashFlowView('12m')}
                 >
-                  1Y
+                  12M
                 </button>
               </div>
             </div>
