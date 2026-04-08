@@ -86,13 +86,21 @@ export function Dashboard() {
   const chartTheme = useChartTheme();
   const patterns = useChartPatterns();
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
+  const [showLatest, setShowLatest] = useState(false);
 
   useEffect(() => {
+    let url = 'transactions?per_page=6';
+    if (!showLatest) {
+      const mm = String(selectedMonth).padStart(2, '0');
+      const lastDay = new Date(selectedYear, selectedMonth, 0).getDate();
+      const dd = String(lastDay).padStart(2, '0');
+      url += `&date_from=${selectedYear}-${mm}-01&date_to=${selectedYear}-${mm}-${dd}`;
+    }
     api
-      .get<PaginatedResponse<Transaction>>('transactions?per_page=6')
+      .get<PaginatedResponse<Transaction>>(url)
       .then((data) => setRecentTransactions(data.transactions))
       .catch(() => { /* silent — non-critical */ });
-  }, []);
+  }, [selectedYear, selectedMonth, showLatest]);
 
   const currentYear = now.getFullYear();
   const yearOptions = Array.from({ length: 5 }, (_, i) => currentYear - i);
@@ -630,9 +638,19 @@ export function Dashboard() {
           <div className={styles.cardHeader}>
             <div>
               <div className={styles.cardTitle}>Recent Transactions</div>
-              <div className={styles.cardSubtitle}>Latest activity across all accounts</div>
+              <div className={styles.cardSubtitle}>
+                {showLatest ? 'Latest activity' : `${MONTHS[selectedMonth - 1]} ${selectedYear}`}
+              </div>
             </div>
-            <a href="/transactions" className={styles.cardLink}>View all &rarr;</a>
+            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+              <button
+                className={styles.toggleLink}
+                onClick={() => setShowLatest(!showLatest)}
+              >
+                {showLatest ? `Show ${MONTHS[selectedMonth - 1]} →` : 'Show latest →'}
+              </button>
+              <a href="/transactions" className={styles.cardLink}>View all &rarr;</a>
+            </div>
           </div>
           {recentTransactions.length === 0 ? (
             <p className={styles.emptyState}>No recent transactions</p>
