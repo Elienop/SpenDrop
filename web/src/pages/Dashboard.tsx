@@ -537,9 +537,6 @@ export function Dashboard() {
                 const pct = totalCategorySpent > 0
                   ? Math.round((cat.value / totalCategorySpent) * 100)
                   : 0;
-                const barPct = totalCategorySpent > 0
-                  ? (cat.value / gaugeData[0].value) * 100
-                  : 0;
                 return (
                   <div key={cat.name} className={styles.catRow}>
                     <div
@@ -551,7 +548,7 @@ export function Dashboard() {
                       <div
                         className={styles.catBarFill}
                         style={{
-                          width: `${Math.min(100, barPct)}%`,
+                          width: `${Math.min(100, pct)}%`,
                           background: cat.color,
                           opacity: 0.7,
                         }}
