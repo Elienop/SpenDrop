@@ -171,9 +171,6 @@ export function Dashboard() {
     : 0;
 
   const budgetTotal = summary?.budget ?? 0;
-  const budgetUsedPct = budgetTotal > 0
-    ? (totalExpense / budgetTotal * 100)
-    : 0;
 
   // Delta from previous month
   const prevMonthTrend = (() => {
