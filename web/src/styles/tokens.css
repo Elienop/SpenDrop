@@ -2,9 +2,11 @@
  * This is the ONLY file allowed to contain hex values.
  * All other CSS files must use var() references to semantic tokens.
  *
- * 2-color system: dark neutral + lime-yellow accent
+ * Color system: dark neutral + purple accent
  * Neutral: cool-tinted dark gray (slight blue undertone)
- * Accent: #EFF3A2 (lime-yellow)
+ * Accent: #5347CE (purple)
+ * Category scale: 11-color gradient (purple → orchid → blue → teal → emerald → gold)
+ * Semantic pos/neg: dedicated green/coral for positive/negative indicators only
  */
 
 /* ===== PRIMITIVES ===== */
@@ -23,29 +25,43 @@
   --neutral-11: #B0B0BA;
   --neutral-12: #EEEEF0;
 
-  /* Accent scale (lime-yellow) */
-  --accent-1:  #141413;
-  --accent-2:  #1D1D16;
-  --accent-3:  #2C2E1A;
-  --accent-4:  #3A3D1E;
-  --accent-5:  #484C24;
-  --accent-6:  #5A5E2E;
-  --accent-7:  #73783C;
-  --accent-8:  #959A54;
-  --accent-9:  #EFF3A2;
-  --accent-10: #F3F6B2;
-  --accent-11: #D4D872;
-  --accent-12: #F5F7C8;
+  /* Accent scale (purple) */
+  --accent-1:  #13111A;
+  --accent-2:  #1B1825;
+  --accent-3:  #262040;
+  --accent-4:  #30284F;
+  --accent-5:  #3B3260;
+  --accent-6:  #4030A6;
+  --accent-7:  #5347CE;
+  --accent-8:  #6E60E8;
+  --accent-9:  #887CFD;
+  --accent-10: #A098FE;
+  --accent-11: #B8B0FF;
+  --accent-12: #E0DCFF;
 
-  /* Semantic hues (muted, balanced) */
-  --green-dim:    #B5DAA9;
-  --green-bright: #6AAF5C;
-  --red-dim:      #D4918A;
-  --red-bright:   #C06B62;
-  --amber-dim:    #D4C08A;
-  --amber-bright: #B89E62;
-  --blue-dim:     #8AB4C8;
-  --blue-bright:  #5A92AC;
+  /* Semantic hues */
+  --green-dim:    #22C55E;   /* positive indicators (dark theme) */
+  --green-bright: #16A34A;   /* positive indicators (light theme) */
+  --coral-dim:    #EF8B6E;   /* negative indicators (dark theme) */
+  --coral-bright: #E07050;   /* negative indicators (light theme) */
+  --amber-dim:    #F0C84D;   /* warning (dark theme) */
+  --amber-bright: #D4A830;   /* warning (light theme) */
+  --blue-dim:     #4896FE;   /* info (dark theme) */
+  --blue-bright:  #3B82F6;   /* info (light theme) */
+
+  /* Category color scale (11 steps: purple → orchid → blue → teal → green → gold) */
+  --cat-1:  #4030A6;   /* indigo */
+  --cat-2:  #5347CE;   /* purple */
+  --cat-3:  #B794D8;   /* orchid */
+  --cat-4:  #7B8AFE;   /* periwinkle */
+  --cat-5:  #4896FE;   /* blue */
+  --cat-6:  #2DB3D9;   /* cyan */
+  --cat-7:  #16C8C7;   /* teal */
+  --cat-8:  #3EBD80;   /* emerald */
+  --cat-9:  #7EB854;   /* sage */
+  --cat-10: #C4B83A;   /* olive */
+  --cat-11: #F0C84D;   /* gold */
+  --cat-muted: #B8BCC8; /* neutral/other */
 
   /* ===== TYPOGRAPHY ===== */
   --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -137,22 +153,26 @@
   --text-inverse:   var(--neutral-1);
 
   /* Brand / Interactive */
-  --color-primary:       var(--accent-9);
-  --color-primary-hover: var(--accent-10);
+  --color-primary:       var(--accent-7);
+  --color-primary-hover: var(--accent-8);
+
+  /* Positive/negative (small indicators only — badges, percentages) */
+  --color-pos:     var(--green-dim);
+  --color-neg:     var(--coral-dim);
 
   /* Semantic colors */
-  --color-expense: var(--red-dim);
+  --color-expense: var(--coral-dim);
   --color-income:  var(--green-dim);
   --color-warning: var(--amber-dim);
   --color-info:    var(--blue-dim);
-  --color-error:   var(--red-dim);
+  --color-error:   var(--coral-dim);
 
   /* Borders */
   --border-default: var(--neutral-6);
   --border-muted:   var(--neutral-4);
 
   /* Focus */
-  --focus-ring: var(--accent-9);
+  --focus-ring: var(--accent-7);
 
   /* Overlay */
   --backdrop: color-mix(in srgb, var(--neutral-1) 60%, transparent);
@@ -163,10 +183,18 @@
   --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 30%, transparent);
   --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 40%, transparent);
 
+  /* Glass surface */
+  --glass-bg: color-mix(in srgb, var(--surface-raised) 85%, transparent);
+  --glass-border: color-mix(in srgb, #FFFFFF 6%, transparent);
+  --glass-blur: 12px;
+
+  /* Text on accent surface */
+  --text-on-accent: var(--neutral-12);
+
   /* Opacity utilities */
-  --primary-a8:  color-mix(in srgb, var(--accent-9) 8%, transparent);
-  --primary-a15: color-mix(in srgb, var(--accent-9) 15%, transparent);
-  --primary-a50: color-mix(in srgb, var(--accent-9) 50%, transparent);
+  --primary-a8:  color-mix(in srgb, var(--accent-7) 8%, transparent);
+  --primary-a15: color-mix(in srgb, var(--accent-7) 15%, transparent);
+  --primary-a50: color-mix(in srgb, var(--accent-7) 50%, transparent);
   --expense-a15: color-mix(in srgb, var(--color-expense) 15%, transparent);
   --income-a15:  color-mix(in srgb, var(--color-income) 15%, transparent);
 }
@@ -187,16 +215,19 @@
   --color-primary:       var(--accent-6);
   --color-primary-hover: var(--accent-7);
 
-  --color-expense: var(--red-bright);
+  --color-pos:     var(--green-bright);
+  --color-neg:     var(--coral-bright);
+
+  --color-expense: var(--coral-bright);
   --color-income:  var(--green-bright);
   --color-warning: var(--amber-bright);
   --color-info:    var(--blue-bright);
-  --color-error:   var(--red-bright);
+  --color-error:   var(--coral-bright);
 
   --border-default: #D0D0D5;
   --border-muted:   #E0E0E5;
 
-  --focus-ring: var(--accent-6);
+  --focus-ring: var(--accent-7);
 
   --backdrop: color-mix(in srgb, var(--neutral-1) 40%, transparent);
 
@@ -204,4 +235,7 @@
   --shadow-md: 0 4px 8px color-mix(in srgb, #000000 8%, transparent);
   --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 12%, transparent);
   --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 16%, transparent);
+
+  --glass-bg: color-mix(in srgb, var(--surface-raised) 85%, transparent);
+  --glass-border: color-mix(in srgb, #FFFFFF 40%, transparent);
 }

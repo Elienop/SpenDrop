@@ -96,25 +96,25 @@ CREATE TABLE IF NOT EXISTS app_settings (
 
 -- Seed default categories
 INSERT INTO categories (name, type, color, sort_order) VALUES
-    ('Food', 'expense', '#4ecca3', 1),
-    ('Gifts', 'expense', '#e94560', 2),
-    ('Health/medical', 'expense', '#7b68ee', 3),
-    ('Home', 'expense', '#f9a826', 4),
-    ('Transportation', 'expense', '#00bcd4', 5),
-    ('Personal', 'expense', '#ff7043', 6),
-    ('Repair', 'expense', '#8d6e63', 7),
-    ('Utilities', 'expense', '#78909c', 8),
-    ('Outing', 'expense', '#ab47bc', 9),
-    ('Debt', 'expense', '#ef5350', 10),
-    ('School', 'expense', '#42a5f5', 11),
-    ('Takeout', 'expense', '#ffa726', 12),
-    ('Shopping', 'expense', '#26c6da', 13),
-    ('Sport', 'expense', '#66bb6a', 14),
-    ('Paycheck', 'income', '#4caf50', 1),
-    ('Bonus', 'income', '#8bc34a', 2),
-    ('Interest', 'income', '#cddc39', 3),
-    ('Savings', 'income', '#009688', 4),
-    ('Other', 'income', '#9e9e9e', 5);
+    ('Food', 'expense', '#5347CE', 1),
+    ('Gifts', 'expense', '#B794D8', 2),
+    ('Health/medical', 'expense', '#7B8AFE', 3),
+    ('Home', 'expense', '#4896FE', 4),
+    ('Transportation', 'expense', '#2DB3D9', 5),
+    ('Personal', 'expense', '#16C8C7', 6),
+    ('Repair', 'expense', '#3EBD80', 7),
+    ('Utilities', 'expense', '#7EB854', 8),
+    ('Outing', 'expense', '#C4B83A', 9),
+    ('Debt', 'expense', '#F0C84D', 10),
+    ('School', 'expense', '#4030A6', 11),
+    ('Takeout', 'expense', '#6B8AFE', 12),
+    ('Shopping', 'expense', '#2DB3D9', 13),
+    ('Sport', 'expense', '#3EBD80', 14),
+    ('Paycheck', 'income', '#5347CE', 1),
+    ('Bonus', 'income', '#7B8AFE', 2),
+    ('Interest', 'income', '#16C8C7', 3),
+    ('Savings', 'income', '#4896FE', 4),
+    ('Other', 'income', '#B8BCC8', 5);
 
 -- Seed default currencies
 INSERT INTO currencies (code, name, symbol, rate_to_base, is_base) VALUES
