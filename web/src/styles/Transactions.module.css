@@ -39,19 +39,20 @@
 }
 
 .presetButton {
-  padding: var(--space-1) var(--space-2);
-  background-color: var(--surface-sunken);
+  padding: var(--space-1) 10px;
+  background-color: var(--surface-raised);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
-  font-size: 0.8125rem;
+  font-size: 13px;
+  font-weight: 500;
   transition: all var(--duration-fast) var(--ease-standard);
-  min-height: 36px;
 }
 
 .presetButton:hover {
-  border-color: var(--color-primary);
+  background-color: var(--primary-a15);
   color: var(--color-primary);
+  border-color: var(--color-primary);
 }
 
 .dateInputs {
@@ -73,23 +74,20 @@
 
 .typeToggle {
   display: flex;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  overflow: hidden;
+  gap: 1px;
+  background-color: var(--surface-raised);
+  border-radius: var(--radius-lg);
+  padding: 3px;
 }
 
 .typeButton {
-  padding: var(--space-1) var(--space-4);
-  background-color: var(--surface-sunken);
+  padding: 6px var(--space-4);
+  background: transparent;
   color: var(--text-secondary);
-  font-size: 0.875rem;
-  border-right: 1px solid var(--border-default);
+  font-size: 14px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
   transition: all var(--duration-fast) var(--ease-standard);
-  min-height: 36px;
-}
-
-.typeButton:last-child {
-  border-right: none;
 }
 
 .typeButton:hover {
@@ -99,6 +97,7 @@
 .typeActive {
   background-color: var(--color-primary);
   color: var(--text-inverse);
+  box-shadow: var(--shadow-sm);
 }
 
 .filterSelect {
@@ -119,13 +118,15 @@
 .clearButton {
   padding: var(--space-1) var(--space-2);
   color: var(--text-secondary);
-  font-size: 0.875rem;
-  transition: color var(--duration-fast) var(--ease-standard);
-  min-height: 36px;
+  font-size: 13px;
+  font-weight: 500;
+  transition: all var(--duration-fast) var(--ease-standard);
 }
 
 .clearButton:hover {
   color: var(--color-error);
+  background-color: var(--expense-a15);
+  border-radius: var(--radius-md);
 }
 
 /* Transaction Entry (rapid add) */
@@ -175,10 +176,12 @@
   padding: var(--space-2) var(--space-6);
   background-color: var(--color-primary);
   color: var(--text-inverse);
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
   border-radius: var(--radius-md);
   min-height: 44px;
-  transition: background-color var(--duration-fast) var(--ease-standard);
+  transition: opacity var(--duration-fast) var(--ease-standard);
 }
 
 .addButton:disabled {
@@ -187,7 +190,7 @@
 }
 
 .addButton:hover:not(:disabled) {
-  background-color: var(--color-primary-hover);
+  opacity: 0.8;
 }
 
 /* Transaction Table */
@@ -264,14 +267,14 @@
 .editButton,
 .deleteButton {
   padding: var(--space-1) var(--space-2);
-  font-size: 0.8125rem;
-  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
   transition: all var(--duration-fast) var(--ease-standard);
-  min-height: 32px;
 }
 
 .editButton {
-  color: var(--color-info);
+  color: var(--color-primary);
 }
 
 .editButton:hover {
@@ -295,18 +298,28 @@
   padding: var(--space-1) var(--space-2);
   background-color: var(--color-primary);
   color: var(--text-inverse);
-  font-size: 0.8125rem;
-  font-weight: 600;
-  border-radius: var(--radius-sm);
-  min-height: 32px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  border-radius: var(--radius-md);
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.saveButton:hover {
+  opacity: 0.8;
 }
 
 .cancelButton {
   padding: var(--space-1) var(--space-2);
   color: var(--text-secondary);
-  font-size: 0.8125rem;
-  border-radius: var(--radius-sm);
-  min-height: 32px;
+  font-size: 13px;
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.cancelButton:hover {
+  color: var(--text-primary);
 }
 
 .editInput,
@@ -328,12 +341,13 @@
 
 .pageButton {
   padding: var(--space-2) var(--space-4);
-  background-color: var(--surface-sunken);
+  background-color: var(--surface-raised);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 500;
   transition: all var(--duration-fast) var(--ease-standard);
-  min-height: 44px;
 }
 
 .pageButton:disabled {
@@ -342,6 +356,7 @@
 }
 
 .pageButton:hover:not(:disabled) {
+  background-color: var(--primary-a15);
   border-color: var(--color-primary);
   color: var(--color-primary);
 }
@@ -440,19 +455,20 @@
 }
 
 .categoryChip {
-  padding: 2px var(--space-2);
+  padding: 4px 10px;
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  font-size: 0.75rem;
-  font-weight: 600;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-secondary);
-  background-color: var(--surface-sunken);
+  background-color: var(--surface-raised);
   transition: all var(--duration-fast) var(--ease-standard);
   cursor: pointer;
 }
 
 .categoryChip:hover {
   border-color: var(--color-primary);
+  color: var(--color-primary);
 }
 
 .categoryChipActive {
@@ -477,15 +493,16 @@
 .savedFilterChip {
   display: inline-flex;
   align-items: center;
-  background-color: var(--surface-sunken);
+  background-color: var(--surface-raised);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   overflow: hidden;
 }
 
 .savedFilterButton {
-  padding: var(--space-1) var(--space-2);
-  font-size: 0.8125rem;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--text-primary);
   background: none;
   border: none;
@@ -498,13 +515,14 @@
 }
 
 .savedFilterDelete {
-  padding: var(--space-1) 6px;
-  font-size: 0.875rem;
+  padding: 4px 6px;
+  font-size: 14px;
   color: var(--text-secondary);
   background: none;
   border: none;
   border-left: 1px solid var(--border-default);
   cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-standard);
 }
 
 .savedFilterDelete:hover {
@@ -513,14 +531,15 @@
 }
 
 .saveFilterButton {
-  padding: var(--space-1) var(--space-2);
-  font-size: 0.8125rem;
+  padding: 4px 10px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--color-primary);
   border: 1px dashed var(--color-primary);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: none;
   cursor: pointer;
-  transition: background-color var(--duration-fast) var(--ease-standard);
+  transition: all var(--duration-fast) var(--ease-standard);
 }
 
 .saveFilterButton:hover {
