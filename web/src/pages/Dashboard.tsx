@@ -597,8 +597,8 @@ export function Dashboard() {
                       endAngle={-270}
                       cx="50%"
                       cy="50%"
-                      innerRadius={55}
-                      outerRadius={75}
+                      innerRadius={75}
+                      outerRadius={100}
                       cornerRadius={4}
                       paddingAngle={0}
                       stroke="none"

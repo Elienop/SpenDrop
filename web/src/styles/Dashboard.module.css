@@ -487,8 +487,8 @@
 /* ===== Savings Progress ===== */
 .savingsRing {
   position: relative;
-  width: 160px;
-  height: 160px;
+  width: 220px;
+  height: 220px;
   margin: 0 auto 16px;
 }
 
@@ -516,7 +516,7 @@
 .savingsStats {
   display: flex;
   justify-content: space-between;
-  margin-top: 12px;
+  margin-top: auto;
   padding-top: 12px;
   border-top: 1px solid var(--border-default);
 }
