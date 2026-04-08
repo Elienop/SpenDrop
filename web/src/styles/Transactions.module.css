@@ -537,19 +537,16 @@
 
 .exportButton {
   padding: var(--space-2) var(--space-4);
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  /* stylelint-disable-next-line property-no-vendor-prefix */
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  border-radius: 14px;
-  color: var(--text-primary);
+  background-color: var(--color-primary);
+  color: var(--text-inverse);
   font-size: 0.875rem;
-  transition: all var(--duration-fast) var(--ease-standard);
+  font-weight: 500;
+  border: none;
+  border-radius: var(--radius-md);
+  transition: opacity var(--duration-fast) var(--ease-standard);
   min-height: 36px;
 }
 
 .exportButton:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
+  opacity: 0.8;
 }
