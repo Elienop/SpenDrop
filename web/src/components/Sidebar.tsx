@@ -1,10 +1,10 @@
 import { useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
-  LayoutDashboard,
-  TrendingUp,
-  List,
-  Grid2X2,
+  LayoutGrid,
+  ArrowLeftRight,
+  BarChart3,
+  Tag,
   Settings,
   Moon,
   Sun,
@@ -17,11 +17,14 @@ import { useAuth } from '../hooks/useAuth';
 import { useTheme } from '../hooks/useTheme';
 import styles from '../styles/Sidebar.module.css';
 
-const navItems = [
-  { to: '/', label: 'Dashboard', icon: LayoutDashboard },
-  { to: '/reports', label: 'Reports', icon: TrendingUp },
-  { to: '/transactions', label: 'Transactions', icon: List },
-  { to: '/categories', label: 'Categories', icon: Grid2X2 },
+const menuItems = [
+  { to: '/', label: 'Dashboard', icon: LayoutGrid },
+  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight, badge: undefined as number | undefined },
+  { to: '/reports', label: 'Reports', icon: BarChart3 },
+  { to: '/categories', label: 'Categories', icon: Tag },
+];
+
+const generalItems = [
   { to: '/settings', label: 'Settings', icon: Settings },
 ];
 
@@ -70,24 +73,48 @@ export function Sidebar() {
       </div>
 
       <nav className={styles.nav} aria-label="Main navigation">
-        <ul className={styles.navList}>
-          {navItems.map((item) => (
-            <li key={item.to}>
-              <NavLink
-                to={item.to}
-                end={item.to === '/'}
-                className={({ isActive }) =>
-                  `${styles.navLink}${isActive ? ` ${styles.active}` : ''}`
-                }
-              >
-                <span className={styles.navIcon} aria-hidden="true">
-                  <item.icon size={20} strokeWidth={1.5} />
-                </span>
-                <span className={styles.navLabel}>{item.label}</span>
-              </NavLink>
-            </li>
-          ))}
-        </ul>
+        <div className={styles.navSection}>
+          <div className={styles.navSectionLabel}>Menu</div>
+          <ul className={styles.navList}>
+            {menuItems.map((item) => (
+              <li key={item.to}>
+                <NavLink
+                  to={item.to}
+                  end={item.to === '/'}
+                  className={({ isActive }) =>
+                    `${styles.navLink}${isActive ? ` ${styles.active}` : ''}`
+                  }
+                >
+                  <span className={styles.navIcon} aria-hidden="true">
+                    <item.icon size={20} strokeWidth={1.5} />
+                  </span>
+                  <span className={styles.navLabel}>{item.label}</span>
+                </NavLink>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className={styles.navSection}>
+          <div className={styles.navSectionLabel}>General</div>
+          <ul className={styles.navList}>
+            {generalItems.map((item) => (
+              <li key={item.to}>
+                <NavLink
+                  to={item.to}
+                  className={({ isActive }) =>
+                    `${styles.navLink}${isActive ? ` ${styles.active}` : ''}`
+                  }
+                >
+                  <span className={styles.navIcon} aria-hidden="true">
+                    <item.icon size={20} strokeWidth={1.5} />
+                  </span>
+                  <span className={styles.navLabel}>{item.label}</span>
+                </NavLink>
+              </li>
+            ))}
+          </ul>
+        </div>
       </nav>
 
       <div className={styles.bottomSection}>
