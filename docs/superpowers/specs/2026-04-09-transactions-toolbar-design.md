@@ -29,11 +29,11 @@ When filters are applied and the filter panel is closed, show small dismissible 
 
 Each chip has an "x" button that clears that specific filter group. This replaces the current "Clear" button with something more informative and targeted.
 
-Chips only show when the filter panel is closed and at least one non-search filter is active.
+Chips only show when the filter panel is closed and at least one non-search, non-type filter is active. The `type` filter is excluded from chips and the active filter count because the type toggle is always visible in the toolbar (like search).
 
 ### Filter Panel (expandable, below toolbar)
 
-Slides down below the toolbar when "Filters" is clicked. Glass card styling. Contains 4 tabs:
+Appears below the toolbar when "Filters" is clicked (no animation — instant show/hide). The filter panel uses conditional rendering (not `display: none`) because all filter inputs are controlled by `useTransactions` hook state and will repopulate from state when reopened. Glass card styling. Contains 4 tabs:
 
 **Date tab:**
 - Date preset chips: This Month, Last Month, This Year
@@ -50,7 +50,7 @@ Slides down below the toolbar when "Filters" is clicked. Glass card styling. Con
 - List of saved filter chips (click to load, x to delete)
 - "+ Save current" button (dashed border, same as current)
 
-Top-right of the panel: "Clear all" link button that resets all filters (including `categoryId`, `categoryIds`, `dateFrom`, `dateTo`, `amountMin`, `amountMax`, `tags`).
+Top-right of the panel: "Clear all" link button that resets only panel-scoped filters (`categoryId`, `categoryIds`, `dateFrom`, `dateTo`, `amountMin`, `amountMax`, `tags`). It does NOT clear `search` or `type` since those controls live in the toolbar, not the panel. This requires a new `clearPanelFilters` function (not the existing `clearFilters` which resets everything including search/type).
 
 The save filter button retains the current `window.prompt('Name this filter:')` approach for naming. No change from current behavior.
 
@@ -77,7 +77,7 @@ Two new boolean states in `Transactions.tsx`:
 - `showFilters` — toggles filter panel visibility
 - `showEntry` — toggles entry form visibility
 
-All filter state remains in `useTransactions` hook unchanged. No backend changes.
+All filter state remains in `useTransactions` hook unchanged. Export the `TransactionFilters` interface from `useTransactions.ts` so `FilterPanel` can import it (replaces the local `FilterValues` interface that will be deleted with `FilterBar.tsx`). Add a `clearPanelFilters` function to the hook that resets only `dateFrom`, `dateTo`, `categoryId`, `categoryIds`, `amountMin`, `amountMax`, `tags` — leaving `search` and `type` untouched. No backend changes.
 
 ## Components
 
@@ -109,9 +109,9 @@ interface TransactionToolbarProps {
 **FilterPanel:**
 ```ts
 interface FilterPanelProps {
-  filters: FilterValues;
-  setFilter: (key: keyof FilterValues, value: string) => void;
-  clearFilters: () => void;
+  filters: TransactionFilters;
+  setFilter: (key: keyof TransactionFilters, value: string) => void;
+  clearPanelFilters: () => void;
   categories: Category[];
   savedFilters: SavedFilter[];
   onSaveFilter: (name: string) => void;
@@ -158,6 +158,7 @@ New classes needed:
 | `web/src/components/FilterBar.tsx` | Delete: no longer used |
 | `web/src/pages/Transactions.tsx` | Modify: replace FilterBar + always-visible entry with Toolbar + conditional panels |
 | `web/src/styles/Transactions.module.css` | Modify: remove old filter styles, add toolbar/panel/chip styles |
+| `web/src/hooks/useTransactions.ts` | Modify: export `TransactionFilters`, add `clearPanelFilters` function |
 | `web/src/pages/Transactions.test.tsx` | Modify: update for new component structure |
 
 ## Files NOT Modified
@@ -167,7 +168,6 @@ New classes needed:
 | Backend Go code | No API changes needed |
 | `TransactionEntry.tsx` | Component unchanged, just conditionally rendered |
 | `TransactionRow.tsx` | No changes |
-| `useTransactions.ts` | Hook unchanged, same filter state interface |
 | `useSavedFilters.ts` | Hook unchanged |
 | `tokens.css` | No new tokens needed |
 
