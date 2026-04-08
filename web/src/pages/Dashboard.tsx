@@ -15,7 +15,7 @@ import {
   Wallet,
   TrendingUp,
   TrendingDown,
-  PiggyBank,
+  Database,
   ArrowUpRight,
   ArrowDownRight,
 } from 'lucide-react';
@@ -110,8 +110,8 @@ export function Dashboard() {
   const totalExpense = summary?.total_spent ?? 0;
   const totalBalance = totalIncome - totalExpense;
 
-  // Cash flow chart data
-  const monthlyChartData = [...trend].reverse().map((item) => ({
+  // Cash flow chart data — 6M shows last 6 months only
+  const monthlyChartData = [...trend].reverse().slice(-6).map((item) => ({
     name: SHORT_MONTHS[item.month - 1],
     income: item.total_income,
     expense: -item.total_spent,
@@ -271,7 +271,7 @@ export function Dashboard() {
           </p>
         </div>
         <div className={styles.selectors}>
-          <label htmlFor="dash-month" className="sr-only">Month</label>
+          <span className={styles.selectLabel}>Month</span>
           <select
             id="dash-month"
             aria-label="Month"
@@ -284,7 +284,7 @@ export function Dashboard() {
             ))}
           </select>
 
-          <label htmlFor="dash-year" className="sr-only">Year</label>
+          <span className={styles.selectLabel}>Year</span>
           <select
             id="dash-year"
             aria-label="Year"
@@ -388,7 +388,7 @@ export function Dashboard() {
             <div className={styles.kpiTop}>
               <span className={styles.kpiLabel}>Savings Rate</span>
               <div className={`${styles.kpiIcon} ${styles.kpiIconYellow}`}>
-                <PiggyBank size={18} strokeWidth={1.5} />
+                <Database size={18} strokeWidth={1.5} />
               </div>
             </div>
             <div className={styles.kpiValue}>
@@ -521,8 +521,8 @@ export function Dashboard() {
                     endAngle={0}
                     cx="50%"
                     cy="95%"
-                    innerRadius="60%"
-                    outerRadius="80%"
+                    innerRadius={130}
+                    outerRadius={175}
                     cornerRadius={4}
                     paddingAngle={1.5}
                     stroke="none"

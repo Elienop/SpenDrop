@@ -3,7 +3,7 @@ import { NavLink } from 'react-router-dom';
 import {
   LayoutGrid,
   ArrowLeftRight,
-  BarChart3,
+  ChartNoAxesColumnIncreasing,
   Tag,
   Settings,
   Moon,
@@ -19,8 +19,8 @@ import styles from '../styles/Sidebar.module.css';
 
 const menuItems = [
   { to: '/', label: 'Dashboard', icon: LayoutGrid },
-  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight, badge: undefined as number | undefined },
-  { to: '/reports', label: 'Reports', icon: BarChart3 },
+  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { to: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
   { to: '/categories', label: 'Categories', icon: Tag },
 ];
 
@@ -113,37 +113,44 @@ export function Sidebar() {
                 </NavLink>
               </li>
             ))}
+            {/* Logout inside General section, under Settings */}
+            <li>
+              <button
+                className={styles.navLink}
+                onClick={() => void logout()}
+                aria-label="Log out"
+              >
+                <span className={styles.navIcon} aria-hidden="true">
+                  <LogOut size={20} strokeWidth={1.5} />
+                </span>
+                <span className={styles.navLabel}>Logout</span>
+              </button>
+            </li>
           </ul>
         </div>
       </nav>
 
-      <div className={styles.bottomSection}>
-        <button
-          className={styles.themeToggle}
-          onClick={cycleTheme}
-          aria-label={`Theme: ${theme}. Click to change.`}
-        >
-          <span className={styles.navIcon}>
-            <ThemeIcon size={20} strokeWidth={1.5} />
-          </span>
-          <span className={styles.navLabel}>{theme.charAt(0).toUpperCase() + theme.slice(1)}</span>
-        </button>
+      {/* Theme toggle above the bottom line */}
+      <button
+        className={styles.themeToggle}
+        onClick={cycleTheme}
+        aria-label={`Theme: ${theme}. Click to change.`}
+      >
+        <span className={styles.navIcon}>
+          <ThemeIcon size={20} strokeWidth={1.5} />
+        </span>
+        <span className={styles.navLabel}>{theme.charAt(0).toUpperCase() + theme.slice(1)}</span>
+      </button>
 
+      {/* User at the very bottom, below the line */}
+      <div className={styles.bottomSection}>
         <div className={styles.userRow}>
           <span className={styles.avatar}>{initial}</span>
-          <span className={styles.userName}>{user?.display_name}</span>
+          <div className={styles.userInfo}>
+            <span className={styles.userName}>{user?.display_name}</span>
+            <span className={styles.userEmail}>{user?.username}</span>
+          </div>
         </div>
-
-        <button
-          className={styles.logoutButton}
-          onClick={() => void logout()}
-          aria-label="Log out"
-        >
-          <span className={styles.navIcon}>
-            <LogOut size={20} strokeWidth={1.5} />
-          </span>
-          <span className={styles.navLabel}>Log out</span>
-        </button>
       </div>
     </aside>
   );
