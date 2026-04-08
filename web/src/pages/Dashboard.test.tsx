@@ -151,4 +151,25 @@ describe('Dashboard', () => {
     });
   });
 
+  test('renders Savings Progress section', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('Savings Progress')).toBeInTheDocument();
+      expect(screen.getByText('of goal')).toBeInTheDocument();
+      expect(screen.getByText('Saved YTD')).toBeInTheDocument();
+      expect(screen.getByText('Annual Goal')).toBeInTheDocument();
+    });
+  });
+
+  test('does not render removed Monthly Budget section', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.queryByText('Monthly Budget')).not.toBeInTheDocument();
+  });
+
+  test('renders 6M and 12M toggle buttons', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.getByText('6M')).toBeInTheDocument();
+    expect(screen.getByText('12M')).toBeInTheDocument();
+  });
+
 });
