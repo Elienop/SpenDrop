@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type {
@@ -949,7 +950,11 @@ function DataSection() {
 export function Settings() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const validTabs: SettingsTab[] = ['general', 'currencies', 'savings', 'users', 'data'];
+  const initialTab = validTabs.includes(tabParam as SettingsTab) ? (tabParam as SettingsTab) : 'general';
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   const tabs: { key: SettingsTab; label: string; adminOnly?: boolean }[] = [
     { key: 'general', label: 'General' },

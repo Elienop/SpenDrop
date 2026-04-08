@@ -630,7 +630,7 @@ export function Dashboard() {
             </>
           ) : (
             <div className={styles.savingsEmptyMsg}>
-              <Link to="/settings">Set a savings goal</Link> to track progress
+              <Link to="/settings?tab=savings">Set a savings goal</Link> to track progress
             </div>
           )}
         </div>
