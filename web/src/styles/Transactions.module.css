@@ -11,10 +11,19 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
-  background: transparent;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
   padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s;
+}
+
+.filterBar:hover {
+  box-shadow: var(--shadow-md);
 }
 
 .filterRow {
@@ -124,11 +133,20 @@
   display: flex;
   align-items: flex-end;
   gap: var(--space-2);
-  background: transparent;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
   padding: var(--space-4);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s;
   flex-wrap: wrap;
+}
+
+.entryForm:hover {
+  box-shadow: var(--shadow-md);
 }
 
 .entryField {
@@ -174,10 +192,19 @@
 
 /* Transaction Table */
 .tableWrapper {
-  background: transparent;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s;
   overflow-x: auto;
+}
+
+.tableWrapper:hover {
+  box-shadow: var(--shadow-md);
 }
 
 .table {
@@ -505,13 +532,17 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  margin-bottom: 8px;
 }
 
 .exportButton {
   padding: var(--space-2) var(--space-4);
-  background-color: var(--surface-sunken);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
   color: var(--text-primary);
   font-size: 0.875rem;
   transition: all var(--duration-fast) var(--ease-standard);
