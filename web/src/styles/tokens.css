@@ -201,41 +201,54 @@
 
 /* ===== LIGHT THEME OVERRIDES ===== */
 [data-theme="light"] {
-  --surface-base:    #FAFAFA;
+  --surface-base:    #EAEBF2;
   --surface-raised:  #FFFFFF;
   --surface-overlay: #FFFFFF;
-  --surface-sunken:  #F0F0F2;
-  --surface-hover:   #F0F0F2;
+  --surface-sunken:  #EAEBF2;
+  --surface-hover:   #EAEBF2;
 
-  --text-primary:   var(--neutral-1);
-  --text-secondary: var(--neutral-9);
-  --text-tertiary:  var(--neutral-8);
+  --text-primary:   #111827;
+  --text-secondary: #6B7280;
+  --text-tertiary:  #9CA3AF;
   --text-inverse:   var(--neutral-12);
 
-  --color-primary:       var(--accent-6);
-  --color-primary-hover: var(--accent-7);
+  --color-primary:       var(--accent-7);
+  --color-primary-hover: var(--accent-8);
+  --color-primary-dim:   var(--accent-6);
 
-  --color-pos:     var(--green-bright);
-  --color-neg:     var(--coral-bright);
+  --color-pos:     #22C55E;
+  --color-neg:     #EF8B6E;
 
-  --color-expense: var(--coral-bright);
-  --color-income:  var(--green-bright);
-  --color-warning: var(--amber-bright);
-  --color-info:    var(--blue-bright);
-  --color-error:   var(--coral-bright);
+  --color-expense: #EF8B6E;
+  --color-income:  #22C55E;
+  --color-warning: #F0C84D;
+  --color-info:    #4896FE;
+  --color-error:   #EF8B6E;
 
-  --border-default: #D0D0D5;
-  --border-muted:   #E0E0E5;
+  --border-default: #D8DAE5;
+  --border-muted:   #E0E3ED;
 
   --focus-ring: var(--accent-7);
 
   --backdrop: color-mix(in srgb, var(--neutral-1) 40%, transparent);
 
-  --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 5%, transparent);
-  --shadow-md: 0 4px 8px color-mix(in srgb, #000000 8%, transparent);
-  --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 12%, transparent);
-  --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 16%, transparent);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.12);
 
-  --glass-bg: color-mix(in srgb, var(--surface-raised) 85%, transparent);
-  --glass-border: color-mix(in srgb, #FFFFFF 40%, transparent);
+  --glass-bg: rgba(255, 255, 255, 0.85);
+  --glass-border: rgba(255, 255, 255, 0.4);
+
+  /* KPI icon badge backgrounds (light theme only) */
+  --kpi-icon-purple-bg: #F0EEFF;
+  --kpi-icon-purple-fg: var(--accent-7);
+  --kpi-icon-teal-bg:   #E6FAF9;
+  --kpi-icon-teal-fg:   #16C8C7;
+  --kpi-icon-red-bg:    #F0EEFF;
+  --kpi-icon-red-fg:    var(--accent-6);
+  --kpi-icon-yellow-bg: #FDF8E8;
+  --kpi-icon-yellow-fg: #C9A030;
+  --kpi-icon-blue-bg:   #EEF4FF;
+  --kpi-icon-blue-fg:   #4896FE;
 }

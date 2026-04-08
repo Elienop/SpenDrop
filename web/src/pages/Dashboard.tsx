@@ -7,11 +7,18 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  ReferenceLine,
   PieChart,
   Pie,
   Cell,
 } from 'recharts';
+import {
+  Wallet,
+  TrendingUp,
+  TrendingDown,
+  PiggyBank,
+  ArrowUpRight,
+  ArrowDownRight,
+} from 'lucide-react';
 import { useDashboard } from '../hooks/useDashboard';
 import { useChartTheme } from '../hooks/useChartTheme';
 import { useChartPatterns, ChartPatternDefs } from '../hooks/useChartPatterns';
@@ -21,12 +28,7 @@ import { api } from '../api/client';
 import type { Transaction, PaginatedResponse } from '../api/types';
 import styles from '../styles/Dashboard.module.css';
 
-function formatCurrency(amount: number): string {
-  return amount.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  });
-}
+/* ── Formatters ── */
 
 function formatCompact(amount: number): string {
   return '$' + Math.abs(amount).toLocaleString('en-US', {
@@ -35,10 +37,26 @@ function formatCompact(amount: number): string {
   });
 }
 
+function splitCurrency(amount: number): { dollars: string; cents: string } {
+  const abs = Math.abs(amount);
+  const dollars = Math.floor(abs).toLocaleString('en-US');
+  const cents = (abs % 1).toFixed(2).slice(1); // ".52"
+  return { dollars: `$${dollars}`, cents };
+}
+
+function formatFull(amount: number): string {
+  return '$' + Math.abs(amount).toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
+}
+
 function pctChange(current: number, previous: number): number | null {
   if (previous === 0) return null;
   return ((current - previous) / Math.abs(previous)) * 100;
 }
+
+/* ── Constants ── */
 
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -51,6 +69,16 @@ const SHORT_MONTHS = [
 ];
 
 type CashFlowView = 'monthly' | 'yearly';
+
+/* ── Budget bar gradient helpers ── */
+
+function budgetGradient(pct: number): string {
+  if (pct >= 100) return 'linear-gradient(90deg, #EF8B6E, #E07050)';
+  if (pct >= 85) return 'linear-gradient(90deg, #F0C84D, #E0B83D)';
+  return 'linear-gradient(90deg, #16C8C7, #12B0AF)';
+}
+
+/* ── Component ── */
 
 export function Dashboard() {
   const { user } = useAuth();
@@ -76,7 +104,7 @@ export function Dashboard() {
   const currentYear = now.getFullYear();
   const yearOptions = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
-  // --- Derived data ---
+  /* ── Derived data ── */
 
   const totalIncome = summary?.total_income ?? 0;
   const totalExpense = summary?.total_spent ?? 0;
@@ -109,18 +137,26 @@ export function Dashboard() {
 
   const chartData = cashFlowView === 'monthly' ? monthlyChartData : yearlyChartData;
 
-  // Categories donut data
-  const pieData = categories.slice(0, 6).map((cat) => ({
-    name: cat.name,
-    value: cat.total,
-    color: cat.color,
-  }));
-
+  // Categories — top 5 for donut + list
+  const topCats = categories.slice(0, 5);
+  const otherTotal = categories.slice(5).reduce((sum, cat) => sum + cat.total, 0);
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
 
+  // Half-gauge pie data (top 5 + "Other")
+  const gaugeData = [
+    ...topCats.map((cat) => ({
+      name: cat.name,
+      value: cat.total,
+      color: cat.color,
+    })),
+    ...(otherTotal > 0
+      ? [{ name: 'Other', value: otherTotal, color: '#B8BCC8' }]
+      : []),
+  ];
+
   // Pattern configs for charts
-  const categoryPatterns = pieData.map((cat, i) => patterns.getCategoryPattern(i, cat.color));
-  const categoryDefs = patterns.getCategoryDefs(pieData);
+  const categoryPatterns = gaugeData.map((cat, i) => patterns.getCategoryPattern(i, cat.color));
+  const categoryDefs = patterns.getCategoryDefs(gaugeData);
 
   const cfPatternStyles = patterns.buildStyleMap([
     patterns.cashFlow.income,
@@ -134,11 +170,12 @@ export function Dashboard() {
     ? ((totalIncome - totalExpense) / totalIncome * 100)
     : 0;
 
-  const budgetUsage = summary && summary.budget > 0
-    ? (totalExpense / summary.budget * 100)
+  const budgetTotal = summary?.budget ?? 0;
+  const budgetUsedPct = budgetTotal > 0
+    ? (totalExpense / budgetTotal * 100)
     : 0;
 
-  // Delta from previous month (find in trend data)
+  // Delta from previous month
   const prevMonthTrend = (() => {
     const prevM = selectedMonth === 1 ? 12 : selectedMonth - 1;
     const prevY = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
@@ -153,7 +190,24 @@ export function Dashboard() {
     ? pctChange(totalIncome, prevMonthTrend.total_income)
     : null;
 
-  // --- Loading state ---
+  const expenseDelta = prevMonthTrend
+    ? pctChange(totalExpense, prevMonthTrend.total_spent)
+    : null;
+
+  const savingsRatePrev = prevMonthTrend && prevMonthTrend.total_income > 0
+    ? ((prevMonthTrend.total_income - prevMonthTrend.total_spent) / prevMonthTrend.total_income * 100)
+    : null;
+
+  const savingsDelta = savingsRatePrev !== null
+    ? savingsRate - savingsRatePrev
+    : null;
+
+  // Split values for decimal formatting
+  const balanceSplit = splitCurrency(totalBalance);
+  const incomeSplit = splitCurrency(totalIncome);
+  const expenseSplit = splitCurrency(totalExpense);
+
+  /* ── Loading state ── */
   if (loading) {
     return (
       <div className={styles.page}>
@@ -175,7 +229,7 @@ export function Dashboard() {
         <div className={styles.contentGrid}>
           <div className={styles.card}>
             <div className={styles.skeletonText} style={{ width: '30%' }} />
-            <div className={styles.skeleton} style={{ height: 200, marginTop: 16 }} />
+            <div className={styles.skeleton} style={{ height: 260, marginTop: 16 }} />
           </div>
           <div className={styles.card}>
             <div className={styles.skeletonText} style={{ width: '40%' }} />
@@ -186,12 +240,12 @@ export function Dashboard() {
     );
   }
 
-  // --- Error state ---
+  /* ── Error state ── */
   if (error) {
     return (
       <div className={styles.page}>
         <div className={styles.header}>
-          <h1>Dashboard</h1>
+          <h1 className={styles.headerTitle}>Dashboard</h1>
         </div>
         <div className={styles.errorState} role="alert">
           <p>{error}</p>
@@ -206,12 +260,15 @@ export function Dashboard() {
     );
   }
 
+  /* ── Render ── */
   return (
     <div className={styles.page}>
-      {/* Header */}
+      {/* ===== Header ===== */}
       <div className={styles.header}>
         <div>
-          <h1>Welcome back, {user?.display_name ?? 'there'}</h1>
+          <h1 className={styles.headerTitle}>
+            Welcome back, {user?.display_name ?? 'there'}
+          </h1>
           <p className={styles.subtitle}>
             Here's what's happening with your finances.
           </p>
@@ -250,73 +307,123 @@ export function Dashboard() {
         <div className={styles.kpiRow}>
           {/* Total Balance — featured accent card */}
           <div className={`${styles.kpiCard} ${styles.featured}`}>
-            <span className={styles.kpiLabel}>Total Balance</span>
-            <span className={styles.kpiValue}>{formatCurrency(totalBalance)}</span>
-            {balanceDelta != null && (
-              <span className={balanceDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
-                {balanceDelta >= 0 ? '\u2191' : '\u2193'}
-                {Math.abs(balanceDelta).toFixed(1)}% vs last month
-              </span>
-            )}
+            <div className={styles.kpiTop}>
+              <span className={styles.kpiLabel}>Total Balance</span>
+              <div className={`${styles.kpiIcon} ${styles.kpiIconPurple}`}>
+                <Wallet size={18} strokeWidth={1.5} />
+              </div>
+            </div>
+            <div className={styles.kpiValue}>
+              {balanceSplit.dollars}
+              <span className={styles.kpiDecimal}>{balanceSplit.cents}</span>
+            </div>
+            <div className={styles.kpiFooter}>
+              {balanceDelta != null && (
+                <>
+                  <span className={balanceDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
+                    {balanceDelta >= 0
+                      ? <ArrowUpRight size={12} strokeWidth={3} />
+                      : <ArrowDownRight size={12} strokeWidth={3} />}
+                    {Math.abs(balanceDelta).toFixed(1)}%
+                  </span>
+                  <span className={styles.kpiVs}>vs last month</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Income */}
           <div className={styles.kpiCard}>
-            <span className={styles.kpiLabel}>Income</span>
-            <span className={styles.kpiValue}>{formatCurrency(totalIncome)}</span>
-            {incomeDelta != null && (
-              <span className={incomeDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
-                {incomeDelta >= 0 ? '\u2191' : '\u2193'}
-                {Math.abs(incomeDelta).toFixed(1)}% vs last month
-              </span>
-            )}
+            <div className={styles.kpiTop}>
+              <span className={styles.kpiLabel}>Income</span>
+              <div className={`${styles.kpiIcon} ${styles.kpiIconTeal}`}>
+                <TrendingUp size={18} strokeWidth={1.5} />
+              </div>
+            </div>
+            <div className={styles.kpiValue}>
+              {incomeSplit.dollars}
+              <span className={styles.kpiDecimal}>{incomeSplit.cents}</span>
+            </div>
+            <div className={styles.kpiFooter}>
+              {incomeDelta != null && (
+                <>
+                  <span className={incomeDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
+                    {incomeDelta >= 0
+                      ? <ArrowUpRight size={12} strokeWidth={3} />
+                      : <ArrowDownRight size={12} strokeWidth={3} />}
+                    {Math.abs(incomeDelta).toFixed(1)}%
+                  </span>
+                  <span className={styles.kpiVs}>vs last month</span>
+                </>
+              )}
+            </div>
           </div>
 
-          {/* Expenses — with budget progress bar */}
+          {/* Expenses */}
           <div className={styles.kpiCard}>
-            <span className={styles.kpiLabel}>Expenses</span>
-            <span className={styles.kpiValue}>{formatCurrency(totalExpense)}</span>
-            {summary.budget > 0 && (
-              <>
-                <span className={styles.kpiSub}>
-                  {formatCompact(totalExpense)} of {formatCompact(summary.budget)} budget
-                </span>
-                <div className={styles.kpiProgress}>
-                  <div
-                    className={styles.kpiProgressFill}
-                    style={{
-                      width: `${Math.min(100, budgetUsage)}%`,
-                      background: budgetUsage > 100
-                        ? 'var(--color-expense)'
-                        : budgetUsage > 85
-                          ? 'var(--color-warning)'
-                          : 'var(--color-primary)',
-                    }}
-                  />
-                </div>
-              </>
-            )}
+            <div className={styles.kpiTop}>
+              <span className={styles.kpiLabel}>Expenses</span>
+              <div className={`${styles.kpiIcon} ${styles.kpiIconRed}`}>
+                <TrendingDown size={18} strokeWidth={1.5} />
+              </div>
+            </div>
+            <div className={styles.kpiValue}>
+              {expenseSplit.dollars}
+              <span className={styles.kpiDecimal}>{expenseSplit.cents}</span>
+            </div>
+            <div className={styles.kpiFooter}>
+              {expenseDelta != null && (
+                <>
+                  <span className={expenseDelta >= 0 ? styles.kpiBadgeNegative : styles.kpiBadgePositive}>
+                    {expenseDelta >= 0
+                      ? <ArrowUpRight size={12} strokeWidth={3} />
+                      : <ArrowDownRight size={12} strokeWidth={3} />}
+                    {Math.abs(expenseDelta).toFixed(1)}%
+                  </span>
+                  <span className={styles.kpiVs}>vs last month</span>
+                </>
+              )}
+            </div>
           </div>
 
           {/* Savings Rate */}
           <div className={styles.kpiCard}>
-            <span className={styles.kpiLabel}>Savings Rate</span>
-            <span className={styles.kpiValue}>
-              {savingsRate.toFixed(1)}<span className={styles.kpiUnit}>%</span>
-            </span>
-            <span className={styles.kpiSub}>
-              {formatCompact(summary.savings_ytd)} saved this year
-            </span>
+            <div className={styles.kpiTop}>
+              <span className={styles.kpiLabel}>Savings Rate</span>
+              <div className={`${styles.kpiIcon} ${styles.kpiIconYellow}`}>
+                <PiggyBank size={18} strokeWidth={1.5} />
+              </div>
+            </div>
+            <div className={styles.kpiValue}>
+              {savingsRate.toFixed(1)}
+              <span className={styles.kpiDecimal}>%</span>
+            </div>
+            <div className={styles.kpiFooter}>
+              {savingsDelta != null && (
+                <>
+                  <span className={savingsDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
+                    {savingsDelta >= 0
+                      ? <ArrowUpRight size={12} strokeWidth={3} />
+                      : <ArrowDownRight size={12} strokeWidth={3} />}
+                    {Math.abs(savingsDelta).toFixed(1)}%
+                  </span>
+                  <span className={styles.kpiVs}>vs last month</span>
+                </>
+              )}
+            </div>
           </div>
         </div>
       )}
 
-      {/* ===== Content Grid: Cash Flow + Categories ===== */}
+      {/* ===== Content Grid ===== */}
       <div className={styles.contentGrid}>
-        {/* Cash Flow */}
+        {/* ── Cash Flow Chart ── */}
         <div className={styles.card}>
           <div className={styles.cardHeader}>
-            <span className={styles.cardTitle}>Cash Flow</span>
+            <div>
+              <div className={styles.cardTitle}>Cash Flow</div>
+              <div className={styles.cardSubtitle}>Income vs expenses over time</div>
+            </div>
             <div className={styles.cfControls}>
               <div className={styles.cfLegend}>
                 <div className={styles.legendItem}>
@@ -347,76 +454,83 @@ export function Dashboard() {
 
           <div className={styles.cfChartWrap}>
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 10, right: 10, bottom: 0, left: 0 }}>
+              <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
                 <ChartPatternDefs patterns={patterns.cashFlowDefs} />
                 <CartesianGrid
                   strokeDasharray="3 3"
                   stroke={chartTheme.gridStroke}
-                  strokeOpacity={0.4}
                   vertical={false}
                 />
                 <XAxis
                   dataKey="name"
-                  stroke={chartTheme.axisStroke}
-                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
                   tickLine={false}
-                  axisLine={false}
+                  axisLine={{ stroke: chartTheme.gridStroke, strokeWidth: 1 }}
+                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
+                  dy={4}
                 />
                 <YAxis
-                  stroke={chartTheme.axisStroke}
-                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
                   tickLine={false}
                   axisLine={false}
+                  width={48}
+                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
                   tickFormatter={(v: number) => `$${Math.abs(v / 1000).toFixed(0)}k`}
                 />
                 <Tooltip
                   content={<ChartTooltip patternStyles={cfPatternStyles} />}
                   cursor={{ fill: chartTheme.hoverBg }}
                 />
-                <ReferenceLine y={0} stroke={chartTheme.axisStroke} />
                 <Bar
                   dataKey="income"
                   fill={patterns.cashFlow.income.fill}
-                  radius={[4, 4, 0, 0]}
+                  radius={[6, 6, 6, 6]}
                   name="Income"
+                  barSize={36}
                 />
                 <Bar
                   dataKey="expense"
                   fill={patterns.cashFlow.expense.fill}
                   stroke={patterns.cashFlow.expense.stroke}
                   strokeWidth={patterns.cashFlow.expense.strokeWidth}
-                  radius={[4, 4, 0, 0]}
+                  radius={[6, 6, 6, 6]}
                   name="Expenses"
+                  barSize={36}
                 />
               </BarChart>
             </ResponsiveContainer>
           </div>
         </div>
 
-        {/* Spending by Category */}
+        {/* ── Spending by Category (Half-Gauge) ── */}
         <div className={styles.card}>
           <div className={styles.cardHeader}>
-            <span className={styles.cardTitle}>Spending by Category</span>
+            <div>
+              <div className={styles.cardTitle}>Spending by Category</div>
+              <div className={styles.cardSubtitle}>
+                {MONTHS[selectedMonth - 1]} {selectedYear}
+              </div>
+            </div>
             <a href="/categories" className={styles.cardLink}>View all &rarr;</a>
           </div>
-          <div className={styles.catLayout}>
-            <div className={styles.donutWrap}>
+          <div className={styles.spendGrid}>
+            <div className={styles.gaugeWrap}>
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <ChartPatternDefs patterns={categoryDefs} />
                   <Pie
-                    data={pieData}
+                    data={gaugeData}
                     dataKey="value"
                     nameKey="name"
+                    startAngle={180}
+                    endAngle={0}
                     cx="50%"
-                    cy="50%"
-                    innerRadius={55}
-                    outerRadius={70}
-                    cornerRadius={3}
-                    paddingAngle={2}
+                    cy="95%"
+                    innerRadius="60%"
+                    outerRadius="80%"
+                    cornerRadius={4}
+                    paddingAngle={1.5}
                     stroke="none"
                   >
-                    {pieData.map((_, i) => (
+                    {gaugeData.map((_, i) => (
                       <Cell
                         key={i}
                         fill={categoryPatterns[i].fill}
@@ -427,91 +541,160 @@ export function Dashboard() {
                   </Pie>
                   <Tooltip
                     content={<ChartTooltip patternStyles={catPatternStyles} />}
-                    cursor={{ fill: chartTheme.hoverBg }}
+                    offset={10}
                   />
                 </PieChart>
               </ResponsiveContainer>
-              <div className={styles.donutCenter}>
-                <span className={styles.donutTotal}>{formatCompact(totalCategorySpent)}</span>
-                <span className={styles.donutSub}>Total Spent</span>
+              <div className={styles.gaugeCenter}>
+                <span className={styles.gaugeTotal}>
+                  {formatCompact(totalCategorySpent)}
+                </span>
+                <span className={styles.gaugeSub}>Total Spent</span>
               </div>
             </div>
+
             <div className={styles.catList}>
-              {categories.slice(0, 6).map((cat, i) => (
-                <div key={cat.id} className={styles.catItem}>
-                  <div
-                    className={styles.catDot}
-                    style={categoryPatterns[i]?.legendStyle ?? { background: cat.color }}
-                  />
-                  <span className={styles.catName}>{cat.name}</span>
-                  <span className={styles.catPct}>
-                    {totalCategorySpent > 0 ? Math.round((cat.total / totalCategorySpent) * 100) : 0}%
-                  </span>
-                  <div className={styles.catBar}>
+              {gaugeData.map((cat, i) => {
+                const pct = totalCategorySpent > 0
+                  ? Math.round((cat.value / totalCategorySpent) * 100)
+                  : 0;
+                const barPct = totalCategorySpent > 0
+                  ? (cat.value / gaugeData[0].value) * 100
+                  : 0;
+                return (
+                  <div key={cat.name} className={styles.catRow}>
                     <div
-                      className={styles.catBarFill}
-                      style={{
-                        width: totalCategorySpent > 0
-                          ? `${(cat.total / totalCategorySpent) * 100}%`
-                          : '0%',
-                        background: cat.color,
-                      }}
+                      className={styles.catDot}
+                      style={categoryPatterns[i]?.legendStyle ?? { background: cat.color }}
                     />
+                    <span className={styles.catName}>{cat.name}</span>
+                    <div className={styles.catBar}>
+                      <div
+                        className={styles.catBarFill}
+                        style={{
+                          width: `${Math.min(100, barPct)}%`,
+                          background: cat.color,
+                          opacity: 0.7,
+                        }}
+                      />
+                    </div>
+                    <span className={styles.catPct}>{pct}%</span>
+                    <span className={styles.catAmount}>{formatCompact(cat.value)}</span>
                   </div>
-                  <span className={styles.catAmount}>{formatCompact(cat.total)}</span>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+
+        {/* ── Monthly Budget ── */}
+        <div className={styles.card}>
+          <div className={styles.cardHeader}>
+            <div>
+              <div className={styles.cardTitle}>Monthly Budget</div>
+              <div className={styles.cardSubtitle}>
+                {budgetTotal > 0
+                  ? `${formatCompact(totalExpense)} of ${formatCompact(budgetTotal)} used`
+                  : 'No budget set'}
+              </div>
+            </div>
+            <a href="/settings" className={styles.cardLink}>Details &rarr;</a>
+          </div>
+          {budgetTotal > 0 ? (
+            <div className={styles.budgetList}>
+              {topCats.map((cat) => {
+                // Per-category share of total budget proportional to spending
+                const catPct = budgetTotal > 0
+                  ? (cat.total / budgetTotal) * 100
+                  : 0;
+                return (
+                  <div key={cat.id} className={styles.budgetItem}>
+                    <div className={styles.budgetInfo}>
+                      <span className={styles.budgetName}>{cat.name}</span>
+                      <span className={styles.budgetAmounts}>
+                        {formatCompact(cat.total)}
+                        <span className={catPct > 25 ? styles.budgetLimitOver : styles.budgetLimit}>
+                          {' '}/ {formatCompact(budgetTotal)}
+                        </span>
+                      </span>
+                    </div>
+                    <div className={styles.budgetBarRow}>
+                      <div className={styles.budgetTrack}>
+                        <div
+                          className={styles.budgetFill}
+                          style={{
+                            width: `${Math.min(100, catPct)}%`,
+                            background: budgetGradient(catPct > 20 ? catPct * 4 : catPct * 3),
+                          }}
+                        />
+                      </div>
+                      <span className={catPct > 25 ? styles.budgetPctOver : styles.budgetPct}>
+                        {Math.round(catPct)}%
+                      </span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className={styles.emptyState}>
+              Set a monthly budget in Settings to track progress
+            </p>
+          )}
+        </div>
+
+        {/* ── Recent Transactions ── */}
+        <div className={styles.card}>
+          <div className={styles.cardHeader}>
+            <div>
+              <div className={styles.cardTitle}>Recent Transactions</div>
+              <div className={styles.cardSubtitle}>Latest activity across all accounts</div>
+            </div>
+            <a href="/transactions" className={styles.cardLink}>View all &rarr;</a>
+          </div>
+          {recentTransactions.length === 0 ? (
+            <p className={styles.emptyState}>No recent transactions</p>
+          ) : (
+            <div className={styles.txList}>
+              {recentTransactions.slice(0, 6).map((tx) => (
+                <div key={tx.id} className={styles.txRow}>
+                  <div
+                    className={styles.txIcon}
+                    style={{
+                      background: `color-mix(in srgb, ${tx.category_color} 15%, transparent)`,
+                      color: tx.category_color,
+                    }}
+                  >
+                    <span style={{ fontSize: 14, fontWeight: 600 }}>
+                      {tx.category_name.charAt(0)}
+                    </span>
+                  </div>
+                  <div className={styles.txInfo}>
+                    <div className={styles.txName}>{tx.description}</div>
+                    <div className={styles.txMeta}>{tx.category_name}</div>
+                  </div>
+                  <div className={styles.txRight}>
+                    <div
+                      className={`${styles.txAmount} ${
+                        tx.category_type === 'expense' ? styles.expense : styles.income
+                      }`}
+                    >
+                      {tx.category_type === 'expense' ? '-' : '+'}
+                      {formatFull(tx.amount)}
+                    </div>
+                    <div className={styles.txDate}>
+                      {new Date(tx.date).toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                      })}
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
-          </div>
+          )}
         </div>
-      </div>
-
-      {/* ===== Recent Transactions ===== */}
-      <div className={styles.card}>
-        <div className={styles.cardHeader}>
-          <span className={styles.cardTitle}>Recent Transactions</span>
-          <a href="/transactions" className={styles.cardLink}>View all &rarr;</a>
-        </div>
-        {recentTransactions.length === 0 ? (
-          <p className={styles.emptyState}>No recent transactions</p>
-        ) : (
-          <div className={styles.txList}>
-            {recentTransactions.slice(0, 6).map((tx) => (
-              <div key={tx.id} className={styles.txItem}>
-                <div
-                  className={styles.txIcon}
-                  style={{
-                    background: `color-mix(in srgb, ${tx.category_color} 15%, transparent)`,
-                    color: tx.category_color,
-                  }}
-                >
-                  {tx.category_name.charAt(0)}
-                </div>
-                <div className={styles.txInfo}>
-                  <div className={styles.txName}>{tx.description}</div>
-                  <div className={styles.txCategory}>{tx.category_name}</div>
-                </div>
-                <div className={styles.txRight}>
-                  <div
-                    className={`${styles.txAmount} ${
-                      tx.category_type === 'expense' ? styles.expense : styles.income
-                    }`}
-                  >
-                    {tx.category_type === 'expense' ? '-' : '+'}
-                    {formatCurrency(tx.amount)}
-                  </div>
-                  <div className={styles.txDate}>
-                    {new Date(tx.date).toLocaleDateString('en-US', {
-                      month: 'short',
-                      day: 'numeric',
-                      year: 'numeric',
-                    })}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
     </div>
   );
