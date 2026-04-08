@@ -89,6 +89,7 @@ export function Dashboard() {
   const [showLatest, setShowLatest] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
     let url = 'transactions?per_page=6';
     if (!showLatest) {
       const mm = String(selectedMonth).padStart(2, '0');
@@ -98,8 +99,9 @@ export function Dashboard() {
     }
     api
       .get<PaginatedResponse<Transaction>>(url)
-      .then((data) => setRecentTransactions(data.transactions))
+      .then((data) => { if (!cancelled) setRecentTransactions(data.transactions); })
       .catch(() => { /* silent — non-critical */ });
+    return () => { cancelled = true; };
   }, [selectedYear, selectedMonth, showLatest]);
 
   const currentYear = now.getFullYear();
@@ -487,7 +489,7 @@ export function Dashboard() {
                 {MONTHS[selectedMonth - 1]} {selectedYear}
               </div>
             </div>
-            <a href="/categories" className={styles.cardLink}>View all &rarr;</a>
+            <Link to="/categories" className={styles.cardLink}>View all &rarr;</Link>
           </div>
           <div className={styles.spendGrid}>
             <div className={styles.gaugeWrap}>
@@ -649,7 +651,7 @@ export function Dashboard() {
               >
                 {showLatest ? `Show ${MONTHS[selectedMonth - 1]} →` : 'Show latest →'}
               </button>
-              <a href="/transactions" className={styles.cardLink}>View all &rarr;</a>
+              <Link to="/transactions" className={styles.cardLink}>View all &rarr;</Link>
             </div>
           </div>
           {recentTransactions.length === 0 ? (
