@@ -33,12 +33,6 @@
   align-items: center;
 }
 
-.selectLabel {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-tertiary);
-}
-
 .select {
   height: 36px;
   padding: 0 26px 0 12px;
@@ -488,95 +482,6 @@
   min-width: 64px;
   text-align: right;
   white-space: nowrap;
-}
-
-/* ===== Monthly Budget ===== */
-.budgetList {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  flex: 1;
-}
-
-.budgetItem {
-  padding: 10px 4px;
-  margin: 0 -4px;
-  border-bottom: 1px solid var(--surface-sunken);
-  border-radius: 8px;
-  transition: background 0.15s;
-  cursor: pointer;
-}
-
-.budgetItem:hover {
-  background: var(--surface-hover);
-}
-
-.budgetItem:last-child {
-  border-bottom: none;
-}
-
-.budgetInfo {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 8px;
-}
-
-.budgetName {
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--text-primary);
-}
-
-.budgetAmounts {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text-primary);
-  font-variant-numeric: tabular-nums;
-}
-
-.budgetLimit {
-  color: var(--text-tertiary);
-  font-weight: 400;
-}
-
-.budgetLimitOver {
-  color: var(--color-neg);
-  font-weight: 400;
-}
-
-.budgetBarRow {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.budgetTrack {
-  flex: 1;
-  height: 5px;
-  background: var(--surface-sunken);
-  border-radius: 99px;
-  overflow: hidden;
-}
-
-.budgetFill {
-  height: 100%;
-  border-radius: 0;
-  transition: width 0.5s ease;
-}
-
-.budgetPct {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-secondary);
-  min-width: 36px;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.budgetPctOver {
-  composes: budgetPct;
-  color: var(--color-neg);
 }
 
 /* ===== Recent Transactions ===== */

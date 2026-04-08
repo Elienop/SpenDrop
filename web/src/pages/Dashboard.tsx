@@ -70,14 +70,6 @@ const SHORT_MONTHS = [
 
 type CashFlowView = '6m' | '12m';
 
-/* ── Budget bar gradient helpers ── */
-
-function budgetGradient(pct: number): string {
-  if (pct >= 100) return 'linear-gradient(90deg, #EF8B6E, #E07050)';
-  if (pct >= 85) return 'linear-gradient(90deg, #F0C84D, #E0B83D)';
-  return 'linear-gradient(90deg, #16C8C7, #12B0AF)';
-}
-
 /* ── Component ── */
 
 export function Dashboard() {
@@ -153,8 +145,6 @@ export function Dashboard() {
   const savingsRate = totalIncome > 0
     ? ((totalIncome - totalExpense) / totalIncome * 100)
     : 0;
-
-  const budgetTotal = summary?.budget ?? 0;
 
   // Delta from previous month
   const prevMonthTrend = (() => {
@@ -561,62 +551,6 @@ export function Dashboard() {
               })}
             </div>
           </div>
-        </div>
-
-        {/* ── Monthly Budget ── */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div>
-              <div className={styles.cardTitle}>Monthly Budget</div>
-              <div className={styles.cardSubtitle}>
-                {budgetTotal > 0
-                  ? `${formatCompact(totalExpense)} of ${formatCompact(budgetTotal)} used`
-                  : 'No budget set'}
-              </div>
-            </div>
-            <a href="/settings" className={styles.cardLink}>Details &rarr;</a>
-          </div>
-          {budgetTotal > 0 ? (
-            <div className={styles.budgetList}>
-              {topCats.map((cat) => {
-                // Per-category share of total budget proportional to spending
-                const catPct = budgetTotal > 0
-                  ? (cat.total / budgetTotal) * 100
-                  : 0;
-                return (
-                  <div key={cat.id} className={styles.budgetItem}>
-                    <div className={styles.budgetInfo}>
-                      <span className={styles.budgetName}>{cat.name}</span>
-                      <span className={styles.budgetAmounts}>
-                        {formatCompact(cat.total)}
-                        <span className={catPct > 25 ? styles.budgetLimitOver : styles.budgetLimit}>
-                          {' '}/ {formatCompact(budgetTotal)}
-                        </span>
-                      </span>
-                    </div>
-                    <div className={styles.budgetBarRow}>
-                      <div className={styles.budgetTrack}>
-                        <div
-                          className={styles.budgetFill}
-                          style={{
-                            width: `${Math.min(100, catPct)}%`,
-                            background: budgetGradient(catPct > 20 ? catPct * 4 : catPct * 3),
-                          }}
-                        />
-                      </div>
-                      <span className={catPct > 25 ? styles.budgetPctOver : styles.budgetPct}>
-                        {Math.round(catPct)}%
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <p className={styles.emptyState}>
-              Set a monthly budget in Settings to track progress
-            </p>
-          )}
         </div>
 
         {/* ── Recent Transactions ── */}
