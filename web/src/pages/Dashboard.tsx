@@ -458,6 +458,7 @@ export function Dashboard() {
                 <Tooltip
                   content={<ChartTooltip patternStyles={cfPatternStyles} />}
                   cursor={{ fill: chartTheme.hoverBg }}
+                  isAnimationActive={false}
                 />
                 <Bar
                   dataKey="income"
@@ -522,6 +523,7 @@ export function Dashboard() {
                   <Tooltip
                     content={<ChartTooltip patternStyles={catPatternStyles} />}
                     offset={10}
+                    isAnimationActive={false}
                   />
                 </PieChart>
               </ResponsiveContainer>
