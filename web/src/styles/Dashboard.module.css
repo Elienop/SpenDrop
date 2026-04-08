@@ -29,33 +29,32 @@
 
 .selectors {
   display: flex;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
 }
 
 .selectLabel {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
 }
 
 .select {
-  height: 38px;
-  padding: 0 28px 0 12px;
+  height: 36px;
+  padding: 0 26px 0 12px;
   background-color: var(--surface-raised);
   border: 1px solid var(--border-default);
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--text-primary);
   font-size: 13px;
   font-weight: 500;
   font-family: var(--font-sans);
-  box-shadow: var(--shadow-sm);
   cursor: pointer;
   appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2.5'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
-  background-position: right 8px center;
-  transition: border-color 0.15s;
+  background-position: right 10px center;
+  transition: border-color 0.15s, box-shadow 0.15s;
 }
 
 .select:hover {
@@ -65,7 +64,7 @@
 .select:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px var(--primary-a15);
+  box-shadow: 0 0 0 3px var(--primary-a8);
 }
 
 /* ===== KPI Row ===== */
@@ -339,17 +338,18 @@
   flex-shrink: 0;
 }
 
-/* Segmented toggle (tabs-sm from preview) */
+/* Segmented toggle (pill tabs) */
 .cfToggle {
   display: flex;
   gap: 2px;
   background: var(--surface-sunken);
+  border: 1px solid var(--border-muted);
   border-radius: 8px;
   padding: 3px;
 }
 
 .cfToggleBtn {
-  padding: 5px 12px;
+  padding: 4px 14px;
   border: none;
   background: none;
   font-family: var(--font-sans);
