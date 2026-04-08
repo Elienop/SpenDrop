@@ -19,6 +19,7 @@ import {
   ArrowUpRight,
   ArrowDownRight,
 } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
 import { useChartTheme } from '../hooks/useChartTheme';
 import { useChartPatterns, ChartPatternDefs } from '../hooks/useChartPatterns';
@@ -551,6 +552,77 @@ export function Dashboard() {
               })}
             </div>
           </div>
+        </div>
+
+        {/* ── Savings Progress ── */}
+        <div className={styles.card}>
+          <div className={styles.cardHeader}>
+            <div>
+              <div className={styles.cardTitle}>Savings Progress</div>
+              <div className={styles.cardSubtitle}>
+                {selectedYear} annual goal
+              </div>
+            </div>
+          </div>
+          {summary && (summary.savings_goal ?? 0) > 0 ? (
+            <>
+              <div className={styles.savingsRing}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={[
+                        {
+                          name: 'Saved',
+                          value: Math.min(100, Math.max(0, summary.savings_goal_progress)),
+                        },
+                        {
+                          name: 'Remaining',
+                          value: Math.max(0, 100 - Math.min(100, Math.max(0, summary.savings_goal_progress))),
+                        },
+                      ]}
+                      dataKey="value"
+                      startAngle={90}
+                      endAngle={-270}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={55}
+                      outerRadius={75}
+                      cornerRadius={4}
+                      paddingAngle={0}
+                      stroke="none"
+                    >
+                      <Cell fill="var(--color-primary)" />
+                      <Cell fill="var(--border-default)" />
+                    </Pie>
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className={styles.savingsCenter}>
+                  <span className={styles.savingsCenterPct}>
+                    {Math.round(Math.min(100, Math.max(0, summary.savings_goal_progress)))}%
+                  </span>
+                  <span className={styles.savingsCenterLabel}>of goal</span>
+                </div>
+              </div>
+              <div className={styles.savingsStats}>
+                <div className={styles.savingsStat}>
+                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_ytd)}</div>
+                  <div className={styles.savingsStatLabel}>Saved YTD</div>
+                </div>
+                <div className={styles.savingsStat}>
+                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_goal)}</div>
+                  <div className={styles.savingsStatLabel}>Annual Goal</div>
+                </div>
+                <div className={styles.savingsStat}>
+                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_this_month)}</div>
+                  <div className={styles.savingsStatLabel}>This Month</div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className={styles.savingsEmptyMsg}>
+              <Link to="/settings">Set a savings goal</Link> to track progress
+            </div>
+          )}
         </div>
 
         {/* ── Recent Transactions ── */}
