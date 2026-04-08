@@ -21,7 +21,7 @@ describe('useChartTheme', () => {
     expect(theme).toHaveProperty('incomeColor');
     expect(theme).toHaveProperty('expenseColor');
     expect(theme).toHaveProperty('categoryColors');
-    expect(theme.categoryColors).toHaveLength(6);
+    expect(theme.categoryColors).toHaveLength(12);
   });
 
   test('returns string values for all color properties', () => {

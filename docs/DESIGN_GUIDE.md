@@ -1,51 +1,6 @@
 # SpenDrop Design Guide
 
-A practical reference for developers working on SpenDrop's frontend. This covers the token system, component patterns, and rules you need to follow.
-
----
-
-## Palette: Purple Accent
-
-Dark-first design with a cool blue undertone and purple accent.
-
-### Brand Colors
-
-| Role | Dark | Light | Usage |
-|------|------|-------|-------|
-| Primary | `#5347CE` (Accent-7) | `#4030A6` (Accent-6) | Buttons, links, active states, featured cards |
-| Expense | `#EF8B6E` (coral) | `#E07050` (coral bright) | Negative amounts, over-budget |
-| Income | `#22C55E` (green) | `#16A34A` (green bright) | Positive amounts, savings |
-| Warning | `#F0C84D` (amber) | `#D4A830` (amber bright) | Budget approaching limit |
-| Info | `#4896FE` (blue) | `#3B82F6` (blue bright) | Informational badges |
-| Error | Same as expense | Same as expense | Form validation, destructive actions |
-
-### Category Color Scale
-
-An 11-step gradient from purple through teal to gold, used for chart segments, category badges, and progress bars. Each category stores its own hex color in the database.
-
-| Token | Color | Name |
-|-------|-------|------|
-| `--cat-1` | `#4030A6` | Indigo |
-| `--cat-2` | `#5347CE` | Purple |
-| `--cat-3` | `#B794D8` | Orchid |
-| `--cat-4` | `#7B8AFE` | Periwinkle |
-| `--cat-5` | `#4896FE` | Blue |
-| `--cat-6` | `#2DB3D9` | Cyan |
-| `--cat-7` | `#16C8C7` | Teal |
-| `--cat-8` | `#3EBD80` | Emerald |
-| `--cat-9` | `#7EB854` | Sage |
-| `--cat-10` | `#C4B83A` | Olive |
-| `--cat-11` | `#F0C84D` | Gold |
-| `--cat-muted` | `#B8BCC8` | Neutral |
-
-### Pos/Neg Semantic Colors
-
-Dedicated green and coral for positive/negative indicators **only** — badges, percentage text, savings/loss amounts. Do NOT use these for large chart fills or backgrounds.
-
-| Token | Dark | Light | Usage |
-|-------|------|-------|-------|
-| `--color-pos` | `#22C55E` | `#16A34A` | Income badges, positive deltas |
-| `--color-neg` | `#EF8B6E` | `#E07050` | Expense badges, negative deltas |
+A practical reference for building pages that match the v3 dashboard style. Every value in this guide is extracted from the production dashboard implementation — use it as the single source of truth.
 
 ---
 
@@ -64,51 +19,187 @@ Primitives (raw values)     Semantic tokens (contextual meaning)
 --coral-dim: #EF8B6E   -->  --color-expense: var(--coral-dim)
 ```
 
-**Rule:** Component `.module.css` files only use semantic tokens. Never reference primitives like `--gray-700` directly.
+**Rule:** Component `.module.css` files only use semantic tokens. Never reference primitives like `--neutral-7` directly.
 
-### Surface Tokens (Elevation)
+---
 
-Dark mode uses tonal surface progression instead of shadows for depth:
+## Color System
 
-| Token | Dark | Light | Usage |
-|-------|------|-------|-------|
-| `--surface-base` | `#111113` | `#FAFAFA` | Page background |
-| `--surface-raised` | `#19191B` | `#FFFFFF` | Cards, sections |
-| `--surface-overlay` | `#222225` | `#FFFFFF` | Dropdowns, modals, tooltips |
-| `--surface-sunken` | `#0C0C0E` | `#F0F0F2` | Input backgrounds, inset areas |
-| `--surface-hover` | `#2A2A2D` | `#F0F0F2` | Hover state on surfaces |
+### Brand Colors
 
-### Glass Surface Tokens
+| Role | Token | Hex | Usage |
+|------|-------|-----|-------|
+| Primary | `--color-primary` | `#5347CE` | Buttons, links, active states, featured cards |
+| Primary hover | `--color-primary-hover` | `#6E60E8` | Button/link hover states |
+| Expense | `--color-expense` | `#EF8B6E` | Negative amounts, over-budget indicators |
+| Income | `--color-income` | `#22C55E` | Positive amounts, savings indicators |
+| Warning | `--color-warning` | `#F0C84D` | Budget approaching limit |
+| Info | `--color-info` | `#4896FE` | Informational badges |
+| Error | `--color-error` | `#EF8B6E` | Form validation, destructive actions |
 
-Used for dashboard cards and floating elements with frosted-glass depth:
+### Positive / Negative Indicators
 
-| Token | Dark | Light | Usage |
-|-------|------|-------|-------|
-| `--glass-bg` | raised @ 85% | white @ 85% | Card background |
-| `--glass-border` | white @ 6% | white @ 40% | Subtle edge highlight |
-| `--glass-blur` | `12px` | `12px` | Backdrop blur radius |
+Dedicated green and coral for small indicators **only** — badges, percentage text, delta arrows. Do NOT use for large chart fills or backgrounds.
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--color-pos` | `#22C55E` | Income badges, positive deltas |
+| `--color-neg` | `#EF8B6E` | Expense badges, negative deltas |
+
+### Category Color Scale
+
+11-step gradient (purple → gold) for chart segments, category badges, and progress bars:
+
+| Token | Color | Name |
+|-------|-------|------|
+| `--cat-1` | `#4030A6` | Indigo |
+| `--cat-2` | `#5347CE` | Purple |
+| `--cat-3` | `#B794D8` | Orchid |
+| `--cat-4` | `#7B8AFE` | Periwinkle |
+| `--cat-5` | `#4896FE` | Blue |
+| `--cat-6` | `#2DB3D9` | Cyan |
+| `--cat-7` | `#16C8C7` | Teal |
+| `--cat-8` | `#3EBD80` | Emerald |
+| `--cat-9` | `#7EB854` | Sage |
+| `--cat-10` | `#C4B83A` | Olive |
+| `--cat-11` | `#F0C84D` | Gold |
+| `--cat-muted` | `#B8BCC8` | Neutral/other |
+
+### Opacity Utilities
+
+Use `color-mix()` — never raw `rgba()`:
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--primary-a8` | primary at 8% | Row hover, focus ring |
+| `--primary-a15` | primary at 15% | Active nav item, selected state |
+| `--primary-a50` | primary at 50% | Focus ring glow |
+| `--expense-a15` | expense at 15% | Error/expense background tint |
+| `--income-a15` | income at 15% | Success/income background tint |
+
+---
+
+## Surfaces & Elevation
+
+### Dark Theme (Default)
+
+Uses tonal surface progression for depth, minimal shadows:
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--surface-base` | `#111113` | Page background |
+| `--surface-raised` | `#19191B` | Cards, sidebar, sections |
+| `--surface-overlay` | `#222225` | Dropdowns, modals, tooltips |
+| `--surface-sunken` | `#0C0C0E` | Input backgrounds, progress tracks |
+| `--surface-hover` | `#2A2A2D` | Hover state on surfaces |
+
+### Light Theme
+
+Clean cool-gray page background with crisp white cards:
+
+| Token | Value | Usage |
+|-------|-------|-------|
+| `--surface-base` | `#EAEBF2` | Page background (cool lavender-gray) |
+| `--surface-raised` | `#FFFFFF` | Cards, sidebar, sections |
+| `--surface-overlay` | `#FFFFFF` | Dropdowns, modals |
+| `--surface-sunken` | `#EAEBF2` | Input backgrounds, progress tracks |
+| `--surface-hover` | `#EAEBF2` | Hover state on surfaces |
+
+### Glass Surface (Dashboard Cards)
+
+Frosted-glass effect for cards — provides depth via semi-transparency + backdrop blur:
+
+```css
+.card {
+  background: var(--glass-bg);           /* rgba(255,255,255,0.85) in light */
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border); /* rgba(255,255,255,0.4) in light */
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+}
+```
+
+| Token | Dark | Light |
+|-------|------|-------|
+| `--glass-bg` | `raised @ 85%` | `rgba(255,255,255,0.85)` |
+| `--glass-border` | `white @ 6%` | `rgba(255,255,255,0.4)` |
+| `--glass-blur` | `12px` | `12px` |
 
 ### Text Tokens
 
 | Token | Dark | Light | Usage |
 |-------|------|-------|-------|
-| `--text-primary` | `#EEEEF0` | `#111113` | Body text, headings |
-| `--text-secondary` | `#B0B0BA` | `#6E6E79` | Labels, metadata |
-| `--text-tertiary` | `#6E6E79` | `#606069` | Placeholders, helper text |
+| `--text-primary` | `#EEEEF0` | `#111827` | Body text, headings, values |
+| `--text-secondary` | `#B0B0BA` | `#6B7280` | Labels, metadata, nav items |
+| `--text-tertiary` | `#6E6E79` | `#9CA3AF` | Placeholders, helper text, "vs" text |
 | `--text-inverse` | `#111113` | `#EEEEF0` | Text on colored backgrounds |
-| `--text-on-accent` | `#EEEEF0` | `#EEEEF0` | Text on `--color-primary` bg (both themes) |
+| `--text-on-accent` | `#EEEEF0` | `#EEEEF0` | Text on `--color-primary` bg |
 
-### Opacity Utilities
+### Borders
 
-Use `color-mix()` for semi-transparent variants:
+| Token | Dark | Light | Usage |
+|-------|------|-------|-------|
+| `--border-default` | `--neutral-6` | `#D8DAE5` | Select borders, dividers |
+| `--border-muted` | `--neutral-4` | `#E0E3ED` | Segmented controls, subtle dividers |
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--primary-a8` | primary at 8% | Row hover |
-| `--primary-a15` | primary at 15% | Active nav item, selected state |
-| `--primary-a50` | primary at 50% | Focus ring |
-| `--expense-a15` | expense at 15% | Error/expense background tint |
-| `--income-a15` | income at 15% | Success/income background tint |
+### Shadows
+
+| Token | Light Value | Usage |
+|-------|------------|-------|
+| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.04)` | Card default, segmented active tab |
+| `--shadow-md` | `0 2px 8px rgba(0,0,0,0.06)` | Card hover, elevated elements |
+| `--shadow-lg` | `0 4px 16px rgba(0,0,0,0.08)` | Dropdown menus, overlays |
+| `--shadow-xl` | `0 16px 48px rgba(0,0,0,0.12)` | Modals, dialogs |
+
+---
+
+## Typography
+
+**Font:** Inter Variable (self-hosted via `@fontsource-variable/inter`)
+
+**OpenType features:** `cv02` (straight a), `cv03` (open 6), `cv04` (open 9), `cv11` (single-storey l)
+
+### Type Scale
+
+| Role | Size | Weight | Line-height | Usage |
+|------|------|--------|-------------|-------|
+| `display` | 36px | 700 | 40px | Dashboard hero values (not currently used) |
+| `heading-lg` | 24px | 600 | 32px | Page titles, welcome heading |
+| `heading-md` | 20px | 600 | 28px | Section headers |
+| `heading-sm` | 16px | 600 | 24px | Card titles |
+| `body-lg` | 16px | 400 | 24px | Form inputs, primary content |
+| `body-md` | 14px | 400 | 20px | Table data, descriptions, nav labels |
+| `body-sm` | 12px | 400 | 16px | Timestamps, metadata |
+| `label-lg` | 13px | 500 | 20px | Buttons, select text, nav labels |
+| `label-md` | 12px | 500 | 16px | Chips, badges, form labels, legend items |
+| `label-sm` | 11px | 500 | 16px | Overlines, section labels, percentage text |
+| `amount` | 16px | 500 | 24px | Currency values (with `tabular-nums`) |
+
+### Dashboard-Specific Typography
+
+These values are used directly on the dashboard and should be adopted on any page with financial data:
+
+| Element | Size | Weight | Extra |
+|---------|------|--------|-------|
+| Page title | 24px | 700 | `letter-spacing: -0.03em` |
+| KPI value | 30px | 700 | `letter-spacing: -0.03em; line-height: 1` |
+| KPI decimal | 18px | 500 | `color: var(--text-tertiary)` |
+| Card title | 15px | 600 | `letter-spacing: -0.01em` |
+| Card subtitle | 12px | – | `color: var(--text-tertiary)` |
+| KPI label | 13px | 500 | `color: var(--text-secondary)` |
+| Badge text | 12px | 600 | Inside colored badge pill |
+| "vs last month" | 12px | – | `color: var(--text-tertiary)` |
+| Gauge total | 30px | 700 | Same as KPI value |
+| Gauge sub-label | 11px | – | `color: var(--text-tertiary)` |
+
+### Rules
+
+- Only weights: 400 (regular), 500 (medium), 600 (semibold), 700 (bold — page titles + KPI values only)
+- No `text-transform: uppercase` except sidebar section labels (`11px/600/uppercase/0.06em`)
+- Currency columns must use `font-variant-numeric: tabular-nums`
+- Minimum text size: 11px
 
 ---
 
@@ -119,56 +210,15 @@ Use `color-mix()` for semi-transparent variants:
 | Token | Value | Usage |
 |-------|-------|-------|
 | `--space-1` | 4px | Icon gaps, tight padding |
-| `--space-2` | 8px | Small gaps, input padding |
-| `--space-3` | 12px | Form field padding |
-| `--space-4` | 16px | Standard padding |
-| `--space-5` | 20px | Card internal padding |
-| `--space-6` | 24px | Section spacing |
-| `--space-8` | 32px | Large section gaps |
-| `--space-10` | 40px | Page-level spacing |
-| `--space-12` | 48px | Major divisions |
-| `--space-16` | 64px | Max separation |
-
----
-
-## Typography
-
-**Font:** Inter Variable (self-hosted via `@fontsource-variable/inter`)
-
-**OpenType features** enabled globally: `cv02` (straight a), `cv03` (open 6), `cv04` (open 9), `cv11` (single-storey l)
-
-### Type Scale
-
-Each role has three sub-tokens: `-size`, `-weight`, `-line-height`.
-
-```css
-/* Usage in a .module.css file */
-.pageTitle {
-  font-size: var(--type-heading-lg-size);       /* 24px */
-  font-weight: var(--type-heading-lg-weight);   /* 600 */
-  line-height: var(--type-heading-lg-line-height); /* 32px */
-}
-```
-
-| Role | Size | Weight | Usage |
-|------|------|--------|-------|
-| `heading-lg` | 24px | 600 | Page titles |
-| `heading-md` | 20px | 600 | Section headers |
-| `heading-sm` | 16px | 600 | Card titles |
-| `body-lg` | 16px | 400 | Form inputs, primary content |
-| `body-md` | 14px | 400 | Table data, descriptions |
-| `body-sm` | 12px | 400 | Timestamps, metadata |
-| `label-lg` | 14px | 500 | Buttons, table headers, nav |
-| `label-md` | 12px | 500 | Chips, badges, form labels |
-| `label-sm` | 11px | 500 | Overlines, helper text |
-| `amount` | 16px | 500 | Currency values (use with `tabular-nums`) |
-
-### Rules
-
-- Only weights: 400 (regular), 500 (medium), 600 (semibold)
-- No `text-transform: uppercase` (enforced by stylelint)
-- Currency columns must use `font-variant-numeric: tabular-nums`
-- Minimum text size: 11px
+| `--space-2` | 8px | Small gaps, badge padding |
+| `--space-3` | 12px | Grid gap, category row gap, form field padding |
+| `--space-4` | 16px | Standard padding, section spacing |
+| `--space-5` | 20px | Card header margin-bottom |
+| `--space-6` | 24px | Card padding, sidebar section padding |
+| `--space-8` | 32px | Page vertical padding, header margin-bottom |
+| `--space-10` | 40px | Page horizontal padding |
+| `--space-12` | 48px | Major divisions, error state padding |
+| `--space-16` | 64px | Sidebar collapsed width |
 
 ---
 
@@ -176,26 +226,25 @@ Each role has three sub-tokens: `-size`, `-weight`, `-line-height`.
 
 | Token | Value | Usage |
 |-------|-------|-------|
-| `--radius-sm` | 4px | Inputs, tooltips |
-| `--radius-md` | 8px | Chips, small cards, nav items |
-| `--radius-lg` | 12px | Cards, sections |
+| `--radius-sm` | 4px | Tooltips |
+| `--radius-md` | 8px | Selects, segmented controls, nav items, badges |
+| `--radius-lg` | 12px | Secondary cards |
+| 14px (hardcoded) | 14px | Dashboard glass cards, KPI cards |
 | `--radius-xl` | 16px | Large cards |
-| `--radius-2xl` | 28px | Modals/dialogs (MD3 style) |
-| `--radius-full` | 9999px | Pill buttons, avatars, badges |
+| `--radius-2xl` | 28px | Modals/dialogs |
+| `--radius-full` | 9999px | Pill buttons, avatars, progress bars |
+
+**Note:** Dashboard cards use `14px` directly — this is the standard card radius for the v3 design.
 
 ---
 
 ## Motion
 
-### Easing
-
 | Token | Curve | Usage |
 |-------|-------|-------|
 | `--ease-standard` | `cubic-bezier(0.2, 0, 0, 1)` | General interactions |
-| `--ease-decelerate` | `cubic-bezier(0.05, 0.7, 0.1, 1)` | Elements entering (expand, open) |
-| `--ease-accelerate` | `cubic-bezier(0.3, 0, 0.8, 0.15)` | Elements exiting (collapse, close) |
-
-### Duration
+| `--ease-decelerate` | `cubic-bezier(0.05, 0.7, 0.1, 1)` | Elements entering |
+| `--ease-accelerate` | `cubic-bezier(0.3, 0, 0.8, 0.15)` | Elements exiting |
 
 | Token | Value | Usage |
 |-------|-------|-------|
@@ -204,33 +253,88 @@ Each role has three sub-tokens: `-size`, `-weight`, `-line-height`.
 | `--duration-slow` | 350ms | Sidebar expand/collapse |
 | `--duration-page` | 400ms | Page transitions |
 
-### Pattern
+### Interaction Transitions
 
 ```css
-/* Enter: decelerate (slows into place) */
-.panel { transition: width var(--duration-slow) var(--ease-accelerate); }
-.panel.open { transition: width var(--duration-slow) var(--ease-decelerate); }
+/* Card hover — lift + shadow */
+transition: box-shadow 0.2s, transform 0.2s;
+/* On hover: */
+box-shadow: var(--shadow-md);
+transform: translateY(-1px);
+
+/* Row hover — background fade */
+transition: background 0.15s;
+/* On hover: */
+background: var(--surface-hover);
+
+/* Link/button hover — color fade */
+transition: color 0.15s, background-color 0.15s;
+```
+
+---
+
+## Layout
+
+### App Shell
+
+```css
+.main {
+  padding: var(--space-8) var(--space-10) var(--space-8) calc(64px + var(--space-10));
+  max-width: calc(1400px + 64px);
+}
+/* With expanded sidebar: */
+.mainExpanded {
+  padding-left: calc(240px + var(--space-10));
+  max-width: calc(1400px + 240px);
+}
+```
+
+### Page Structure
+
+Every page follows this layout:
+
+```
+.page (flex column, gap: 0)
+  └── .header (flex, space-between, margin-bottom: 32px)
+  │     ├── left: title + subtitle
+  │     └── right: selectors / controls
+  └── .contentGrid (grid or main content area)
+```
+
+### Content Grid (Dashboard)
+
+```css
+.contentGrid {
+  display: grid;
+  grid-template-columns: 3fr 2fr;
+  gap: 12px;
+}
+```
+
+Cards inside can span full width with `grid-column: span 2`.
+
+### Responsive Breakpoints
+
+```css
+@media (width <= 1200px) {
+  /* KPI row: 2 columns instead of 4 */
+  /* Content grid: single column */
+}
+
+@media (width <= 768px) {
+  /* KPI row: single column */
+  /* Header: stack vertically */
+  /* Card headers: stack vertically */
+}
 ```
 
 ---
 
 ## Component Patterns
 
-### Sidebar
+### Glass Card
 
-- **Collapsed:** 64px, icon-only
-- **Expanded:** 240px, icon + label
-- Expand/collapse is triggered by a **toggle button** (no hover — explicit click only)
-- State persists in `localStorage` under key `spendrop-sidebar` (`"true"` / `"false"`)
-- A `sidebar-toggle` event is dispatched on `window` after each toggle (for layout recalculation)
-- Transition uses different easing for expand vs collapse
-- 5 nav items: Dashboard, Reports, Transactions, Categories, Settings
-- Bottom section: theme toggle (cycles dark → light → system), user avatar, logout
-- Icons: Lucide React, 24px, stroke-width 2
-
-### Cards
-
-**Glass card (default for dashboard and floating sections):**
+The standard card pattern for data sections:
 
 ```css
 .card {
@@ -238,167 +342,494 @@ Each role has three sub-tokens: `-size`, `-weight`, `-line-height`.
   backdrop-filter: blur(var(--glass-blur));
   -webkit-backdrop-filter: blur(var(--glass-blur));
   border: 1px solid var(--glass-border);
-  border-radius: var(--radius-lg);
-  padding: var(--space-5);
+  border-radius: 14px;
+  padding: 24px;
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow 0.2s;
+}
+.card:hover {
+  box-shadow: var(--shadow-md);
 }
 ```
 
-The frosted-glass effect provides depth via semi-transparent background + backdrop blur. In dark mode this is subtle; in light mode it creates a classic frosted-white effect.
+### Card Header
 
-**Featured card (accent-filled, e.g. Total Balance KPI):**
+Standard header inside every card:
+
+```css
+.cardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.cardTitle {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+.cardSubtitle {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.cardLink {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-primary);
+  /* "View all →" style link */
+}
+```
+
+### Featured Card (Accent-Filled)
+
+Used for the primary KPI (Total Balance):
 
 ```css
 .featured {
   background: var(--color-primary);
   border-color: transparent;
 }
-/* Child text uses --text-on-accent */
+.featured .kpiLabel { color: rgba(255, 255, 255, 0.7); }
+.featured .kpiValue { color: #fff; }
+.featured .kpiDecimal { color: rgba(255, 255, 255, 0.5); }
+.featured .kpiVs { color: rgba(255, 255, 255, 0.6); }
+.featured .kpiIcon { background: rgba(255, 255, 255, 0.15); color: #fff; }
+.featured .kpiBadge { color: #fff; background: rgba(255, 255, 255, 0.15); }
 ```
 
-**Border-only card (for secondary content like settings/categories):**
+### KPI Card
+
+Four-across row for key metrics:
 
 ```css
-.cardBorder {
-  background: transparent;
-  border: 1px solid var(--border-muted);
-  border-radius: var(--radius-lg);
-  padding: var(--space-5);
+.kpiRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.kpiCard {
+  /* Same glass-card base */
+  padding: 22px 24px;
+  gap: 14px;
+  border-radius: 14px;
 }
 ```
 
-### Tabs
-
-Use the shared `<Tabs>` component at `web/src/components/Tabs.tsx`.
-
-```tsx
-import { Tabs } from '../components/Tabs';
-
-<Tabs
-  tabs={[{ key: 'monthly', label: 'Monthly' }, { key: 'yearly', label: 'Yearly' }]}
-  activeKey={activeTab}
-  onTabChange={setActiveTab}
-/>
+**Structure:**
+```
+.kpiCard
+  ├── .kpiTop (flex, space-between)
+  │     ├── .kpiLabel (13px/500, text-secondary)
+  │     └── .kpiIcon (36px square, 10px radius, themed bg+fg)
+  ├── .kpiValue (30px/700, letter-spacing -0.03em)
+  │     └── .kpiDecimal (18px/500, text-tertiary)
+  └── .kpiFooter (flex, gap: 8px, 12px text)
+        ├── .kpiBadge (pill: 2px 8px, 6px radius, 12px/600)
+        │     └── <ArrowUpRight/ArrowDownRight size={12}> + "4.2%"
+        └── .kpiVs ("vs last month", text-tertiary)
 ```
 
-The component applies an **overlapping underline** technique: the active tab renders a 2px bottom border via `border-bottom: 2px solid var(--color-primary)` while `margin-bottom: -1px` causes it to overlap the container's `border-bottom: 1px solid var(--border-muted)`. This produces a seamless connected underline without a visible gap between the tab indicator and the container border.
+**KPI Icon Badges** (light theme):
 
-The tab row uses `role="tablist"` / `role="tab"` / `aria-selected` for accessibility.
+| Variant | Background | Foreground |
+|---------|-----------|------------|
+| Purple | `#F0EEFF` | `--accent-7` |
+| Teal | `#E6FAF9` | `#16C8C7` |
+| Red | `#F0EEFF` | `--accent-6` |
+| Yellow | `#FDF8E8` | `#C9A030` |
+| Blue | `#EEF4FF` | `#4896FE` |
 
-### Chart Theming
+### Currency Display (Split Formatting)
 
-Use the `useChartTheme()` hook (`web/src/hooks/useChartTheme.ts`) to get resolved CSS token values for Recharts components. This ensures charts respect the active theme (dark/light) and use consistent design tokens.
+Dollar amounts use a split format with smaller decimals:
 
-**Available properties:**
+```tsx
+function splitCurrency(amount: number): { dollars: string; cents: string } {
+  const abs = Math.abs(amount);
+  const dollars = Math.floor(abs).toLocaleString('en-US');
+  const cents = (abs % 1).toFixed(2).slice(1); // ".52"
+  return { dollars: `$${dollars}`, cents };
+}
 
-| Property | Token source | Usage |
-|----------|-------------|-------|
-| `axisStroke` | `--text-tertiary` | XAxis / YAxis `tick` fill |
+// Render:
+<div className={styles.kpiValue}>
+  {balanceSplit.dollars}
+  <span className={styles.kpiDecimal}>{balanceSplit.cents}</span>
+</div>
+```
+
+### Selects (Dropdown Controls)
+
+Clean pill-button style selects:
+
+```css
+.select {
+  height: 36px;
+  padding: 0 26px 0 12px;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: var(--font-sans);
+  cursor: pointer;
+  appearance: none;
+  /* Custom chevron SVG */
+  background-image: url("data:image/svg+xml,...");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+}
+.select:hover {
+  border-color: var(--text-tertiary);
+}
+.select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--primary-a8);
+}
+```
+
+**With labels:**
+```tsx
+<span className={styles.selectLabel}>Month</span>
+<select className={styles.select}>...</select>
+```
+
+### Segmented Toggle (Pill Tabs)
+
+Used for chart view switching (6M / 1Y):
+
+```css
+.cfToggle {
+  display: flex;
+  gap: 2px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border-muted);
+  border-radius: 8px;
+  padding: 3px;
+}
+.cfToggleBtn {
+  padding: 4px 14px;
+  border: none;
+  background: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.cfToggleBtnActive {
+  background: var(--surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-sm);
+}
+```
+
+### Data Row (Transactions)
+
+Row layout for list items with icon + info + right-aligned data:
+
+```css
+.txRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--surface-sunken);
+  padding: 10px 4px;
+  margin: 0 -4px;
+  border-radius: 8px;
+  transition: background 0.15s;
+  cursor: pointer;
+}
+.txRow:hover { background: var(--surface-hover); }
+```
+
+**Icon circle:**
+```css
+.txIcon {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  /* Dynamic: background = color-mix(in srgb, [category_color] 15%, transparent) */
+  /* Dynamic: color = [category_color] */
+}
+```
+
+**Amount coloring:**
+- Expenses: `color: var(--text-primary)` (neutral, with `-` prefix)
+- Income: `color: var(--color-pos)` (green, with `+` prefix)
+
+### Category Row (Compact List)
+
+Used in category breakdowns:
+
+```css
+.catRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px;
+  margin: 0 -4px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+/* Children: */
+.catDot     /* 10px square, 3px radius — color swatch */
+.catName    /* 13px/500, text-secondary, flex: 1 */
+.catBar     /* 60px wide, 4px tall, rounded progress bar */
+.catPct     /* 11px, text-tertiary, 32px min-width, right-aligned */
+.catAmount  /* 13px/600, text-primary, 64px min-width, right-aligned */
+```
+
+### Budget Progress Bar
+
+```css
+.budgetTrack {
+  flex: 1;
+  height: 5px;
+  background: var(--surface-sunken);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.budgetFill {
+  height: 100%;
+  /* Dynamic gradient based on usage % */
+}
+```
+
+**Gradient logic:**
+- Under 85%: `linear-gradient(90deg, #16C8C7, #12B0AF)` (teal)
+- 85–99%: `linear-gradient(90deg, #F0C84D, #E0B83D)` (amber)
+- 100%+: `linear-gradient(90deg, #EF8B6E, #E07050)` (coral)
+
+### Legend Item
+
+Chart legend pattern:
+
+```css
+.legendItem {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+.legendDot {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+}
+```
+
+### Skeleton Loading
+
+Shimmer animation for loading states:
+
+```css
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg,
+    var(--border-muted) 25%,
+    var(--surface-overlay) 50%,
+    var(--border-muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 8px;
+}
+```
+
+---
+
+## Sidebar
+
+### Dimensions
+
+- **Collapsed:** 64px width, icon-only
+- **Expanded:** 240px width, icon + label
+- Background: `var(--surface-raised)` (white in light theme)
+- Border-right: `1px solid var(--border-default)`
+- Padding: `24px 8px` collapsed, `24px 16px` expanded
+
+### Structure
+
+```
+aside.sidebar
+  ├── .header
+  │     ├── .logoMark (34px square, 10px radius, primary bg, white "S")
+  │     ├── .logoText (18px/700, hidden when collapsed)
+  │     └── .toggleButton (24px circle, absolute right: -20px)
+  ├── nav.nav
+  │     ├── .navSection "Menu"
+  │     │     └── Dashboard, Transactions, Reports, Categories
+  │     └── .navSection "General"
+  │           ├── Settings
+  │           └── Logout (button, not link)
+  ├── .themeToggle (above bottom separator)
+  └── .bottomSection (below border-top)
+        └── .userRow
+              ├── .avatar (34px circle, primary tint bg, initial letter)
+              └── .userInfo (name + email, hidden when collapsed)
+```
+
+### Nav Item
+
+```css
+.navLink {
+  height: 38px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  /* Collapsed: centered icon only */
+  /* Expanded: flex-start, gap: 10px, padding: 9px 12px */
+}
+.active {
+  color: var(--color-primary);
+  background-color: var(--primary-a15);
+}
+```
+
+### Section Labels
+
+```css
+.navSectionLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 0 12px;
+  margin-bottom: 8px;
+  /* Hidden when collapsed */
+}
+```
+
+### Icons
+
+- Library: Lucide React
+- Size: **20px** in sidebar and dashboard
+- Stroke width: **1.5** (not 2)
+- Specific icons:
+  - Dashboard: `LayoutGrid`
+  - Transactions: `ArrowLeftRight`
+  - Reports: `ChartNoAxesColumnIncreasing`
+  - Categories: `Tag`
+  - Settings: `Settings`
+  - Logout: `LogOut`
+  - Theme: `Moon` / `Sun` / `Monitor`
+
+---
+
+## Chart Theming
+
+### useChartTheme() Hook
+
+Returns resolved CSS token values for Recharts:
+
+| Property | Token | Usage |
+|----------|-------|-------|
+| `axisStroke` | `--text-tertiary` | Axis tick text fill |
 | `gridStroke` | `--border-muted` | CartesianGrid stroke |
 | `tooltipBg` | `--surface-overlay` | Tooltip background |
 | `tooltipBorder` | `--border-default` | Tooltip border |
-| `tooltipText` | `--text-primary` | Tooltip text color |
-| `hoverBg` | `--primary-a8` | Active bar / dot hover fill |
-| `incomeColor` | `--color-primary` | Income / primary series color |
-| `expenseColor` | `--cat-3` | Expense accent color |
-| `categoryColors` | 12-slot cat-* palette | Multi-series category charts |
+| `tooltipText` | `--text-primary` | Tooltip text |
+| `hoverBg` | `--primary-a8` | Bar hover cursor fill |
+| `incomeColor` | `--color-primary` | Income series |
+| `expenseColor` | `--cat-3` | Expense accent |
+| `categoryColors` | `cat-*` palette | Multi-series charts |
 
-### Chart Pattern System
+### useChartPatterns() Hook
 
-Use `useChartPatterns()` hook (`web/src/hooks/useChartPatterns.tsx`) for SVG pattern fills that visually differentiate chart series beyond color alone.
+SVG pattern fills for visual differentiation beyond color:
 
-**Pattern types:** `solid`, `stripe` (45° diagonal lines), `stripe-reverse` (-45°), `dots`
+- **Pattern types:** `solid`, `stripe` (45°), `stripe-reverse` (-45°), `dots`
+- **Cash flow:** Income = solid brand color; Expense = striped pattern of same color
+- **Categories:** Cycle through `[solid, stripe, solid, stripe-reverse, solid, dots]`
+- Each pattern includes a `legendStyle` CSS object for matching legend dots
 
-**Cash flow bars:** Income uses solid brand color, expenses use a striped pattern of the same color with a stroke border. This differentiates them without needing a second color.
+### Chart Configuration
 
-**Category donut segments:** Alternate between solid and patterned fills using the `PATTERN_CYCLE` array: `[solid, stripe, solid, stripe-reverse, solid, dots]`.
-
+**Bar chart defaults:**
 ```tsx
-import { useChartPatterns, ChartPatternDefs } from '../hooks/useChartPatterns';
-
-const patterns = useChartPatterns();
-
-<BarChart data={chartData}>
-  <ChartPatternDefs patterns={patterns.cashFlowDefs} />
-  <Bar dataKey="income" fill={patterns.cashFlow.income.fill} />
-  <Bar dataKey="expense" fill={patterns.cashFlow.expense.fill}
-       stroke={patterns.cashFlow.expense.stroke}
-       strokeWidth={patterns.cashFlow.expense.strokeWidth} />
+<BarChart margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
+  <CartesianGrid strokeDasharray="3 3" vertical={false} />
+  <XAxis tickLine={false} dy={4} fontSize={12} />
+  <YAxis tickLine={false} axisLine={false} width={48} fontSize={12} />
+  <Bar radius={[6, 6, 6, 6]} barSize={36} />
 </BarChart>
 ```
 
-**Legend dots:** Each `PatternConfig` includes a `legendStyle` CSS object that produces a matching CSS background (using `repeating-linear-gradient` or `radial-gradient`) for 10px rounded-square legend dots.
-
-### ChartTooltip
-
-`<ChartTooltip>` component (`web/src/components/ChartTooltip.tsx`) is a pre-built Recharts custom tooltip with pattern support.
-
-- Accepts `patternStyles` prop: a `Record<string, CSSProperties>` mapping SVG fill values (e.g. `"url(#cf-stripe)"`) to CSS legend-dot styles
-- Dots are 10px rounded squares (borderRadius 3px) matching the chart legend style
-- Build the map using `patterns.buildStyleMap([...])` from the hook
-
+**Half-gauge (donut):**
 ```tsx
-const cfStyles = patterns.buildStyleMap([patterns.cashFlow.income, patterns.cashFlow.expense]);
-<Tooltip content={<ChartTooltip patternStyles={cfStyles} />} />
+<Pie
+  startAngle={180} endAngle={0}
+  cx="50%" cy="95%"
+  innerRadius={130} outerRadius={175}
+  cornerRadius={4} paddingAngle={1.5}
+  stroke="none"
+/>
 ```
-
-### Buttons
-
-- Height: 40px, border-radius: `--radius-full` (pill shape)
-- **Primary:** `--color-primary` background, `--text-inverse` text
-- **Outlined:** transparent, `--color-primary` text, `--border-default` border
-- **Ghost:** transparent, `--color-primary` text, no border
-- **Danger:** `--color-expense` background, `--text-inverse` text
-- Disabled: `opacity: 0.38`, `pointer-events: none`
-
-### Inputs
-
-- Height: 40px, radius: `--radius-sm`
-- Background: `--surface-sunken`
-- Focus: `--color-primary` border + `0 0 0 2px var(--primary-a50)` ring
-
-### Chips/Badges
-
-- Height: 28px, radius: `--radius-md`
-- Category badges: 15% tinted background of category color
-
-### Data Tables
-
-- Header: `--type-label-lg`, `--text-secondary`
-- Rows: 44px height, `--type-body-md`
-- Row hover: `--primary-a8`
-- Amounts: right-aligned, `tabular-nums`, expense in `--color-expense`, income in `--color-income`
 
 ---
 
 ## Dark/Light Theme
 
-### How It Works
+### Implementation
 
-1. **FOUC prevention:** An inline `<script>` in `index.html` reads `localStorage` and sets `data-theme` before CSS loads
-2. **ThemeProvider:** React context at `web/src/hooks/useTheme.tsx` manages state
-3. **CSS:** Semantic tokens auto-switch via `[data-theme="light"]` selector in `tokens.css`
+1. **FOUC prevention:** Inline `<script>` in `index.html` reads localStorage and sets `data-theme` before CSS loads
+2. **ThemeProvider:** React context at `web/src/hooks/useTheme.tsx`
+3. **CSS:** Semantic tokens auto-switch via `[data-theme="light"]` in `tokens.css`
 
 ### Three Modes
 
 | Mode | Behavior | localStorage |
 |------|----------|-------------|
 | Dark | Graphite Indigo dark palette | `"dark"` |
-| Light | Cool off-white with deeper accents | `"light"` |
+| Light | Cool off-white + crisp white cards | `"light"` |
 | System | Follows OS preference | `"system"` |
 
 ### Using in Components
 
 ```tsx
-import { useTheme } from '../hooks/useTheme';
-
-function MyComponent() {
-  const { theme, resolvedTheme, setTheme } = useTheme();
-  // theme: 'dark' | 'light' | 'system'
-  // resolvedTheme: 'dark' | 'light' (actual applied theme)
-}
+const { theme, resolvedTheme, setTheme } = useTheme();
+// theme: 'dark' | 'light' | 'system'
+// resolvedTheme: 'dark' | 'light' (actual applied)
 ```
 
-Theme toggle is in the sidebar — cycles dark -> light -> system.
+---
+
+## Icons
+
+**Library:** Lucide React (tree-shakeable, outline style only)
+
+### Sizes
+
+| Context | Size | Stroke Width |
+|---------|------|-------------|
+| Sidebar navigation | 20px | 1.5 |
+| KPI icon badges | 18px | 1.5 |
+| Buttons, chips | 18px | 1.5 |
+| Badge arrows (ArrowUpRight etc.) | 12px | 3 |
+| Card link arrows | 14px | default |
+| Sidebar toggle chevron | 14px | default |
+
+### Rules
+
+- Outline style only (no filled icons)
+- Color: inherit from parent
+- Decorative icons: `aria-hidden="true"`
+- Interactive icon-only buttons: `aria-label="description"`
 
 ---
 
@@ -406,63 +837,80 @@ Theme toggle is in the sidebar — cycles dark -> light -> system.
 
 Configuration: `web/.stylelintrc.json`
 
-### What's Enforced
-
 | Rule | Effect |
 |------|--------|
 | `color-no-hex` | No hex colors outside `tokens.css` |
-| `color-named: never` | No named colors (`red`, `blue`) |
+| `color-named: never` | No named colors |
 | `function-disallowed-list` | No `rgb()`, `rgba()`, `hsl()`, `hsla()` |
-| `font-weight-notation: numeric` | Must use `400` not `normal`, `600` not `bold` |
-| `text-transform: uppercase` banned | No uppercase transforms |
-| `font-weight < 400` banned | No thin/light weights |
-
-### Fixing Violations
-
-If stylelint flags your CSS, replace raw values with tokens:
-
-```css
-/* Bad */
-.error { color: #e94560; background: rgba(233, 69, 96, 0.1); }
-
-/* Good */
-.error { color: var(--color-error); background-color: var(--expense-a15); }
-```
-
-### Running
+| `font-weight-notation: numeric` | Must use numbers, not words |
 
 ```bash
 cd web
-npm run lint:css                           # all CSS files
+npm run lint:css                           # all files
 npx stylelint src/styles/MyFile.module.css # single file
 ```
 
 ---
 
-## Icons
+## Adopting the Style on New Pages
 
-**Library:** Lucide React (tree-shakeable)
+When building or updating a page, follow this checklist:
 
-```tsx
-import { LayoutDashboard } from 'lucide-react';
+### 1. Page Wrapper
 
-<LayoutDashboard size={24} strokeWidth={2} />
+```css
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
 ```
 
-### Sizes
+### 2. Page Header
 
-| Context | Size |
-|---------|------|
-| Sidebar navigation | 24px |
-| Buttons, chips | 18px |
-| Table actions | 16px |
+```css
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 32px;
+}
+.headerTitle {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-primary);
+  letter-spacing: -0.03em;
+}
+.subtitle {
+  font-size: 14px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+```
 
-### Rules
+### 3. Cards
 
-- Outline style only (no filled icons)
-- Color: inherit from parent (use text color tokens)
-- Decorative icons: `aria-hidden="true"`
-- Interactive icon-only buttons: `aria-label="description"`
+Use glass card base. All cards get `14px` border-radius and `24px` padding. Add card header with title/subtitle/link pattern.
+
+### 4. Data Lists
+
+Use the transaction row pattern: `gap: 12px`, `border-bottom: 1px solid var(--surface-sunken)`, `padding: 10px 4px`, hover to `var(--surface-hover)`.
+
+### 5. Selects & Controls
+
+All selects: `height: 36px`, `border-radius: 8px`, custom SVG chevron, no box-shadow on default state, focus ring using `var(--primary-a8)`.
+
+### 6. Loading States
+
+Use skeleton shimmer pattern for every card.
+
+### 7. Error States
+
+Centered error message with retry button (`10px radius, primary bg, white text`).
+
+### 8. Empty States
+
+Centered muted text: `padding: 24px; color: var(--text-secondary); text-align: center`.
 
 ---
 
@@ -473,17 +921,22 @@ import { LayoutDashboard } from 'lucide-react';
 - Use semantic tokens in all component CSS
 - Use `color-mix()` for semi-transparent variants
 - Use `tabular-nums` on number/currency columns
-- Use `--ease-decelerate` for enter, `--ease-accelerate` for exit
-- Test color pairs for WCAG AA contrast
-- Run `npm run lint:css` before committing CSS changes
+- Use `font-variant-numeric: tabular-nums` for financial data
+- Use 14px border-radius for cards
+- Use 12px gap for grids and rows
+- Use 20px icons at 1.5 stroke-width
+- Use the glass-card pattern for dashboard-style cards
+- Use `transition: background 0.15s` for row hover effects
+- Test both dark and light themes
 
 ### Don't
 
 - Use raw hex, rgb, or hsl in `.module.css` files
 - Use font weights below 400
-- Use `text-transform: uppercase`
-- Use pure black (`#000`) or pure white (`#FFF`) for backgrounds
-- Use `box-shadow` as the primary depth signal in dark mode
+- Use `text-transform: uppercase` (except sidebar section labels)
+- Use pure black or pure white for backgrounds
+- Use shadows as the primary depth signal in dark mode
 - Add animations longer than 600ms
-- Use emoji for icons (use Lucide)
-- Reference primitive tokens (`--gray-700`) in component CSS
+- Use 24px/strokeWidth:2 for icons (old style — use 20px/1.5)
+- Mix glass-card and border-only card styles on the same page
+- Skip loading skeletons — every data section needs one

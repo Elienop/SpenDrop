@@ -83,6 +83,31 @@ vi.mock('../components/ChartTooltip', () => ({
   ChartTooltip: () => <div />,
 }));
 
+vi.mock('../hooks/useAuth', () => ({
+  useAuth: () => ({
+    user: { id: 1, username: 'elie', display_name: 'Elie' },
+    isAuthenticated: true,
+    loading: false,
+    login: vi.fn(),
+    register: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
+
+vi.mock('../hooks/useChartPatterns', () => ({
+  useChartPatterns: () => ({
+    cashFlow: {
+      income: { fill: '#5347CE', legendStyle: {} },
+      expense: { fill: 'url(#stripe)', stroke: '#5347CE', strokeWidth: 1.5, legendStyle: {} },
+    },
+    getCategoryPattern: () => ({ fill: '#5347CE', legendStyle: {} }),
+    getCategoryDefs: () => [],
+    buildStyleMap: () => ({}),
+    ChartPatternDefs: () => null,
+  }),
+  ChartPatternDefs: () => null,
+}));
+
 import { Dashboard } from './Dashboard';
 
 describe('Dashboard', () => {
@@ -90,9 +115,9 @@ describe('Dashboard', () => {
     vi.clearAllMocks();
   });
 
-  test('renders Dashboard heading', () => {
+  test('renders welcome heading with user name', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
-    expect(screen.getByRole('heading', { level: 1, name: /dashboard/i })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Welcome back, Elie/);
   });
 
   test('renders month/year selectors', () => {
@@ -101,11 +126,13 @@ describe('Dashboard', () => {
     expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
   });
 
-  test('renders hero row with Total Balance and Savings Goal', async () => {
+  test('renders KPI cards with Total Balance', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
       expect(screen.getByText('Total Balance')).toBeInTheDocument();
-      expect(screen.getByText('Savings Goal')).toBeInTheDocument();
+      expect(screen.getAllByText('Income').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('Expenses').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText('Savings Rate')).toBeInTheDocument();
     });
   });
 
@@ -116,10 +143,10 @@ describe('Dashboard', () => {
     });
   });
 
-  test('renders Categories and Recent Transactions sections', async () => {
+  test('renders Spending and Recent Transactions sections', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
-      expect(screen.getByText('Categories')).toBeInTheDocument();
+      expect(screen.getByText('Spending by Category')).toBeInTheDocument();
       expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
     });
   });

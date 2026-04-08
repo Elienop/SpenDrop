@@ -232,13 +232,20 @@
 
   --backdrop: color-mix(in srgb, var(--neutral-1) 40%, transparent);
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.06);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.08);
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.12);
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 6%);
+  --shadow-lg: 0 4px 16px rgb(0 0 0 / 8%);
+  --shadow-xl: 0 16px 48px rgb(0 0 0 / 12%);
 
-  --glass-bg: rgba(255, 255, 255, 0.85);
-  --glass-border: rgba(255, 255, 255, 0.4);
+  --glass-bg: rgb(255 255 255 / 85%);
+  --glass-border: rgb(255 255 255 / 40%);
+
+  /* Featured card overlays (white at various opacities) */
+  --featured-text: #FFFFFF;
+  --featured-label: rgb(255 255 255 / 70%);
+  --featured-decimal: rgb(255 255 255 / 50%);
+  --featured-vs: rgb(255 255 255 / 60%);
+  --featured-overlay: rgb(255 255 255 / 15%);
 
   /* KPI icon badge backgrounds (light theme only) */
   --kpi-icon-purple-bg: #F0EEFF;
