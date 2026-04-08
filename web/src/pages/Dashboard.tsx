@@ -522,7 +522,7 @@ export function Dashboard() {
                   </Pie>
                   <Tooltip
                     content={<ChartTooltip patternStyles={catPatternStyles} />}
-                    offset={10}
+                    position={{ x: 0, y: -10 }}
                     isAnimationActive={false}
                   />
                 </PieChart>
