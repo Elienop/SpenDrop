@@ -144,7 +144,7 @@ export function FilterPanel({
             <div className={styles.multiSelect}>
               {categories.map((cat) => {
                 const ids = filters.categoryIds
-                  ? filters.categoryIds.split(',')
+                  ? filters.categoryIds.split(',').filter(Boolean)
                   : [];
                 const selected = ids.includes(String(cat.id));
                 return (
