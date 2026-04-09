@@ -8,7 +8,7 @@ import type { TransactionFilters } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
 import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
-import { TransactionEntry } from '../components/TransactionEntry';
+import { TransactionEntryRow } from '../components/TransactionEntryRow';
 import { TransactionRow } from '../components/TransactionRow';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -286,15 +286,15 @@ export function Transactions() {
       </Sheet>
 
       {/*
-        The old TransactionEntry is still wired in via a Tailwind `hidden`
-        toggle so that its internal state (date, amount, description, tags) is
-        preserved across open/close. Commit 9 replaces this component with an
-        inline TransactionEntryRow that lives inside the table as the top row.
+        TransactionEntryRow is shown/hidden via Tailwind `hidden` so that its
+        internal form state (date, amount, description, tags) is preserved
+        across open/close.
       */}
       <div className={showEntry ? undefined : 'hidden'}>
-        <TransactionEntry
+        <TransactionEntryRow
           categories={categories}
           onSubmit={createTransaction}
+          onDelete={deleteTransaction}
         />
       </div>
 

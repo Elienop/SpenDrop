@@ -6,6 +6,7 @@ import { Transactions } from '../pages/Transactions';
 import { Categories } from '../pages/Categories';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
+import { Toaster } from '@/components/ui/sonner';
 
 export function AppShell() {
   const [sidebarExpanded, setSidebarExpanded] = useState(
@@ -40,6 +41,7 @@ export function AppShell() {
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>
+      <Toaster />
     </div>
   );
 }
