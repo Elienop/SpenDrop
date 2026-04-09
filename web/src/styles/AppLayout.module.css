@@ -1,0 +1,15 @@
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.main {
+  flex: 1;
+  padding: var(--space-8) var(--space-10) var(--space-8) calc(64px + var(--space-10));
+  max-width: calc(1400px + 64px);
+}
+
+.mainExpanded {
+  padding-left: calc(240px + var(--space-10));
+  max-width: calc(1400px + 240px);
+}

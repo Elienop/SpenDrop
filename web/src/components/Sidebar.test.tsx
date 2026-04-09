@@ -8,10 +8,17 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }));
 
+// Mock useTheme
+vi.mock('../hooks/useTheme', () => ({
+  useTheme: vi.fn(),
+}));
+
 import { useAuth } from '../hooks/useAuth';
+import { useTheme } from '../hooks/useTheme';
 import { Sidebar } from './Sidebar';
 
 const mockedUseAuth = vi.mocked(useAuth);
+const mockedUseTheme = vi.mocked(useTheme);
 
 const mockUser = {
   id: 1,
@@ -31,8 +38,10 @@ function renderSidebar(currentPath = '/') {
 
 describe('Sidebar', () => {
   const mockLogout = vi.fn();
+  const mockSetTheme = vi.fn();
 
   beforeEach(() => {
+    localStorage.clear();
     vi.clearAllMocks();
     mockedUseAuth.mockReturnValue({
       user: mockUser,
@@ -40,6 +49,11 @@ describe('Sidebar', () => {
       login: vi.fn(),
       register: vi.fn(),
       logout: mockLogout,
+    });
+    mockedUseTheme.mockReturnValue({
+      theme: 'dark',
+      resolvedTheme: 'dark',
+      setTheme: mockSetTheme,
     });
   });
 
@@ -81,5 +95,63 @@ describe('Sidebar', () => {
   test('has semantic nav element', () => {
     renderSidebar();
     expect(screen.getByRole('navigation')).toBeInTheDocument();
+  });
+
+  test('has theme toggle button', () => {
+    renderSidebar();
+    expect(screen.getByRole('button', { name: /theme/i })).toBeInTheDocument();
+  });
+
+  test('cycles theme on toggle click', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+
+    const themeButton = screen.getByRole('button', { name: /theme/i });
+    await user.click(themeButton);
+
+    expect(mockSetTheme).toHaveBeenCalledWith('light');
+  });
+
+  test('displays user avatar initial', () => {
+    renderSidebar();
+    expect(screen.getByText('A')).toBeInTheDocument();
+  });
+
+  test('renders collapsed by default', () => {
+    renderSidebar();
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).not.toContain('expanded');
+  });
+
+  test('does not expand on mouse hover', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    const sidebar = screen.getByRole('complementary');
+    await user.hover(sidebar);
+    expect(sidebar.className).not.toContain('expanded');
+  });
+
+  test('expands when toggle button is clicked', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    const toggle = screen.getByLabelText('Toggle sidebar');
+    await user.click(toggle);
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).toContain('expanded');
+  });
+
+  test('persists expanded state to localStorage', async () => {
+    const user = userEvent.setup();
+    renderSidebar();
+    const toggle = screen.getByLabelText('Toggle sidebar');
+    await user.click(toggle);
+    expect(localStorage.getItem('spendrop-sidebar')).toBe('true');
+  });
+
+  test('reads initial state from localStorage', () => {
+    localStorage.setItem('spendrop-sidebar', 'true');
+    renderSidebar();
+    const sidebar = screen.getByRole('complementary');
+    expect(sidebar.className).toContain('expanded');
   });
 });

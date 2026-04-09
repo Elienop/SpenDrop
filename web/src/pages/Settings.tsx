@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type {
@@ -12,6 +13,7 @@ import type {
   User,
 } from '../api/types';
 import styles from '../styles/Settings.module.css';
+import { Tabs } from '../components/Tabs';
 
 type SettingsTab = 'general' | 'currencies' | 'savings' | 'users' | 'data';
 
@@ -948,7 +950,11 @@ function DataSection() {
 export function Settings() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
-  const [activeTab, setActiveTab] = useState<SettingsTab>('general');
+  const [searchParams] = useSearchParams();
+  const tabParam = searchParams.get('tab');
+  const validTabs: SettingsTab[] = ['general', 'currencies', 'savings', 'users', 'data'];
+  const initialTab = validTabs.includes(tabParam as SettingsTab) ? (tabParam as SettingsTab) : 'general';
+  const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   const tabs: { key: SettingsTab; label: string; adminOnly?: boolean }[] = [
     { key: 'general', label: 'General' },
@@ -962,24 +968,11 @@ export function Settings() {
     <div className={styles.page}>
       <h1>Settings</h1>
 
-      <div className={styles.tabs} role="tablist">
-        {tabs
-          .filter((t) => !t.adminOnly || isAdmin)
-          .map((t) => (
-            <button
-              key={t.key}
-              type="button"
-              role="tab"
-              aria-selected={activeTab === t.key}
-              className={`${styles.tab} ${
-                activeTab === t.key ? styles.tabActive : ''
-              }`}
-              onClick={() => setActiveTab(t.key)}
-            >
-              {t.label}
-            </button>
-          ))}
-      </div>
+      <Tabs
+        tabs={tabs.filter(t => !t.adminOnly || isAdmin)}
+        activeKey={activeTab}
+        onTabChange={(key) => setActiveTab(key as SettingsTab)}
+      />
 
       {activeTab === 'general' && <GeneralSection />}
       {activeTab === 'currencies' && <CurrenciesSection />}

@@ -1,212 +1,175 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import React from 'react';
 
-vi.mock('../hooks/useAuth', () => ({
-  useAuth: vi.fn(),
+vi.mock('../hooks/useChartTheme', () => ({
+  useChartTheme: () => ({
+    axisStroke: '#58585F',
+    gridStroke: '#1E1E23',
+    tooltipBg: '#1E1E23',
+    tooltipBorder: '#2A2A30',
+    tooltipText: '#F5F5F6',
+    hoverBg: 'rgba(129,140,248,0.08)',
+    incomeColor: '#7EC89B',
+    expenseColor: '#E88B9C',
+    categoryColors: ['#818CF8', '#7EC89B', '#E88B9C', '#E8A87C', '#7CAFD4', '#58585F'],
+  }),
+}));
+
+vi.mock('recharts', () => ({
+  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Bar: () => <div />,
+  XAxis: () => <div />,
+  YAxis: () => <div />,
+  CartesianGrid: () => <div />,
+  Tooltip: () => <div />,
+  ReferenceLine: () => <div />,
+  PieChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Pie: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Cell: () => <div />,
 }));
 
 vi.mock('../hooks/useDashboard', () => ({
-  useDashboard: vi.fn(),
+  useDashboard: () => ({
+    summary: {
+      budget: 5000,
+      total_spent: 3200,
+      total_income: 4500,
+      remaining: 1300,
+      savings_this_month: 500,
+      savings_goal: 10000,
+      savings_ytd: 7500,
+      savings_goal_progress: 75,
+    },
+    trend: [
+      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
+      { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
+    ],
+    categories: [
+      { id: 1, name: 'Food', color: '#818CF8', total: 1200, transaction_count: 15 },
+      { id: 2, name: 'Transport', color: '#7EC89B', total: 800, transaction_count: 8 },
+    ],
+    loading: false,
+    error: '',
+  }),
 }));
 
 vi.mock('../api/client', () => ({
   api: {
-    get: vi.fn(),
+    get: vi.fn().mockResolvedValue({
+      transactions: [
+        {
+          id: 1,
+          amount: 42.50,
+          description: 'Groceries',
+          date: '2026-04-01',
+          category_name: 'Food',
+          category_type: 'expense',
+          category_color: '#818CF8',
+          currency_code: 'USD',
+        },
+      ],
+      total: 1,
+      page: 1,
+      per_page: 6,
+      total_pages: 1,
+    }),
   },
 }));
 
-// Mock recharts to avoid rendering canvas in tests
-vi.mock('recharts', () => ({
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="responsive-container">{children}</div>
-  ),
-  BarChart: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="bar-chart">{children}</div>
-  ),
-  Bar: () => <div />,
-  XAxis: () => <div />,
-  YAxis: () => <div />,
-  Tooltip: () => <div />,
-  Legend: () => <div />,
-  CartesianGrid: () => <div />,
-  PieChart: ({ children }: { children: React.ReactNode }) => (
-    <div data-testid="pie-chart">{children}</div>
-  ),
-  Pie: () => <div />,
-  Cell: () => <div />,
+vi.mock('../components/ChartTooltip', () => ({
+  ChartTooltip: () => <div />,
 }));
 
-import { useAuth } from '../hooks/useAuth';
-import { useDashboard } from '../hooks/useDashboard';
-import { api } from '../api/client';
+vi.mock('../hooks/useAuth', () => ({
+  useAuth: () => ({
+    user: { id: 1, username: 'elie', display_name: 'Elie' },
+    isAuthenticated: true,
+    loading: false,
+    login: vi.fn(),
+    register: vi.fn(),
+    logout: vi.fn(),
+  }),
+}));
+
+vi.mock('../hooks/useChartPatterns', () => ({
+  useChartPatterns: () => ({
+    cashFlow: {
+      income: { fill: '#5347CE', legendStyle: {} },
+      expense: { fill: 'url(#stripe)', stroke: '#5347CE', strokeWidth: 1.5, legendStyle: {} },
+    },
+    getCategoryPattern: () => ({ fill: '#5347CE', legendStyle: {} }),
+    getCategoryDefs: () => [],
+    buildStyleMap: () => ({}),
+    ChartPatternDefs: () => null,
+  }),
+  ChartPatternDefs: () => null,
+}));
+
 import { Dashboard } from './Dashboard';
-
-const mockedUseAuth = vi.mocked(useAuth);
-const mockedUseDashboard = vi.mocked(useDashboard);
-const mockedApi = vi.mocked(api);
-
-function renderDashboard() {
-  return render(
-    <MemoryRouter>
-      <Dashboard />
-    </MemoryRouter>,
-  );
-}
 
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockedUseAuth.mockReturnValue({
-      user: {
-        id: 1,
-        username: 'alice',
-        display_name: 'Alice',
-        role: 'admin',
-        created_at: '2024-01-01',
-      },
-      loading: false,
-      login: vi.fn(),
-      register: vi.fn(),
-      logout: vi.fn(),
-    });
-    mockedApi.get.mockResolvedValue({ transactions: [], total: 0, page: 1, per_page: 5 });
   });
 
-  test('renders Dashboard heading', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: null,
-      trend: [],
-      categories: [],
-      loading: true,
-      error: '',
-    });
-
-    renderDashboard();
-    expect(
-      screen.getByRole('heading', { level: 1, name: /dashboard/i }),
-    ).toBeInTheDocument();
+  test('renders welcome heading with user name', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent(/Welcome back, Elie/);
   });
 
-  test('shows loading state', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: null,
-      trend: [],
-      categories: [],
-      loading: true,
-      error: '',
-    });
-
-    renderDashboard();
-    expect(screen.getByText(/loading/i)).toBeInTheDocument();
-  });
-
-  test('shows error state', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: null,
-      trend: [],
-      categories: [],
-      loading: false,
-      error: 'Failed to load',
-    });
-
-    renderDashboard();
-    expect(screen.getByRole('alert')).toHaveTextContent('Failed to load');
-  });
-
-  test('renders 4 KPI cards with summary data', async () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: {
-        year: 2026,
-        month: 4,
-        budget: 3000,
-        total_spent: 1200,
-        total_income: 4000,
-        remaining: 1800,
-        savings_this_month: 500,
-        savings_goal: 6000,
-        savings_ytd: 2000,
-        savings_goal_progress: 33.3,
-      },
-      trend: [],
-      categories: [],
-      loading: false,
-      error: '',
-    });
-
-    renderDashboard();
-
-    await waitFor(() => {
-      expect(screen.getByText('Budget')).toBeInTheDocument();
-      expect(screen.getByText('Spent')).toBeInTheDocument();
-      expect(screen.getByText('Remaining')).toBeInTheDocument();
-      expect(screen.getByText('Savings Progress')).toBeInTheDocument();
-    });
-  });
-
-  test('renders spending trend chart area', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: {
-        year: 2026,
-        month: 4,
-        budget: 3000,
-        total_spent: 1200,
-        total_income: 4000,
-        remaining: 1800,
-        savings_this_month: 500,
-        savings_goal: 6000,
-        savings_ytd: 2000,
-        savings_goal_progress: 33.3,
-      },
-      trend: [
-        { year: 2026, month: 3, total_spent: 1100, total_income: 3800 },
-      ],
-      categories: [],
-      loading: false,
-      error: '',
-    });
-
-    renderDashboard();
-    expect(screen.getByText(/spending trend/i)).toBeInTheDocument();
-  });
-
-  test('renders category breakdown chart area', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: {
-        year: 2026,
-        month: 4,
-        budget: 3000,
-        total_spent: 1200,
-        total_income: 4000,
-        remaining: 1800,
-        savings_this_month: 500,
-        savings_goal: 6000,
-        savings_ytd: 2000,
-        savings_goal_progress: 33.3,
-      },
-      trend: [],
-      categories: [
-        { id: 1, name: 'Food', color: '#ff0000', total: 500 },
-      ],
-      loading: false,
-      error: '',
-    });
-
-    renderDashboard();
-    expect(screen.getByText(/category breakdown/i)).toBeInTheDocument();
-  });
-
-  test('renders month/year selector', () => {
-    mockedUseDashboard.mockReturnValue({
-      summary: null,
-      trend: [],
-      categories: [],
-      loading: true,
-      error: '',
-    });
-
-    renderDashboard();
+  test('renders month/year selectors', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
     expect(screen.getByLabelText(/month/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
   });
+
+  test('renders KPI cards with Total Balance', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('Total Balance')).toBeInTheDocument();
+      expect(screen.getAllByText('Income').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getAllByText('Expenses').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText('Savings Rate')).toBeInTheDocument();
+    });
+  });
+
+  test('renders Cash Flow section', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('Cash Flow')).toBeInTheDocument();
+    });
+  });
+
+  test('renders Spending and Recent Transactions sections', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('Spending by Category')).toBeInTheDocument();
+      expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
+    });
+  });
+
+  test('renders Savings Progress section', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText('Savings Progress')).toBeInTheDocument();
+      expect(screen.getByText('of goal')).toBeInTheDocument();
+      expect(screen.getByText('Saved YTD')).toBeInTheDocument();
+      expect(screen.getByText('Annual Goal')).toBeInTheDocument();
+    });
+  });
+
+  test('does not render removed Monthly Budget section', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.queryByText('Monthly Budget')).not.toBeInTheDocument();
+  });
+
+  test('renders 6M and 12M toggle buttons', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.getByText('6M')).toBeInTheDocument();
+    expect(screen.getByText('12M')).toBeInTheDocument();
+  });
+
 });

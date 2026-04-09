@@ -1,43 +1,5 @@
-/* SpenDrop Global Styles — Dark Theme */
-
-:root {
-  /* Colors — Backgrounds */
-  --bg-primary: #1a1a2e;
-  --bg-card: #16213e;
-  --bg-surface: #0a0a1a;
-
-  /* Colors — Accent */
-  --color-primary: #4ecca3;
-  --color-danger: #e94560;
-  --color-warning: #f9a826;
-  --color-info: #7b68ee;
-
-  /* Colors — Text */
-  --color-text: #e0e0e0;
-  --color-text-secondary: #888888;
-
-  /* Border */
-  --border-color: #2a2a4a;
-
-  /* Radius */
-  --radius-sm: 4px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-
-  /* Spacing */
-  --space-xs: 4px;
-  --space-sm: 8px;
-  --space-md: 16px;
-  --space-lg: 24px;
-  --space-xl: 32px;
-
-  /* Transitions */
-  --transition: 0.2s ease;
-
-  /* Typography */
-  --font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    sans-serif;
-}
+/* SpenDrop Global Styles */
+@import url('./tokens.css');
 
 /* CSS Reset */
 *,
@@ -56,9 +18,10 @@ html {
 }
 
 body {
-  font-family: var(--font-family);
-  background-color: var(--bg-primary);
-  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+  background-color: var(--surface-base);
+  color: var(--text-primary);
   line-height: 1.5;
   min-height: 100vh;
 }
@@ -67,32 +30,32 @@ body {
   min-height: 100vh;
 }
 
-h1,
-h2,
-h3,
-h4,
-h5,
-h6 {
+h1, h2, h3, h4, h5, h6 {
   line-height: 1.2;
-  font-weight: 600;
 }
 
 h1 {
-  font-size: 1.75rem;
+  font-size: var(--type-heading-lg-size);
+  font-weight: var(--type-heading-lg-weight);
+  line-height: var(--type-heading-lg-line-height);
 }
 
 h2 {
-  font-size: 1.375rem;
+  font-size: var(--type-heading-md-size);
+  font-weight: var(--type-heading-md-weight);
+  line-height: var(--type-heading-md-line-height);
 }
 
 h3 {
-  font-size: 1.125rem;
+  font-size: var(--type-heading-sm-size);
+  font-weight: var(--type-heading-sm-weight);
+  line-height: var(--type-heading-sm-line-height);
 }
 
 a {
   color: var(--color-primary);
   text-decoration: none;
-  transition: opacity var(--transition);
+  transition: opacity var(--duration-fast) var(--ease-standard);
 }
 
 a:hover {
@@ -114,11 +77,11 @@ textarea {
   font-family: inherit;
   font-size: inherit;
   color: inherit;
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  padding: var(--space-sm) var(--space-md);
-  transition: border-color var(--transition);
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--duration-fast) var(--ease-standard);
 }
 
 input:focus,
@@ -126,10 +89,10 @@ select:focus,
 textarea:focus {
   outline: none;
   border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--primary-a50);
 }
 
-ul,
-ol {
+ul, ol {
   list-style: none;
 }
 
@@ -138,20 +101,20 @@ img {
   display: block;
 }
 
-/* Utility — Scrollbar (Webkit) */
+/* Scrollbar (Webkit) */
 ::-webkit-scrollbar {
   width: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-surface);
+  background: var(--surface-sunken);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-color);
+  background: var(--border-default);
   border-radius: var(--radius-sm);
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--color-text-secondary);
+  background: var(--text-secondary);
 }

@@ -21,7 +21,7 @@ function CategoryEditForm({
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initial?.name ?? '');
-  const [color, setColor] = useState(initial?.color ?? '#4ecca3');
+  const [color, setColor] = useState(initial?.color ?? '#5347CE');
   const [icon, setIcon] = useState(initial?.icon ?? '');
 
   function handleSubmit(e: FormEvent) {

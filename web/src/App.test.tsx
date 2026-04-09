@@ -10,6 +10,15 @@ vi.mock('./hooks/useAuth', () => ({
   ),
 }));
 
+// Mock useTheme (Sidebar uses it)
+vi.mock('./hooks/useTheme', () => ({
+  useTheme: vi.fn().mockReturnValue({
+    theme: 'dark',
+    resolvedTheme: 'dark',
+    setTheme: vi.fn(),
+  }),
+}));
+
 // Mock the API client (real pages call api.get, etc.)
 vi.mock('./api/client', () => ({
   api: {
@@ -19,6 +28,61 @@ vi.mock('./api/client', () => ({
     patch: vi.fn(),
     del: vi.fn(),
   },
+}));
+
+// Mock useDashboard so Dashboard renders content instead of loading skeleton
+vi.mock('./hooks/useDashboard', () => ({
+  useDashboard: () => ({
+    summary: {
+      budget: 5000,
+      total_spent: 3200,
+      total_income: 4500,
+      remaining: 1300,
+      savings_this_month: 500,
+      savings_goal: 10000,
+      savings_ytd: 7500,
+      savings_goal_progress: 75,
+    },
+    trend: [],
+    categories: [],
+    loading: false,
+    error: '',
+  }),
+}));
+
+// Mock useChartPatterns (Dashboard uses it)
+vi.mock('./hooks/useChartPatterns', () => ({
+  useChartPatterns: () => ({
+    cashFlow: {
+      income: { fill: '#5347CE', legendStyle: {} },
+      expense: { fill: 'url(#stripe)', stroke: '#5347CE', strokeWidth: 1.5, legendStyle: {} },
+    },
+    getCategoryPattern: () => ({ fill: '#5347CE', legendStyle: {} }),
+    getCategoryDefs: () => [],
+    buildStyleMap: () => ({}),
+    ChartPatternDefs: () => null,
+  }),
+  ChartPatternDefs: () => null,
+}));
+
+// Mock useChartTheme (Dashboard charts use it)
+vi.mock('./hooks/useChartTheme', () => ({
+  useChartTheme: () => ({
+    axisStroke: '#58585F',
+    gridStroke: '#1E1E23',
+    tooltipBg: '#1E1E23',
+    tooltipBorder: '#2A2A30',
+    tooltipText: '#F5F5F6',
+    hoverBg: 'rgba(129,140,248,0.08)',
+    incomeColor: '#7EC89B',
+    expenseColor: '#E88B9C',
+    categoryColors: ['#818CF8', '#7EC89B', '#E88B9C', '#E8A87C', '#7CAFD4', '#58585F'],
+  }),
+}));
+
+// Mock ChartTooltip
+vi.mock('./components/ChartTooltip', () => ({
+  ChartTooltip: () => <div />,
 }));
 
 // Mock recharts (Dashboard and Reports use it)
@@ -79,10 +143,10 @@ describe('App', () => {
       renderApp('/');
       // Sidebar has the app title
       expect(screen.getByText('SpenDrop')).toBeInTheDocument();
-      // Main content has an h1 with Dashboard
+      // Main content has an h1 with welcome greeting
       expect(
-        screen.getByRole('heading', { level: 1, name: 'Dashboard' }),
-      ).toBeInTheDocument();
+        screen.getByRole('heading', { level: 1 }),
+      ).toHaveTextContent(/Welcome back/);
     });
 
     test('renders reports heading on /reports', () => {

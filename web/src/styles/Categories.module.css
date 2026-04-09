@@ -3,36 +3,36 @@
 .page {
   display: flex;
   flex-direction: column;
-  gap: var(--space-lg);
+  gap: var(--space-6);
 }
 
 .section {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
+  background: transparent;
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  padding: var(--space-lg);
+  padding: var(--space-6);
 }
 
 .sectionTitle {
-  margin-bottom: var(--space-md);
+  margin-bottom: var(--space-4);
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: var(--space-md);
+  gap: var(--space-4);
 }
 
 /* Category Card */
 .card {
   display: flex;
   align-items: center;
-  gap: var(--space-md);
-  padding: var(--space-md);
-  background-color: var(--bg-surface);
-  border: 1px solid var(--border-color);
+  gap: var(--space-4);
+  padding: var(--space-4);
+  background-color: var(--surface-sunken);
+  border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  transition: border-color var(--transition);
+  transition: border-color var(--duration-fast) var(--ease-standard);
 }
 
 .card:hover {
@@ -62,21 +62,21 @@
 
 .cardStatus {
   font-size: 0.75rem;
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
 }
 
 .cardActions {
   display: flex;
-  gap: var(--space-xs);
+  gap: var(--space-1);
   align-items: center;
 }
 
 .editButton {
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-1) var(--space-2);
   font-size: 0.8125rem;
   color: var(--color-info);
   border-radius: var(--radius-sm);
-  transition: all var(--transition);
+  transition: all var(--duration-fast) var(--ease-standard);
   min-height: 36px;
   min-width: 36px;
   display: flex;
@@ -85,14 +85,14 @@
 }
 
 .editButton:hover {
-  background-color: rgba(123, 104, 238, 0.1);
+  background-color: var(--primary-a15);
 }
 
 .toggleButton {
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-1) var(--space-2);
   font-size: 0.75rem;
   border-radius: var(--radius-sm);
-  transition: all var(--transition);
+  transition: all var(--duration-fast) var(--ease-standard);
   min-height: 36px;
 }
 
@@ -101,15 +101,15 @@
 }
 
 .toggleActive:hover {
-  background-color: rgba(78, 204, 163, 0.1);
+  background-color: var(--primary-a15);
 }
 
 .toggleInactive {
-  color: var(--color-text-secondary);
+  color: var(--text-secondary);
 }
 
 .toggleInactive:hover {
-  background-color: rgba(136, 136, 136, 0.1);
+  background-color: var(--primary-a8);
 }
 
 /* Add Category button */
@@ -117,13 +117,13 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  background-color: var(--bg-surface);
-  border: 2px dashed var(--border-color);
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background-color: var(--surface-sunken);
+  border: 2px dashed var(--border-default);
   border-radius: var(--radius-md);
-  color: var(--color-text-secondary);
-  transition: all var(--transition);
+  color: var(--text-secondary);
+  transition: all var(--duration-fast) var(--ease-standard);
   min-height: 72px;
 }
 
@@ -136,22 +136,22 @@
 .editForm {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
-  padding: var(--space-md);
-  background-color: var(--bg-surface);
+  gap: var(--space-2);
+  padding: var(--space-4);
+  background-color: var(--surface-sunken);
   border: 1px solid var(--color-primary);
   border-radius: var(--radius-md);
 }
 
 .editFormRow {
   display: flex;
-  gap: var(--space-sm);
+  gap: var(--space-2);
   align-items: center;
 }
 
 .editInput {
   flex: 1;
-  padding: var(--space-xs) var(--space-sm);
+  padding: var(--space-1) var(--space-2);
   min-height: 36px;
   font-size: 0.875rem;
 }
@@ -166,14 +166,14 @@
 
 .editFormActions {
   display: flex;
-  gap: var(--space-xs);
+  gap: var(--space-1);
   justify-content: flex-end;
 }
 
 .saveButton {
-  padding: var(--space-xs) var(--space-md);
+  padding: var(--space-1) var(--space-4);
   background-color: var(--color-primary);
-  color: var(--bg-surface);
+  color: var(--text-inverse);
   font-weight: 600;
   font-size: 0.8125rem;
   border-radius: var(--radius-sm);
@@ -181,8 +181,8 @@
 }
 
 .cancelButton {
-  padding: var(--space-xs) var(--space-md);
-  color: var(--color-text-secondary);
+  padding: var(--space-1) var(--space-4);
+  color: var(--text-secondary);
   font-size: 0.8125rem;
   border-radius: var(--radius-sm);
   min-height: 36px;
@@ -191,8 +191,8 @@
 /* Drag */
 .dragHandle {
   cursor: grab;
-  padding: var(--space-xs);
-  color: var(--color-text-secondary);
+  padding: var(--space-1);
+  color: var(--text-secondary);
   font-size: 1.25rem;
   line-height: 1;
 }
@@ -211,20 +211,20 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--space-xl);
-  color: var(--color-text-secondary);
+  padding: var(--space-8);
+  color: var(--text-secondary);
 }
 
 .error {
-  padding: var(--space-md);
-  background-color: rgba(233, 69, 96, 0.1);
-  border: 1px solid var(--color-danger);
+  padding: var(--space-4);
+  background-color: var(--expense-a15);
+  border: 1px solid var(--color-error);
   border-radius: var(--radius-md);
-  color: var(--color-danger);
+  color: var(--color-error);
 }
 
 .emptyState {
   text-align: center;
-  padding: var(--space-lg);
-  color: var(--color-text-secondary);
+  padding: var(--space-6);
+  color: var(--text-secondary);
 }

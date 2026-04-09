@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { format } from 'date-fns';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
-import { FilterBar } from '../components/FilterBar';
+import { TransactionToolbar } from '../components/TransactionToolbar';
+import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntry } from '../components/TransactionEntry';
 import { TransactionRow } from '../components/TransactionRow';
 import styles from '../styles/Transactions.module.css';
@@ -17,6 +19,7 @@ export function Transactions() {
     filters,
     setFilter,
     clearFilters,
+    clearPanelFilters,
     setPage,
     loading,
     error,
@@ -24,6 +27,9 @@ export function Transactions() {
     updateTransaction,
     deleteTransaction,
   } = useTransactions();
+
+  const [showFilters, setShowFilters] = useState(false);
+  const [showEntry, setShowEntry] = useState(false);
 
   const handleExport = useCallback(() => {
     const params = new URLSearchParams();
@@ -57,8 +63,8 @@ export function Transactions() {
     api
       .get<Category[]>('categories')
       .then(setCategories)
-      .catch(() => {
-        /* non-critical */
+      .catch((err) => {
+        console.warn('Failed to load categories', err);
       });
   }, []);
 
@@ -91,6 +97,91 @@ export function Transactions() {
     [deleteSavedFilter],
   );
 
+  // Count active filter groups (excluding search and type — they're in the toolbar)
+  const activeFilterCount = useMemo(() => {
+    let count = 0;
+    if (filters.dateFrom || filters.dateTo) count++;
+    if (filters.categoryIds || filters.categoryId) count++;
+    if (filters.amountMin || filters.amountMax) count++;
+    if (filters.tags) count++;
+    return count;
+  }, [filters]);
+
+  // Build active filter chips data
+  const activeChips = useMemo(() => {
+    if (showFilters) return [];
+    const chips: { key: string; label: string; onClear: () => void }[] = [];
+
+    // Date chip
+    if (filters.dateFrom || filters.dateTo) {
+      let label: string;
+      if (filters.dateFrom && filters.dateTo) {
+        label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
+      } else if (filters.dateFrom) {
+        label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
+      } else {
+        label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
+      }
+      chips.push({
+        key: 'date',
+        label,
+        onClear: () => {
+          setFilter('dateFrom', '');
+          setFilter('dateTo', '');
+        },
+      });
+    }
+
+    // Category chip
+    if (filters.categoryIds || filters.categoryId) {
+      const ids = filters.categoryIds
+        ? filters.categoryIds.split(',')
+        : [filters.categoryId];
+      const names = ids
+        .map((id) => categories.find((c) => String(c.id) === id)?.name)
+        .filter(Boolean);
+      chips.push({
+        key: 'category',
+        label: names.join(', ') || 'Categories',
+        onClear: () => {
+          setFilter('categoryIds', '');
+          setFilter('categoryId', '');
+        },
+      });
+    }
+
+    // Amount chip
+    if (filters.amountMin || filters.amountMax) {
+      let label: string;
+      if (filters.amountMin && filters.amountMax) {
+        label = `$${filters.amountMin} - $${filters.amountMax}`;
+      } else if (filters.amountMin) {
+        label = `Min $${filters.amountMin}`;
+      } else {
+        label = `Max $${filters.amountMax}`;
+      }
+      chips.push({
+        key: 'amount',
+        label,
+        onClear: () => {
+          setFilter('amountMin', '');
+          setFilter('amountMax', '');
+        },
+      });
+    }
+
+    // Tags chip
+    if (filters.tags) {
+      chips.push({
+        key: 'tags',
+        label: filters.tags,
+        onClear: () => setFilter('tags', ''),
+      });
+    }
+
+    return chips;
+  }, [filters, showFilters, categories, setFilter]);
+
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
@@ -102,21 +193,58 @@ export function Transactions() {
         </button>
       </div>
 
-      <FilterBar
-        filters={filters}
-        setFilter={setFilter}
-        categories={categories}
-        onClear={clearFilters}
-        savedFilters={savedFilters}
-        onSaveFilter={handleSaveFilter}
-        onLoadFilter={handleLoadFilter}
-        onDeleteFilter={handleDeleteFilter}
+      <TransactionToolbar
+        search={filters.search}
+        onSearchChange={(v) => setFilter('search', v)}
+        type={filters.type}
+        onTypeChange={(v) => setFilter('type', v)}
+        activeFilterCount={activeFilterCount}
+        showFilters={showFilters}
+        onToggleFilters={() => setShowFilters((p) => !p)}
+        showEntry={showEntry}
+        onToggleEntry={() => setShowEntry((p) => !p)}
       />
 
-      <TransactionEntry
-        categories={categories}
-        onSubmit={createTransaction}
-      />
+      {/* Active filter chips — only when filters active and panel closed */}
+      {activeChips.length > 0 && (
+        <div className={styles.activeChips}>
+          {activeChips.map((chip) => (
+            <span key={chip.key} className={styles.activeChip}>
+              {chip.label}
+              <button
+                type="button"
+                className={styles.activeChipRemove}
+                onClick={chip.onClear}
+                aria-label={`Clear ${chip.label} filter`}
+              >
+                &times;
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Filter panel — conditional rendering */}
+      {showFilters && (
+        <FilterPanel
+          filters={filters}
+          setFilter={setFilter}
+          clearPanelFilters={clearPanelFilters}
+          categories={categories}
+          savedFilters={savedFilters}
+          onSaveFilter={handleSaveFilter}
+          onLoadFilter={handleLoadFilter}
+          onDeleteFilter={handleDeleteFilter}
+        />
+      )}
+
+      {/* Entry form — display:none to preserve state */}
+      <div className={showEntry ? undefined : styles.entryFormHidden}>
+        <TransactionEntry
+          categories={categories}
+          onSubmit={createTransaction}
+        />
+      </div>
 
       {error && (
         <div className={styles.error} role="alert">

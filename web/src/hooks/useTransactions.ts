@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { Transaction, PaginatedResponse } from '../api/types';
 
-interface TransactionFilters {
+export interface TransactionFilters {
   dateFrom: string;
   dateTo: string;
   categoryId: string;
@@ -37,6 +37,7 @@ interface UseTransactionsResult {
   filters: TransactionFilters;
   setFilter: (key: keyof TransactionFilters, value: string) => void;
   clearFilters: () => void;
+  clearPanelFilters: () => void;
   setPage: (page: number) => void;
   loading: boolean;
   error: string;
@@ -120,6 +121,20 @@ export function useTransactions(): UseTransactionsResult {
     setPage(1);
   }, []);
 
+  const clearPanelFilters = useCallback(() => {
+    setFilters((prev) => ({
+      ...prev,
+      dateFrom: '',
+      dateTo: '',
+      categoryId: '',
+      categoryIds: '',
+      amountMin: '',
+      amountMax: '',
+      tags: '',
+    }));
+    setPage(1);
+  }, []);
+
   const createTransaction = useCallback(
     async (input: CreateTransactionInput) => {
       await api.post('transactions', input);
@@ -153,6 +168,7 @@ export function useTransactions(): UseTransactionsResult {
     filters,
     setFilter,
     clearFilters,
+    clearPanelFilters,
     setPage,
     loading,
     error,

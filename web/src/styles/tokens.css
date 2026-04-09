@@ -1,0 +1,261 @@
+/* SpenDrop Design Tokens
+ * This is the ONLY file allowed to contain hex values.
+ * All other CSS files must use var() references to semantic tokens.
+ *
+ * Color system: dark neutral + purple accent
+ * Neutral: cool-tinted dark gray (slight blue undertone)
+ * Accent: #5347CE (purple)
+ * Category scale: 11-color gradient (purple → orchid → blue → teal → emerald → gold)
+ * Semantic pos/neg: dedicated green/coral for positive/negative indicators only
+ */
+
+/* ===== PRIMITIVES ===== */
+:root {
+  /* Neutral scale (Radix-inspired 12-step, cool blue undertone) */
+  --neutral-1:  #111113;
+  --neutral-2:  #19191B;
+  --neutral-3:  #222225;
+  --neutral-4:  #2A2A2D;
+  --neutral-5:  #313136;
+  --neutral-6:  #3A3A40;
+  --neutral-7:  #48484F;
+  --neutral-8:  #606069;
+  --neutral-9:  #6E6E79;
+  --neutral-10: #7B7B85;
+  --neutral-11: #B0B0BA;
+  --neutral-12: #EEEEF0;
+
+  /* Accent scale (purple) */
+  --accent-1:  #13111A;
+  --accent-2:  #1B1825;
+  --accent-3:  #262040;
+  --accent-4:  #30284F;
+  --accent-5:  #3B3260;
+  --accent-6:  #4030A6;
+  --accent-7:  #5347CE;
+  --accent-8:  #6E60E8;
+  --accent-9:  #887CFD;
+  --accent-10: #A098FE;
+  --accent-11: #B8B0FF;
+  --accent-12: #E0DCFF;
+
+  /* Semantic hues */
+  --green-dim:    #22C55E;   /* positive indicators (dark theme) */
+  --green-bright: #16A34A;   /* positive indicators (light theme) */
+  --coral-dim:    #EF8B6E;   /* negative indicators (dark theme) */
+  --coral-bright: #E07050;   /* negative indicators (light theme) */
+  --amber-dim:    #F0C84D;   /* warning (dark theme) */
+  --amber-bright: #D4A830;   /* warning (light theme) */
+  --blue-dim:     #4896FE;   /* info (dark theme) */
+  --blue-bright:  #3B82F6;   /* info (light theme) */
+
+  /* Category color scale (11 steps: purple → orchid → blue → teal → green → gold) */
+  --cat-1:  #4030A6;   /* indigo */
+  --cat-2:  #5347CE;   /* purple */
+  --cat-3:  #B794D8;   /* orchid */
+  --cat-4:  #7B8AFE;   /* periwinkle */
+  --cat-5:  #4896FE;   /* blue */
+  --cat-6:  #2DB3D9;   /* cyan */
+  --cat-7:  #16C8C7;   /* teal */
+  --cat-8:  #3EBD80;   /* emerald */
+  --cat-9:  #7EB854;   /* sage */
+  --cat-10: #C4B83A;   /* olive */
+  --cat-11: #F0C84D;   /* gold */
+  --cat-muted: #B8BCC8; /* neutral/other */
+
+  /* ===== TYPOGRAPHY ===== */
+  --font-sans: 'Inter Variable', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+
+  /* Type scale — size */
+  --type-heading-lg-size: 24px;
+  --type-heading-md-size: 20px;
+  --type-heading-sm-size: 16px;
+  --type-body-lg-size: 16px;
+  --type-body-md-size: 14px;
+  --type-body-sm-size: 12px;
+  --type-label-lg-size: 13px;
+  --type-label-md-size: 12px;
+  --type-label-sm-size: 11px;
+  --type-amount-size: 16px;
+  --type-display-size: 36px;
+
+  /* Type scale — weight */
+  --type-heading-lg-weight: 600;
+  --type-heading-md-weight: 600;
+  --type-heading-sm-weight: 600;
+  --type-body-lg-weight: 400;
+  --type-body-md-weight: 400;
+  --type-body-sm-weight: 400;
+  --type-label-lg-weight: 500;
+  --type-label-md-weight: 500;
+  --type-label-sm-weight: 500;
+  --type-amount-weight: 500;
+  --type-display-weight: 700;
+
+  /* Type scale — line-height */
+  --type-heading-lg-line-height: 32px;
+  --type-heading-md-line-height: 28px;
+  --type-heading-sm-line-height: 24px;
+  --type-body-lg-line-height: 24px;
+  --type-body-md-line-height: 20px;
+  --type-body-sm-line-height: 16px;
+  --type-label-lg-line-height: 20px;
+  --type-label-md-line-height: 16px;
+  --type-label-sm-line-height: 16px;
+  --type-amount-line-height: 24px;
+  --type-display-line-height: 40px;
+
+  /* ===== SPACING (4px base) ===== */
+  --space-0:  0;
+  --space-1:  4px;
+  --space-2:  8px;
+  --space-3:  12px;
+  --space-4:  16px;
+  --space-5:  20px;
+  --space-6:  24px;
+  --space-8:  32px;
+  --space-10: 40px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* ===== SHAPE ===== */
+  --radius-sm:   4px;
+  --radius-md:   8px;
+  --radius-lg:   12px;
+  --radius-xl:   16px;
+  --radius-2xl:  28px;
+  --radius-full: 9999px;
+
+  /* ===== MOTION ===== */
+  --ease-standard:   cubic-bezier(0.2, 0, 0, 1);
+  --ease-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --ease-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
+
+  --duration-fast:   150ms;
+  --duration-normal: 250ms;
+  --duration-slow:   350ms;
+  --duration-page:   400ms;
+
+  /* ===== SEMANTIC TOKENS (Dark Theme — Default) ===== */
+
+  /* Surfaces */
+  --surface-base:    var(--neutral-1);
+  --surface-raised:  var(--neutral-2);
+  --surface-overlay: var(--neutral-3);
+  --surface-sunken:  #0C0C0E;
+  --surface-hover:   var(--neutral-4);
+
+  /* Text */
+  --text-primary:   var(--neutral-12);
+  --text-secondary: var(--neutral-11);
+  --text-tertiary:  var(--neutral-9);
+  --text-inverse:   var(--neutral-1);
+
+  /* Brand / Interactive */
+  --color-primary:       var(--accent-7);
+  --color-primary-hover: var(--accent-8);
+
+  /* Positive/negative (small indicators only — badges, percentages) */
+  --color-pos:     var(--green-dim);
+  --color-neg:     var(--coral-dim);
+
+  /* Semantic colors */
+  --color-expense: var(--coral-dim);
+  --color-income:  var(--green-dim);
+  --color-warning: var(--amber-dim);
+  --color-info:    var(--blue-dim);
+  --color-error:   var(--coral-dim);
+
+  /* Borders */
+  --border-default: var(--neutral-6);
+  --border-muted:   var(--neutral-4);
+
+  /* Focus */
+  --focus-ring: var(--accent-7);
+
+  /* Overlay */
+  --backdrop: color-mix(in srgb, var(--neutral-1) 60%, transparent);
+
+  /* Shadows */
+  --shadow-sm: 0 1px 2px color-mix(in srgb, #000000 20%, transparent);
+  --shadow-md: 0 4px 8px color-mix(in srgb, #000000 25%, transparent);
+  --shadow-lg: 0 8px 24px color-mix(in srgb, #000000 30%, transparent);
+  --shadow-xl: 0 16px 48px color-mix(in srgb, #000000 40%, transparent);
+
+  /* Glass surface */
+  --glass-bg: color-mix(in srgb, var(--surface-raised) 85%, transparent);
+  --glass-border: color-mix(in srgb, #FFFFFF 6%, transparent);
+  --glass-blur: 12px;
+
+  /* Text on accent surface */
+  --text-on-accent: var(--neutral-12);
+
+  /* Opacity utilities */
+  --primary-a8:  color-mix(in srgb, var(--accent-7) 8%, transparent);
+  --primary-a15: color-mix(in srgb, var(--accent-7) 15%, transparent);
+  --primary-a50: color-mix(in srgb, var(--accent-7) 50%, transparent);
+  --expense-a15: color-mix(in srgb, var(--color-expense) 15%, transparent);
+  --income-a15:  color-mix(in srgb, var(--color-income) 15%, transparent);
+}
+
+/* ===== LIGHT THEME OVERRIDES ===== */
+[data-theme="light"] {
+  --surface-base:    #EAEBF2;
+  --surface-raised:  #FFFFFF;
+  --surface-overlay: #FFFFFF;
+  --surface-sunken:  #EAEBF2;
+  --surface-hover:   #EAEBF2;
+
+  --text-primary:   #111827;
+  --text-secondary: #6B7280;
+  --text-tertiary:  #9CA3AF;
+  --text-inverse:   var(--neutral-12);
+
+  --color-primary:       var(--accent-7);
+  --color-primary-hover: var(--accent-8);
+  --color-primary-dim:   var(--accent-6);
+
+  --color-pos:     #22C55E;
+  --color-neg:     #EF8B6E;
+
+  --color-expense: #EF8B6E;
+  --color-income:  #22C55E;
+  --color-warning: #F0C84D;
+  --color-info:    #4896FE;
+  --color-error:   #EF8B6E;
+
+  --border-default: #D8DAE5;
+  --border-muted:   #E0E3ED;
+
+  --focus-ring: var(--accent-7);
+
+  --backdrop: color-mix(in srgb, var(--neutral-1) 40%, transparent);
+
+  --shadow-sm: 0 1px 2px rgb(0 0 0 / 4%);
+  --shadow-md: 0 2px 8px rgb(0 0 0 / 6%);
+  --shadow-lg: 0 4px 16px rgb(0 0 0 / 8%);
+  --shadow-xl: 0 16px 48px rgb(0 0 0 / 12%);
+
+  --glass-bg: rgb(255 255 255 / 85%);
+  --glass-border: rgb(255 255 255 / 40%);
+
+  /* Featured card overlays (white at various opacities) */
+  --featured-text: #FFFFFF;
+  --featured-label: rgb(255 255 255 / 70%);
+  --featured-decimal: rgb(255 255 255 / 50%);
+  --featured-vs: rgb(255 255 255 / 60%);
+  --featured-overlay: rgb(255 255 255 / 15%);
+
+  /* KPI icon badge backgrounds (light theme only) */
+  --kpi-icon-purple-bg: #F0EEFF;
+  --kpi-icon-purple-fg: var(--accent-7);
+  --kpi-icon-teal-bg:   #E6FAF9;
+  --kpi-icon-teal-fg:   #16C8C7;
+  --kpi-icon-red-bg:    #F0EEFF;
+  --kpi-icon-red-fg:    var(--accent-6);
+  --kpi-icon-yellow-bg: #FDF8E8;
+  --kpi-icon-yellow-fg: #C9A030;
+  --kpi-icon-blue-bg:   #EEF4FF;
+  --kpi-icon-blue-fg:   #4896FE;
+}

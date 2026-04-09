@@ -9,6 +9,10 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+vi.mock('../hooks/useTheme', () => ({
+  useTheme: () => ({ theme: 'dark', resolvedTheme: 'dark', setTheme: vi.fn() }),
+}));
+
 // Mock recharts to avoid canvas rendering in tests
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
