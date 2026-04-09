@@ -588,7 +588,7 @@ func TestHandleListTransactions_IncludesCategoryInfo(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	// Category 1 = "Food" (expense, #4ecca3) from seed
+	// Category 1 = "Food" (expense, #5347CE) from seed
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 50.0, "Groceries")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
@@ -616,8 +616,8 @@ func TestHandleListTransactions_IncludesCategoryInfo(t *testing.T) {
 	if txn["category_type"] != "expense" {
 		t.Errorf("expected category_type 'expense', got %v", txn["category_type"])
 	}
-	if txn["category_color"] != "#4ecca3" {
-		t.Errorf("expected category_color '#4ecca3', got %v", txn["category_color"])
+	if txn["category_color"] != "#5347CE" {
+		t.Errorf("expected category_color '#5347CE', got %v", txn["category_color"])
 	}
 }
 
