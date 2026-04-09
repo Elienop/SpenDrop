@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { api } from '../api/client';
 
@@ -9,11 +10,21 @@ vi.mock('../api/client', () => ({
   },
 }));
 
-vi.mock('../hooks/useTheme', () => ({
-  useTheme: () => ({ theme: 'dark', resolvedTheme: 'dark', setTheme: vi.fn() }),
+// Mock the shadcn chart primitive so the component tree renders without
+// measuring the DOM in happy-dom. Each wrapper just renders its children.
+vi.mock('@/components/ui/chart', () => ({
+  ChartContainer: ({ children }: { children: React.ReactNode }) => (
+    <div data-testid="chart-container">{children}</div>
+  ),
+  ChartTooltip: () => <div />,
+  ChartTooltipContent: () => <div />,
+  ChartLegend: () => <div />,
+  ChartLegendContent: () => <div />,
 }));
 
-// Mock recharts to avoid canvas rendering in tests
+// Mock recharts primitives used directly by the Reports page. The shadcn
+// chart primitive wraps these but the page still imports Bar/BarChart/Line
+// etc. directly from recharts.
 vi.mock('recharts', () => ({
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => (
     <div data-testid="responsive-container">{children}</div>
@@ -48,7 +59,12 @@ const mockYoY = {
 
 const mockCatTrends = {
   categories: [
-    { id: 1, name: 'Food', color: '#ff0000', type: 'expense', data: [{ year: 2026, month: 1, total: 500 }] },
+    {
+      id: 1,
+      name: 'Food',
+      type: 'expense',
+      data: [{ year: 2026, month: 1, total: 500 }],
+    },
   ],
 };
 
@@ -86,9 +102,11 @@ function renderReports() {
 }
 
 describe('Reports', () => {
-  it('renders the page heading', async () => {
+  it('renders the page heading', () => {
     renderReports();
-    expect(screen.getByRole('heading', { level: 1, name: 'Reports' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Reports' }),
+    ).toBeInTheDocument();
   });
 
   it('renders all four section headings', async () => {
@@ -109,16 +127,28 @@ describe('Reports', () => {
     });
   });
 
-  it('renders year selector for year-over-year', () => {
+  it('renders year selector for year-over-year (combobox role)', () => {
     renderReports();
-    const select = screen.getByLabelText('Year');
-    expect(select).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: /year-over-year year/i }),
+    ).toBeInTheDocument();
   });
 
-  it('renders time period selector for income/expenses', () => {
+  it('renders time period selector for income/expenses (combobox role)', () => {
     renderReports();
-    const select = screen.getByLabelText('Time period');
-    expect(select).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: /time period/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('renders month and year selectors for top merchants (combobox role)', () => {
+    renderReports();
+    expect(
+      screen.getByRole('combobox', { name: /merchant month/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('combobox', { name: /merchant year/i }),
+    ).toBeInTheDocument();
   });
 
   it('shows empty state when no merchants', async () => {
@@ -133,7 +163,27 @@ describe('Reports', () => {
 
     renderReports();
     await waitFor(() => {
-      expect(screen.getByText('No transactions for this period')).toBeInTheDocument();
+      expect(
+        screen.getByText('No transactions for this period'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it('opens the period selector and switches to 24 months', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderReports();
+
+    await user.click(
+      screen.getByRole('combobox', { name: /time period/i }),
+    );
+    await user.click(screen.getByRole('option', { name: /24 months/i }));
+
+    // After switching, the hook is re-called with 24; the api mock
+    // still resolves. We just assert the trigger shows the new value.
+    await waitFor(() => {
+      expect(
+        screen.getByRole('combobox', { name: /time period/i }),
+      ).toHaveTextContent(/24 months/i);
     });
   });
 });
