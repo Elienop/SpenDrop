@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { MoreHorizontal, Plus } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
@@ -64,21 +64,29 @@ export function Categories() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [editor, setEditor] = useState<CategoryEditorState | null>(null);
+  const fetchSeqRef = useRef(0);
 
   const fetchCategories = useCallback(() => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     api
       .get<Category[]>('categories?include_inactive=true')
       .then((cats) => {
+        if (seq !== fetchSeqRef.current) return;
         setCategories(cats);
         setError('');
       })
       .catch((err) => {
+        if (seq !== fetchSeqRef.current) return;
+        setCategories([]);
         setError(
           err instanceof Error ? err.message : 'Failed to load categories',
         );
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (seq !== fetchSeqRef.current) return;
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
@@ -125,10 +133,14 @@ export function Categories() {
   }
 
   // Sort: expense first, then income; within each group, by sort_order
-  const sortedCategories = [...categories].sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'expense' ? -1 : 1;
-    return a.sort_order - b.sort_order;
-  });
+  const sortedCategories = useMemo(
+    () =>
+      [...categories].sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'expense' ? -1 : 1;
+        return a.sort_order - b.sort_order;
+      }),
+    [categories],
+  );
 
   return (
     <div className="container mx-auto max-w-4xl space-y-6 p-6">
@@ -177,7 +189,9 @@ export function Categories() {
                   <TableHead>Name</TableHead>
                   <TableHead>Type</TableHead>
                   <TableHead className="text-right">Transactions</TableHead>
-                  <TableHead className="w-12" />
+                  <TableHead className="w-12">
+                    <span className="sr-only">Actions</span>
+                  </TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -265,7 +279,13 @@ function CategoryEditorSheet({
   const [type, setType] = useState<CategoryType>('expense');
   const [icon, setIcon] = useState('');
 
-  // Seed the form whenever the editor is (re)opened
+  const mode = state?.mode;
+  const editingId = state?.mode === 'edit' ? state.category?.id : undefined;
+
+  // Seed the form whenever the editor is (re)opened.
+  // We intentionally depend on the identity fields (`mode` + editing category id),
+  // not the whole `state` object, so unrelated parent re-renders don't re-seed
+  // the form mid-edit.
   useEffect(() => {
     if (!state) return;
     if (state.mode === 'edit' && state.category) {
@@ -277,7 +297,8 @@ function CategoryEditorSheet({
       setType('expense');
       setIcon('');
     }
-  }, [state]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, editingId]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -313,6 +334,8 @@ function CategoryEditorSheet({
               onChange={(e) => setName(e.target.value)}
               placeholder="e.g. Groceries"
               required
+              pattern=".*\S.*"
+              title="Name must contain at least one non-whitespace character"
             />
           </div>
 

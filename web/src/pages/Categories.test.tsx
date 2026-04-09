@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -122,15 +122,19 @@ describe('Categories', () => {
         expect(screen.getByText('Salary')).toBeInTheDocument();
         expect(screen.getByText('Transport')).toBeInTheDocument();
       });
+      // 1 header row + 3 data rows
+      expect(screen.getAllByRole('row')).toHaveLength(4);
     });
 
     test('renders a type badge for each category', async () => {
       renderCategories();
       await waitFor(() => {
-        // Expense and Income labels appear as badges in rows
-        expect(screen.getAllByText(/expense/i).length).toBeGreaterThan(0);
-        expect(screen.getAllByText(/income/i).length).toBeGreaterThan(0);
+        expect(screen.getByText('Food')).toBeInTheDocument();
       });
+      const table = screen.getByRole('table');
+      // Assert the exact badge labels, not the descriptive copy above the table
+      expect(within(table).getAllByText('Expense').length).toBeGreaterThan(0);
+      expect(within(table).getAllByText('Income').length).toBeGreaterThan(0);
     });
 
     test('renders Add category button for admin', async () => {
@@ -217,6 +221,17 @@ describe('Categories', () => {
       ).toBeInTheDocument();
     });
 
+    test('inactive rows render an (inactive) label', async () => {
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Transport')).toBeInTheDocument();
+      });
+      // "(inactive)" only appears on deactivated rows
+      const transportRow = screen.getByText('Transport').closest('tr');
+      expect(transportRow).not.toBeNull();
+      expect(transportRow).toHaveTextContent(/\(inactive\)/);
+    });
+
     test('Edit menu item opens a Sheet with existing category values', async () => {
       const user = userEvent.setup();
       renderCategories();
@@ -286,6 +301,23 @@ describe('Categories', () => {
           is_active: false,
         });
       });
+    });
+
+    test('renders em-dash placeholder in transactions column', async () => {
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+      // One em-dash per row (3 fixtures)
+      const emdashes = screen.getAllByText('—');
+      expect(emdashes.length).toBe(3);
+    });
+
+    test('surfaces load failure in an alert banner', async () => {
+      mockedApi.get.mockRejectedValueOnce(new Error('boom'));
+      renderCategories();
+      const banner = await screen.findByRole('alert');
+      expect(banner).toHaveTextContent('boom');
     });
   });
 
