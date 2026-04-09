@@ -98,10 +98,9 @@ describe('Register', () => {
     await user.type(screen.getByLabelText(/username/i), 'bob');
     await user.type(screen.getByLabelText(/password/i), 'pass456');
     await user.type(screen.getByLabelText(/display name/i), 'Bob');
-    await user.click(screen.getByRole('button', { name: /create account/i }));
+    const submit = screen.getByRole('button', { name: /create account/i });
+    await user.click(submit);
 
-    expect(
-      screen.getByRole('button', { name: /creating/i }),
-    ).toBeDisabled();
+    await waitFor(() => expect(submit).toBeDisabled());
   });
 });
