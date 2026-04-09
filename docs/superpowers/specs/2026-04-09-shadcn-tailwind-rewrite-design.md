@@ -608,7 +608,7 @@ New tests to add (beyond entry row covered above):
 - Delete `web/.stylelintrc.json`
 - Remove `lint:css` and the `stylelint` portion of the `lint` script from `web/package.json` (currently `"lint": "tsc --noEmit && stylelint \"src/**/*.css\""` — becomes `"lint": "tsc --noEmit && eslint ."`)
 - Remove stylelint dev deps (`stylelint`, `stylelint-config-standard`, `stylelint-config-css-modules`)
-- CI: there is currently no stylelint step in `.github/workflows/pr.yml` (the `lint` script is invoked instead), so nothing to remove in CI — just the script change propagates
+- CI: `.github/workflows/pr.yml` line 50 calls `npx tsc -b` directly — it does **not** run `npm run lint`, and there is no stylelint invocation anywhere in CI today. Removing stylelint is therefore a local-tooling change only; no CI edit is required in this commit. The `npx eslint .` CI step is added separately in the final cleanup commit (§8 commit 13).
 
 Replacement: none. Tailwind's utility classes structurally prevent the problems stylelint was enforcing (no raw hex, no arbitrary tokens).
 
@@ -699,14 +699,31 @@ SQLite's `ALTER TABLE DROP COLUMN` requires SQLite 3.35+ (March 2021) — well w
 - `web/src/pages/Reports.tsx` — line 219: replace `cat.color || 'var(--color-text-secondary)'` with `getCategoryColorVar(cat)`.
 - `web/src/components/FilterPanel.tsx` — line 157: replace `{ backgroundColor: cat.color, borderColor: cat.color }` with `{ backgroundColor: getCategoryColorVar(cat), borderColor: getCategoryColorVar(cat) }`.
 - `web/src/components/TransactionRow.tsx` — line 144: replace `color={transaction.category_color}` with `color={getCategoryColorVar({ id: transaction.category_id })}`. Or, since `TransactionRow` is being rewritten anyway as part of the Transactions page commit, inline the `getCategoryColorVar` call directly in the new Tailwind-based row.
-- `web/src/hooks/useChartPatterns.tsx` — deleted wholesale as part of the final cleanup (it references `p.color` at lines 71, 77, 84, 90, 91, 148 but is a hook that nothing will import after the Dashboard rewrite uses the new chart primitives).
+- `web/src/hooks/useChartPatterns.tsx` — deleted wholesale as part of the final cleanup. It references `p.color` at lines 71, 77, 84, 90, 91 and `item.color` at line 148, but it's a hook that nothing will import after the Dashboard rewrite uses the new chart primitives.
 
 **Frontend tests:**
-- `web/src/pages/Dashboard.test.tsx` — line 70: drop `category_color: '#818CF8'` from the transaction fixture.
-- `web/src/pages/Transactions.test.tsx` — line 34: drop `category_color: '#e94560'` from the transaction fixture.
-- `web/src/components/TransactionRow.test.tsx` — line 32: drop `category_color: '#e94560'` from the transaction fixture.
+
+Two classes of break exist here: (a) fixtures explicitly typed as `Category[]`, `CategoryBreakdownItem[]`, etc., which fail `tsc --noEmit` with TS2353 (excess property) the moment the field is removed from `types.ts`, and (b) untyped object literals which TypeScript won't flag but which carry stale data and will mislead future debugging. Both classes are enumerated.
+
+**Typed fixtures — TS2353 breaks (must be fixed in this commit):**
+- `web/src/pages/Settings.test.tsx` — lines 419, 420, 421: `mockCategories: Category[]` with three explicit `color: '#ff0000'` / `'#00ff00'` / `'#0000ff'` entries. Guaranteed TS2353 when `Category.color` is removed. Drop the three `color:` keys.
+- `web/src/components/TransactionEntry.test.tsx` — **deleted wholesale in §8 commit 9** when the component is renamed to `TransactionEntryRow` and its new test is written TDD-first. The `Category[]`-typed `color: '#e94560'` fixture at line 12 disappears with the file, so no edit is required in this commit. Listed here only for completeness of the blast-radius grep.
+- `web/src/components/TransactionRow.test.tsx` — line 12: `mockCategories: Category[]` with `color: '#e94560'`. Drop the key. (Line 32 `category_color: '#e94560'` on the transaction fixture is a separate field; drop it too.) Both edits live in the same commit.
+
+**Untyped fixtures — TS silent but stale (must still be fixed for hygiene and so the §7.3 grep stays clean):**
+- `web/src/pages/Dashboard.test.tsx` — line 51: `{ id: 1, name: 'Food', color: '#818CF8', total: 1200, transaction_count: 15 }`, line 52: `{ id: 2, name: 'Transport', color: '#7EC89B', total: 800, transaction_count: 8 }`, line 70: `category_color: '#818CF8'`. Drop all three.
+- `web/src/pages/Transactions.test.tsx` — line 34: `category_color: '#e94560'` on the transaction fixture. Drop.
+- `web/src/pages/Categories.test.tsx` — lines 31, 41, 51: three `color: '#ff0000'` / `'#00ff00'` / `'#0000ff'` entries inside an untyped `const mockCategories = [...]`. Drop all three.
+- `web/src/pages/Reports.test.tsx` — line 51: `{ id: 1, name: 'Food', color: '#ff0000', type: 'expense', data: [...] }` inside an untyped mock. Drop the `color:` key.
+- `web/src/hooks/useDashboard.test.ts` — lines 34, 35: two breakdown-item literals with `color: '#ff0000'` / `'#00ff00'`. Drop both keys.
 - `web/src/App.test.tsx` — any fixture that embeds a category or transaction with a `color` field gets that field deleted.
-- `web/src/hooks/useChartTheme.test.ts` — deleted as part of the hook removal (the hook is gone).
+
+**Test files deleted wholesale (not edited — the test goes away with its subject):**
+- `web/src/hooks/useChartTheme.test.ts` — hook removed.
+- `web/src/hooks/useChartPatterns.test.tsx` — if present, hook removed.
+- `web/src/components/ChartTooltip.test.tsx` — the `color` strings at lines 13, 14 are payload item colors (not `Category.color`), but the component itself is removed in §4.6, so the test file goes too.
+
+**Pre-flight check for commit 12 (expanded):** In addition to the `categories.color`, `cat.color`, `category_color`, `c.color` greps named in §8 commit 12, also grep for `\bcolor:\s*['"]#` (literal hex-color object-field syntax) and `category_color` (already listed, repeated here for emphasis). The only remaining hits inside the commit should be the deletions themselves. If any test or component still carries a stray `color: '#...'` fixture after this commit, add it to the deletion list and re-run the grep.
 
 #### 7.3 Why it's all one commit
 
@@ -732,7 +749,7 @@ Frontend tests move with the pages they cover — a page rewrite commit also rew
 6. **Dashboard rewrite** — page + `KpiCard` + `ChartCard` + Recharts via shadcn `chart` primitive. **Source all category colors via `getCategoryColorVar()`** — this commit stops reading `cat.color` and `tx.category_color` on the Dashboard, even though the DB column still exists. Delete `Dashboard.module.css`. Rewrite `Dashboard.test.tsx`, updating transaction/category fixtures to not rely on `color` visually (the fixture can still carry the field — it just won't be asserted).
 7. **Categories page rewrite** — rewrite `Categories.tsx` + `CategoryEditor`. **The color picker is removed from the UI in this commit**, but the `color` field on the Category TypeScript interface and the Go handler still exist. The edit form simply stops submitting a `color` value; the backend silently keeps the old stored color until the final migration commit nukes it. Rewrite `Categories.test.tsx`.
 8. **Transactions page rewrite (non-entry)** — `TransactionToolbar`, `FilterPanel`, `TransactionTable`, bulk actions, row actions. **All category-color rendering goes through `getCategoryColorVar()`** — no reads of `tx.category_color` or `cat.color` remain on this page. Delete `Transactions.module.css`, `Tabs.module.css`, `ChartTooltip.module.css`. Rewrite `Transactions.test.tsx` and `TransactionRow.test.tsx`. Entry row still uses the old classic-form component, wired into the new shell.
-9. **Transaction entry row rewrite (§5)** — RHF + shadcn `Form` + `Command` + `TagInput` wrapper + Sonner toast + undo buffer. Dedicated `TransactionEntryRow.test.tsx` written **first** (TDD). Highest-value commit of the whole migration.
+9. **Transaction entry row rewrite (§5)** — rename the component from `TransactionEntry` → `TransactionEntryRow` and rewrite with RHF + shadcn `Form` + `Command` + `TagInput` wrapper + Sonner toast + undo buffer. **Delete the old `web/src/components/TransactionEntry.tsx` and its sibling `web/src/components/TransactionEntry.test.tsx` in the same commit** — no orphaned files, no stale imports. Dedicated `TransactionEntryRow.test.tsx` written **first** (TDD) and lives in this commit. Update the import site in `web/src/pages/Transactions.tsx` to point at the new component. Highest-value commit of the whole migration.
 10. **Reports rewrite** — page + `DateRangePicker` + chart cards. All category colors via `getCategoryColorVar()`. Delete `Reports.module.css`. Rewrite `Reports.test.tsx` (if it exists).
 11. **Settings rewrite** — page + shadcn `Tabs` + `Form` + `Dialog` for data export/import. Delete `Settings.module.css`. Rewrite `Settings.test.tsx` (if it exists).
 12. **Database migration + color cleanup (atomic)** — everything listed in §7.2 in one commit:
@@ -740,9 +757,17 @@ Frontend tests move with the pages they cover — a page rewrite commit also rew
     - `queries.sql` edits + `sqlc generate` + resulting `queries.sql.go` diff
     - Go handler field/validation deletions in `category_handlers.go`, `transaction_handlers.go`, `dashboard_handlers.go`, `reports_handlers.go`
     - Go test fixture updates in `category_handlers_test.go` + `transaction_handlers_test.go`
-    - `web/src/api/types.ts` field deletions
-    - Any lingering `color` prop / fixture cleanups on frontend
-    - **Pre-flight check before committing:** grep `categories.color`, `cat.color`, `category_color`, `c.color` across the full repo; the only remaining hits should be inside this commit's own deletions. If any page/test still consumes the field, fix it here.
+    - `web/src/api/types.ts` field deletions (four fields, enumerated in §7.2)
+    - Frontend test fixture cleanups enumerated in §7.2 "Frontend tests" (Settings, TransactionRow, Categories, Dashboard, Transactions, Reports, useDashboard, App). §7.2 is exhaustive — this commit deletes every entry on that list, nothing extra.
+    - **Pre-flight check before committing:** run the full grep set across `internal/` and `web/src/`:
+      - `categories\.color`
+      - `cat\.color`
+      - `category_color`
+      - `c\.color`
+      - `\bcolor:\s*['"]#` (literal hex-color object-field syntax — catches typed and untyped fixtures alike)
+      - `\.color\b` inside `web/src/pages/` and `web/src/components/` (catches any renamed but forgotten consumer)
+
+      The only remaining hits should be inside this commit's own deletions. If any page/test still consumes the field, add it to the deletion list and re-run the grep until clean.
     - Enforces the §7.2 "all one commit" rule.
 13. **Final cleanup** — delete everything from the "Deleted wholesale" list that hasn't already been removed by the page rewrites: `tokens.css`, `global.css`, any remaining `*.module.css`, `.stylelintrc.json`, stylelint dev deps, `useChartTheme.ts` + its test, `useChartPatterns.tsx`, `useTheme.tsx` + its test (removes both `ThemeProvider` and `useTheme` named exports), `ChartTooltip.tsx` + its test, `Tabs.tsx` + its test, `@fontsource-variable/inter`. **Enable Tailwind preflight** (`corePlugins: { preflight: true }` / remove the override) and visually verify every page. Add the `npx eslint .` CI step in `pr.yml`'s frontend job.
 
