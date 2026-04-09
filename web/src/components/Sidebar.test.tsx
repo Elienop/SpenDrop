@@ -119,10 +119,13 @@ describe('Sidebar', () => {
   test('dispatches sidebar-toggle event on toggle', async () => {
     const listener = vi.fn();
     window.addEventListener('sidebar-toggle', listener);
-    const user = userEvent.setup();
-    renderSidebar();
-    await user.click(screen.getByLabelText('Toggle sidebar'));
-    expect(listener).toHaveBeenCalled();
-    window.removeEventListener('sidebar-toggle', listener);
+    try {
+      const user = userEvent.setup();
+      renderSidebar();
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      expect(listener).toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('sidebar-toggle', listener);
+    }
   });
 });

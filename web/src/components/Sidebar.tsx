@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutGrid,
@@ -37,7 +37,12 @@ export function Sidebar() {
     () => localStorage.getItem('spendrop-sidebar') === 'true',
   );
 
+  const didMountRef = useRef(false);
   useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true;
+      return;
+    }
     localStorage.setItem('spendrop-sidebar', String(expanded));
     window.dispatchEvent(new Event('sidebar-toggle'));
   }, [expanded]);
