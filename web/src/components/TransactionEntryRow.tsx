@@ -81,6 +81,7 @@ export function TransactionEntryRow({
   onSubmit,
   onDelete,
 }: TransactionEntryRowProps) {
+  const formRef = useRef<HTMLFormElement | null>(null);
   const amountRef = useRef<HTMLInputElement | null>(null);
   const undoBufferRef = useRef<{
     saved: Transaction;
@@ -103,14 +104,29 @@ export function TransactionEntryRow({
     const buf = undoBufferRef.current;
     if (!buf) return;
     undoBufferRef.current = null;
-    await onDelete(buf.saved.id);
+    try {
+      await onDelete(buf.saved.id);
+    } catch {
+      undoBufferRef.current = buf;
+      toast.error('Could not undo');
+      return;
+    }
     form.reset(buf.values);
     amountRef.current?.focus();
   }, [onDelete, form]);
 
   const submit = useCallback(
     async (values: EntryFormValues) => {
-      const saved = await onSubmit(values);
+      let saved: Transaction;
+      try {
+        saved = await onSubmit(values);
+      } catch {
+        toast.error('Failed to save transaction');
+        // Leave the form untouched so the user can retry. Do not clear
+        // undoBufferRef — a previous successful save's undo buffer, if any,
+        // stays valid because nothing new was saved.
+        return;
+      }
       saveLastCategory(values.category_id);
       saveLastDate(values.date);
       undoBufferRef.current = { saved, values };
@@ -144,7 +160,7 @@ export function TransactionEntryRow({
     categories.find((c) => c.id === id)?.name;
 
   const focusFieldByName = (name: string) => {
-    const el = document.querySelector<HTMLElement>(
+    const el = formRef.current?.querySelector<HTMLElement>(
       `[data-entry-field="${name}"]`,
     );
     el?.focus();
@@ -182,11 +198,14 @@ export function TransactionEntryRow({
     }
   };
 
-  // Global Cmd/Ctrl+Z listener scoped to "undo buffer still populated"
+  // Global Cmd/Ctrl+Z listener scoped to "undo buffer still populated" and
+  // to the owning form — so we don't swallow the browser's native undo when
+  // the user is focused outside of the transaction entry row.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         if (!undoBufferRef.current) return;
+        if (!formRef.current?.contains(document.activeElement)) return;
         e.preventDefault();
         void undoLastSave();
       }
@@ -199,6 +218,7 @@ export function TransactionEntryRow({
     <Card className="p-4">
       <Form {...form}>
         <form
+          ref={formRef}
           onSubmit={(e) => {
             void form.handleSubmit(submit)(e);
           }}
@@ -316,12 +336,23 @@ export function TransactionEntryRow({
             name="tags"
             render={({ field }) => (
               <FormItem className="w-56">
-                <FormLabel>Tags</FormLabel>
-                <TagInput
-                  value={field.value}
-                  onChange={field.onChange}
-                  placeholder="Add tags..."
-                />
+                {/*
+                  Nested-label pattern: wrapping a <label> around the input
+                  avoids the htmlFor/id round-trip that shadcn's FormLabel
+                  expects. Clicking the visible "Tags" text focuses the
+                  first labelable descendant (TagInput's internal input)
+                  automatically, and TagInput keeps its own aria-label
+                  for screen readers. Do NOT replace with <FormLabel>
+                  unless TagInput also accepts an id prop.
+                */}
+                <label className="text-sm font-medium leading-none">
+                  <span className="mb-2 block">Tags</span>
+                  <TagInput
+                    value={field.value}
+                    onChange={field.onChange}
+                    placeholder="Add tags..."
+                  />
+                </label>
                 <FormMessage />
               </FormItem>
             )}

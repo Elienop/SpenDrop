@@ -12,10 +12,11 @@ import {
 import { TransactionEntryRow } from './TransactionEntryRow';
 import type { Category, Transaction } from '../api/types';
 
-// Mock sonner so toast.success becomes inspectable and no portal renders
+// Mock sonner so toast.success / toast.error become inspectable and no portal renders
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
+    error: vi.fn(),
   },
   Toaster: () => null,
 }));
@@ -82,6 +83,7 @@ describe('TransactionEntryRow', () => {
     onSubmit = vi.fn().mockResolvedValue(savedTransaction);
     onDelete = vi.fn().mockResolvedValue(undefined);
     (toast.success as Mock).mockClear();
+    (toast.error as Mock).mockClear();
     localStorage.clear();
   });
 
@@ -444,11 +446,102 @@ describe('TransactionEntryRow', () => {
     });
     const opts = (toast.success as Mock).mock.calls[0][1];
 
+    // Invoke the auto-close callback directly to exercise the buffer-clear
+    // contract without spinning up fake timers for the real 4000ms duration.
     opts.onAutoClose();
 
     await user.keyboard('{Control>}z{/Control}');
 
     expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  // -----------------------------------------------------------------
+  // Phase I: Error paths — submit rejection + undo rejection
+  // -----------------------------------------------------------------
+
+  it('shows an error toast and keeps the form when onSubmit rejects', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '12');
+    await user.type(screen.getByLabelText(/description/i), 'Eggs');
+    await user.click(
+      screen.getByRole('button', { name: /select category/i }),
+    );
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledTimes(1);
+    });
+    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/failed to save/i);
+    // Success toast must NOT fire on rejection
+    expect(toast.success).not.toHaveBeenCalled();
+    // Form is not reset — user can retry
+    expect(
+      (screen.getByLabelText(/amount/i) as HTMLInputElement).value,
+    ).toBe('12');
+    expect(
+      (screen.getByLabelText(/description/i) as HTMLInputElement).value,
+    ).toBe('Eggs');
+    // onSubmit was called, but localStorage was NOT updated on failure
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem('spendrop-last-category')).toBeNull();
+  });
+
+  it('restores the undo buffer and toasts when onDelete rejects during undo', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '5');
+    await user.type(screen.getByLabelText(/description/i), 'Gum');
+    await user.click(
+      screen.getByRole('button', { name: /select category/i }),
+    );
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => {
+      expect(toast.success).toHaveBeenCalled();
+    });
+    const opts = (toast.success as Mock).mock.calls[0][1];
+
+    // First undo attempt: onDelete rejects. Buffer must be restored.
+    onDelete.mockRejectedValueOnce(new Error('server error'));
+    await opts.action.onClick();
+
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(toast.error).toHaveBeenCalledTimes(1);
+    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/could not undo/i);
+    // Form NOT reset to the saved values on failure — leave post-save state
+    expect(
+      (screen.getByLabelText(/description/i) as HTMLInputElement).value,
+    ).toBe('');
+
+    // Second undo attempt succeeds because the buffer was restored.
+    await opts.action.onClick();
+    expect(onDelete).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      expect(
+        (screen.getByLabelText(/description/i) as HTMLInputElement).value,
+      ).toBe('Gum');
+    });
   });
 
   // -----------------------------------------------------------------
