@@ -115,6 +115,7 @@ function GeneralSection() {
           <form
             onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
             className="max-w-sm space-y-4"
+            noValidate
           >
             <FormField
               control={form.control}
@@ -243,7 +244,11 @@ function CurrenciesSection() {
         <CardTitle>Currencies</CardTitle>
       </CardHeader>
       <CardContent className="space-y-6">
-        <form onSubmit={(e) => void handleSaveRates(e)} className="space-y-4">
+        <form
+          onSubmit={(e) => void handleSaveRates(e)}
+          className="space-y-4"
+          noValidate
+        >
           <Table>
             <TableHeader>
               <TableRow>
@@ -300,6 +305,7 @@ function CurrenciesSection() {
             <form
               onSubmit={(e) => void addForm.handleSubmit(onAddCurrency)(e)}
               className="grid gap-4 sm:grid-cols-2 md:grid-cols-4"
+              noValidate
             >
               <FormField
                 control={addForm.control}
@@ -489,6 +495,7 @@ function SavingsSection() {
             <form
               onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
               className="grid max-w-md gap-4 sm:grid-cols-2"
+              noValidate
             >
               <FormField
                 control={form.control}
@@ -693,6 +700,7 @@ function UsersSection() {
             <form
               onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
               className="grid max-w-2xl gap-4 sm:grid-cols-2"
+              noValidate
             >
               <FormField
                 control={form.control}

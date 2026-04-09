@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -264,12 +264,7 @@ describe('Settings', () => {
       await user.clear(input);
       await user.type(input, '5000');
 
-      // happy-dom: userEvent.click on <button type="submit"> does not
-      // reliably fire onSubmit; submit the form directly instead.
-      const form = screen
-        .getByRole('button', { name: /save budget/i })
-        .closest('form')!;
-      fireEvent.submit(form);
+      await user.click(screen.getByRole('button', { name: /save budget/i }));
 
       await waitFor(() => {
         const now = new Date();
@@ -297,10 +292,7 @@ describe('Settings', () => {
       await user.clear(rateInput);
       await user.type(rateInput, '0.95');
 
-      const form = screen
-        .getByRole('button', { name: /save rates/i })
-        .closest('form')!;
-      fireEvent.submit(form);
+      await user.click(screen.getByRole('button', { name: /save rates/i }));
 
       await waitFor(() => {
         expect(mockedApi.put).toHaveBeenCalledWith(
@@ -333,10 +325,7 @@ describe('Settings', () => {
       const amountInput = screen.getByLabelText(/target amount/i);
       await user.type(amountInput, '10000');
 
-      const form = screen
-        .getByRole('button', { name: /add goal/i })
-        .closest('form')!;
-      fireEvent.submit(form);
+      await user.click(screen.getByRole('button', { name: /add goal/i }));
 
       await waitFor(() => {
         expect(mockedApi.put).toHaveBeenCalledWith(
