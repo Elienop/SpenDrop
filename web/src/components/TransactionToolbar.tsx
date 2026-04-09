@@ -29,6 +29,7 @@ export function TransactionToolbar({
 }: TransactionToolbarProps) {
   return (
     <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
+      {/* 240px is the min width where the "Search transactions..." placeholder fits without truncation */}
       <div className="relative min-w-[240px] flex-1">
         <Search
           aria-hidden="true"
@@ -46,6 +47,9 @@ export function TransactionToolbar({
 
       <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
+      {/* Inner bg-background is intentionally distinct from the toolbar's bg-card
+          wrapper so the segmented control reads as a sunken track — tokens.css
+          and globals.css resolve --background and --card to different HSL values. */}
       <div className="inline-flex items-center gap-0.5 rounded-md border bg-background p-0.5">
         {([
           { value: '', label: 'All' },
@@ -76,9 +80,6 @@ export function TransactionToolbar({
         size="sm"
         onClick={onToggleFilters}
         aria-expanded={showFilters}
-        aria-label={
-          activeFilterCount > 0 ? `Filters (${activeFilterCount})` : 'Filters'
-        }
       >
         Filters
         {activeFilterCount > 0 && (

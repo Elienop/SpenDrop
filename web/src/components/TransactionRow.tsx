@@ -30,7 +30,7 @@ function formatCurrency(amount: number): string {
   });
 }
 
-interface TransactionRowProps {
+export interface TransactionRowProps {
   transaction: Transaction;
   categories: Category[];
   onUpdate: (input: {
@@ -163,9 +163,9 @@ export function TransactionRow({
       </TableCell>
       <TableCell>
         {transaction.tags &&
-          transaction.tags.split(',').map((tag) => (
+          transaction.tags.split(',').map((tag, i) => (
             <span
-              key={tag.trim()}
+              key={`${tag.trim()}-${i}`}
               className="mr-1 inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
             >
               {tag.trim()}
@@ -177,7 +177,7 @@ export function TransactionRow({
           'text-right font-mono tabular-nums',
           transaction.category_type === 'expense'
             ? 'text-foreground'
-            : 'text-emerald-600 dark:text-emerald-400',
+            : 'text-[var(--color-income)]',
         )}
       >
         {transaction.category_type === 'expense' ? '-' : '+'}
@@ -200,6 +200,8 @@ export function TransactionRow({
             <DropdownMenuItem onSelect={() => setEditing(true)}>
               Edit
             </DropdownMenuItem>
+            {/* TODO(post-migration): wrap Delete in AlertDialog — kebab menu items auto-dismiss,
+                making mis-clicks easier than the pre-migration visible Delete button. */}
             <DropdownMenuItem
               onSelect={() => void onDelete(transaction.id)}
               className="text-destructive focus:text-destructive"

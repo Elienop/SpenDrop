@@ -1,7 +1,9 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Mock } from 'vitest';
 import { TransactionRow } from './TransactionRow';
+import type { TransactionRowProps } from './TransactionRow';
 import type { Transaction, Category } from '../api/types';
 
 const mockCategories: Category[] = [
@@ -44,17 +46,19 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
 
 function renderRow(
   transaction: Transaction,
-  onUpdate?: ReturnType<typeof vi.fn>,
-  onDelete?: ReturnType<typeof vi.fn>,
+  onUpdate?: TransactionRowProps['onUpdate'],
+  onDelete?: TransactionRowProps['onDelete'],
 ) {
+  const update = onUpdate ?? vi.fn().mockResolvedValue(undefined);
+  const del = onDelete ?? vi.fn().mockResolvedValue(undefined);
   return render(
     <table>
       <tbody>
         <TransactionRow
           transaction={transaction}
           categories={mockCategories}
-          onUpdate={(onUpdate ?? vi.fn().mockResolvedValue(undefined)) as never}
-          onDelete={(onDelete ?? vi.fn().mockResolvedValue(undefined)) as never}
+          onUpdate={update}
+          onDelete={del}
         />
       </tbody>
     </table>,
@@ -105,7 +109,9 @@ describe('TransactionRow actions menu', () => {
   });
 
   it('calls onDelete when Delete is chosen', async () => {
-    const onDelete = vi.fn().mockResolvedValue(undefined);
+    const onDelete = vi
+      .fn<TransactionRowProps['onDelete']>()
+      .mockResolvedValue(undefined);
     renderRow(
       makeTx({ description: 'Weekly groceries' }),
       undefined,
@@ -118,10 +124,12 @@ describe('TransactionRow actions menu', () => {
 });
 
 describe('TransactionRow tags editing', () => {
-  let onUpdate: ReturnType<typeof vi.fn>;
+  let onUpdate: Mock<TransactionRowProps['onUpdate']>;
 
   beforeEach(() => {
-    onUpdate = vi.fn().mockResolvedValue(undefined);
+    onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
   });
 
   it('shows TagInput with existing tags in edit mode', async () => {
@@ -153,13 +161,7 @@ describe('TransactionRow tags editing', () => {
     const user = await openActionsMenu('Weekly groceries');
     await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // TagInput is the kept-as-is legacy component; its input is still the only
-    // text input inside the edit row. Grab it by placeholder-less text query
-    // fallback: find all text inputs and pick the last one (the tag field).
-    const textInputs = screen
-      .getAllByRole('textbox')
-      .filter((el) => (el as HTMLInputElement).type === 'text');
-    const tagInputEl = textInputs[textInputs.length - 1];
+    const tagInputEl = screen.getByLabelText('Add tag');
     await user.type(tagInputEl, 'extra{Enter}');
     expect(screen.getByText('extra')).toBeInTheDocument();
 

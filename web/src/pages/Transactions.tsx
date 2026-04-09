@@ -4,6 +4,7 @@ import { X } from 'lucide-react';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
+import type { TransactionFilters } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
 import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
@@ -26,9 +27,89 @@ import {
   TableRow,
 } from '@/components/ui/table';
 
-// TODO: Bulk select + bulk categorize (Checkbox column + Dialog) are deferred.
-// They require a new `useTransactions` hook method and a new backend endpoint.
-// Tracked as a follow-up commit — do not add here without extending the hook.
+// TODO(post-migration): Bulk select + bulk categorize (Checkbox column + Dialog)
+// are deferred. They require a new `useTransactions` hook method and a new
+// backend endpoint — spec §3 line 305 flags this as out of scope for the
+// migration. Do not add here without extending the hook.
+
+interface ActiveChip {
+  key: string;
+  label: string;
+  onClear: () => void;
+}
+
+function buildActiveChips(
+  filters: TransactionFilters,
+  categories: Category[],
+  setFilter: (key: keyof TransactionFilters, value: string) => void,
+): ActiveChip[] {
+  const chips: ActiveChip[] = [];
+
+  if (filters.dateFrom || filters.dateTo) {
+    let label: string;
+    if (filters.dateFrom && filters.dateTo) {
+      label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
+    } else if (filters.dateFrom) {
+      label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
+    } else {
+      label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
+    }
+    chips.push({
+      key: 'date',
+      label,
+      onClear: () => {
+        setFilter('dateFrom', '');
+        setFilter('dateTo', '');
+      },
+    });
+  }
+
+  if (filters.categoryIds || filters.categoryId) {
+    const ids = filters.categoryIds
+      ? filters.categoryIds.split(',')
+      : [filters.categoryId];
+    const names = ids
+      .map((id) => categories.find((c) => String(c.id) === id)?.name)
+      .filter(Boolean);
+    chips.push({
+      key: 'category',
+      label: names.join(', ') || 'Categories',
+      onClear: () => {
+        setFilter('categoryIds', '');
+        setFilter('categoryId', '');
+      },
+    });
+  }
+
+  if (filters.amountMin || filters.amountMax) {
+    let label: string;
+    if (filters.amountMin && filters.amountMax) {
+      label = `$${filters.amountMin} - $${filters.amountMax}`;
+    } else if (filters.amountMin) {
+      label = `Min $${filters.amountMin}`;
+    } else {
+      label = `Max $${filters.amountMax}`;
+    }
+    chips.push({
+      key: 'amount',
+      label,
+      onClear: () => {
+        setFilter('amountMin', '');
+        setFilter('amountMax', '');
+      },
+    });
+  }
+
+  if (filters.tags) {
+    chips.push({
+      key: 'tags',
+      label: filters.tags,
+      onClear: () => setFilter('tags', ''),
+    });
+  }
+
+  return chips;
+}
 
 export function Transactions() {
   const {
@@ -98,16 +179,21 @@ export function Transactions() {
   const handleLoadFilter = useCallback(
     (sf: SavedFilter) => {
       try {
-        const parsed = JSON.parse(sf.filter_json) as Record<string, string>;
+        const parsed = JSON.parse(sf.filter_json) as Record<string, unknown>;
         clearFilters();
-        for (const [key, value] of Object.entries(parsed)) {
-          setFilter(key as keyof typeof filters, value);
+        // Only apply keys that are part of our known filter shape and carry strings.
+        const knownKeys = Object.keys(filters) as (keyof typeof filters)[];
+        for (const key of knownKeys) {
+          const value = parsed[key];
+          if (typeof value === 'string') {
+            setFilter(key, value);
+          }
         }
-      } catch {
-        /* invalid JSON — ignore */
+      } catch (err) {
+        console.warn('Failed to load saved filter', err);
       }
     },
-    [setFilter, clearFilters],
+    [setFilter, clearFilters, filters],
   );
 
   const handleDeleteFilter = useCallback(
@@ -126,75 +212,10 @@ export function Transactions() {
     return count;
   }, [filters]);
 
-  const activeChips = useMemo(() => {
-    if (showFilters) return [];
-    const chips: { key: string; label: string; onClear: () => void }[] = [];
-
-    if (filters.dateFrom || filters.dateTo) {
-      let label: string;
-      if (filters.dateFrom && filters.dateTo) {
-        label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
-      } else if (filters.dateFrom) {
-        label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
-      } else {
-        label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
-      }
-      chips.push({
-        key: 'date',
-        label,
-        onClear: () => {
-          setFilter('dateFrom', '');
-          setFilter('dateTo', '');
-        },
-      });
-    }
-
-    if (filters.categoryIds || filters.categoryId) {
-      const ids = filters.categoryIds
-        ? filters.categoryIds.split(',')
-        : [filters.categoryId];
-      const names = ids
-        .map((id) => categories.find((c) => String(c.id) === id)?.name)
-        .filter(Boolean);
-      chips.push({
-        key: 'category',
-        label: names.join(', ') || 'Categories',
-        onClear: () => {
-          setFilter('categoryIds', '');
-          setFilter('categoryId', '');
-        },
-      });
-    }
-
-    if (filters.amountMin || filters.amountMax) {
-      let label: string;
-      if (filters.amountMin && filters.amountMax) {
-        label = `$${filters.amountMin} - $${filters.amountMax}`;
-      } else if (filters.amountMin) {
-        label = `Min $${filters.amountMin}`;
-      } else {
-        label = `Max $${filters.amountMax}`;
-      }
-      chips.push({
-        key: 'amount',
-        label,
-        onClear: () => {
-          setFilter('amountMin', '');
-          setFilter('amountMax', '');
-        },
-      });
-    }
-
-    if (filters.tags) {
-      chips.push({
-        key: 'tags',
-        label: filters.tags,
-        onClear: () => setFilter('tags', ''),
-      });
-    }
-
-    return chips;
-  }, [filters, showFilters, categories, setFilter]);
+  const activeChips = useMemo(
+    () => (showFilters ? [] : buildActiveChips(filters, categories, setFilter)),
+    [filters, showFilters, categories, setFilter],
+  );
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 

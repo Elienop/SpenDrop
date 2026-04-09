@@ -68,6 +68,7 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
         onKeyDown={handleKeyDown}
         onBlur={() => addTag(input)}
         placeholder={tags.length === 0 ? placeholder : ''}
+        aria-label="Add tag"
       />
     </div>
   );

@@ -146,7 +146,7 @@ describe('Transactions page', () => {
       );
       render(<Transactions />);
       expect(
-        screen.getByRole('button', { name: /Filters \(2\)/ }),
+        screen.getByRole('button', { name: /Filters.*2/ }),
       ).toBeInTheDocument();
     });
 
@@ -273,8 +273,7 @@ describe('Transactions page', () => {
 
     it('calls deleteFilter hook when delete button is clicked', async () => {
       render(<Transactions />);
-      await openSavedTab();
-      const user = userEvent.setup();
+      const user = await openSavedTab();
 
       const deleteBtn = screen.getByRole('button', {
         name: /delete saved filter/i,

@@ -219,9 +219,9 @@ export function FilterPanel({
               >
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="link"
                   size="sm"
-                  className="h-auto p-0 font-medium"
+                  className="font-medium"
                   onClick={() => onLoadFilter(sf)}
                 >
                   {sf.name}

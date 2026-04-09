@@ -12,6 +12,7 @@ interface CategoryBadgeProps {
  * `--badge-color` against the surface and the text is the full color.
  */
 export function CategoryBadge({ category }: CategoryBadgeProps) {
+  // React.CSSProperties doesn't type custom `--` properties, so we cast after composing.
   const style = {
     '--badge-color': getCategoryColorVar(category),
     backgroundColor:
