@@ -6,33 +6,6 @@
   gap: var(--space-6);
 }
 
-/* Filter Bar */
-.filterBar {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-  background: var(--glass-bg);
-  backdrop-filter: blur(var(--glass-blur));
-  /* stylelint-disable-next-line property-no-vendor-prefix */
-  -webkit-backdrop-filter: blur(var(--glass-blur));
-  border: 1px solid var(--glass-border);
-  border-radius: 14px;
-  padding: var(--space-4);
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow 0.2s;
-}
-
-.filterBar:hover {
-  box-shadow: var(--shadow-md);
-}
-
-.filterRow {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-wrap: wrap;
-}
-
 .datePresets {
   display: flex;
   gap: var(--space-1);
@@ -98,35 +71,6 @@
   background-color: var(--color-primary);
   color: var(--text-inverse);
   box-shadow: var(--shadow-sm);
-}
-
-.filterSelect {
-  padding: var(--space-1) var(--space-2);
-  min-height: 36px;
-  font-size: 0.875rem;
-  min-width: 150px;
-}
-
-.searchInput {
-  flex: 1;
-  min-width: 200px;
-  padding: var(--space-1) var(--space-2);
-  min-height: 36px;
-  font-size: 0.875rem;
-}
-
-.clearButton {
-  padding: var(--space-1) var(--space-2);
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  transition: all var(--duration-fast) var(--ease-standard);
-}
-
-.clearButton:hover {
-  color: var(--color-error);
-  background-color: var(--expense-a15);
-  border-radius: var(--radius-md);
 }
 
 /* Transaction Entry (rapid add) */
@@ -568,4 +512,208 @@
 
 .exportButton:hover {
   opacity: 0.8;
+}
+
+/* ===== Toolbar ===== */
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  padding: 10px var(--space-4);
+  box-shadow: var(--shadow-sm);
+}
+
+.toolbarSearch {
+  flex: 1;
+  position: relative;
+  min-width: 200px;
+}
+
+.toolbarSearchIcon {
+  position: absolute;
+  left: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-tertiary);
+  font-size: 14px;
+  pointer-events: none;
+}
+
+.toolbarSearchInput {
+  width: 100%;
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  padding: var(--space-2) var(--space-2) var(--space-2) 32px;
+  color: var(--text-primary);
+  font-size: 14px;
+  min-height: 36px;
+  box-sizing: border-box;
+}
+
+.toolbarSearchInput:focus {
+  border-color: var(--color-primary);
+  outline: none;
+}
+
+.toolbarDivider {
+  width: 1px;
+  height: 28px;
+  background-color: var(--border-default);
+  flex-shrink: 0;
+}
+
+.filterButton {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: var(--space-2) var(--space-3);
+  background-color: var(--surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+  transition: all var(--duration-fast) var(--ease-standard);
+}
+
+.filterButton:hover {
+  background-color: var(--primary-a15);
+  color: var(--color-primary);
+  border-color: var(--color-primary);
+}
+
+.filterDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background-color: var(--color-primary);
+}
+
+.addButtonToolbar {
+  padding: var(--space-2) 18px;
+  background-color: var(--color-primary);
+  color: var(--text-inverse);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  font-weight: 500;
+  flex-shrink: 0;
+  white-space: nowrap;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+
+.addButtonToolbar:hover {
+  opacity: 0.8;
+}
+
+/* ===== Active Filter Chips ===== */
+.activeChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.activeChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background-color: var(--primary-a15);
+  color: var(--color-primary);
+  border-radius: var(--radius-full);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.activeChipRemove {
+  background: none;
+  border: none;
+  color: var(--color-primary);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  line-height: 1;
+  opacity: 0.7;
+}
+
+.activeChipRemove:hover {
+  opacity: 1;
+}
+
+/* ===== Filter Panel ===== */
+.filterPanel {
+  background: var(--glass-bg);
+  backdrop-filter: blur(var(--glass-blur));
+  /* stylelint-disable-next-line property-no-vendor-prefix */
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  border-radius: 14px;
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+
+.filterTabsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-default);
+  padding: 0 var(--space-4);
+}
+
+.filterTabs {
+  display: flex;
+}
+
+.filterTab {
+  padding: var(--space-3) var(--space-4);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  background: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.filterTab:hover {
+  color: var(--text-primary);
+}
+
+.filterTabActive {
+  color: var(--color-primary);
+  font-weight: 600;
+  border-bottom-color: var(--color-primary);
+}
+
+.filterTabContent {
+  padding: var(--space-4);
+}
+
+.clearAllButton {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  background: none;
+  border: none;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+
+.clearAllButton:hover {
+  color: var(--color-error);
+}
+
+/* ===== Entry Form Wrapper ===== */
+.entryFormHidden {
+  display: none;
 }
