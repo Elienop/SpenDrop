@@ -108,7 +108,7 @@ describe('TransactionEntryRow', () => {
     expect(
       screen.getByRole('button', { name: /select category/i }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText(/tags/i)).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/add tags/i)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /add/i })).toBeInTheDocument();
   });
 
@@ -133,7 +133,7 @@ describe('TransactionEntryRow', () => {
     );
     await user.click(await screen.findByRole('option', { name: /groceries/i }));
 
-    await user.type(screen.getByLabelText(/tags/i), 'food{Enter}');
+    await user.type(screen.getByPlaceholderText(/add tags/i), 'food{Enter}');
 
     await user.click(screen.getByRole('button', { name: /add/i }));
 
@@ -327,7 +327,7 @@ describe('TransactionEntryRow', () => {
       screen.getByRole('button', { name: /select category/i }),
     );
     await user.click(await screen.findByRole('option', { name: /groceries/i }));
-    await user.type(screen.getByLabelText(/tags/i), 'food{Enter}');
+    await user.type(screen.getByPlaceholderText(/add tags/i), 'food{Enter}');
 
     await user.click(screen.getByRole('button', { name: /add/i }));
 

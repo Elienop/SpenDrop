@@ -82,7 +82,6 @@ export function TransactionEntryRow({
   onDelete,
 }: TransactionEntryRowProps) {
   const amountRef = useRef<HTMLInputElement | null>(null);
-  const tagContainerRef = useRef<HTMLDivElement | null>(null);
   const undoBufferRef = useRef<{
     saved: Transaction;
     values: EntryFormValues;
@@ -98,16 +97,6 @@ export function TransactionEntryRow({
       tags: '',
     },
     mode: 'onSubmit',
-  });
-
-  // Wire a stable id onto the TagInput's internal input so that the adjacent
-  // <label htmlFor="entry-tags"> associates with it for accessibility and
-  // testing-library's getByLabelText. TagInput itself is preserved as-is.
-  useEffect(() => {
-    const input = tagContainerRef.current?.querySelector('input');
-    if (input && input.id !== 'entry-tags') {
-      input.id = 'entry-tags';
-    }
   });
 
   const undoLastSave = useCallback(async () => {
@@ -327,19 +316,12 @@ export function TransactionEntryRow({
             name="tags"
             render={({ field }) => (
               <FormItem className="w-56">
-                <label
-                  htmlFor="entry-tags"
-                  className="text-sm font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
-                >
-                  Tags
-                </label>
-                <div ref={tagContainerRef}>
-                  <TagInput
-                    value={field.value}
-                    onChange={field.onChange}
-                    placeholder="Add tags..."
-                  />
-                </div>
+                <FormLabel>Tags</FormLabel>
+                <TagInput
+                  value={field.value}
+                  onChange={field.onChange}
+                  placeholder="Add tags..."
+                />
                 <FormMessage />
               </FormItem>
             )}
