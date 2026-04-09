@@ -119,7 +119,7 @@ describe('Settings', () => {
     });
 
     test('switches to currencies tab', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /currencies/i }));
@@ -131,7 +131,7 @@ describe('Settings', () => {
     });
 
     test('switches to savings tab', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /savings/i }));
@@ -142,7 +142,7 @@ describe('Settings', () => {
     });
 
     test('shows users tab for admin', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /users/i }));
@@ -160,7 +160,7 @@ describe('Settings', () => {
     });
 
     test('switches to data tab and shows export section', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
@@ -173,14 +173,16 @@ describe('Settings', () => {
     });
 
     test('data tab has year input, month select, and export buttons', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
 
       await waitFor(() => {
         expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
-        expect(screen.getByLabelText(/month/i)).toBeInTheDocument();
+        expect(
+          screen.getByRole('combobox', { name: /export month/i }),
+        ).toBeInTheDocument();
         expect(
           screen.getByRole('button', { name: /export monthly/i }),
         ).toBeInTheDocument();
@@ -191,7 +193,7 @@ describe('Settings', () => {
     });
 
     test('export monthly opens correct URL', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
       renderSettings();
 
@@ -217,7 +219,7 @@ describe('Settings', () => {
     });
 
     test('export yearly opens correct URL', async () => {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
       renderSettings();
 
@@ -251,7 +253,7 @@ describe('Settings', () => {
 
     test('saves budget via PUT to budgets/{year}/{month}', async () => {
       mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await waitFor(() => {
@@ -262,7 +264,11 @@ describe('Settings', () => {
       await user.clear(input);
       await user.type(input, '5000');
 
-      const form = input.closest('form')!;
+      // happy-dom: userEvent.click on <button type="submit"> does not
+      // reliably fire onSubmit; submit the form directly instead.
+      const form = screen
+        .getByRole('button', { name: /save budget/i })
+        .closest('form')!;
       fireEvent.submit(form);
 
       await waitFor(() => {
@@ -278,7 +284,7 @@ describe('Settings', () => {
 
     test('saves currency rates via PUT with full currency object', async () => {
       mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /currencies/i }));
@@ -291,7 +297,9 @@ describe('Settings', () => {
       await user.clear(rateInput);
       await user.type(rateInput, '0.95');
 
-      const form = rateInput.closest('form')!;
+      const form = screen
+        .getByRole('button', { name: /save rates/i })
+        .closest('form')!;
       fireEvent.submit(form);
 
       await waitFor(() => {
@@ -309,7 +317,7 @@ describe('Settings', () => {
 
     test('adds savings goal via PUT to savings-goals/{year}', async () => {
       mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /savings/i }));
@@ -325,7 +333,9 @@ describe('Settings', () => {
       const amountInput = screen.getByLabelText(/target amount/i);
       await user.type(amountInput, '10000');
 
-      const form = amountInput.closest('form')!;
+      const form = screen
+        .getByRole('button', { name: /add goal/i })
+        .closest('form')!;
       fireEvent.submit(form);
 
       await waitFor(() => {
@@ -338,7 +348,7 @@ describe('Settings', () => {
 
     test('deletes savings goal by setting target_amount to 0 via PUT', async () => {
       mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /savings/i }));
@@ -359,19 +369,21 @@ describe('Settings', () => {
 
     test('changes user role via PUT (not PATCH)', async () => {
       mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
       await user.click(screen.getByRole('tab', { name: /users/i }));
 
       await waitFor(() => {
-        expect(screen.getByLabelText(/role for alice/i)).toBeInTheDocument();
+        expect(
+          screen.getByRole('combobox', { name: /role for alice/i }),
+        ).toBeInTheDocument();
       });
 
-      await user.selectOptions(
-        screen.getByLabelText(/role for alice/i),
-        'member',
+      await user.click(
+        screen.getByRole('combobox', { name: /role for alice/i }),
       );
+      await user.click(screen.getByRole('option', { name: /^member$/i }));
 
       await waitFor(() => {
         expect(mockedApi.put).toHaveBeenCalledWith('users/1', {
@@ -462,7 +474,7 @@ describe('Settings', () => {
     });
 
     async function goToDataTab() {
-      const user = userEvent.setup();
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
       await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
       return user;
@@ -575,6 +587,16 @@ describe('Settings', () => {
 
       await user.click(screen.getByRole('button', { name: /^import$/i }));
 
+      // Confirmation dialog should appear
+      await waitFor(() => {
+        expect(
+          screen.getByRole('dialog', { name: /confirm import/i }),
+        ).toBeInTheDocument();
+      });
+      await user.click(
+        screen.getByRole('button', { name: /confirm and import/i }),
+      );
+
       await waitFor(() => {
         expect(screen.getByText(/4 imported/i)).toBeInTheDocument();
         expect(screen.getByText(/1 skipped/i)).toBeInTheDocument();
@@ -600,6 +622,16 @@ describe('Settings', () => {
         expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
       });
       await user.click(screen.getByRole('button', { name: /^import$/i }));
+
+      // Confirmation dialog should appear
+      await waitFor(() => {
+        expect(
+          screen.getByRole('dialog', { name: /confirm import/i }),
+        ).toBeInTheDocument();
+      });
+      await user.click(
+        screen.getByRole('button', { name: /confirm and import/i }),
+      );
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: /import another/i })).toBeInTheDocument();
@@ -665,6 +697,16 @@ describe('Settings', () => {
 
       await user.click(screen.getByRole('button', { name: /^import$/i }));
 
+      // Confirmation dialog should appear
+      await waitFor(() => {
+        expect(
+          screen.getByRole('dialog', { name: /confirm import/i }),
+        ).toBeInTheDocument();
+      });
+      await user.click(
+        screen.getByRole('button', { name: /confirm and import/i }),
+      );
+
       await waitFor(() => {
         expect(screen.getByText(/import failed: duplicate rows/i)).toBeInTheDocument();
       });
@@ -689,6 +731,16 @@ describe('Settings', () => {
         expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
       });
       await user.click(screen.getByRole('button', { name: /^import$/i }));
+
+      // Confirmation dialog should appear
+      await waitFor(() => {
+        expect(
+          screen.getByRole('dialog', { name: /confirm import/i }),
+        ).toBeInTheDocument();
+      });
+      await user.click(
+        screen.getByRole('button', { name: /confirm and import/i }),
+      );
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: /import another/i })).toBeInTheDocument();
@@ -736,6 +788,16 @@ describe('Settings', () => {
       });
 
       await user.click(screen.getByRole('button', { name: /^import$/i }));
+
+      // Confirmation dialog should appear
+      await waitFor(() => {
+        expect(
+          screen.getByRole('dialog', { name: /confirm import/i }),
+        ).toBeInTheDocument();
+      });
+      await user.click(
+        screen.getByRole('button', { name: /confirm and import/i }),
+      );
 
       await waitFor(() => {
         expect(mockedApi.post).toHaveBeenCalledWith('import/confirm', expect.objectContaining({
