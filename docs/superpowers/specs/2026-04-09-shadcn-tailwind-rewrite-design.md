@@ -675,7 +675,7 @@ SQLite's `ALTER TABLE DROP COLUMN` requires SQLite 3.35+ (March 2021) — well w
   - Delete `Color: row.Color,` in the row-to-response mapper (line ~148).
 
 **Go tests:**
-- `internal/api/category_handlers_test.go` — drop every `"color":"#..."` from JSON request bodies (lines 101, 130, 147, 164, 200, 217, 234, 251) and remove both `resp["color"]` assertions (lines 120–121). Some requests will then have empty bodies; keep the trailing fields that still matter (`name`, `type`, `sort_order`).
+- `internal/api/category_handlers_test.go` — drop every `"color":"#..."` from JSON request bodies (lines 101, 130, 147, 164, 200, 217, 234, 251) and delete the single `resp["color"]` `if` block at lines 120–121 in its entirety. Some requests will then have empty bodies; keep the trailing fields that still matter (`name`, `type`, `sort_order`).
 - `internal/api/transaction_handlers_test.go`:
   - `seedTestCategory` helper (lines 84–89) — drop the `color string` parameter and the `Color: color,` field. Update every call site within the file to match.
   - `TestHandleListTransactions_IncludesCategoryInfo` (lines 619–620) — delete the `txn["category_color"] != "#5347CE"` assertion entirely; the response no longer has that key.
@@ -696,6 +696,7 @@ SQLite's `ALTER TABLE DROP COLUMN` requires SQLite 3.35+ (March 2021) — well w
   - Delete the `color: cat.color,` entry in `gaugeData` at line 137.
   - Replace `cat.color` at lines 547 and 555 with `getCategoryColorVar(cat)` (new helper from §2.3).
   - Delete the `tx.category_color` references at lines 668–669 and replace with `getCategoryColorVar({ id: tx.category_id })`.
+  - **Note:** the `useChartPatterns` call at line 145 and the `'Other' color: '#B8BCC8'` fallback at line 140 also reference color, but both sit inside chart-pattern code paths that are **already deleted in §8 commit 6** (Dashboard rewrite). By the time commit 12 runs, `Dashboard.tsx` no longer contains those lines — they are not part of this commit's edits.
 - `web/src/pages/Reports.tsx` — line 219: replace `cat.color || 'var(--color-text-secondary)'` with `getCategoryColorVar(cat)`.
 - `web/src/components/FilterPanel.tsx` — line 157: replace `{ backgroundColor: cat.color, borderColor: cat.color }` with `{ backgroundColor: getCategoryColorVar(cat), borderColor: getCategoryColorVar(cat) }`.
 - `web/src/components/TransactionRow.tsx` — line 144: replace `color={transaction.category_color}` with `color={getCategoryColorVar({ id: transaction.category_id })}`. Or, since `TransactionRow` is being rewritten anyway as part of the Transactions page commit, inline the `getCategoryColorVar` call directly in the new Tailwind-based row.
@@ -767,9 +768,12 @@ Frontend tests move with the pages they cover — a page rewrite commit also rew
       - `\bcolor:\s*['"]#` (literal hex-color object-field syntax — catches typed and untyped fixtures alike)
       - `\.color\b` inside `web/src/pages/` and `web/src/components/` (catches any renamed but forgotten consumer)
 
-      The only remaining hits should be inside this commit's own deletions. If any page/test still consumes the field, add it to the deletion list and re-run the grep until clean.
+      The `\bcolor:\s*['"]#` pattern and the broader `.color\b` sweep will produce false positives for unrelated uses (e.g. `style.color`, CSS-in-JS object literals, third-party library fields). Skim past the noise — the only relevant hits are those touching `Category`, `Transaction`, `CategoryBreakdownItem`, or `CategoryTrendEntry` shapes. The only remaining **relevant** hits should be inside this commit's own deletions. If any page/test still consumes the field, add it to the deletion list and re-run the grep until clean.
     - Enforces the §7.2 "all one commit" rule.
-13. **Final cleanup** — delete everything from the "Deleted wholesale" list that hasn't already been removed by the page rewrites: `tokens.css`, `global.css`, any remaining `*.module.css`, `.stylelintrc.json`, stylelint dev deps, `useChartTheme.ts` + its test, `useChartPatterns.tsx`, `useTheme.tsx` + its test (removes both `ThemeProvider` and `useTheme` named exports), `ChartTooltip.tsx` + its test, `Tabs.tsx` + its test, `@fontsource-variable/inter`. **Enable Tailwind preflight** (`corePlugins: { preflight: true }` / remove the override) and visually verify every page. Add the `npx eslint .` CI step in `pr.yml`'s frontend job.
+13. **Final cleanup** — three top-line goals:
+    1. **Delete the "Deleted wholesale" leftovers** — anything from the §Deleted-wholesale list that wasn't already removed by a page rewrite: `tokens.css`, `global.css`, any remaining `*.module.css`, `.stylelintrc.json`, stylelint dev deps, `useChartTheme.ts` + its test, `useChartPatterns.tsx`, `useTheme.tsx` + its test (removes both `ThemeProvider` and `useTheme` named exports), `ChartTooltip.tsx` + its test, `Tabs.tsx` + its test, `@fontsource-variable/inter`.
+    2. **Re-enable Tailwind preflight** — flip `corePlugins: { preflight: false }` off in `tailwind.config.ts` (or remove the override). This is a behavioral change: preflight resets default browser styles (margins, list markers, form element appearance, etc.). Do a full visual sweep of every page after enabling, with particular attention to forms, lists, and any element that relied on default browser styles during the migration. Fix any regressions in the same commit. This is the reason preflight was held until the end.
+    3. **Add the `npx eslint .` CI step** to the frontend job in `.github/workflows/pr.yml` so the ESLint-driven Tailwind class linting becomes a hard CI gate.
 
 At each commit, CI must be green: `go test -race ./...`, `npx tsc -b`, `npx vitest run`, `npx eslint .` (added in commit 1 even if the step doesn't run in CI yet), and `docker build` for the full-stack job.
 
