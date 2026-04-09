@@ -53,9 +53,12 @@ vi.mock('../hooks/useDashboard', () => ({
       savings_ytd: 7500,
       savings_goal_progress: 75,
     },
+    // Backend returns trend newest-first (see dashboard_handlers.go) — keep
+    // this fixture in the same order so chartData's `.reverse()` produces
+    // chronologically-sorted bars.
     trend: [
-      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
       { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
+      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
     ],
     categories: [
       { id: 1, name: 'Food', color: '#818CF8', total: 1200 },
@@ -132,6 +135,13 @@ describe('Dashboard', () => {
       expect(screen.getAllByText('Income').length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText('Expenses').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText('Savings Rate')).toBeInTheDocument();
+      // Assert the KPI row actually rendered values — "Income" / "Expenses"
+      // strings also appear in the cash-flow chart config, so label-only
+      // assertions would pass even if the KPI row were missing. These
+      // formatted dollar splits (4500-3200=1300) are unique to KPI cards.
+      expect(screen.getByText('$1,300')).toBeInTheDocument();
+      expect(screen.getByText('$4,500')).toBeInTheDocument();
+      expect(screen.getByText('$3,200')).toBeInTheDocument();
     });
   });
 

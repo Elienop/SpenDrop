@@ -40,6 +40,9 @@ function splitCurrency(amount: number): { dollars: string; cents: string } {
   return { dollars: `$${dollars}`, cents };
 }
 
+// Intentionally unsigned: callers supply the sign glyph (+/-) from
+// category_type or from a dedicated delta. Do not rely on this formatter
+// to preserve negative amounts.
 function formatFull(amount: number): string {
   return '$' + Math.abs(amount).toLocaleString('en-US', {
     minimumFractionDigits: 2,
@@ -111,7 +114,11 @@ export function Dashboard() {
     api
       .get<PaginatedResponse<Transaction>>(url)
       .then((data) => { if (!cancelled) setRecentTransactions(data.transactions); })
-      .catch(() => { /* silent — non-critical */ });
+      .catch(() => {
+        // Clear stale data on failure so the empty state renders under the
+        // new month header instead of showing the previous month's rows.
+        if (!cancelled) setRecentTransactions([]);
+      });
     return () => { cancelled = true; };
   }, [selectedYear, selectedMonth, showLatest]);
 
@@ -124,6 +131,10 @@ export function Dashboard() {
   const totalExpense = summary?.total_spent ?? 0;
   const totalBalance = totalIncome - totalExpense;
 
+  // The backend returns `trend` newest-first (dashboard_handlers.go walks
+  // backwards from the anchor with `AddDate(0, -i, 0)`), so reverse to
+  // ascending order before slicing — the bar chart renders left-to-right
+  // chronologically with the most recent month on the right edge.
   const chartData = useMemo(() => {
     const sorted = [...trend].reverse();
     const sliced = cashFlowView === '6m' ? sorted.slice(-6) : sorted;
@@ -159,9 +170,15 @@ export function Dashboard() {
     ];
   }, [categories]);
 
+  // Key by a stable slug (`cat-${id}`), not by name. shadcn's ChartStyle
+  // turns every ChartConfig key into a `--color-${key}` CSS custom property,
+  // so keys must be valid CSS identifiers — user-editable names like
+  // "Food & Drink" would produce malformed CSS and break tooltip color
+  // lookup silently. The id-derived slug also prevents duplicate-name
+  // categories from clobbering each other in the config map.
   const categoryChartConfig = useMemo<ChartConfig>(() => {
     return gaugeData.reduce<ChartConfig>((acc, slice) => {
-      acc[slice.name] = { label: slice.name, color: slice.color };
+      acc[`cat-${slice.id}`] = { label: slice.name, color: slice.color };
       return acc;
     }, {});
   }, [gaugeData]);
@@ -170,11 +187,11 @@ export function Dashboard() {
     ? ((totalIncome - totalExpense) / totalIncome * 100)
     : 0;
 
-  const prevMonthTrend = (() => {
+  const prevMonthTrend = useMemo(() => {
     const prevM = selectedMonth === 1 ? 12 : selectedMonth - 1;
     const prevY = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
     return trend.find(t => t.year === prevY && t.month === prevM);
-  })();
+  }, [trend, selectedMonth, selectedYear]);
 
   const balanceDelta = prevMonthTrend
     ? pctChange(totalBalance, prevMonthTrend.total_income - prevMonthTrend.total_spent)
@@ -195,10 +212,10 @@ export function Dashboard() {
   const expenseSplit = splitCurrency(totalExpense);
 
   const savingsGoalPct = summary?.savings_goal_progress ?? 0;
-  const savingsData = [
+  const savingsData = useMemo(() => [
     { name: 'filled', value: savingsGoalPct },
     { name: 'rest', value: Math.max(0, 100 - savingsGoalPct) },
-  ];
+  ], [savingsGoalPct]);
 
   /* ── Loading state ── */
   if (loading) {
@@ -396,7 +413,7 @@ export function Dashboard() {
                       strokeWidth={0}
                     >
                       {gaugeData.map((slice) => (
-                        <Cell key={slice.name} fill={slice.color} />
+                        <Cell key={slice.id} fill={slice.color} />
                       ))}
                     </Pie>
                   </PieChart>
@@ -408,7 +425,7 @@ export function Dashboard() {
                     ? (slice.value / totalCategorySpent) * 100
                     : 0;
                   return (
-                    <li key={slice.name} className="flex items-center gap-3 text-sm">
+                    <li key={slice.id} className="flex items-center gap-3 text-sm">
                       <span
                         className="h-2.5 w-2.5 shrink-0 rounded-sm"
                         style={{ backgroundColor: slice.color }}
@@ -436,6 +453,7 @@ export function Dashboard() {
               <h2 className="text-base font-semibold tracking-tight">Recent Transactions</h2>
               <button
                 type="button"
+                aria-pressed={showLatest}
                 className="mt-0.5 text-xs font-medium text-primary hover:underline"
                 onClick={() => setShowLatest((v) => !v)}
               >
