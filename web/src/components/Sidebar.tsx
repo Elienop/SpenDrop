@@ -1,157 +1,194 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutGrid,
   ArrowLeftRight,
   ChartNoAxesColumnIncreasing,
   Tag,
-  Settings,
-  Moon,
-  Sun,
-  Monitor,
+  Settings as SettingsIcon,
   ChevronLeft,
   ChevronRight,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import { useTheme } from '../hooks/useTheme';
-import styles from '../styles/Sidebar.module.css';
+import { ScrollArea } from '@/components/ui/scroll-area';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 
 const menuItems = [
-  { to: '/', label: 'Dashboard', icon: LayoutGrid },
-  { to: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
-  { to: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
-  { to: '/categories', label: 'Categories', icon: Tag },
+  { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
+  { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
+  { path: '/categories', label: 'Categories', icon: Tag },
 ];
 
 const generalItems = [
-  { to: '/settings', label: 'Settings', icon: Settings },
+  { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
-
-const themeIcons = { dark: Moon, light: Sun, system: Monitor } as const;
-const themeOrder: Array<'dark' | 'light' | 'system'> = ['dark', 'light', 'system'];
 
 export function Sidebar() {
   const { user, logout } = useAuth();
-  const { theme, setTheme } = useTheme();
-  const [expanded, setExpanded] = useState(() => {
-    return localStorage.getItem('spendrop-sidebar') === 'true';
-  });
+  const [expanded, setExpanded] = useState(
+    () => localStorage.getItem('spendrop-sidebar') === 'true',
+  );
 
-  const ThemeIcon = themeIcons[theme];
+  useEffect(() => {
+    localStorage.setItem('spendrop-sidebar', String(expanded));
+    window.dispatchEvent(new Event('sidebar-toggle'));
+  }, [expanded]);
 
-  const toggleSidebar = () => {
-    setExpanded(prev => {
-      const next = !prev;
-      localStorage.setItem('spendrop-sidebar', String(next));
-      window.dispatchEvent(new Event('sidebar-toggle'));
-      return next;
-    });
-  };
-
-  const cycleTheme = () => {
-    const idx = themeOrder.indexOf(theme);
-    setTheme(themeOrder[(idx + 1) % themeOrder.length]);
-  };
-
-  const initial = user?.display_name?.charAt(0).toUpperCase() ?? '?';
+  const initial = user?.display_name?.[0]?.toUpperCase() ?? '?';
 
   return (
-    <aside
-      className={`${styles.sidebar}${expanded ? ` ${styles.expanded}` : ''}`}
-    >
-      <div className={styles.header}>
-        <span className={styles.logoMark}>S</span>
-        <span className={styles.logoText}>SpenDrop</span>
-        <button
-          className={styles.toggleButton}
-          onClick={toggleSidebar}
-          aria-label="Toggle sidebar"
-        >
-          {expanded ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
-        </button>
-      </div>
-
-      <nav className={styles.nav} aria-label="Main navigation">
-        <div className={styles.navSection}>
-          <div className={styles.navSectionLabel}>Menu</div>
-          <ul className={styles.navList}>
-            {menuItems.map((item) => (
-              <li key={item.to}>
-                <NavLink
-                  to={item.to}
-                  end={item.to === '/'}
-                  className={({ isActive }) =>
-                    `${styles.navLink}${isActive ? ` ${styles.active}` : ''}`
-                  }
-                >
-                  <span className={styles.navIcon} aria-hidden="true">
-                    <item.icon size={20} strokeWidth={1.5} />
-                  </span>
-                  <span className={styles.navLabel}>{item.label}</span>
-                </NavLink>
-              </li>
-            ))}
-          </ul>
-        </div>
-
-        <div className={styles.navSection}>
-          <div className={styles.navSectionLabel}>General</div>
-          <ul className={styles.navList}>
-            {generalItems.map((item) => (
-              <li key={item.to}>
-                <NavLink
-                  to={item.to}
-                  className={({ isActive }) =>
-                    `${styles.navLink}${isActive ? ` ${styles.active}` : ''}`
-                  }
-                >
-                  <span className={styles.navIcon} aria-hidden="true">
-                    <item.icon size={20} strokeWidth={1.5} />
-                  </span>
-                  <span className={styles.navLabel}>{item.label}</span>
-                </NavLink>
-              </li>
-            ))}
-            {/* Logout inside General section, under Settings */}
-            <li>
-              <button
-                className={styles.navLink}
-                onClick={() => void logout()}
-                aria-label="Log out"
-              >
-                <span className={styles.navIcon} aria-hidden="true">
-                  <LogOut size={20} strokeWidth={1.5} />
-                </span>
-                <span className={styles.navLabel}>Logout</span>
-              </button>
-            </li>
-          </ul>
-        </div>
-      </nav>
-
-      {/* Theme toggle above the bottom line */}
-      <button
-        className={styles.themeToggle}
-        onClick={cycleTheme}
-        aria-label={`Theme: ${theme}. Click to change.`}
+    <TooltipProvider delayDuration={200}>
+      <aside
+        role="complementary"
+        className={cn(
+          'fixed left-0 top-0 flex h-screen flex-col border-r border-border bg-card transition-[width] duration-150',
+          expanded ? 'w-60' : 'w-16',
+        )}
       >
-        <span className={styles.navIcon}>
-          <ThemeIcon size={20} strokeWidth={1.5} />
-        </span>
-        <span className={styles.navLabel}>{theme.charAt(0).toUpperCase() + theme.slice(1)}</span>
-      </button>
-
-      {/* User at the very bottom, below the line */}
-      <div className={styles.bottomSection}>
-        <div className={styles.userRow}>
-          <span className={styles.avatar}>{initial}</span>
-          <div className={styles.userInfo}>
-            <span className={styles.userName}>{user?.display_name}</span>
-            <span className={styles.userEmail}>{user?.username}</span>
-          </div>
+        <div className="flex h-14 items-center justify-between border-b border-border px-4">
+          {expanded ? (
+            <span className="font-semibold tracking-tight">SpenDrop</span>
+          ) : (
+            <span className="sr-only">SpenDrop</span>
+          )}
+          <button
+            type="button"
+            aria-label="Toggle sidebar"
+            aria-expanded={expanded}
+            onClick={() => setExpanded((v) => !v)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+          >
+            {expanded ? (
+              <ChevronLeft className="h-4 w-4" />
+            ) : (
+              <ChevronRight className="h-4 w-4" />
+            )}
+          </button>
         </div>
-      </div>
-    </aside>
+
+        <ScrollArea className="flex-1">
+          <nav className="flex flex-col gap-6 px-2 py-4" aria-label="Primary">
+            <SidebarSection
+              title="Menu"
+              items={menuItems}
+              expanded={expanded}
+            />
+            <div className="flex flex-col gap-1">
+              <SidebarSectionTitle expanded={expanded} title="General" />
+              {generalItems.map((item) => (
+                <SidebarLink key={item.path} item={item} expanded={expanded} />
+              ))}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => void logout()}
+                    className="mx-1 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                  >
+                    <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    <span className={expanded ? undefined : 'sr-only'}>
+                      Log out
+                    </span>
+                  </button>
+                </TooltipTrigger>
+                {!expanded && (
+                  <TooltipContent side="right">Log out</TooltipContent>
+                )}
+              </Tooltip>
+            </div>
+          </nav>
+        </ScrollArea>
+
+        <div className="flex items-center gap-3 border-t border-border px-3 py-3">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
+            {initial}
+          </div>
+          {expanded && user && (
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium">
+                {user.display_name}
+              </p>
+              <p className="truncate text-xs text-muted-foreground">
+                @{user.username}
+              </p>
+            </div>
+          )}
+        </div>
+      </aside>
+    </TooltipProvider>
+  );
+}
+
+function SidebarSection({
+  title,
+  items,
+  expanded,
+}: {
+  title: string;
+  items: typeof menuItems;
+  expanded: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <SidebarSectionTitle expanded={expanded} title={title} />
+      {items.map((item) => (
+        <SidebarLink key={item.path} item={item} expanded={expanded} />
+      ))}
+    </div>
+  );
+}
+
+function SidebarSectionTitle({
+  title,
+  expanded,
+}: {
+  title: string;
+  expanded: boolean;
+}) {
+  if (!expanded) return null;
+  return (
+    <p className="px-3 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+      {title}
+    </p>
+  );
+}
+
+function SidebarLink({
+  item,
+  expanded,
+}: {
+  item: { path: string; label: string; icon: React.ElementType; end?: boolean };
+  expanded: boolean;
+}) {
+  const Icon = item.icon;
+  const link = (
+    <NavLink
+      to={item.path}
+      end={item.end}
+      className={({ isActive }) =>
+        cn(
+          'mx-1 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
+          isActive && 'bg-muted text-foreground',
+        )
+      }
+    >
+      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
+      <span className={expanded ? undefined : 'sr-only'}>{item.label}</span>
+    </NavLink>
+  );
+  if (expanded) return link;
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>{link}</TooltipTrigger>
+      <TooltipContent side="right">{item.label}</TooltipContent>
+    </Tooltip>
   );
 }

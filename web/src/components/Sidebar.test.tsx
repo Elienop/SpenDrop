@@ -3,22 +3,14 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
-// Mock useAuth
 vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }));
 
-// Mock useTheme
-vi.mock('../hooks/useTheme', () => ({
-  useTheme: vi.fn(),
-}));
-
 import { useAuth } from '../hooks/useAuth';
-import { useTheme } from '../hooks/useTheme';
 import { Sidebar } from './Sidebar';
 
 const mockedUseAuth = vi.mocked(useAuth);
-const mockedUseTheme = vi.mocked(useTheme);
 
 const mockUser = {
   id: 1,
@@ -38,7 +30,6 @@ function renderSidebar(currentPath = '/') {
 
 describe('Sidebar', () => {
   const mockLogout = vi.fn();
-  const mockSetTheme = vi.fn();
 
   beforeEach(() => {
     localStorage.clear();
@@ -50,16 +41,6 @@ describe('Sidebar', () => {
       register: vi.fn(),
       logout: mockLogout,
     });
-    mockedUseTheme.mockReturnValue({
-      theme: 'dark',
-      resolvedTheme: 'dark',
-      setTheme: mockSetTheme,
-    });
-  });
-
-  test('displays SpenDrop title', () => {
-    renderSidebar();
-    expect(screen.getByText('SpenDrop')).toBeInTheDocument();
   });
 
   test('renders all navigation links', () => {
@@ -71,24 +52,28 @@ describe('Sidebar', () => {
     expect(screen.getByRole('link', { name: /settings/i })).toBeInTheDocument();
   });
 
-  test('highlights the active nav link', () => {
+  test('marks the current route as active via aria-current', () => {
     renderSidebar('/transactions');
-    const transactionsLink = screen.getByRole('link', { name: /transactions/i });
-    expect(transactionsLink.className).toContain('active');
+    const link = screen.getByRole('link', { name: /transactions/i });
+    expect(link).toHaveAttribute('aria-current', 'page');
   });
 
-  test('displays user display name', () => {
+  test('displays user display name when expanded', async () => {
+    const user = userEvent.setup();
     renderSidebar();
+    await user.click(screen.getByLabelText('Toggle sidebar'));
     expect(screen.getByText('Alice')).toBeInTheDocument();
+  });
+
+  test('displays user avatar initial', () => {
+    renderSidebar();
+    expect(screen.getByText('A')).toBeInTheDocument();
   });
 
   test('calls logout when logout button is clicked', async () => {
     const user = userEvent.setup();
     renderSidebar();
-
-    const logoutButton = screen.getByRole('button', { name: /log\s*out/i });
-    await user.click(logoutButton);
-
+    await user.click(screen.getByRole('button', { name: /log\s*out/i }));
     expect(mockLogout).toHaveBeenCalledTimes(1);
   });
 
@@ -97,61 +82,47 @@ describe('Sidebar', () => {
     expect(screen.getByRole('navigation')).toBeInTheDocument();
   });
 
-  test('has theme toggle button', () => {
-    renderSidebar();
-    expect(screen.getByRole('button', { name: /theme/i })).toBeInTheDocument();
-  });
-
-  test('cycles theme on toggle click', async () => {
-    const user = userEvent.setup();
-    renderSidebar();
-
-    const themeButton = screen.getByRole('button', { name: /theme/i });
-    await user.click(themeButton);
-
-    expect(mockSetTheme).toHaveBeenCalledWith('light');
-  });
-
-  test('displays user avatar initial', () => {
-    renderSidebar();
-    expect(screen.getByText('A')).toBeInTheDocument();
-  });
-
   test('renders collapsed by default', () => {
     renderSidebar();
-    const sidebar = screen.getByRole('complementary');
-    expect(sidebar.className).not.toContain('expanded');
-  });
-
-  test('does not expand on mouse hover', async () => {
-    const user = userEvent.setup();
-    renderSidebar();
-    const sidebar = screen.getByRole('complementary');
-    await user.hover(sidebar);
-    expect(sidebar.className).not.toContain('expanded');
+    expect(screen.getByLabelText('Toggle sidebar')).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    );
   });
 
   test('expands when toggle button is clicked', async () => {
     const user = userEvent.setup();
     renderSidebar();
-    const toggle = screen.getByLabelText('Toggle sidebar');
-    await user.click(toggle);
-    const sidebar = screen.getByRole('complementary');
-    expect(sidebar.className).toContain('expanded');
+    await user.click(screen.getByLabelText('Toggle sidebar'));
+    expect(screen.getByLabelText('Toggle sidebar')).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
   });
 
   test('persists expanded state to localStorage', async () => {
     const user = userEvent.setup();
     renderSidebar();
-    const toggle = screen.getByLabelText('Toggle sidebar');
-    await user.click(toggle);
+    await user.click(screen.getByLabelText('Toggle sidebar'));
     expect(localStorage.getItem('spendrop-sidebar')).toBe('true');
   });
 
   test('reads initial state from localStorage', () => {
     localStorage.setItem('spendrop-sidebar', 'true');
     renderSidebar();
-    const sidebar = screen.getByRole('complementary');
-    expect(sidebar.className).toContain('expanded');
+    expect(screen.getByLabelText('Toggle sidebar')).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
+  });
+
+  test('dispatches sidebar-toggle event on toggle', async () => {
+    const listener = vi.fn();
+    window.addEventListener('sidebar-toggle', listener);
+    const user = userEvent.setup();
+    renderSidebar();
+    await user.click(screen.getByLabelText('Toggle sidebar'));
+    expect(listener).toHaveBeenCalled();
+    window.removeEventListener('sidebar-toggle', listener);
   });
 });
