@@ -18,9 +18,9 @@ This rewrite also elevates the **transaction entry row** — SpenDrop's spreadsh
 ## Goals
 
 1. Replace every `*.module.css` file with Tailwind utilities and shadcn primitives.
-2. Adopt shadcn/ui component library (~24 primitives) as the canonical UI vocabulary.
+2. Adopt shadcn/ui component library (~20 primitives) as the canonical UI vocabulary.
 3. Unify typography on Geist Sans + Geist Mono with tabular figures for all numbers.
-4. Delete the 11-color per-category `cat-*` token scale and replace with an 11-slot chart palette assigned by `category.id % 11`. Remove per-category color customization.
+4. Delete the 11-color per-category `cat-*` token scale and replace with an 11-slot chart palette assigned by `((category.id - 1) % 11) + 1`. Remove per-category color customization.
 5. Drop light mode entirely — dark-only.
 6. Delete glass/blur surfaces, SVG chart patterns, and all theming hooks.
 7. Rewrite the transaction entry row so that keyboard-first data entry is faster and more robust than it is today, using react-hook-form + shadcn `Command` for category selection.
@@ -52,7 +52,7 @@ Locked in during brainstorming, 2026-04-09.
 | Typography | Geist Sans (body) + Geist Mono (numbers) | Inter everywhere; Geist Sans everywhere without mono |
 | Theme scope | Dark-only | Dark + light; dark-only-for-now-with-light-ready |
 | Migration strategy | Big-bang single branch | Slice-by-page ship-as-you-go; foundation PR + slices |
-| Category color source | CSS-driven via `--chart-N` slot from `category.id % 11` | Database `categories.color` column (preserved); expanded 20-slot palette |
+| Category color source | CSS-driven via `--chart-N` slot from `((category.id - 1) % 11) + 1` | Database `categories.color` column (preserved); expanded 20-slot palette |
 | Category color picker | **Removed** — `categories.color` column **dropped** in migration | Leave column, ignore in UI |
 | Entry row integration | react-hook-form + shadcn `Form` + `Command` (primary app goal) | Keep uncontrolled fallback |
 | Cash flow bar colors | Green + crimson (convention) | Teal + crimson (WCAG-safe but unconventional for finance) |
@@ -71,7 +71,7 @@ web/src/
 │   │   ├── button.tsx
 │   │   ├── card.tsx
 │   │   ├── input.tsx
-│   │   ├── ... (~24 files)
+│   │   ├── ... (~20 files)
 │   ├── AppShell.tsx         (replaces AppLayout)
 │   ├── Sidebar.tsx          (rewritten)
 │   ├── KpiCard.tsx          (new)
@@ -92,39 +92,39 @@ web/src/
 │   └── Settings.tsx
 ├── styles/
 │   └── globals.css          (Tailwind directives + CSS var layer; replaces tokens.css + global.css)
-└── main.tsx                 (imports geist/font/sans + geist/font/mono)
+└── main.tsx                 (imports @fontsource-variable/geist + @fontsource-variable/geist-mono)
 ```
 
 **Deleted wholesale:**
 - `src/styles/tokens.css`
 - `src/styles/global.css`
-- All `*.module.css` files (under `src/styles/` and `src/pages/`)
-- `src/hooks/useChartTheme.ts`
-- `src/hooks/useChartPatterns.ts`
-- `src/hooks/useTheme.ts`
-- `src/components/ThemeProvider.tsx`
-- `src/components/ChartTooltip.tsx`
-- `src/components/Tabs.tsx` (replaced by `ui/tabs`)
-- `.stylelintrc.json` and all stylelint configuration
+- `src/styles/AppLayout.module.css`, `Auth.module.css`, `Categories.module.css`, `ChartTooltip.module.css`, `Dashboard.module.css`, `Reports.module.css`, `Settings.module.css`, `Sidebar.module.css`, `Tabs.module.css`, `Transactions.module.css`
+- `src/hooks/useChartTheme.ts` and `useChartTheme.test.ts`
+- `src/hooks/useChartPatterns.tsx`
+- `src/hooks/useTheme.tsx` and `useTheme.test.tsx` (file exports both `ThemeProvider` and `useTheme` as named exports — there is no standalone `ThemeProvider.tsx`)
+- `src/components/ChartTooltip.tsx` and `ChartTooltip.test.tsx`
+- `src/components/Tabs.tsx` and `Tabs.test.tsx` (replaced by `ui/tabs`)
+- `web/.stylelintrc.json` and all stylelint configuration
+
+**Replaced in place (not deleted):**
+- `AppLayout` is defined inline as a local function inside `web/src/App.tsx` (not a separate file). The rewrite replaces this function's body with an `<AppShell>` component; `App.tsx` itself is kept and its routing layout re-wired.
 
 ### 1 — Foundation
 
 #### 1.1 Package changes
 
+**Tailwind version: v3 (pinned).** Tailwind v4 is available but introduces a CSS-first config and breaks `eslint-plugin-tailwindcss` (unmaintained for v4). We pin `tailwindcss@^3` and stay on the `tailwind.config.ts` format that shadcn's docs still target as primary.
+
 **Add:**
-- `tailwindcss` + `postcss` + `autoprefixer` + `tailwindcss-animate`
+- `tailwindcss@^3`, `postcss`, `autoprefixer`, `tailwindcss-animate`
 - `class-variance-authority`, `clsx`, `tailwind-merge`
-- `geist` (Vercel's font package; ships Geist Sans and Geist Mono as Vite-compatible imports)
+- `@fontsource-variable/geist`, `@fontsource-variable/geist-mono` (self-hosted Geist Sans + Mono via fontsource — the `geist` npm package is Next.js-only and uses `next/font`, which Vite cannot consume)
 - `react-hook-form`, `@hookform/resolvers`, `zod` (pulled in by shadcn `form`)
 - `cmdk` (pulled in by shadcn `command`)
 - `sonner` (toasts; pulled in by shadcn `sonner`)
 - `@radix-ui/*` packages (pulled in by individual shadcn primitives)
 - `prettier-plugin-tailwindcss` (dev — sorts utility classes)
-- `eslint-plugin-tailwindcss` (dev — catches class typos)
-
-**Remove:**
-- `@fontsource-variable/inter`
-- `stylelint`, `stylelint-config-standard`, `stylelint-config-css-modules`, any stylelint plugins
+- `eslint-plugin-tailwindcss` (dev — catches class typos; works on Tailwind v3)
 
 **Keep:**
 - `recharts`, `date-fns`, `react-router-dom`, `vite`, `vitest`, `@testing-library/*`, `lucide-react`
@@ -133,13 +133,21 @@ web/src/
 
 ```bash
 cd web
-npm install tailwindcss postcss autoprefixer tailwindcss-animate class-variance-authority clsx tailwind-merge geist
+npm install -D tailwindcss@^3 postcss autoprefixer tailwindcss-animate
+npm install class-variance-authority clsx tailwind-merge \
+  @fontsource-variable/geist @fontsource-variable/geist-mono
 npx tailwindcss init -p
 npx shadcn@latest init
 # Style: default | Base color: neutral | CSS variables: yes
 ```
 
 This generates `tailwind.config.ts`, `postcss.config.js`, `components.json`, and `src/lib/utils.ts` (containing the `cn()` helper).
+
+**Preflight handling during migration.** Tailwind's base preflight reset normalizes `h1`–`h6`, `button`, `ul/ol`, and form elements. Enabling it in commit 1 while CSS Modules still render half the app would cause visible regressions (button padding, heading sizes, list bullets) on every non-migrated page. Therefore:
+
+- **Commits 1–2:** Disable preflight via `corePlugins: { preflight: false }` in `tailwind.config.ts`. Old CSS Modules and Tailwind utilities coexist without reset collisions.
+- **Commit 3 (AppShell + Sidebar):** Keep preflight disabled. AppShell and Sidebar are fully Tailwind.
+- **Final cleanup commit:** Re-enable preflight (`corePlugins: { preflight: true }` or remove the override) once the last CSS Module is deleted. Visually regression-test each page immediately after.
 
 #### 1.3 Design tokens in `globals.css`
 
@@ -201,25 +209,29 @@ Dark-only, so the `:root` block is the only scope. Values below are HSL triples 
 
 #### 1.4 Fonts
 
+The Vercel `geist` npm package is **Next.js-only** — it depends on `next/font` internals that Vite cannot consume. For Vite we self-host via fontsource, which ships the same SIL OFL binaries as plain CSS imports:
+
 ```ts
 // main.tsx
-import 'geist/font/sans';
-import 'geist/font/mono';
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
 ```
 
-Tailwind config references the CSS variables the Geist package installs:
+These imports register the `@font-face` declarations and expose the font-family names `"Geist Variable"` and `"Geist Mono Variable"`. Tailwind references them directly:
 
 ```ts
 // tailwind.config.ts
 theme: {
   extend: {
     fontFamily: {
-      sans: ['var(--font-geist-sans)', 'system-ui', 'sans-serif'],
-      mono: ['var(--font-geist-mono)', 'ui-monospace', 'monospace'],
+      sans: ['"Geist Variable"', 'system-ui', 'sans-serif'],
+      mono: ['"Geist Mono Variable"', 'ui-monospace', 'monospace'],
     },
   },
 }
 ```
+
+`globals.css` sets `font-family: theme('fontFamily.sans');` on `body` so the base face applies without `className="font-sans"` on every element.
 
 Any element rendering a number uses `className="font-mono tabular-nums"`. This applies to KPI values, transaction amounts, chart axis labels, table date columns, and percentages.
 
@@ -234,12 +246,14 @@ Shadcn expects `@/*` to resolve to `src/*`. Confirm `vite.config.ts` and `tsconf
 All installed in a single command during the shadcn-primitives commit:
 
 ```bash
-npx shadcn@latest add button card input label select textarea checkbox form \
-  dialog sheet dropdown-menu popover command tabs table badge separator \
-  skeleton tooltip sonner scroll-area switch calendar chart
+npx shadcn@latest add button card input label select checkbox form \
+  dialog sheet dropdown-menu popover command tabs table badge \
+  skeleton tooltip sonner scroll-area calendar chart
 ```
 
-24 primitives, each copied into `src/components/ui/`.
+20 primitives, each copied into `src/components/ui/`.
+
+Not installed (deliberately): `switch` (no toggle controls in any page), `textarea` (no multi-line fields in current entry or forms), `separator` (layout uses Tailwind borders directly). If any of these becomes needed during implementation, add it with a one-line `npx shadcn add <name>` as part of the commit where it's first used.
 
 #### 2.2 App components (built on primitives)
 
@@ -373,7 +387,7 @@ const chartConfig = categories.reduce<ChartConfig>((acc, cat) => {
 
 #### 4.6 Deleted
 
-- `src/hooks/useChartPatterns.ts`
+- `src/hooks/useChartPatterns.tsx`
 - `src/hooks/useChartTheme.ts`
 - `src/components/ChartTooltip.tsx`
 - All `<pattern>` / `<defs>` blocks in current chart code
@@ -381,59 +395,100 @@ const chartConfig = categories.reduce<ChartConfig>((acc, cat) => {
 
 ### 5 — Transaction entry row (primary app goal)
 
-SpenDrop's spreadsheet-like keyboard flow is the main data-entry loop. The rewrite must make this flow faster and more robust, not just prettier. This section specifies exactly how.
+SpenDrop's entry flow is the main data-entry loop. The rewrite must make this flow faster and more robust, not just prettier. This section starts from an honest read of the **current** code and names every change as an improvement so nothing is papered over as "preserved."
 
-#### 5.1 Current behavior (preserved)
+#### 5.1 Current behavior (ground truth from `web/src/components/TransactionEntry.tsx`)
 
-- A persistent empty row is always visible at the top of the table.
-- User types amount → Tab/Enter to move to next field (date → description → category).
-- On Enter in the final field (or via a save button), the row is persisted and a new empty row appears with the amount input focused.
-- Validation failures (missing amount, bad date) show inline and don't clear the row.
+The current component is a classic HTML form, not a spreadsheet row:
 
-#### 5.2 Target behavior (improvements)
+- **Not persistent in-table.** It is rendered above the table inside a wrapper that the Transactions page toggles with `display: none` when the toolbar's "Add" button is pressed. It is a modal-ish panel, not a live table row.
+- **Fields (in order):** Date (`<input type="date">`), Amount (`<input type="number" step="0.01" min="0">`), Description (`<input type="text">`), Category (native `<select>` populated from `categories`), Tags (`<TagInput>` — a custom chip input from `src/components/TagInput.tsx`).
+- **Submit:** explicit `<button type="submit">Add</button>`. There is no Enter-to-save from arbitrary fields — Enter just submits the form the way any native form does (from the last field with a submit button present in tab order).
+- **Keyboard:** no custom key handling at all. Tab moves between fields using the browser default. No field-to-field Enter navigation, no `⌘Enter`, no Shift+Enter, no Escape-to-reset, no `⌘Z`.
+- **After save:** `amount`, `description`, and `tags` are cleared; `date` and `category_id` are preserved. The "most recently selected category" is also persisted to `localStorage` under `spendrop-last-category` and used as the initial value on next mount.
+- **Focus after save:** the component does not explicitly refocus any field. The amount input keeps focus only because browsers preserve it across an in-place form reset.
+- **Validation:** an early return if `amount`, `description`, or `category_id` is empty. No inline error messages — submission just silently no-ops.
+- **Amount sign:** always stored as positive (`min="0"`). The transaction's expense/income polarity is derived from the category's `type`, not from the amount's sign.
+- **Tags:** `TagInput` is a comma-separated chip input. Values are joined into a single string and sent as the `tags` field of the payload.
 
-1. **Fuzzy category picker** — replace the current `<select>` with shadcn `Command` (built on `cmdk`). User types a few letters; matching categories appear; Enter selects. Massively faster than scrolling a select with 14+ entries.
-2. **Smart date default** — the date field defaults to the most recently used date (not always "today"), so entering a batch of transactions from yesterday doesn't require repeatedly fixing the date. A small "today" quick-button in the `Popover` calendar header snaps back to today.
-3. **Amount field heuristics** — detects minus sign for explicit expense entry; otherwise uses the selected category's type to determine sign. Shift+Enter to force-swap sign.
-4. **Undo last save** — after saving, show a Sonner toast "Saved. Undo (⌘Z)" for 4 seconds. ⌘Z deletes the just-saved transaction and restores the row data.
-5. **Keyboard-only flow** — no field should require the mouse. Tab / Shift+Tab cycles; Enter commits; Escape cancels edit; ⌘Enter saves immediately from any field.
+This is "fine" but far from the primary-app-goal bar. The rewrite makes it a genuinely fast, keyboard-driven flow.
+
+#### 5.2 Target behavior (new — everything in this list is an improvement, not a preservation)
+
+1. **Fuzzy category picker** — replace the native `<select>` with shadcn `Command` (built on `cmdk`). Type a few letters; matching categories appear; Enter selects. Massively faster than scrolling a select with 14+ entries.
+2. **Field-to-field Enter navigation** — Enter on Amount → moves to Description → moves to Category picker → moves to Tags → submit. No more Tab-gymnastics. `⌘Enter` from any field submits immediately.
+3. **Escape resets** — Escape on any field resets the form to its default values (same behavior as discarding the entry).
+4. **Smart date default** — the date field defaults to the most recently used date (not always "today"), so entering a batch of transactions from yesterday doesn't require repeatedly fixing the date. The existing `spendrop-last-category` localStorage key is joined by `spendrop-last-date` (same `YYYY-MM-DD` format). A small "today" quick-button on the calendar popover snaps back to today.
+5. **Undo last save** — after saving, show a Sonner toast "Saved. Undo (⌘Z)" for 4 seconds. Clicking Undo (or pressing ⌘Z while the toast is visible) deletes the just-saved transaction and restores the form fields to the saved values.
+6. **Persistent focus on amount after save** — explicit ref + `amountRef.current?.focus()` in the post-save reset.
+7. **Inline validation** — missing amount / description / category surfaces `FormMessage` from shadcn `Form`, not a silent no-op.
+8. **Preserved from current behavior:** the `tags` field stays (implemented via a `FormField`-wrapped `TagInput`; the existing `TagInput` component is kept and used as-is); date + category are still preserved across saves; amount stays positive-only and polarity is still derived from the category's `type`. Shift-Enter sign toggle and minus-sign heuristics are **not** part of this rewrite — the backend has no concept of a signed amount on a category, and introducing one is out of scope.
 
 #### 5.3 Implementation with react-hook-form + shadcn
 
-Schema (Zod):
+Schema (Zod), including `tags`:
 
 ```ts
 const entrySchema = z.object({
-  amount: z.coerce.number().refine((n) => n !== 0, 'Amount required'),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
-  description: z.string().max(200),
+  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
+  amount: z.coerce.number().positive('Amount must be > 0'),
+  description: z.string().min(1, 'Description required').max(200),
   category_id: z.number().int().positive('Category required'),
+  tags: z.string().default(''), // comma-separated, same shape as today
 });
 type EntryForm = z.infer<typeof entrySchema>;
 ```
 
-Form component skeleton:
+Form skeleton (abbreviated — full version lives in the implementation):
 
 ```tsx
 const form = useForm<EntryForm>({
   resolver: zodResolver(entrySchema),
-  defaultValues: { amount: 0, date: lastUsedDate, description: '', category_id: 0 },
+  defaultValues: {
+    date: getLastDate(),
+    amount: 0,
+    description: '',
+    category_id: getLastCategoryId(),
+    tags: '',
+  },
 });
+
+const undoBufferRef = useRef<{ saved: Transaction; values: EntryForm } | null>(null);
 
 const onSubmit = async (values: EntryForm) => {
   const saved = await createTransaction(values);
-  toast.success('Saved', {
+  saveLastCategory(String(values.category_id));
+  saveLastDate(values.date);
+  undoBufferRef.current = { saved, values };
+  toast.success('Transaction saved', {
+    duration: 4000,
     action: {
       label: 'Undo (⌘Z)',
-      onClick: () => deleteTransaction(saved.id),
+      onClick: () => undoLastSave(),
     },
+    onAutoClose: () => { undoBufferRef.current = null; },
   });
-  form.reset({ amount: 0, date: values.date, description: '', category_id: 0 });
+  form.reset({
+    date: values.date,
+    amount: 0,
+    description: '',
+    category_id: values.category_id,
+    tags: '',
+  });
   amountRef.current?.focus();
 };
+
+const undoLastSave = useCallback(async () => {
+  const buf = undoBufferRef.current;
+  if (!buf) return;
+  undoBufferRef.current = null;
+  await deleteTransaction(buf.saved.id);
+  form.reset(buf.values); // restore the form to what the user had typed
+  amountRef.current?.focus();
+}, [form]);
 ```
 
-Fields use shadcn `Form` wrappers (`FormField`, `FormItem`, `FormControl`, `FormMessage`), which integrate with RHF's `register`/`control` while preserving accessibility (label association, aria-describedby for errors).
+Fields use shadcn `Form` wrappers (`FormField`, `FormItem`, `FormControl`, `FormMessage`), which integrate with RHF's `control` while preserving accessibility (label association, aria-describedby for errors).
 
 The **category field** uses a custom `FormField` that renders a `Popover` with `Command` inside:
 
@@ -456,6 +511,7 @@ The **category field** uses a custom `FormField` that renders a `Popover` with `
               {categories.map((cat) => (
                 <CommandItem
                   key={cat.id}
+                  value={cat.name}
                   onSelect={() => field.onChange(cat.id)}
                 >
                   <CategoryBadge category={cat} /> {cat.name}
@@ -471,34 +527,55 @@ The **category field** uses a custom `FormField` that renders a `Popover` with `
 />
 ```
 
+The **tags field** wraps the existing `TagInput` in a `FormField`:
+
+```tsx
+<FormField
+  name="tags"
+  control={form.control}
+  render={({ field }) => (
+    <FormItem>
+      <FormControl>
+        <TagInput value={field.value} onChange={field.onChange} placeholder="Add tags..." />
+      </FormControl>
+      <FormMessage />
+    </FormItem>
+  )}
+/>
+```
+
 #### 5.4 Keyboard handling
 
 A single `onKeyDown` handler on the form root manages:
-- `Enter` on any field → focus next field
-- `Enter` on last field (or `⌘Enter` anywhere) → submit
-- `Escape` → reset form to empty defaults (with confirmation only if dirty)
+- `Enter` on any field → focus next field in a hard-coded order (`date → amount → description → category → tags → submit`); prevents the native form submit on intermediate fields
+- `⌘Enter` (or `Ctrl+Enter`) on any field → submit immediately
+- `Escape` on any field → `form.reset()` to default values (no confirmation — the user can just re-type; Undo toast covers accidental saves, not accidental resets)
 - `Tab` / `Shift+Tab` → browser default (relies on natural DOM order)
-- `Shift+Enter` → toggle amount sign (expense ↔ income)
-- `⌘Z` after save → restore from last-saved buffer, delete the saved transaction, refocus amount
+- `⌘Z` / `Ctrl+Z` while the post-save Sonner toast is still open → calls `undoLastSave()`, which reads from `undoBufferRef` and no-ops if the buffer has been cleared by auto-close
 
-The flow is implemented as a plain `useCallback` listener on the form element. No custom focus management beyond a ref on the amount input for post-save focus.
+The undo-buffer race is avoided by the single-slot ref pattern: any new save overwrites the buffer with its own values, and the toast's `onAutoClose` clears the ref when its timer expires. A ⌘Z after the toast is gone simply finds `null` and does nothing.
+
+The flow is implemented as a plain `useCallback` listener on the form element plus a global `window` listener for the ⌘Z case (scoped to "toast is visible"). No custom focus management beyond `amountRef` for post-save focus.
 
 #### 5.5 Why RHF is worth the integration cost
 
 - Form state, validation, and error surfacing all unified in one API
-- `formState.isDirty` powers the Escape confirmation
-- `form.reset({ ...preserveDate })` is the cleanest way to reset-with-preserved-values after each save
+- `form.reset({ ...preserveDate, ...preserveCategory })` is the cleanest way to reset-with-preserved-values after each save
 - shadcn `Form` handles ARIA wiring for free (no manual `aria-describedby`)
 - Zod schema is reusable on the category edit form for consistent validation
+- The `undoBufferRef` pattern sits alongside RHF cleanly — the buffer holds both the saved transaction (for the delete call) and the previous form values (for the reset on undo)
 
 #### 5.6 Testing
 
 Dedicated test file `TransactionEntryRow.test.tsx` using `userEvent`:
-- Full save flow: type amount → Enter → type description → Enter → select category → Enter → verify API call + row reset
-- Undo flow: save → ⌘Z → verify delete API call + form restored
-- Validation: submit empty → verify error message on amount field
-- Category search: type "gr" → verify "Groceries" is selected highlight
-- Sign toggle: Shift+Enter → verify amount sign flip
+- Full save flow: type amount → Enter → type description → Enter → select category in Command → Enter → type tags → Enter → verify API call payload matches, verify `amount`/`description`/`tags` cleared, verify `date`/`category_id` preserved, verify amount input refocused
+- Tags included in payload: verify `tags` field round-trips through the form
+- Undo flow: save → click "Undo" in the toast → verify delete API call + form fields restored to the saved values
+- Undo-after-auto-close: save → advance fake timers past 4s → press ⌘Z → verify delete is **not** called
+- Validation: submit empty → verify error messages on amount + description + category via `FormMessage`
+- Category search: type "gr" in the Command input → verify "Groceries" is highlighted → Enter selects it
+- Escape resets: fill all fields → press Escape → verify all fields back to defaults
+- localStorage: saving a transaction writes both `spendrop-last-category` and `spendrop-last-date`; re-mounting reads them back
 
 This test file is written **before** the implementation (TDD) — it serves as the executable spec for the entry row.
 
@@ -528,10 +605,10 @@ New tests to add (beyond entry row covered above):
 
 #### 6.2 Stylelint removal
 
-- Delete `.stylelintrc.json` (or wherever it lives in the `web/` tree)
-- Remove stylelint-related scripts from `web/package.json`
-- Remove stylelint dev deps
-- Remove stylelint CI step if it exists (currently no stylelint step in `.github/workflows/pr.yml`, so nothing to remove in CI)
+- Delete `web/.stylelintrc.json`
+- Remove `lint:css` and the `stylelint` portion of the `lint` script from `web/package.json` (currently `"lint": "tsc --noEmit && stylelint \"src/**/*.css\""` — becomes `"lint": "tsc --noEmit && eslint ."`)
+- Remove stylelint dev deps (`stylelint`, `stylelint-config-standard`, `stylelint-config-css-modules`)
+- CI: there is currently no stylelint step in `.github/workflows/pr.yml` (the `lint` script is invoked instead), so nothing to remove in CI — just the script change propagates
 
 Replacement: none. Tailwind's utility classes structurally prevent the problems stylelint was enforcing (no raw hex, no arbitrary tokens).
 
@@ -550,54 +627,142 @@ Replacement: none. Tailwind's utility classes structurally prevent the problems 
 - **Frontend job** — add `Lint` step (`npx eslint .`) before `Type check`
 - **Docker job** — unchanged
 
-### 7 — Database migration
+### 7 — Database migration (`categories.color` removal)
+
+Dropping the `categories.color` column is a **fully enumerated** change. This section lists every file that must be updated, in the same atomic commit where the migration lands, so CI stays green. Skip any file here and either sqlc, Go build, `tsc --noEmit`, vitest, or a test assertion will break.
+
+#### 7.1 Migration SQL
 
 `internal/database/migrations/004_drop_categories_color.sql`:
 
 ```sql
 -- Drop categories.color column. Category colors are now derived from
--- the chart palette slot (category.id % 11) at render time.
+-- the chart palette slot (((category.id - 1) % 11) + 1) at render time.
 ALTER TABLE categories DROP COLUMN color;
 ```
 
-**Impact check:**
-- Sqlc queries that `SELECT * FROM categories` auto-regenerate without the column
-- Sqlc queries that explicitly reference `color` must be updated (grep for `color` in `internal/database/queries/`)
-- The `/api/categories` response shape changes: `color` field disappears
-- `web/src/api/types.ts` `Category` interface loses the `color` field
-- Any Go tests asserting on `color` need updating (already confirmed the only one is `TestHandleListTransactions_IncludesCategoryInfo`, which also asserts `category_color` through the join — needs to drop that assertion)
+SQLite's `ALTER TABLE DROP COLUMN` requires SQLite 3.35+ (March 2021) — well within supported versions. The existing `001_initial_schema.sql` seed that inserts `color` values must also be updated to drop the `color` parameter from its `INSERT INTO categories (...)` list. Migration ordering is by filename, so the seed runs before `004`; but the drop happens after the initial seed, so both shapes must stop referencing `color` in the same commit that drops the column. Practically: update the seed SQL in the same commit as `004`.
 
-SQLite's `ALTER TABLE DROP COLUMN` requires SQLite 3.35+ (March 2021); well within supported versions.
+#### 7.2 Enumerated file changes
+
+**SQL / sqlc layer:**
+- `internal/database/migrations/001_initial_schema.sql` — remove `color` from the `categories` table definition **and** from the seed `INSERT INTO categories (name, type, color, sort_order) VALUES ...` statements (lines ~90–117). The final state: `INSERT INTO categories (name, type, sort_order) VALUES ...`.
+- `internal/database/migrations/004_drop_categories_color.sql` — new file, SQL above.
+- `internal/database/queries.sql`:
+  - Line 48: `INSERT INTO categories (name, type, color, sort_order)` → `(name, type, sort_order)`
+  - Line 63: `UPDATE categories SET name = ?, color = ?, icon = ?` → `SET name = ?, icon = ?`
+  - Line 172: `SELECT c.id, c.name, c.color, CAST(COALESCE(...))` → drop `c.color,`
+  - Line 216: `c.color,` inside `SumByCategoryForRange` → drop
+- `internal/database/queries.sql.go` — **regenerated by `sqlc generate`**, not hand-edited. The generated `Category`, `CreateCategoryParams`, `UpdateCategoryParams`, `SumByCategoryForMonthRow`, and `SumByCategoryForRangeRow` structs all lose their `Color` field. Don't edit this file manually; just run `sqlc generate` and commit the diff.
+- `internal/database/models.go` — if the generated `Category` model lives here rather than in `queries.sql.go` depending on the sqlc version, it also regenerates. Verify after running sqlc.
+
+**Go handlers:**
+- `internal/api/category_handlers.go`:
+  - Delete `hexColorRegexp` and `isValidHexColor` (top of file, lines 14–18).
+  - Delete the `Color string \`json:"color"\`` field from `categoryCreateRequest` (line 24) and `categoryUpdateRequest` (line 31).
+  - Delete both `if req.Color != "" && !isValidHexColor(...)` validation blocks (lines 96–99 and 153–156).
+  - Remove `Color: req.Color,` from `CreateCategoryParams` (line 108) and `UpdateCategoryParams` (line 164).
+  - Update the function doc comment at line 119 ("updates an existing category's name, color, and icon") to drop "color".
+- `internal/api/transaction_handlers.go`:
+  - Delete the `CategoryColor string \`json:"category_color,omitempty"\`` field from `transactionResponse` (line 47).
+  - Update the list query at line 180 from `c.name AS category_name, c.type AS category_type, c.color AS category_color` to `c.name AS category_name, c.type AS category_type` — the JOIN on `categories` still stands; only the projected column goes away.
+  - Delete the local `categoryColor string` variable (line 208), its `&categoryColor` scan arg (line 213), and the `tr.CategoryColor = categoryColor` assignment (line 223). The scan arg list must match the new SELECT.
+- `internal/api/dashboard_handlers.go`:
+  - Delete the `Color string \`json:"color"\`` field on the category-breakdown response struct (line ~42).
+  - Delete the `Color: row.Color,` assignment that populates it (line ~294).
+- `internal/api/reports_handlers.go`:
+  - Delete the `Color string \`json:"color"\`` field on the category-trend response struct (line ~96).
+  - Delete `Color: row.Color,` in the row-to-response mapper (line ~148).
+
+**Go tests:**
+- `internal/api/category_handlers_test.go` — drop every `"color":"#..."` from JSON request bodies (lines 101, 130, 147, 164, 200, 217, 234, 251) and remove both `resp["color"]` assertions (lines 120–121). Some requests will then have empty bodies; keep the trailing fields that still matter (`name`, `type`, `sort_order`).
+- `internal/api/transaction_handlers_test.go`:
+  - `seedTestCategory` helper (lines 84–89) — drop the `color string` parameter and the `Color: color,` field. Update every call site within the file to match.
+  - `TestHandleListTransactions_IncludesCategoryInfo` (lines 619–620) — delete the `txn["category_color"] != "#5347CE"` assertion entirely; the response no longer has that key.
+
+**Frontend TypeScript:**
+- `web/src/api/types.ts` — four fields to delete:
+  - Line 20: `category_color: string;` on `Transaction`
+  - Line 31: `color: string;` on `Category`
+  - Line 85: `color: string;` on `CategoryBreakdownItem`
+  - Line 147: `color: string;` on `CategoryTrendEntry`
+- `web/src/pages/Categories.tsx`:
+  - Delete `const [color, setColor] = useState(initial?.color ?? '#5347CE')` (line 24).
+  - Delete the color `<input>` element and its surrounding label block (around line 50).
+  - Delete the `<span className={styles.colorSwatch} style={{ backgroundColor: category.color }} />` at lines 108–109.
+  - Delete the `color: cat.color,` entry in the edit-initial object at line 283.
+  - Delete the `color` parameter from the edit form submit handler (wherever it posts the update).
+- `web/src/pages/Dashboard.tsx`:
+  - Delete the `color: cat.color,` entry in `gaugeData` at line 137.
+  - Replace `cat.color` at lines 547 and 555 with `getCategoryColorVar(cat)` (new helper from §2.3).
+  - Delete the `tx.category_color` references at lines 668–669 and replace with `getCategoryColorVar({ id: tx.category_id })`.
+- `web/src/pages/Reports.tsx` — line 219: replace `cat.color || 'var(--color-text-secondary)'` with `getCategoryColorVar(cat)`.
+- `web/src/components/FilterPanel.tsx` — line 157: replace `{ backgroundColor: cat.color, borderColor: cat.color }` with `{ backgroundColor: getCategoryColorVar(cat), borderColor: getCategoryColorVar(cat) }`.
+- `web/src/components/TransactionRow.tsx` — line 144: replace `color={transaction.category_color}` with `color={getCategoryColorVar({ id: transaction.category_id })}`. Or, since `TransactionRow` is being rewritten anyway as part of the Transactions page commit, inline the `getCategoryColorVar` call directly in the new Tailwind-based row.
+- `web/src/hooks/useChartPatterns.tsx` — deleted wholesale as part of the final cleanup (it references `p.color` at lines 71, 77, 84, 90, 91, 148 but is a hook that nothing will import after the Dashboard rewrite uses the new chart primitives).
+
+**Frontend tests:**
+- `web/src/pages/Dashboard.test.tsx` — line 70: drop `category_color: '#818CF8'` from the transaction fixture.
+- `web/src/pages/Transactions.test.tsx` — line 34: drop `category_color: '#e94560'` from the transaction fixture.
+- `web/src/components/TransactionRow.test.tsx` — line 32: drop `category_color: '#e94560'` from the transaction fixture.
+- `web/src/App.test.tsx` — any fixture that embeds a category or transaction with a `color` field gets that field deleted.
+- `web/src/hooks/useChartTheme.test.ts` — deleted as part of the hook removal (the hook is gone).
+
+#### 7.3 Why it's all one commit
+
+Every item above must move together. Sqlc regen after the query changes, Go build after the handler changes, `tsc --noEmit` after the types change, and vitest after the fixture changes — a partial commit breaks the build. The full change is still small (maybe 30 files, mostly 1–3 line deletes), so one atomic "drop categories.color" commit is tractable. Tests for each piece are run in the same commit's CI — nothing ships partial.
+
+#### 7.4 What does **not** change
+
+- The `categories` table schema otherwise: `id`, `name`, `type`, `icon`, `sort_order`, `is_active`, `created_at`, `updated_at` all stay.
+- Any JOIN on `categories` stays; only the projected `c.color` columns disappear.
+- The `/api/categories` response shape loses only the `color` key — all other keys are untouched.
 
 ### 8 — Migration order (commits in order)
 
-Each step lands as its own commit with the build green at that commit. Frontend tests will be partially broken during steps 3-10 — they are rewritten alongside the page they cover.
+Each step lands as its own commit with CI green at that commit. The critical constraint: the **DB migration that drops `categories.color` lands last, after every Go and frontend render site has already stopped reading it.** Landing it earlier would break CI in whichever commit still references the dropped column. The schema change is deferred precisely because the column is load-bearing in the current code.
 
-1. **Foundation** — Tailwind + PostCSS config, shadcn init, `components.json`, `lib/utils.ts`, `globals.css` with token vars, Geist imports in `main.tsx`, path alias verification. App renders with old CSS Modules unchanged. No visible change.
-2. **Install shadcn primitives** — one `shadcn add` command producing ~24 files under `src/components/ui/`. Tests unchanged.
-3. **AppShell + Sidebar rewrite** — Tailwind-only. Delete `Sidebar.module.css`, any `AppLayout.module.css`. Sidebar tests rewritten in this commit.
-4. **Auth pages rewrite** — login + register. Auth tests rewritten.
-5. **Database migration** — `004_drop_categories_color.sql`. Go tests updated. sqlc regen. `types.ts` Category interface updated. This lands before the pages that depended on the color column.
-6. **Dashboard rewrite** — page + test.
-7. **Categories page rewrite** — page + `CategoryEditor` + tests. `CategoryEditor` has no color picker after this commit.
-8. **Transactions page rewrite (first pass — non-entry)** — toolbar, filter panel, table, bulk actions, tests. Entry row stays old.
-9. **Transaction entry row rewrite (§5)** — RHF + shadcn Form + Command. Dedicated test file written first. This is the highest-value commit of the whole migration.
-10. **Reports rewrite** — page + tests.
-11. **Settings rewrite** — page + tests.
-12. **Cleanup** — delete `tokens.css`, `global.css`, all `*.module.css`, `.stylelintrc.json`, stylelint deps, `useChartTheme`, `useChartPatterns`, `ChartTooltip.tsx`, `ThemeProvider.tsx`, `useTheme.ts`, `@fontsource-variable/inter`, `Tabs.tsx`.
+Frontend tests move with the pages they cover — a page rewrite commit also rewrites that page's test file. Preflight stays disabled (`corePlugins: { preflight: false }`) from commit 1 until the final cleanup commit that deletes the last CSS Module.
 
-At each commit, CI must be green: `go test -race ./...`, `npx tsc -b`, `npx vitest run`, `npx eslint .`, `docker build`.
+1. **Foundation** — Tailwind v3 + PostCSS + autoprefixer + `tailwindcss-animate` installed. `shadcn init` generates `tailwind.config.ts`, `postcss.config.js`, `components.json`, `src/lib/utils.ts`. `globals.css` created with the full token block from §1.3. Geist fontsource packages installed and imported in `main.tsx`. Path alias `@/*` verified in `vite.config.ts` and `tsconfig.json`. Preflight disabled. App still renders with old CSS Modules — zero visible change.
+2. **Install shadcn primitives** — one `shadcn add` command producing ~20 files under `src/components/ui/`. No app components consume them yet. Tests unchanged.
+3. **`chart-colors.ts` helper** — create `web/src/lib/chart-colors.ts` with `getCategoryColorVar()` (§2.3). Trivial unit test. This helper is the mechanism that lets subsequent commits stop reading `cat.color` / `tx.category_color` without waiting for the DB migration.
+4. **AppShell + Sidebar rewrite** — replace the inline `AppLayout` function in `App.tsx` with `<AppShell>`; rewrite `Sidebar.tsx` with Tailwind + shadcn `ScrollArea` + `Tooltip`. Delete `Sidebar.module.css` and `AppLayout.module.css`. Rewrite `Sidebar.test.tsx`. No other pages touched.
+5. **Auth pages rewrite** — Login + Register rewritten with shadcn `Card` + `Form` + `Input` + `Button`. Delete `Auth.module.css`. Rewrite `Login.test.tsx` / `Register.test.tsx`.
+6. **Dashboard rewrite** — page + `KpiCard` + `ChartCard` + Recharts via shadcn `chart` primitive. **Source all category colors via `getCategoryColorVar()`** — this commit stops reading `cat.color` and `tx.category_color` on the Dashboard, even though the DB column still exists. Delete `Dashboard.module.css`. Rewrite `Dashboard.test.tsx`, updating transaction/category fixtures to not rely on `color` visually (the fixture can still carry the field — it just won't be asserted).
+7. **Categories page rewrite** — rewrite `Categories.tsx` + `CategoryEditor`. **The color picker is removed from the UI in this commit**, but the `color` field on the Category TypeScript interface and the Go handler still exist. The edit form simply stops submitting a `color` value; the backend silently keeps the old stored color until the final migration commit nukes it. Rewrite `Categories.test.tsx`.
+8. **Transactions page rewrite (non-entry)** — `TransactionToolbar`, `FilterPanel`, `TransactionTable`, bulk actions, row actions. **All category-color rendering goes through `getCategoryColorVar()`** — no reads of `tx.category_color` or `cat.color` remain on this page. Delete `Transactions.module.css`, `Tabs.module.css`, `ChartTooltip.module.css`. Rewrite `Transactions.test.tsx` and `TransactionRow.test.tsx`. Entry row still uses the old classic-form component, wired into the new shell.
+9. **Transaction entry row rewrite (§5)** — RHF + shadcn `Form` + `Command` + `TagInput` wrapper + Sonner toast + undo buffer. Dedicated `TransactionEntryRow.test.tsx` written **first** (TDD). Highest-value commit of the whole migration.
+10. **Reports rewrite** — page + `DateRangePicker` + chart cards. All category colors via `getCategoryColorVar()`. Delete `Reports.module.css`. Rewrite `Reports.test.tsx` (if it exists).
+11. **Settings rewrite** — page + shadcn `Tabs` + `Form` + `Dialog` for data export/import. Delete `Settings.module.css`. Rewrite `Settings.test.tsx` (if it exists).
+12. **Database migration + color cleanup (atomic)** — everything listed in §7.2 in one commit:
+    - New migration `004_drop_categories_color.sql` + seed update in `001_initial_schema.sql`
+    - `queries.sql` edits + `sqlc generate` + resulting `queries.sql.go` diff
+    - Go handler field/validation deletions in `category_handlers.go`, `transaction_handlers.go`, `dashboard_handlers.go`, `reports_handlers.go`
+    - Go test fixture updates in `category_handlers_test.go` + `transaction_handlers_test.go`
+    - `web/src/api/types.ts` field deletions
+    - Any lingering `color` prop / fixture cleanups on frontend
+    - **Pre-flight check before committing:** grep `categories.color`, `cat.color`, `category_color`, `c.color` across the full repo; the only remaining hits should be inside this commit's own deletions. If any page/test still consumes the field, fix it here.
+    - Enforces the §7.2 "all one commit" rule.
+13. **Final cleanup** — delete everything from the "Deleted wholesale" list that hasn't already been removed by the page rewrites: `tokens.css`, `global.css`, any remaining `*.module.css`, `.stylelintrc.json`, stylelint dev deps, `useChartTheme.ts` + its test, `useChartPatterns.tsx`, `useTheme.tsx` + its test (removes both `ThemeProvider` and `useTheme` named exports), `ChartTooltip.tsx` + its test, `Tabs.tsx` + its test, `@fontsource-variable/inter`. **Enable Tailwind preflight** (`corePlugins: { preflight: true }` / remove the override) and visually verify every page. Add the `npx eslint .` CI step in `pr.yml`'s frontend job.
+
+At each commit, CI must be green: `go test -race ./...`, `npx tsc -b`, `npx vitest run`, `npx eslint .` (added in commit 1 even if the step doesn't run in CI yet), and `docker build` for the full-stack job.
 
 ### 9 — Risks
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Entry row keyboard flow regression during RHF integration | Medium | Test file written first (TDD); manual verification against current behavior spec in §5.1; dedicated single commit so it can be reverted cleanly |
+| Entry row rewrite introduces a keyboard-flow regression that makes the primary app loop worse instead of better | Medium | Test file written first (TDD — §5.6); current behavior honestly documented in §5.1 so improvements in §5.2 can't accidentally regress preservation items; dedicated single commit so it can be reverted cleanly |
 | Recharts + CSS var color resolution fails on production data shapes | Low | Seed local DB with real export; visually verify every chart before moving to the next commit |
 | Sheet + router navigation state leakage | Low | Use controlled `open`/`onOpenChange`, never imperative |
-| Geist font FOUC on first paint | Low | `geist` package preloads via Vite; verify Network waterfall after prod build |
-| `categories.color` drop breaks sqlc-generated code silently | Medium | Run `sqlc generate` immediately after migration commit; run Go tests; check `types.ts` regen |
-| `category_color` in transaction list response was a JOIN, not a direct column — dropping `categories.color` breaks the JOIN | High if overlooked | Grep `category_color` across Go + SQL + TS before commit 5; update list query + test |
+| Geist FOUC on first paint via fontsource | Low | fontsource ships `@font-face` blocks with `font-display: swap`; verify Network waterfall after prod build |
+| `categories.color` drop breaks sqlc-generated code silently | Medium | §7.2 enumerates every query that references `color`; run `sqlc generate` inside the migration commit and verify the `queries.sql.go` diff matches the enumerated list |
+| `category_color` in transaction list response is a JOIN projection, not a direct column — dropping `categories.color` breaks the JOIN's SELECT list | High if overlooked | Handled by §7.2 explicitly and by §8 commit 12's grep pre-flight; the list query at `transaction_handlers.go:180` is named out in full |
+| Dashboard / Reports / FilterPanel still read `cat.color` or `tx.category_color` when the DB column is dropped | High if commits are re-ordered | §8 commit 12 is the last commit; every prior page rewrite (commits 6, 8, 10) routes category colors through `getCategoryColorVar()` using the `chart-colors.ts` helper introduced in commit 3 |
+| Tailwind preflight reset causes visible regressions on half-migrated pages | High if enabled early | Preflight disabled from commit 1; re-enabled only in the final cleanup commit (§1.2) |
+| Tailwind v4 vs v3 mismatch — `eslint-plugin-tailwindcss` and some shadcn examples differ by version | Medium | Pin `tailwindcss@^3` explicitly in §1.1; document the choice so implementers don't pick v4 by accident |
+| Fontsource package names wrong — typo would silently fall back to system font | Low | Package names pinned to `@fontsource-variable/geist` and `@fontsource-variable/geist-mono` in §1.1 and §1.2; verify via browser DevTools → Computed style that `font-family` resolves to Geist after commit 1 |
+| Undo toast race — two rapid saves leave an orphan buffer and ⌘Z deletes the wrong transaction | Medium | Single-slot `undoBufferRef` with `onAutoClose` ref-clearing; documented explicitly in §5.4 |
 | Big-bang "no rollback" | Accepted | Main stays clean; worst case `git reset --hard feat/design-system-v3` |
 | prettier-plugin-tailwindcss reorders classes and creates diff churn on first run | Low | Run Prettier once during the foundation commit to normalize; subsequent diffs are stable |
 
