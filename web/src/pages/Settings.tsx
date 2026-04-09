@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -64,7 +64,56 @@ import {
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 
-type SettingsTab = 'general' | 'currencies' | 'savings' | 'users' | 'data';
+/* ---------- Module-scope constants ---------- */
+
+const VALID_TABS = [
+  'general',
+  'currencies',
+  'savings',
+  'users',
+  'data',
+] as const;
+type SettingsTab = (typeof VALID_TABS)[number];
+
+const MONTH_NAMES = [
+  'January',
+  'February',
+  'March',
+  'April',
+  'May',
+  'June',
+  'July',
+  'August',
+  'September',
+  'October',
+  'November',
+  'December',
+] as const;
+
+/* ---------- Pure helpers ---------- */
+
+function isValidTab(value: string | null): value is SettingsTab {
+  return value !== null && (VALID_TABS as readonly string[]).includes(value);
+}
+
+// Match preview category names (case-insensitive) to existing category ids.
+// Pure — captures no closure, hoisted for test-ability and perf.
+function autoMapCategories(
+  previewData: ImportPreview,
+  cats: Category[],
+): Record<string, string> {
+  const map: Record<string, string> = {};
+  const uniqueCategories = previewData.unique_categories ?? [];
+  for (const catName of uniqueCategories) {
+    const match = cats.find(
+      (c) => c.name.toLowerCase() === catName.toLowerCase(),
+    );
+    if (match) {
+      map[catName] = String(match.id);
+    }
+  }
+  return map;
+}
 
 /* ---------- General Tab ---------- */
 
@@ -74,9 +123,13 @@ const budgetSchema = z.object({
 type BudgetValues = z.infer<typeof budgetSchema>;
 
 function GeneralSection() {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = now.getMonth() + 1;
+  // Lazy init so year/month are captured once at mount and remain stable as
+  // effect deps — also matches the Reports page precedent.
+  const [ym] = useState(() => {
+    const d = new Date();
+    return { year: d.getFullYear(), month: d.getMonth() + 1 };
+  });
+  const { year, month } = ym;
 
   const form = useForm<BudgetValues>({
     resolver: zodResolver(budgetSchema),
@@ -93,6 +146,8 @@ function GeneralSection() {
       .catch(() => {
         /* non-critical */
       });
+    // form.reset is stable across renders and intentionally not a dep —
+    // including it would re-fetch on every render.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month]);
 
@@ -177,24 +232,20 @@ function CurrenciesSection() {
     defaultValues: { code: '', name: '', symbol: '', rate_to_base: 0 },
   });
 
-  const fetchCurrencies = useCallback(() => {
-    api
-      .get<Currency[]>('currencies')
-      .then((data) => {
-        setCurrencies(data);
-        const rates: Record<string, string> = {};
-        data.forEach((c) => {
-          rates[c.code] = String(c.rate_to_base);
-        });
-        setEditRates(rates);
-      })
-      .catch(() => {
-        /* non-critical */
-      });
+  const fetchCurrencies = useCallback(async () => {
+    const data = await api.get<Currency[]>('currencies');
+    setCurrencies(data);
+    const rates: Record<string, string> = {};
+    data.forEach((c) => {
+      rates[c.code] = String(c.rate_to_base);
+    });
+    setEditRates(rates);
   }, []);
 
   useEffect(() => {
-    fetchCurrencies();
+    fetchCurrencies().catch(() => {
+      /* initial load failure is non-critical; table will show empty */
+    });
   }, [fetchCurrencies]);
 
   async function handleSaveRates(e: FormEvent) {
@@ -214,11 +265,19 @@ function CurrenciesSection() {
         }
       }
       toast.success('Rates updated successfully');
-      fetchCurrencies();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update');
     } finally {
       setSaving(false);
+      // Re-sync with server truth whether or not the save loop threw. Saves
+      // could have been partially applied before a later PUT failed; without
+      // this refetch the table would keep showing stale local edits.
+      fetchCurrencies().catch((err) => {
+        toast.error(
+          'Refresh failed: ' +
+            (err instanceof Error ? err.message : 'unknown'),
+        );
+      });
     }
   }
 
@@ -230,9 +289,14 @@ function CurrenciesSection() {
         symbol: values.symbol,
         rate_to_base: values.rate_to_base,
       });
-      addForm.reset({ code: '', name: '', symbol: '', rate_to_base: 0 });
-      fetchCurrencies();
+      addForm.reset();
       toast.success('Currency added');
+      fetchCurrencies().catch((err) => {
+        toast.error(
+          'Refresh failed: ' +
+            (err instanceof Error ? err.message : 'unknown'),
+        );
+      });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add currency');
     }
@@ -408,30 +472,34 @@ function SavingsSection() {
     },
   });
 
-  const fetchGoals = useCallback(() => {
-    api
-      .get<SavingsGoal[]>('savings-goals')
-      .then(setGoals)
-      .catch(() => {
-        /* non-critical */
-      });
+  const fetchGoals = useCallback(async () => {
+    const data = await api.get<SavingsGoal[]>('savings-goals');
+    setGoals(data);
   }, []);
 
   useEffect(() => {
-    fetchGoals();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchGoals().catch(() => {
+      /* initial load failure is non-critical; list will show empty */
+    });
   }, [fetchGoals]);
+
+  function refreshGoals() {
+    fetchGoals().catch((err) => {
+      toast.error(
+        'Refresh failed: ' + (err instanceof Error ? err.message : 'unknown'),
+      );
+    });
+  }
 
   async function onAdd(values: GoalValues) {
     try {
       await api.put(`savings-goals/${values.year}`, {
         target_amount: values.target_amount,
       });
-      form.reset({
-        year: new Date().getFullYear(),
-        target_amount: 0,
-      });
-      fetchGoals();
+      form.reset();
       toast.success('Savings goal added');
+      refreshGoals();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add goal');
     }
@@ -442,8 +510,8 @@ function SavingsSection() {
       await api.put(`savings-goals/${goal.year}`, {
         target_amount: 0,
       });
-      fetchGoals();
       toast.success('Savings goal removed');
+      refreshGoals();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete');
     }
@@ -585,18 +653,25 @@ function UsersSection() {
     },
   });
 
-  const fetchUsers = useCallback(() => {
-    api
-      .get<User[]>('users')
-      .then(setUsers)
-      .catch(() => {
-        /* non-critical */
-      });
+  const fetchUsers = useCallback(async () => {
+    const data = await api.get<User[]>('users');
+    setUsers(data);
   }, []);
 
   useEffect(() => {
-    fetchUsers();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchUsers().catch(() => {
+      /* initial load failure is non-critical; list will show empty */
+    });
   }, [fetchUsers]);
+
+  function refreshUsers() {
+    fetchUsers().catch((err) => {
+      toast.error(
+        'Refresh failed: ' + (err instanceof Error ? err.message : 'unknown'),
+      );
+    });
+  }
 
   async function onAddUser(values: NewUserValues) {
     try {
@@ -606,14 +681,9 @@ function UsersSection() {
         display_name: values.display_name,
         role: values.role,
       });
-      form.reset({
-        username: '',
-        password: '',
-        display_name: '',
-        role: 'member',
-      });
-      fetchUsers();
+      form.reset();
       toast.success('User added');
+      refreshUsers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add user');
     }
@@ -622,8 +692,8 @@ function UsersSection() {
   async function handleRoleChange(userId: number, role: 'admin' | 'member') {
     try {
       await api.put(`users/${userId}`, { role });
-      fetchUsers();
       toast.success('Role updated');
+      refreshUsers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update role');
     }
@@ -632,8 +702,8 @@ function UsersSection() {
   async function handleDeleteUser(userId: number) {
     try {
       await api.del(`users/${userId}`);
-      fetchUsers();
       toast.success('User deleted');
+      refreshUsers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete user');
     }
@@ -662,9 +732,13 @@ function UsersSection() {
                 <TableCell>
                   <Select
                     value={u.role}
-                    onValueChange={(v) =>
-                      void handleRoleChange(u.id, v as 'admin' | 'member')
-                    }
+                    onValueChange={(v) => {
+                      // Narrow at runtime — Radix types onValueChange as
+                      // (v: string) => void so any future SelectItem added
+                      // by mistake would silently flow through an `as` cast.
+                      if (v !== 'admin' && v !== 'member') return;
+                      void handleRoleChange(u.id, v);
+                    }}
                   >
                     <SelectTrigger
                       aria-label={`Role for ${u.username}`}
@@ -749,7 +823,11 @@ function UsersSection() {
                     <FormLabel>Role</FormLabel>
                     <Select
                       value={field.value}
-                      onValueChange={field.onChange}
+                      onValueChange={(v) => {
+                        // Runtime narrow — see Role for ${user} above.
+                        if (v !== 'admin' && v !== 'member') return;
+                        field.onChange(v);
+                      }}
                     >
                       <FormControl>
                         <SelectTrigger aria-label="New user role">
@@ -796,6 +874,7 @@ function DataSection() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     api
@@ -806,22 +885,8 @@ function DataSection() {
       });
   }, []);
 
-  // Auto-detect category mappings when preview arrives
-  function autoMapCategories(
-    previewData: ImportPreview,
-    cats: Category[],
-  ): Record<string, string> {
-    const map: Record<string, string> = {};
-    const uniqueCategories = previewData.unique_categories ?? [];
-    for (const catName of uniqueCategories) {
-      const match = cats.find(
-        (c) => c.name.toLowerCase() === catName.toLowerCase(),
-      );
-      if (match) {
-        map[catName] = String(match.id);
-      }
-    }
-    return map;
+  function clearFileInput() {
+    if (fileInputRef.current) fileInputRef.current.value = '';
   }
 
   async function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
@@ -835,12 +900,12 @@ function DataSection() {
       setImportStep('preview');
     } catch (err) {
       setImportError(err instanceof Error ? err.message : 'Upload failed');
+      clearFileInput();
     }
   }
 
   async function handleConfirmImport() {
     if (!preview) return;
-    setImportError(null);
     try {
       // Convert string IDs to numbers for the backend (Go expects int64)
       const numericCategoryMap: Record<string, number> = {};
@@ -848,16 +913,25 @@ function DataSection() {
         if (id) numericCategoryMap[name] = parseInt(id, 10);
       }
 
-      const res = await api.post<ImportResult>('import/confirm', {
+      const payload: {
+        import_id: string;
+        default_category_id?: number;
+        category_map: Record<string, number>;
+      } = {
         import_id: preview.import_id,
-        default_category_id: defaultCategoryId ?? 0,
         category_map: numericCategoryMap,
-      });
+      };
+      if (defaultCategoryId !== null) {
+        payload.default_category_id = defaultCategoryId;
+      }
+
+      const res = await api.post<ImportResult>('import/confirm', payload);
       setResult(res);
       setImportStep('done');
       setConfirmOpen(false);
+      setImportError(null);
     } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Import failed');
+      toast.error(err instanceof Error ? err.message : 'Import failed');
       setConfirmOpen(false);
     }
   }
@@ -868,6 +942,7 @@ function DataSection() {
     setImportError(null);
     setCategoryMap({});
     setDefaultCategoryId(null);
+    clearFileInput();
   }
 
   function handleImportAnother() {
@@ -877,6 +952,7 @@ function DataSection() {
     setImportError(null);
     setCategoryMap({});
     setDefaultCategoryId(null);
+    clearFileInput();
   }
 
   function handleExportMonthly() {
@@ -886,21 +962,6 @@ function DataSection() {
   function handleExportYearly() {
     window.open(`/api/export/yearly/${year}`, '_blank');
   }
-
-  const monthNames = [
-    'January',
-    'February',
-    'March',
-    'April',
-    'May',
-    'June',
-    'July',
-    'August',
-    'September',
-    'October',
-    'November',
-    'December',
-  ];
 
   const uniqueImportCategories = preview?.unique_categories ?? [];
 
@@ -930,6 +991,7 @@ function DataSection() {
               <div className="max-w-sm space-y-2">
                 <Label htmlFor="excel-file">Excel File</Label>
                 <Input
+                  ref={fileInputRef}
                   id="excel-file"
                   type="file"
                   accept=".xlsx,.xls"
@@ -1120,7 +1182,7 @@ function DataSection() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {monthNames.map((m, i) => (
+                  {MONTH_NAMES.map((m, i) => (
                     <SelectItem key={m} value={String(i + 1)}>
                       {m}
                     </SelectItem>
@@ -1154,17 +1216,15 @@ export function Settings() {
   const isAdmin = user?.role === 'admin';
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const validTabs: SettingsTab[] = [
-    'general',
-    'currencies',
-    'savings',
-    'users',
-    'data',
-  ];
-  const initialTab = validTabs.includes(tabParam as SettingsTab)
-    ? (tabParam as SettingsTab)
-    : 'general';
+  const initialTab = isValidTab(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+
+  useEffect(() => {
+    if (isValidTab(tabParam) && tabParam !== activeTab) {
+      setActiveTab(tabParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tabParam]);
 
   return (
     <div className="space-y-6 p-6">

@@ -18,13 +18,22 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}));
+
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Settings } from './Settings';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 
 function renderSettings() {
   return render(
@@ -697,7 +706,9 @@ describe('Settings', () => {
       );
 
       await waitFor(() => {
-        expect(screen.getByText(/import failed: duplicate rows/i)).toBeInTheDocument();
+        expect(mockedToast.error).toHaveBeenCalledWith(
+          'Import failed: duplicate rows',
+        );
       });
     });
 
