@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import {
   ResponsiveContainer,
   BarChart,
@@ -6,37 +6,32 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Tooltip,
   PieChart,
   Pie,
   Cell,
 } from 'recharts';
-import {
-  Wallet,
-  TrendingUp,
-  TrendingDown,
-  Database,
-  ArrowUpRight,
-  ArrowDownRight,
-} from 'lucide-react';
+import { Wallet, TrendingUp, TrendingDown, Database } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
-import { useChartTheme } from '../hooks/useChartTheme';
-import { useChartPatterns, ChartPatternDefs } from '../hooks/useChartPatterns';
 import { useAuth } from '../hooks/useAuth';
-import { ChartTooltip } from '../components/ChartTooltip';
 import { api } from '../api/client';
+import { getCategoryColorVar } from '@/lib/chart-colors';
+import { KpiCard, type KpiDelta } from '@/components/KpiCard';
+import { ChartCard } from '@/components/ChartCard';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Skeleton } from '@/components/ui/skeleton';
+import { Label } from '@/components/ui/label';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
 import type { Transaction, PaginatedResponse } from '../api/types';
-import styles from '../styles/Dashboard.module.css';
 
 /* ── Formatters ── */
-
-function formatCompact(amount: number): string {
-  return '$' + Math.abs(amount).toLocaleString('en-US', {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
-  });
-}
 
 function splitCurrency(amount: number): { dollars: string; cents: string } {
   const abs = Math.abs(amount);
@@ -57,6 +52,14 @@ function pctChange(current: number, previous: number): number | null {
   return ((current - previous) / Math.abs(previous)) * 100;
 }
 
+function toDelta(value: number | null): KpiDelta | null {
+  if (value == null) return null;
+  return {
+    percent: Math.abs(value),
+    direction: value > 0 ? 'up' : value < 0 ? 'down' : 'flat',
+  };
+}
+
 /* ── Constants ── */
 
 const MONTHS = [
@@ -71,6 +74,16 @@ const SHORT_MONTHS = [
 
 type CashFlowView = '6m' | '12m';
 
+const cashFlowConfig: ChartConfig = {
+  income: { label: 'Income', color: 'hsl(var(--chart-6))' },
+  expense: { label: 'Expense', color: 'hsl(var(--chart-10))' },
+};
+
+const savingsConfig: ChartConfig = {
+  filled: { label: 'Saved', color: 'hsl(var(--chart-1))' },
+  rest: { label: 'Remaining', color: 'hsl(var(--muted))' },
+};
+
 /* ── Component ── */
 
 export function Dashboard() {
@@ -83,8 +96,6 @@ export function Dashboard() {
     selectedYear,
     selectedMonth,
   );
-  const chartTheme = useChartTheme();
-  const patterns = useChartPatterns();
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [showLatest, setShowLatest] = useState(false);
 
@@ -107,57 +118,58 @@ export function Dashboard() {
   const currentYear = now.getFullYear();
   const yearOptions = Array.from({ length: 5 }, (_, i) => currentYear - i);
 
-  /* ── Derived data ── */
+  /* ── Derived ── */
 
   const totalIncome = summary?.total_income ?? 0;
   const totalExpense = summary?.total_spent ?? 0;
   const totalBalance = totalIncome - totalExpense;
 
-  // Cash flow chart data
-  const chartData = (() => {
+  const chartData = useMemo(() => {
     const sorted = [...trend].reverse();
     const sliced = cashFlowView === '6m' ? sorted.slice(-6) : sorted;
     return sliced.map((item) => ({
       name: SHORT_MONTHS[item.month - 1],
       income: item.total_income,
-      expense: -item.total_spent,
+      expense: item.total_spent,
     }));
-  })();
+  }, [trend, cashFlowView]);
 
-  // Categories — top 5 for donut + list
-  const topCats = categories.slice(0, 5);
-  const otherTotal = categories.slice(5).reduce((sum, cat) => sum + cat.total, 0);
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
 
-  // Half-gauge pie data (top 5 + "Other")
-  const gaugeData = [
-    ...topCats.map((cat) => ({
-      name: cat.name,
-      value: cat.total,
-      color: cat.color,
-    })),
-    ...(otherTotal > 0
-      ? [{ name: 'Other', value: otherTotal, color: '#B8BCC8' }]
-      : []),
-  ];
+  const gaugeData = useMemo(() => {
+    const topCats = categories.slice(0, 5);
+    const otherTotal = categories
+      .slice(5)
+      .reduce((sum, cat) => sum + cat.total, 0);
+    return [
+      ...topCats.map((cat) => ({
+        id: cat.id,
+        name: cat.name,
+        value: cat.total,
+        color: getCategoryColorVar({ id: cat.id }),
+      })),
+      ...(otherTotal > 0
+        ? [{
+            id: -1,
+            name: 'Other',
+            value: otherTotal,
+            color: 'hsl(var(--muted-foreground))',
+          }]
+        : []),
+    ];
+  }, [categories]);
 
-  // Pattern configs for charts
-  const categoryPatterns = gaugeData.map((cat, i) => patterns.getCategoryPattern(i, cat.color));
-  const categoryDefs = patterns.getCategoryDefs(gaugeData);
+  const categoryChartConfig = useMemo<ChartConfig>(() => {
+    return gaugeData.reduce<ChartConfig>((acc, slice) => {
+      acc[slice.name] = { label: slice.name, color: slice.color };
+      return acc;
+    }, {});
+  }, [gaugeData]);
 
-  const cfPatternStyles = patterns.buildStyleMap([
-    patterns.cashFlow.income,
-    patterns.cashFlow.expense,
-  ]);
-
-  const catPatternStyles = patterns.buildStyleMap(categoryPatterns);
-
-  // KPI computations
   const savingsRate = totalIncome > 0
     ? ((totalIncome - totalExpense) / totalIncome * 100)
     : 0;
 
-  // Delta from previous month
   const prevMonthTrend = (() => {
     const prevM = selectedMonth === 1 ? 12 : selectedMonth - 1;
     const prevY = selectedMonth === 1 ? selectedYear - 1 : selectedYear;
@@ -167,56 +179,53 @@ export function Dashboard() {
   const balanceDelta = prevMonthTrend
     ? pctChange(totalBalance, prevMonthTrend.total_income - prevMonthTrend.total_spent)
     : null;
-
   const incomeDelta = prevMonthTrend
     ? pctChange(totalIncome, prevMonthTrend.total_income)
     : null;
-
   const expenseDelta = prevMonthTrend
     ? pctChange(totalExpense, prevMonthTrend.total_spent)
     : null;
-
   const savingsRatePrev = prevMonthTrend && prevMonthTrend.total_income > 0
     ? ((prevMonthTrend.total_income - prevMonthTrend.total_spent) / prevMonthTrend.total_income * 100)
     : null;
+  const savingsDelta = savingsRatePrev !== null ? savingsRate - savingsRatePrev : null;
 
-  const savingsDelta = savingsRatePrev !== null
-    ? savingsRate - savingsRatePrev
-    : null;
-
-  // Split values for decimal formatting
   const balanceSplit = splitCurrency(totalBalance);
   const incomeSplit = splitCurrency(totalIncome);
   const expenseSplit = splitCurrency(totalExpense);
 
+  const savingsGoalPct = summary?.savings_goal_progress ?? 0;
+  const savingsData = [
+    { name: 'filled', value: savingsGoalPct },
+    { name: 'rest', value: Math.max(0, 100 - savingsGoalPct) },
+  ];
+
   /* ── Loading state ── */
   if (loading) {
     return (
-      <div className={styles.page}>
-        <div className={styles.header}>
-          <div>
-            <div className={styles.skeletonHeading} />
-            <div className={styles.skeletonText} style={{ marginTop: 8, width: '40%' }} />
-          </div>
+      <div className="flex flex-col gap-6">
+        <div className="flex items-center justify-between">
+          <Skeleton className="h-8 w-64" />
+          <Skeleton className="h-9 w-48" />
         </div>
-        <div className={styles.kpiRow}>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           {[1, 2, 3, 4].map((n) => (
-            <div key={n} className={styles.kpiCard}>
-              <div className={styles.skeletonText} style={{ width: '50%' }} />
-              <div className={styles.skeletonHeading} />
-              <div className={styles.skeletonText} style={{ width: '70%' }} />
-            </div>
+            <Card key={n} className="p-6">
+              <Skeleton className="mb-3 h-3 w-1/2" />
+              <Skeleton className="mb-3 h-8 w-3/4" />
+              <Skeleton className="h-3 w-2/3" />
+            </Card>
           ))}
         </div>
-        <div className={styles.contentGrid}>
-          <div className={styles.card}>
-            <div className={styles.skeletonText} style={{ width: '30%' }} />
-            <div className={styles.skeleton} style={{ height: 260, marginTop: 16 }} />
-          </div>
-          <div className={styles.card}>
-            <div className={styles.skeletonText} style={{ width: '40%' }} />
-            <div className={styles.skeleton} style={{ height: 200, marginTop: 16 }} />
-          </div>
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+          <Card className="p-6 lg:col-span-3">
+            <Skeleton className="mb-4 h-4 w-1/4" />
+            <Skeleton className="h-64 w-full" />
+          </Card>
+          <Card className="p-6 lg:col-span-2">
+            <Skeleton className="mb-4 h-4 w-1/3" />
+            <Skeleton className="h-48 w-full" />
+          </Card>
         </div>
       </div>
     );
@@ -225,41 +234,35 @@ export function Dashboard() {
   /* ── Error state ── */
   if (error) {
     return (
-      <div className={styles.page}>
-        <div className={styles.header}>
-          <h1 className={styles.headerTitle}>Dashboard</h1>
-        </div>
-        <div className={styles.errorState} role="alert">
-          <p>{error}</p>
-          <button
-            className={styles.retryButton}
-            onClick={() => window.location.reload()}
-          >
-            Retry
-          </button>
-        </div>
+      <div className="flex flex-col gap-6">
+        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <Card className="flex flex-col items-center gap-4 p-12 text-center" role="alert">
+          <p className="text-muted-foreground">{error}</p>
+          <Button onClick={() => window.location.reload()}>Retry</Button>
+        </Card>
       </div>
     );
   }
 
   /* ── Render ── */
   return (
-    <div className={styles.page}>
-      {/* ===== Header ===== */}
-      <div className={styles.header}>
+    <div className="flex flex-col gap-6">
+      {/* Header */}
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h1 className={styles.headerTitle}>
+          <h1 className="text-2xl font-bold tracking-tight">
             Welcome back, {user?.display_name ?? 'there'}
           </h1>
-          <p className={styles.subtitle}>
+          <p className="mt-0.5 text-sm text-muted-foreground">
             Here's what's happening with your finances.
           </p>
         </div>
-        <div className={styles.selectors}>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="dash-month" className="sr-only">Month</Label>
           <select
             id="dash-month"
             aria-label="Month"
-            className={styles.select}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm font-medium"
             value={selectedMonth}
             onChange={(e) => setSelectedMonth(Number(e.target.value))}
           >
@@ -267,11 +270,11 @@ export function Dashboard() {
               <option key={m} value={i + 1}>{m}</option>
             ))}
           </select>
-
+          <Label htmlFor="dash-year" className="sr-only">Year</Label>
           <select
             id="dash-year"
             aria-label="Year"
-            className={styles.select}
+            className="h-9 rounded-md border border-input bg-background px-3 text-sm font-medium"
             value={selectedYear}
             onChange={(e) => setSelectedYear(Number(e.target.value))}
           >
@@ -282,424 +285,259 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* ===== KPI Row ===== */}
+      {/* KPI row */}
       {summary && (
-        <div className={styles.kpiRow}>
-          {/* Total Balance — featured accent card */}
-          <div className={`${styles.kpiCard} ${styles.featured}`}>
-            <div className={styles.kpiTop}>
-              <span className={styles.kpiLabel}>Total Balance</span>
-              <div className={`${styles.kpiIcon} ${styles.kpiIconPurple}`}>
-                <Wallet size={18} strokeWidth={1.5} />
-              </div>
-            </div>
-            <div className={styles.kpiValue}>
-              {balanceSplit.dollars}
-              <span className={styles.kpiDecimal}>{balanceSplit.cents}</span>
-            </div>
-            <div className={styles.kpiFooter}>
-              {balanceDelta != null && (
-                <>
-                  <span className={balanceDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
-                    {balanceDelta >= 0
-                      ? <ArrowUpRight size={12} strokeWidth={3} />
-                      : <ArrowDownRight size={12} strokeWidth={3} />}
-                    {Math.abs(balanceDelta).toFixed(1)}%
-                  </span>
-                  <span className={styles.kpiVs}>vs last month</span>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Income */}
-          <div className={styles.kpiCard}>
-            <div className={styles.kpiTop}>
-              <span className={styles.kpiLabel}>Income</span>
-              <div className={`${styles.kpiIcon} ${styles.kpiIconTeal}`}>
-                <TrendingUp size={18} strokeWidth={1.5} />
-              </div>
-            </div>
-            <div className={styles.kpiValue}>
-              {incomeSplit.dollars}
-              <span className={styles.kpiDecimal}>{incomeSplit.cents}</span>
-            </div>
-            <div className={styles.kpiFooter}>
-              {incomeDelta != null && (
-                <>
-                  <span className={incomeDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
-                    {incomeDelta >= 0
-                      ? <ArrowUpRight size={12} strokeWidth={3} />
-                      : <ArrowDownRight size={12} strokeWidth={3} />}
-                    {Math.abs(incomeDelta).toFixed(1)}%
-                  </span>
-                  <span className={styles.kpiVs}>vs last month</span>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Expenses */}
-          <div className={styles.kpiCard}>
-            <div className={styles.kpiTop}>
-              <span className={styles.kpiLabel}>Expenses</span>
-              <div className={`${styles.kpiIcon} ${styles.kpiIconRed}`}>
-                <TrendingDown size={18} strokeWidth={1.5} />
-              </div>
-            </div>
-            <div className={styles.kpiValue}>
-              {expenseSplit.dollars}
-              <span className={styles.kpiDecimal}>{expenseSplit.cents}</span>
-            </div>
-            <div className={styles.kpiFooter}>
-              {expenseDelta != null && (
-                <>
-                  <span className={expenseDelta >= 0 ? styles.kpiBadgeNegative : styles.kpiBadgePositive}>
-                    {expenseDelta >= 0
-                      ? <ArrowUpRight size={12} strokeWidth={3} />
-                      : <ArrowDownRight size={12} strokeWidth={3} />}
-                    {Math.abs(expenseDelta).toFixed(1)}%
-                  </span>
-                  <span className={styles.kpiVs}>vs last month</span>
-                </>
-              )}
-            </div>
-          </div>
-
-          {/* Savings Rate */}
-          <div className={styles.kpiCard}>
-            <div className={styles.kpiTop}>
-              <span className={styles.kpiLabel}>Savings Rate</span>
-              <div className={`${styles.kpiIcon} ${styles.kpiIconYellow}`}>
-                <Database size={18} strokeWidth={1.5} />
-              </div>
-            </div>
-            <div className={styles.kpiValue}>
-              {savingsRate.toFixed(1)}
-              <span className={styles.kpiDecimal}>%</span>
-            </div>
-            <div className={styles.kpiFooter}>
-              {savingsDelta != null && (
-                <>
-                  <span className={savingsDelta >= 0 ? styles.kpiBadgePositive : styles.kpiBadgeNegative}>
-                    {savingsDelta >= 0
-                      ? <ArrowUpRight size={12} strokeWidth={3} />
-                      : <ArrowDownRight size={12} strokeWidth={3} />}
-                    {Math.abs(savingsDelta).toFixed(1)}%
-                  </span>
-                  <span className={styles.kpiVs}>vs last month</span>
-                </>
-              )}
-            </div>
-          </div>
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <KpiCard
+            label="Total Balance"
+            icon={Wallet}
+            dollars={balanceSplit.dollars}
+            cents={balanceSplit.cents}
+            delta={toDelta(balanceDelta)}
+            featured
+          />
+          <KpiCard
+            label="Income"
+            icon={TrendingUp}
+            dollars={incomeSplit.dollars}
+            cents={incomeSplit.cents}
+            delta={toDelta(incomeDelta)}
+          />
+          <KpiCard
+            label="Expenses"
+            icon={TrendingDown}
+            dollars={expenseSplit.dollars}
+            cents={expenseSplit.cents}
+            delta={toDelta(expenseDelta == null ? null : -expenseDelta)}
+          />
+          <KpiCard
+            label="Savings Rate"
+            icon={Database}
+            dollars={savingsRate.toFixed(1)}
+            cents="%"
+            delta={toDelta(savingsDelta)}
+          />
         </div>
       )}
 
-      {/* ===== Content Grid ===== */}
-      <div className={styles.contentGrid}>
-        {/* ── Cash Flow Chart ── */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div>
-              <div className={styles.cardTitle}>Cash Flow</div>
-              <div className={styles.cardSubtitle}>Income vs expenses over time</div>
-            </div>
-            <div className={styles.cfControls}>
-              <div className={styles.cfLegend}>
-                <div className={styles.legendItem}>
-                  <div className={styles.legendDot} style={patterns.cashFlow.income.legendStyle} />
-                  <span>Income</span>
-                </div>
-                <div className={styles.legendItem}>
-                  <div className={styles.legendDot} style={patterns.cashFlow.expense.legendStyle} />
-                  <span>Expenses</span>
-                </div>
-              </div>
-              <div className={styles.cfToggle}>
-                <button
-                  className={`${styles.cfToggleBtn} ${cashFlowView === '6m' ? styles.cfToggleBtnActive : ''}`}
-                  onClick={() => setCashFlowView('6m')}
-                >
-                  6M
-                </button>
-                <button
-                  className={`${styles.cfToggleBtn} ${cashFlowView === '12m' ? styles.cfToggleBtnActive : ''}`}
-                  onClick={() => setCashFlowView('12m')}
-                >
-                  12M
-                </button>
-              </div>
-            </div>
-          </div>
+      {/* Cash flow — full width */}
+      <ChartCard
+        title="Cash Flow"
+        subtitle="Income vs expenses over time"
+        action={
+          <Tabs
+            value={cashFlowView}
+            onValueChange={(v) => setCashFlowView(v as CashFlowView)}
+          >
+            <TabsList className="h-8">
+              <TabsTrigger value="6m" className="h-6 px-3 text-xs">6M</TabsTrigger>
+              <TabsTrigger value="12m" className="h-6 px-3 text-xs">12M</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        }
+      >
+        <ChartContainer config={cashFlowConfig} className="h-64 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
+              <CartesianGrid
+                strokeDasharray="3 3"
+                stroke="hsl(var(--border))"
+                vertical={false}
+              />
+              <XAxis
+                dataKey="name"
+                tickLine={false}
+                axisLine={false}
+                className="text-xs"
+                stroke="hsl(var(--muted-foreground))"
+              />
+              <YAxis
+                tickLine={false}
+                axisLine={false}
+                className="text-xs"
+                stroke="hsl(var(--muted-foreground))"
+              />
+              <ChartTooltip content={<ChartTooltipContent />} />
+              <Bar dataKey="income" fill="var(--color-income)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="expense" fill="var(--color-expense)" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </ChartContainer>
+      </ChartCard>
 
-          <div className={styles.cfChartWrap}>
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
-                <ChartPatternDefs patterns={patterns.cashFlowDefs} />
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke={chartTheme.gridStroke}
-                  vertical={false}
-                />
-                <XAxis
-                  dataKey="name"
-                  tickLine={false}
-                  axisLine={{ stroke: chartTheme.gridStroke, strokeWidth: 1 }}
-                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
-                  dy={4}
-                />
-                <YAxis
-                  tickLine={false}
-                  axisLine={false}
-                  width={48}
-                  tick={{ fill: chartTheme.axisStroke, fontFamily: 'Inter Variable', fontSize: 12 }}
-                  tickFormatter={(v: number) => `$${Math.abs(v / 1000).toFixed(0)}k`}
-                />
-                <Tooltip
-                  content={<ChartTooltip patternStyles={cfPatternStyles} />}
-                  cursor={{ fill: chartTheme.hoverBg }}
-                  isAnimationActive={false}
-                />
-                <Bar
-                  dataKey="income"
-                  fill={patterns.cashFlow.income.fill}
-                  radius={[6, 6, 6, 6]}
-                  name="Income"
-                  barSize={36}
-                />
-                <Bar
-                  dataKey="expense"
-                  fill={patterns.cashFlow.expense.fill}
-                  stroke={patterns.cashFlow.expense.stroke}
-                  strokeWidth={patterns.cashFlow.expense.strokeWidth}
-                  radius={[6, 6, 6, 6]}
-                  name="Expenses"
-                  barSize={36}
-                />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* ── Spending by Category (Half-Gauge) ── */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div>
-              <div className={styles.cardTitle}>Spending by Category</div>
-              <div className={styles.cardSubtitle}>
-                {MONTHS[selectedMonth - 1]} {selectedYear}
-              </div>
+      {/* Bottom grid */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
+        {/* Spending by Category */}
+        <ChartCard
+          title="Spending by Category"
+          subtitle={formatFull(totalCategorySpent)}
+          className="lg:col-span-3"
+        >
+          {gaugeData.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+              No spending yet this month.
             </div>
-            <Link to="/categories" className={styles.cardLink}>View all &rarr;</Link>
-          </div>
-          <div className={styles.spendGrid}>
-            <div className={styles.gaugeWrap}>
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <ChartPatternDefs patterns={categoryDefs} />
-                  <Pie
-                    data={gaugeData}
-                    dataKey="value"
-                    nameKey="name"
-                    startAngle={180}
-                    endAngle={0}
-                    cx="50%"
-                    cy="95%"
-                    innerRadius={130}
-                    outerRadius={175}
-                    cornerRadius={4}
-                    paddingAngle={1.5}
-                    stroke="none"
-                  >
-                    {gaugeData.map((_, i) => (
-                      <Cell
-                        key={i}
-                        fill={categoryPatterns[i].fill}
-                        stroke={categoryPatterns[i].stroke ?? 'none'}
-                        strokeWidth={categoryPatterns[i].strokeWidth ?? 0}
-                      />
-                    ))}
-                  </Pie>
-                  <Tooltip
-                    content={<ChartTooltip patternStyles={catPatternStyles} />}
-                    position={{ x: 0, y: -10 }}
-                    isAnimationActive={false}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-              <div className={styles.gaugeCenter}>
-                <span className={styles.gaugeTotal}>
-                  {formatCompact(totalCategorySpent)}
-                </span>
-                <span className={styles.gaugeSub}>Total Spent</span>
-              </div>
-            </div>
-
-            <div className={styles.catList}>
-              {gaugeData.map((cat, i) => {
-                const pct = totalCategorySpent > 0
-                  ? Math.round((cat.value / totalCategorySpent) * 100)
-                  : 0;
-                return (
-                  <div key={cat.name} className={styles.catRow}>
-                    <div
-                      className={styles.catDot}
-                      style={categoryPatterns[i]?.legendStyle ?? { background: cat.color }}
-                    />
-                    <span className={styles.catName}>{cat.name}</span>
-                    <div className={styles.catBar}>
-                      <div
-                        className={styles.catBarFill}
-                        style={{
-                          width: `${Math.min(100, pct)}%`,
-                          background: cat.color,
-                          opacity: 0.7,
-                        }}
-                      />
-                    </div>
-                    <span className={styles.catPct}>{pct}%</span>
-                    <span className={styles.catAmount}>{formatCompact(cat.value)}</span>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        </div>
-
-        {/* ── Savings Progress ── */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
-            <div>
-              <div className={styles.cardTitle}>Savings Progress</div>
-              <div className={styles.cardSubtitle}>
-                {selectedYear} annual goal
-              </div>
-            </div>
-          </div>
-          {summary && (summary.savings_goal ?? 0) > 0 ? (
-            <>
-              <div className={styles.savingsRing}>
+          ) : (
+            <div className="flex flex-1 flex-col gap-4 md:flex-row md:items-center">
+              <ChartContainer
+                config={categoryChartConfig}
+                className="h-48 w-full md:w-1/2"
+              >
                 <ResponsiveContainer width="100%" height="100%">
                   <PieChart>
+                    <ChartTooltip content={<ChartTooltipContent hideLabel />} />
                     <Pie
-                      data={[
-                        {
-                          name: 'Saved',
-                          value: Math.min(100, Math.max(0, summary.savings_goal_progress)),
-                        },
-                        {
-                          name: 'Remaining',
-                          value: Math.max(0, 100 - Math.min(100, Math.max(0, summary.savings_goal_progress))),
-                        },
-                      ]}
+                      data={gaugeData}
                       dataKey="value"
-                      startAngle={90}
-                      endAngle={-270}
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={75}
-                      outerRadius={100}
-                      cornerRadius={4}
-                      paddingAngle={0}
-                      stroke="none"
+                      nameKey="name"
+                      innerRadius={60}
+                      outerRadius={90}
+                      paddingAngle={2}
+                      strokeWidth={0}
                     >
-                      <Cell fill="var(--color-primary)" />
-                      <Cell fill="var(--border-default)" />
+                      {gaugeData.map((slice) => (
+                        <Cell key={slice.name} fill={slice.color} />
+                      ))}
                     </Pie>
                   </PieChart>
                 </ResponsiveContainer>
-                <div className={styles.savingsCenter}>
-                  <span className={styles.savingsCenterPct}>
-                    {Math.round(Math.min(100, Math.max(0, summary.savings_goal_progress)))}%
-                  </span>
-                  <span className={styles.savingsCenterLabel}>of goal</span>
-                </div>
-              </div>
-              <div className={styles.savingsStats}>
-                <div className={styles.savingsStat}>
-                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_ytd)}</div>
-                  <div className={styles.savingsStatLabel}>Saved YTD</div>
-                </div>
-                <div className={styles.savingsStat}>
-                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_goal)}</div>
-                  <div className={styles.savingsStatLabel}>Annual Goal</div>
-                </div>
-                <div className={styles.savingsStat}>
-                  <div className={styles.savingsStatValue}>{formatCompact(summary.savings_this_month)}</div>
-                  <div className={styles.savingsStatLabel}>This Month</div>
-                </div>
-              </div>
-            </>
-          ) : (
-            <div className={styles.savingsEmptyMsg}>
-              <Link to="/settings?tab=savings">Set a savings goal</Link> to track progress
+              </ChartContainer>
+              <ul className="flex flex-1 flex-col gap-2 md:w-1/2">
+                {gaugeData.map((slice) => {
+                  const pct = totalCategorySpent > 0
+                    ? (slice.value / totalCategorySpent) * 100
+                    : 0;
+                  return (
+                    <li key={slice.name} className="flex items-center gap-3 text-sm">
+                      <span
+                        className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                        style={{ backgroundColor: slice.color }}
+                        aria-hidden="true"
+                      />
+                      <span className="flex-1 truncate font-medium">{slice.name}</span>
+                      <span className="font-mono tabular-nums text-muted-foreground">
+                        {pct.toFixed(0)}%
+                      </span>
+                      <span className="min-w-20 text-right font-mono font-semibold tabular-nums">
+                        {formatFull(slice.value)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
             </div>
           )}
-        </div>
+        </ChartCard>
 
-        {/* ── Recent Transactions ── */}
-        <div className={styles.card}>
-          <div className={styles.cardHeader}>
+        {/* Recent Transactions */}
+        <Card className="flex flex-col p-6 lg:col-span-2">
+          <div className="mb-4 flex items-center justify-between">
             <div>
-              <div className={styles.cardTitle}>Recent Transactions</div>
-              <div className={styles.cardSubtitle}>
-                {showLatest ? 'Latest activity' : `${MONTHS[selectedMonth - 1]} ${selectedYear}`}
-              </div>
-            </div>
-            <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+              <h2 className="text-base font-semibold tracking-tight">Recent Transactions</h2>
               <button
-                className={styles.toggleLink}
-                onClick={() => setShowLatest(!showLatest)}
+                type="button"
+                className="mt-0.5 text-xs font-medium text-primary hover:underline"
+                onClick={() => setShowLatest((v) => !v)}
               >
-                {showLatest ? `Show ${MONTHS[selectedMonth - 1]} →` : 'Show latest →'}
+                {showLatest ? 'Show this month' : 'Show latest'}
               </button>
-              <Link to="/transactions" className={styles.cardLink}>View all &rarr;</Link>
             </div>
+            <Link
+              to="/transactions"
+              className="text-xs font-medium text-primary hover:underline"
+            >
+              View all →
+            </Link>
           </div>
           {recentTransactions.length === 0 ? (
-            <p className={styles.emptyState}>No recent transactions</p>
-          ) : (
-            <div className={styles.txList}>
-              {recentTransactions.slice(0, 6).map((tx) => (
-                <div key={tx.id} className={styles.txRow}>
-                  <div
-                    className={styles.txIcon}
-                    style={{
-                      background: `color-mix(in srgb, ${tx.category_color} 15%, transparent)`,
-                      color: tx.category_color,
-                    }}
-                  >
-                    <span style={{ fontSize: 14, fontWeight: 600 }}>
-                      {tx.category_name.charAt(0)}
-                    </span>
-                  </div>
-                  <div className={styles.txInfo}>
-                    <div className={styles.txName}>{tx.description}</div>
-                    <div className={styles.txMeta}>{tx.category_name}</div>
-                  </div>
-                  <div className={styles.txRight}>
-                    <div
-                      className={`${styles.txAmount} ${
-                        tx.category_type === 'expense' ? styles.expense : styles.income
-                      }`}
-                    >
-                      {tx.category_type === 'expense' ? '-' : '+'}
-                      {formatFull(tx.amount)}
-                    </div>
-                    <div className={styles.txDate}>
-                      {new Date(tx.date).toLocaleDateString('en-US', {
-                        month: 'short',
-                        day: 'numeric',
-                        year: 'numeric',
-                      })}
-                    </div>
-                  </div>
-                </div>
-              ))}
+            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+              No transactions yet.
             </div>
+          ) : (
+            <ul className="flex flex-col divide-y divide-border">
+              {recentTransactions.map((tx) => {
+                const color = getCategoryColorVar({ id: tx.category_id });
+                return (
+                  <li key={tx.id} className="flex items-center gap-3 py-2.5">
+                    <span
+                      className="h-9 w-9 shrink-0 rounded-full"
+                      style={{
+                        backgroundColor: `color-mix(in srgb, ${color} 15%, transparent)`,
+                      }}
+                      aria-hidden="true"
+                    />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium">{tx.description}</div>
+                      <div className="text-xs text-muted-foreground">{tx.category_name}</div>
+                    </div>
+                    <div className="text-right">
+                      <div
+                        className={
+                          tx.category_type === 'income'
+                            ? 'font-mono text-sm font-semibold tabular-nums text-emerald-500'
+                            : 'font-mono text-sm font-semibold tabular-nums'
+                        }
+                      >
+                        {tx.category_type === 'income' ? '+' : '-'}
+                        {formatFull(tx.amount)}
+                      </div>
+                      <div className="text-xs text-muted-foreground">{tx.date}</div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
           )}
-        </div>
+        </Card>
       </div>
+
+      {/* Savings Progress — full width */}
+      <ChartCard
+        title="Savings Progress"
+        subtitle={`${savingsGoalPct.toFixed(0)}% of goal`}
+      >
+        <div className="flex flex-col items-center gap-6 md:flex-row md:justify-around">
+          <ChartContainer config={savingsConfig} className="h-48 w-48">
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={savingsData}
+                  dataKey="value"
+                  nameKey="name"
+                  innerRadius={60}
+                  outerRadius={88}
+                  strokeWidth={0}
+                  startAngle={90}
+                  endAngle={-270}
+                >
+                  <Cell fill="hsl(var(--chart-1))" />
+                  <Cell fill="hsl(var(--muted))" />
+                </Pie>
+              </PieChart>
+            </ResponsiveContainer>
+          </ChartContainer>
+          <div className="flex flex-col items-center gap-1 text-center">
+            <div className="font-mono text-3xl font-bold tracking-tight tabular-nums">
+              {savingsGoalPct.toFixed(0)}%
+            </div>
+            <div className="text-xs text-muted-foreground">of goal</div>
+          </div>
+          <div className="flex gap-8">
+            <div className="text-center">
+              <div className="font-mono text-base font-semibold tabular-nums">
+                {formatFull(summary?.savings_ytd ?? 0)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Saved YTD</div>
+            </div>
+            <div className="text-center">
+              <div className="font-mono text-base font-semibold tabular-nums">
+                {formatFull(summary?.savings_goal ?? 0)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">Annual Goal</div>
+            </div>
+          </div>
+        </div>
+      </ChartCard>
     </div>
   );
 }
