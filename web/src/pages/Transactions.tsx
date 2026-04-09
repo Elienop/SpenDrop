@@ -63,8 +63,8 @@ export function Transactions() {
     api
       .get<Category[]>('categories')
       .then(setCategories)
-      .catch(() => {
-        /* non-critical */
+      .catch((err) => {
+        console.warn('Failed to load categories', err);
       });
   }, []);
 
@@ -110,7 +110,7 @@ export function Transactions() {
   // Build active filter chips data
   const activeChips = useMemo(() => {
     if (showFilters) return [];
-    const chips: { label: string; onClear: () => void }[] = [];
+    const chips: { key: string; label: string; onClear: () => void }[] = [];
 
     // Date chip
     if (filters.dateFrom || filters.dateTo) {
@@ -123,6 +123,7 @@ export function Transactions() {
         label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
       }
       chips.push({
+        key: 'date',
         label,
         onClear: () => {
           setFilter('dateFrom', '');
@@ -140,6 +141,7 @@ export function Transactions() {
         .map((id) => categories.find((c) => String(c.id) === id)?.name)
         .filter(Boolean);
       chips.push({
+        key: 'category',
         label: names.join(', ') || 'Categories',
         onClear: () => {
           setFilter('categoryIds', '');
@@ -159,6 +161,7 @@ export function Transactions() {
         label = `Max $${filters.amountMax}`;
       }
       chips.push({
+        key: 'amount',
         label,
         onClear: () => {
           setFilter('amountMin', '');
@@ -170,6 +173,7 @@ export function Transactions() {
     // Tags chip
     if (filters.tags) {
       chips.push({
+        key: 'tags',
         label: filters.tags,
         onClear: () => setFilter('tags', ''),
       });
@@ -205,7 +209,7 @@ export function Transactions() {
       {activeChips.length > 0 && (
         <div className={styles.activeChips}>
           {activeChips.map((chip) => (
-            <span key={chip.label} className={styles.activeChip}>
+            <span key={chip.key} className={styles.activeChip}>
               {chip.label}
               <button
                 type="button"
