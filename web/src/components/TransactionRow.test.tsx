@@ -9,6 +9,9 @@ const mockCategories: Category[] = [
     id: 1,
     name: 'Groceries',
     type: 'expense',
+    // NOTE: color field still exists on the Category type until commit 12 drops
+    // the DB column. We keep a dummy value to satisfy TypeScript but no test
+    // below asserts on it — the new CategoryBadge derives color from id alone.
     color: '#e94560',
     icon: null,
     sort_order: 1,
@@ -29,6 +32,7 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     category_id: 1,
     category_name: 'Groceries',
     category_type: 'expense',
+    // Same note as mockCategories above — kept for type-correctness only.
     category_color: '#e94560',
     tags: null,
     notes: null,
@@ -57,6 +61,14 @@ function renderRow(
   );
 }
 
+async function openActionsMenu(description: string) {
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole('button', { name: `Actions for ${description}` }),
+  );
+  return user;
+}
+
 describe('TransactionRow tags display', () => {
   it('renders tag pills when transaction has tags', () => {
     renderRow(makeTx({ tags: 'groceries,weekly' }));
@@ -66,13 +78,42 @@ describe('TransactionRow tags display', () => {
 
   it('renders empty cell when tags are null', () => {
     renderRow(makeTx({ tags: null }));
-    // No tag pills
     expect(screen.queryByText('groceries')).not.toBeInTheDocument();
   });
 
   it('renders empty cell when tags are empty string', () => {
     renderRow(makeTx({ tags: '' }));
     expect(screen.queryByText('groceries')).not.toBeInTheDocument();
+  });
+});
+
+describe('TransactionRow actions menu', () => {
+  it('exposes an actions menu trigger with an explicit aria-label', () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    expect(
+      screen.getByRole('button', { name: 'Actions for Weekly groceries' }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens a menu with Edit and Delete items when the trigger is clicked', async () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    await openActionsMenu('Weekly groceries');
+    expect(screen.getByRole('menuitem', { name: /edit/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('menuitem', { name: /delete/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('calls onDelete when Delete is chosen', async () => {
+    const onDelete = vi.fn().mockResolvedValue(undefined);
+    renderRow(
+      makeTx({ description: 'Weekly groceries' }),
+      undefined,
+      onDelete,
+    );
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+    expect(onDelete).toHaveBeenCalledWith(1);
   });
 });
 
@@ -84,55 +125,46 @@ describe('TransactionRow tags editing', () => {
   });
 
   it('shows TagInput with existing tags in edit mode', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries,weekly' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Tag pills should still be visible in TagInput
     expect(screen.getByText('groceries')).toBeInTheDocument();
     expect(screen.getByText('weekly')).toBeInTheDocument();
   });
 
   it('includes tags in save/update call', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Save via fireEvent.submit (happy-dom doesn't fire submit from button click)
     const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
     fireEvent.submit(form);
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tags: 'groceries',
-        }),
+        expect.objectContaining({ tags: 'groceries' }),
       );
     });
   });
 
   it('resets tags on cancel', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Find the tag text input within the TagInput wrapper
-    // Placeholder is empty when tags exist, so query by the tagInput class
-    const tagInputEl = document.querySelector('.tagInput') as HTMLInputElement;
-    expect(tagInputEl).not.toBeNull();
+    // TagInput is the kept-as-is legacy component; its input is still the only
+    // text input inside the edit row. Grab it by placeholder-less text query
+    // fallback: find all text inputs and pick the last one (the tag field).
+    const textInputs = screen
+      .getAllByRole('textbox')
+      .filter((el) => (el as HTMLInputElement).type === 'text');
+    const tagInputEl = textInputs[textInputs.length - 1];
     await user.type(tagInputEl, 'extra{Enter}');
     expect(screen.getByText('extra')).toBeInTheDocument();
 
-    // Cancel
     await user.click(screen.getByRole('button', { name: /cancel/i }));
 
-    // Should show original tags only (in display mode pills)
     expect(screen.getByText('groceries')).toBeInTheDocument();
     expect(screen.queryByText('extra')).not.toBeInTheDocument();
   });

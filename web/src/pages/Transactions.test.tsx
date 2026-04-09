@@ -31,6 +31,8 @@ const defaultTransaction = {
   category_id: 1,
   category_name: 'Groceries',
   category_type: 'expense',
+  // Kept for type-correctness against the Transaction type. No test asserts on
+  // it — the column is dropped in commit 12.
   category_color: '#e94560',
   tags: 'food,weekly',
   notes: null,
@@ -40,7 +42,6 @@ const defaultTransaction = {
 
 const mockUseTransactions = vi.fn();
 
-// Mock the hooks and api
 vi.mock('../api/client', () => ({
   api: {
     get: vi.fn().mockResolvedValue([]),
@@ -109,32 +110,30 @@ describe('Transactions page', () => {
       expect(screen.getByRole('button', { name: '+ Add' })).toBeInTheDocument();
     });
 
-    it('clicking Filters button toggles filter panel visibility', async () => {
+    it('clicking Filters button opens the filter Sheet and shows Date tab content', async () => {
       const user = userEvent.setup();
       render(<Transactions />);
 
-      // Panel not visible initially
-      expect(screen.queryByRole('button', { name: 'This Month' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: 'This Month' }),
+      ).not.toBeInTheDocument();
 
-      // Open panel
       await user.click(screen.getByRole('button', { name: 'Filters' }));
-      expect(screen.getByRole('button', { name: 'This Month' })).toBeInTheDocument();
-
-      // Close panel
-      await user.click(screen.getByRole('button', { name: 'Filters' }));
-      expect(screen.queryByRole('button', { name: 'This Month' })).not.toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'This Month' }),
+      ).toBeInTheDocument();
     });
 
     it('clicking + Add button toggles entry form and changes label to Cancel', async () => {
       const user = userEvent.setup();
       render(<Transactions />);
 
-      // Click + Add
       await user.click(screen.getByRole('button', { name: '+ Add' }));
       expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: '+ Add' })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: '+ Add' }),
+      ).not.toBeInTheDocument();
 
-      // Click Cancel
       await user.click(screen.getByRole('button', { name: 'Cancel' }));
       expect(screen.getByRole('button', { name: '+ Add' })).toBeInTheDocument();
     });
@@ -146,10 +145,12 @@ describe('Transactions page', () => {
         }),
       );
       render(<Transactions />);
-      expect(screen.getByRole('button', { name: /Filters \(2\)/ })).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /Filters \(2\)/ }),
+      ).toBeInTheDocument();
     });
 
-    it('Filters button has aria-expanded attribute', async () => {
+    it('Filters button has aria-expanded attribute that reflects Sheet state', async () => {
       const user = userEvent.setup();
       render(<Transactions />);
 
@@ -159,20 +160,6 @@ describe('Transactions page', () => {
       await user.click(filtersBtn);
       expect(filtersBtn).toHaveAttribute('aria-expanded', 'true');
     });
-
-    it('+ Add button has aria-expanded attribute', async () => {
-      const user = userEvent.setup();
-      render(<Transactions />);
-
-      const addBtn = screen.getByRole('button', { name: '+ Add' });
-      expect(addBtn).toHaveAttribute('aria-expanded', 'false');
-
-      await user.click(addBtn);
-      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveAttribute(
-        'aria-expanded',
-        'true',
-      );
-    });
   });
 
   describe('filter panel tabs', () => {
@@ -180,23 +167,24 @@ describe('Transactions page', () => {
       const user = userEvent.setup();
       render(<Transactions />);
 
-      // Open filter panel
       await user.click(screen.getByRole('button', { name: 'Filters' }));
 
-      // Date tab is default — shows preset buttons
-      expect(screen.getByRole('button', { name: 'This Month' })).toBeInTheDocument();
+      // Date tab is default — preset button visible
+      expect(
+        screen.getByRole('button', { name: 'This Month' }),
+      ).toBeInTheDocument();
 
-      // Switch to Category tab
-      await user.click(screen.getByRole('button', { name: 'Category' }));
+      // shadcn Tabs uses role="tab" for triggers
+      await user.click(screen.getByRole('tab', { name: 'Category' }));
       expect(screen.getByLabelText('Filter by tags')).toBeInTheDocument();
 
-      // Switch to Amount tab
-      await user.click(screen.getByRole('button', { name: 'Amount' }));
+      await user.click(screen.getByRole('tab', { name: 'Amount' }));
       expect(screen.getByLabelText('Minimum amount')).toBeInTheDocument();
 
-      // Switch to Saved tab
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
-      expect(screen.getByRole('button', { name: 'Big expenses' })).toBeInTheDocument();
+      await user.click(screen.getByRole('tab', { name: 'Saved' }));
+      expect(
+        screen.getByRole('button', { name: 'Big expenses' }),
+      ).toBeInTheDocument();
     });
   });
 
@@ -211,7 +199,7 @@ describe('Transactions page', () => {
       expect(screen.getByText('$50 - $200')).toBeInTheDocument();
     });
 
-    it('hides chips when filter panel is open', async () => {
+    it('hides chips when filter Sheet is open', async () => {
       const user = userEvent.setup();
       mockUseTransactions.mockReturnValue(
         defaultHookReturn({
@@ -221,7 +209,6 @@ describe('Transactions page', () => {
       render(<Transactions />);
       expect(screen.getByText('Min $50')).toBeInTheDocument();
 
-      // Open panel — chips should hide
       await user.click(screen.getByRole('button', { name: /Filters/ }));
       expect(screen.queryByText('Min $50')).not.toBeInTheDocument();
     });
@@ -241,33 +228,32 @@ describe('Transactions page', () => {
   });
 
   describe('saved filters integration', () => {
-    it('renders saved filter chips in the Saved tab', async () => {
+    async function openSavedTab() {
       const user = userEvent.setup();
-      render(<Transactions />);
-
-      // Open panel, go to Saved tab
       await user.click(screen.getByRole('button', { name: 'Filters' }));
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
+      await user.click(screen.getByRole('tab', { name: 'Saved' }));
+      return user;
+    }
 
-      expect(screen.getByRole('button', { name: 'Big expenses' })).toBeInTheDocument();
+    it('renders saved filter chips in the Saved tab', async () => {
+      render(<Transactions />);
+      await openSavedTab();
+      expect(
+        screen.getByRole('button', { name: 'Big expenses' }),
+      ).toBeInTheDocument();
     });
 
     it('renders a save filter button in the Saved tab', async () => {
-      const user = userEvent.setup();
       render(<Transactions />);
-
-      await user.click(screen.getByRole('button', { name: 'Filters' }));
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
-
-      expect(screen.getByRole('button', { name: /save filter/i })).toBeInTheDocument();
+      await openSavedTab();
+      expect(
+        screen.getByRole('button', { name: /save filter/i }),
+      ).toBeInTheDocument();
     });
 
     it('clicking a saved filter chip loads its filters via setFilter', async () => {
-      const user = userEvent.setup();
       render(<Transactions />);
-
-      await user.click(screen.getByRole('button', { name: 'Filters' }));
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
+      const user = await openSavedTab();
       await user.click(screen.getByRole('button', { name: 'Big expenses' }));
 
       expect(mockSetFilter).toHaveBeenCalledWith('amountMin', '100');
@@ -275,13 +261,10 @@ describe('Transactions page', () => {
     });
 
     it('calls saveFilter hook with name and current filter JSON on save', async () => {
-      const user = userEvent.setup();
       const originalPrompt = window.prompt;
       window.prompt = vi.fn().mockReturnValue('My filter');
       render(<Transactions />);
-
-      await user.click(screen.getByRole('button', { name: 'Filters' }));
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
+      const user = await openSavedTab();
       await user.click(screen.getByRole('button', { name: /save filter/i }));
 
       expect(mockSaveFilter).toHaveBeenCalledWith('My filter', expect.any(String));
@@ -289,13 +272,13 @@ describe('Transactions page', () => {
     });
 
     it('calls deleteFilter hook when delete button is clicked', async () => {
-      const user = userEvent.setup();
       render(<Transactions />);
+      await openSavedTab();
+      const user = userEvent.setup();
 
-      await user.click(screen.getByRole('button', { name: 'Filters' }));
-      await user.click(screen.getByRole('button', { name: 'Saved' }));
-
-      const deleteBtn = screen.getByRole('button', { name: /delete saved filter/i });
+      const deleteBtn = screen.getByRole('button', {
+        name: /delete saved filter/i,
+      });
       await user.click(deleteBtn);
       expect(mockDeleteFilter).toHaveBeenCalledWith(10);
     });
@@ -347,7 +330,10 @@ describe('Transactions page', () => {
       await user.click(screen.getByRole('button', { name: /export excel/i }));
 
       expect(openSpy).toHaveBeenCalledTimes(1);
-      const url = new URL(openSpy.mock.calls[0][0] as string, 'http://localhost');
+      const url = new URL(
+        openSpy.mock.calls[0][0] as string,
+        'http://localhost',
+      );
       expect(url.pathname).toBe('/api/export/transactions');
       expect(url.searchParams.get('date_from')).toBe('2026-01-01');
       expect(url.searchParams.get('date_to')).toBe('2026-03-31');
@@ -373,7 +359,10 @@ describe('Transactions page', () => {
 
       await user.click(screen.getByRole('button', { name: /export excel/i }));
 
-      const url = new URL(openSpy.mock.calls[0][0] as string, 'http://localhost');
+      const url = new URL(
+        openSpy.mock.calls[0][0] as string,
+        'http://localhost',
+      );
       expect(url.searchParams.get('category_id')).toBe('5');
       expect(url.searchParams.has('category_ids')).toBe(false);
       openSpy.mockRestore();

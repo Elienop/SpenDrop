@@ -1,4 +1,8 @@
-import styles from '../styles/Transactions.module.css';
+import { Search } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
+import { cn } from '@/lib/utils';
 
 interface TransactionToolbarProps {
   search: string;
@@ -24,75 +28,74 @@ export function TransactionToolbar({
   onToggleEntry,
 }: TransactionToolbarProps) {
   return (
-    <div className={styles.toolbar}>
-      {/* Search */}
-      <div className={styles.toolbarSearch}>
-        <span className={styles.toolbarSearchIcon} aria-hidden="true">
-          &#128269;
-        </span>
-        <input
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
+      <div className="relative min-w-[240px] flex-1">
+        <Search
+          aria-hidden="true"
+          className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+        />
+        <Input
           type="text"
-          className={styles.toolbarSearchInput}
-          placeholder="Search transactions..."
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search transactions..."
           aria-label="Search transactions"
+          className="pl-8"
         />
       </div>
 
-      {/* Divider */}
-      <div className={styles.toolbarDivider} />
+      <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
-      {/* Type Toggle */}
-      <div className={styles.typeToggle}>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === '' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('')}
-        >
-          All
-        </button>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === 'expense' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('expense')}
-        >
-          Expenses
-        </button>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === 'income' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('income')}
-        >
-          Income
-        </button>
+      <div className="inline-flex items-center gap-0.5 rounded-md border bg-background p-0.5">
+        {([
+          { value: '', label: 'All' },
+          { value: 'expense', label: 'Expenses' },
+          { value: 'income', label: 'Income' },
+        ] as const).map((opt) => (
+          <Button
+            key={opt.value || 'all'}
+            type="button"
+            variant={type === opt.value ? 'secondary' : 'ghost'}
+            size="sm"
+            className={cn(
+              'h-7 px-3 text-xs',
+              type === opt.value && 'shadow-sm',
+            )}
+            onClick={() => onTypeChange(opt.value)}
+          >
+            {opt.label}
+          </Button>
+        ))}
       </div>
 
-      {/* Divider */}
-      <div className={styles.toolbarDivider} />
+      <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
-      {/* Filters Button */}
-      <button
+      <Button
         type="button"
-        className={styles.filterButton}
+        variant="outline"
+        size="sm"
         onClick={onToggleFilters}
         aria-expanded={showFilters}
+        aria-label={
+          activeFilterCount > 0 ? `Filters (${activeFilterCount})` : 'Filters'
+        }
       >
+        Filters
         {activeFilterCount > 0 && (
-          <span className={styles.filterDot} aria-hidden="true" />
+          <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-[10px]">
+            {activeFilterCount}
+          </Badge>
         )}
-        Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-      </button>
+      </Button>
 
-      {/* + Add / Cancel Button */}
-      <button
+      <Button
         type="button"
-        className={styles.addButtonToolbar}
+        size="sm"
         onClick={onToggleEntry}
         aria-expanded={showEntry}
       >
         {showEntry ? 'Cancel' : '+ Add'}
-      </button>
+      </Button>
     </div>
   );
 }

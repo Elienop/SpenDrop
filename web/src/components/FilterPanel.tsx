@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import type { CSSProperties } from 'react';
 import {
   startOfMonth,
   endOfMonth,
@@ -6,11 +6,14 @@ import {
   startOfYear,
   format,
 } from 'date-fns';
+import { X } from 'lucide-react';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { Category, SavedFilter } from '../api/types';
-import styles from '../styles/Transactions.module.css';
-
-type FilterTab = 'date' | 'category' | 'amount' | 'saved';
+import { getCategoryColorVar } from '../lib/chart-colors';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 
 interface FilterPanelProps {
   filters: TransactionFilters;
@@ -33,8 +36,6 @@ export function FilterPanel({
   onLoadFilter,
   onDeleteFilter,
 }: FilterPanelProps) {
-  const [activeTab, setActiveTab] = useState<FilterTab>('date');
-
   const now = new Date();
 
   function setDatePreset(preset: 'thisMonth' | 'lastMonth' | 'thisYear') {
@@ -67,125 +68,128 @@ export function FilterPanel({
     }
   }
 
+  const selectedCategoryIds = filters.categoryIds
+    ? filters.categoryIds.split(',').filter(Boolean)
+    : [];
+
   return (
-    <div className={styles.filterPanel}>
-      {/* Tabs + Clear all */}
-      <div className={styles.filterTabsRow}>
-        <div className={styles.filterTabs}>
-          {(['date', 'category', 'amount', 'saved'] as const).map((tab) => (
-            <button
-              key={tab}
-              type="button"
-              className={`${styles.filterTab} ${activeTab === tab ? styles.filterTabActive : ''}`}
-              onClick={() => setActiveTab(tab)}
-            >
-              {tab.charAt(0).toUpperCase() + tab.slice(1)}
-            </button>
-          ))}
-        </div>
-        <button
+    <div className="flex flex-col gap-4">
+      <div className="flex items-center justify-end">
+        <Button
           type="button"
-          className={styles.clearAllButton}
+          variant="ghost"
+          size="sm"
           onClick={clearPanelFilters}
         >
           Clear all
-        </button>
+        </Button>
       </div>
 
-      {/* Tab Content */}
-      <div className={styles.filterTabContent}>
-        {activeTab === 'date' && (
-          <>
-            <div className={styles.datePresets}>
-              <button
-                type="button"
-                className={styles.presetButton}
-                onClick={() => setDatePreset('thisMonth')}
-              >
-                This Month
-              </button>
-              <button
-                type="button"
-                className={styles.presetButton}
-                onClick={() => setDatePreset('lastMonth')}
-              >
-                Last Month
-              </button>
-              <button
-                type="button"
-                className={styles.presetButton}
-                onClick={() => setDatePreset('thisYear')}
-              >
-                This Year
-              </button>
-            </div>
-            <div className={styles.dateInputs}>
-              <input
-                type="date"
-                className={styles.filterInput}
-                value={filters.dateFrom}
-                onChange={(e) => setFilter('dateFrom', e.target.value)}
-                aria-label="Date from"
-              />
-              <span className={styles.dateSeparator}>to</span>
-              <input
-                type="date"
-                className={styles.filterInput}
-                value={filters.dateTo}
-                onChange={(e) => setFilter('dateTo', e.target.value)}
-                aria-label="Date to"
-              />
-            </div>
-          </>
-        )}
+      <Tabs defaultValue="date" className="w-full">
+        <TabsList className="grid w-full grid-cols-4">
+          <TabsTrigger value="date">Date</TabsTrigger>
+          <TabsTrigger value="category">Category</TabsTrigger>
+          <TabsTrigger value="amount">Amount</TabsTrigger>
+          <TabsTrigger value="saved">Saved</TabsTrigger>
+        </TabsList>
 
-        {activeTab === 'category' && (
-          <>
-            <div className={styles.multiSelect}>
-              {categories.map((cat) => {
-                const ids = filters.categoryIds
-                  ? filters.categoryIds.split(',').filter(Boolean)
-                  : [];
-                const selected = ids.includes(String(cat.id));
-                return (
-                  <button
-                    key={cat.id}
-                    type="button"
-                    className={`${styles.categoryChip} ${selected ? styles.categoryChipActive : ''}`}
-                    style={
-                      selected
-                        ? { backgroundColor: cat.color, borderColor: cat.color }
-                        : {}
-                    }
-                    onClick={() => {
-                      const next = selected
-                        ? ids.filter((id) => id !== String(cat.id))
-                        : [...ids, String(cat.id)];
-                      setFilter('categoryIds', next.join(','));
-                    }}
-                  >
-                    {cat.name}
-                  </button>
-                );
-              })}
-            </div>
-            <input
+        <TabsContent value="date" className="space-y-3 pt-4">
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setDatePreset('thisMonth')}
+            >
+              This Month
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setDatePreset('lastMonth')}
+            >
+              Last Month
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => setDatePreset('thisYear')}
+            >
+              This Year
+            </Button>
+          </div>
+          <div className="flex items-center gap-2">
+            <Input
+              type="date"
+              value={filters.dateFrom}
+              onChange={(e) => setFilter('dateFrom', e.target.value)}
+              aria-label="Date from"
+            />
+            <span className="text-xs text-muted-foreground">to</span>
+            <Input
+              type="date"
+              value={filters.dateTo}
+              onChange={(e) => setFilter('dateTo', e.target.value)}
+              aria-label="Date to"
+            />
+          </div>
+        </TabsContent>
+
+        <TabsContent value="category" className="space-y-3 pt-4">
+          <div className="flex flex-wrap gap-2">
+            {categories.map((cat) => {
+              const selected = selectedCategoryIds.includes(String(cat.id));
+              const style = {
+                '--chip-color': getCategoryColorVar(cat),
+              } as CSSProperties;
+              return (
+                <Button
+                  key={cat.id}
+                  type="button"
+                  variant={selected ? 'default' : 'outline'}
+                  size="sm"
+                  style={
+                    selected
+                      ? {
+                          ...style,
+                          backgroundColor: 'var(--chip-color)',
+                          borderColor: 'var(--chip-color)',
+                        }
+                      : style
+                  }
+                  onClick={() => {
+                    const next = selected
+                      ? selectedCategoryIds.filter(
+                          (id) => id !== String(cat.id),
+                        )
+                      : [...selectedCategoryIds, String(cat.id)];
+                    setFilter('categoryIds', next.join(','));
+                  }}
+                >
+                  {cat.name}
+                </Button>
+              );
+            })}
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="filter-tags">Tags</Label>
+            <Input
+              id="filter-tags"
               type="text"
-              className={styles.filterInput}
               placeholder="Filter by tags..."
               value={filters.tags}
               onChange={(e) => setFilter('tags', e.target.value)}
               aria-label="Filter by tags"
-              style={{ marginTop: 'var(--space-2)' }}
             />
-          </>
-        )}
+          </div>
+        </TabsContent>
 
-        {activeTab === 'amount' && (
-          <div className={styles.amountRange}>
-            <input
+        <TabsContent value="amount" className="space-y-3 pt-4">
+          <div className="flex items-center gap-2">
+            <Input
               type="number"
-              className={styles.filterInput}
               placeholder="Min $"
               value={filters.amountMin}
               onChange={(e) => setFilter('amountMin', e.target.value)}
@@ -193,10 +197,9 @@ export function FilterPanel({
               min="0"
               aria-label="Minimum amount"
             />
-            <span className={styles.dateSeparator}>to</span>
-            <input
+            <span className="text-xs text-muted-foreground">to</span>
+            <Input
               type="number"
-              className={styles.filterInput}
               placeholder="Max $"
               value={filters.amountMax}
               onChange={(e) => setFilter('amountMax', e.target.value)}
@@ -205,39 +208,47 @@ export function FilterPanel({
               aria-label="Maximum amount"
             />
           </div>
-        )}
+        </TabsContent>
 
-        {activeTab === 'saved' && (
-          <div className={styles.savedFilters}>
+        <TabsContent value="saved" className="space-y-3 pt-4">
+          <div className="flex flex-col gap-2">
             {savedFilters.map((sf) => (
-              <div key={sf.id} className={styles.savedFilterChip}>
-                <button
+              <div
+                key={sf.id}
+                className="flex items-center justify-between rounded-md border px-3 py-2"
+              >
+                <Button
                   type="button"
-                  className={styles.savedFilterButton}
+                  variant="ghost"
+                  size="sm"
+                  className="h-auto p-0 font-medium"
                   onClick={() => onLoadFilter(sf)}
                 >
                   {sf.name}
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  className={styles.savedFilterDelete}
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
                   onClick={() => onDeleteFilter(sf.id)}
                   aria-label={`Delete saved filter ${sf.name}`}
                 >
-                  x
-                </button>
+                  <X className="h-3.5 w-3.5" />
+                </Button>
               </div>
             ))}
-            <button
+            <Button
               type="button"
-              className={styles.saveFilterButton}
+              variant="outline"
+              size="sm"
               onClick={handleSaveFilter}
             >
               + Save Filter
-            </button>
+            </Button>
           </div>
-        )}
-      </div>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }

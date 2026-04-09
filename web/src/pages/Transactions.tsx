@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { format } from 'date-fns';
+import { X } from 'lucide-react';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
@@ -8,7 +9,26 @@ import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntry } from '../components/TransactionEntry';
 import { TransactionRow } from '../components/TransactionRow';
-import styles from '../styles/Transactions.module.css';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
+  Table,
+  TableBody,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+
+// TODO: Bulk select + bulk categorize (Checkbox column + Dialog) are deferred.
+// They require a new `useTransactions` hook method and a new backend endpoint.
+// Tracked as a follow-up commit — do not add here without extending the hook.
 
 export function Transactions() {
   const {
@@ -97,7 +117,6 @@ export function Transactions() {
     [deleteSavedFilter],
   );
 
-  // Count active filter groups (excluding search and type — they're in the toolbar)
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (filters.dateFrom || filters.dateTo) count++;
@@ -107,12 +126,10 @@ export function Transactions() {
     return count;
   }, [filters]);
 
-  // Build active filter chips data
   const activeChips = useMemo(() => {
     if (showFilters) return [];
     const chips: { key: string; label: string; onClear: () => void }[] = [];
 
-    // Date chip
     if (filters.dateFrom || filters.dateTo) {
       let label: string;
       if (filters.dateFrom && filters.dateTo) {
@@ -132,7 +149,6 @@ export function Transactions() {
       });
     }
 
-    // Category chip
     if (filters.categoryIds || filters.categoryId) {
       const ids = filters.categoryIds
         ? filters.categoryIds.split(',')
@@ -150,7 +166,6 @@ export function Transactions() {
       });
     }
 
-    // Amount chip
     if (filters.amountMin || filters.amountMax) {
       let label: string;
       if (filters.amountMin && filters.amountMax) {
@@ -170,7 +185,6 @@ export function Transactions() {
       });
     }
 
-    // Tags chip
     if (filters.tags) {
       chips.push({
         key: 'tags',
@@ -185,12 +199,12 @@ export function Transactions() {
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
-    <div className={styles.page}>
-      <div className={styles.pageHeader}>
-        <h1>Transactions</h1>
-        <button type="button" className={styles.exportButton} onClick={handleExport}>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <Button variant="outline" size="sm" onClick={handleExport}>
           Export Excel
-        </button>
+        </Button>
       </div>
 
       <TransactionToolbar
@@ -205,41 +219,58 @@ export function Transactions() {
         onToggleEntry={() => setShowEntry((p) => !p)}
       />
 
-      {/* Active filter chips — only when filters active and panel closed */}
       {activeChips.length > 0 && (
-        <div className={styles.activeChips}>
+        <div className="flex flex-wrap gap-1.5">
           {activeChips.map((chip) => (
-            <span key={chip.key} className={styles.activeChip}>
+            <span
+              key={chip.key}
+              className="inline-flex items-center gap-1 rounded-full border bg-secondary px-2.5 py-0.5 text-xs"
+            >
               {chip.label}
               <button
                 type="button"
-                className={styles.activeChipRemove}
+                className="text-muted-foreground hover:text-foreground"
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
               >
-                &times;
+                <X className="h-3 w-3" />
               </button>
             </span>
           ))}
         </div>
       )}
 
-      {/* Filter panel — conditional rendering */}
-      {showFilters && (
-        <FilterPanel
-          filters={filters}
-          setFilter={setFilter}
-          clearPanelFilters={clearPanelFilters}
-          categories={categories}
-          savedFilters={savedFilters}
-          onSaveFilter={handleSaveFilter}
-          onLoadFilter={handleLoadFilter}
-          onDeleteFilter={handleDeleteFilter}
-        />
-      )}
+      <Sheet open={showFilters} onOpenChange={setShowFilters}>
+        <SheetContent side="right" className="w-full sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle>Filters</SheetTitle>
+            <SheetDescription>
+              Narrow the transaction list by date, category, amount, or a saved
+              preset.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="mt-4">
+            <FilterPanel
+              filters={filters}
+              setFilter={setFilter}
+              clearPanelFilters={clearPanelFilters}
+              categories={categories}
+              savedFilters={savedFilters}
+              onSaveFilter={handleSaveFilter}
+              onLoadFilter={handleLoadFilter}
+              onDeleteFilter={handleDeleteFilter}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
 
-      {/* Entry form — display:none to preserve state */}
-      <div className={showEntry ? undefined : styles.entryFormHidden}>
+      {/*
+        The old TransactionEntry is still wired in via a Tailwind `hidden`
+        toggle so that its internal state (date, amount, description, tags) is
+        preserved across open/close. Commit 9 replaces this component with an
+        inline TransactionEntryRow that lives inside the table as the top row.
+      */}
+      <div className={showEntry ? undefined : 'hidden'}>
         <TransactionEntry
           categories={categories}
           onSubmit={createTransaction}
@@ -247,31 +278,38 @@ export function Transactions() {
       </div>
 
       {error && (
-        <div className={styles.error} role="alert">
+        <div
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
           {error}
         </div>
       )}
 
       {loading ? (
-        <div className={styles.loading}>Loading transactions...</div>
+        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
+          Loading transactions...
+        </div>
       ) : transactions.length === 0 ? (
-        <div className={styles.emptyState}>
+        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
           No transactions found. Add one above to get started.
         </div>
       ) : (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Description</th>
-                <th>Category</th>
-                <th>Tags</th>
-                <th>Amount</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+        <Card className="overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Category</TableHead>
+                <TableHead>Tags</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+                <TableHead className="w-10 text-right">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {transactions.map((tx) => (
                 <TransactionRow
                   key={tx.id}
@@ -281,33 +319,33 @@ export function Transactions() {
                   onDelete={deleteTransaction}
                 />
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
 
           {totalPages > 1 && (
-            <div className={styles.pagination}>
-              <button
-                type="button"
-                className={styles.pageButton}
+            <div className="flex items-center justify-between border-t px-4 py-3">
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page <= 1}
                 onClick={() => setPage(page - 1)}
               >
                 Previous
-              </button>
-              <span className={styles.pageInfo}>
+              </Button>
+              <span className="text-sm text-muted-foreground">
                 Page {page} of {totalPages}
               </span>
-              <button
-                type="button"
-                className={styles.pageButton}
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={page >= totalPages}
                 onClick={() => setPage(page + 1)}
               >
                 Next
-              </button>
+              </Button>
             </div>
           )}
-        </div>
+        </Card>
       )}
     </div>
   );
