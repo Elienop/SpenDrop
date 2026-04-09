@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   BarChart,
   Bar,
@@ -49,6 +49,14 @@ function formatCurrency(amount: number): string {
   });
 }
 
+// Income vs Expenses chart config is a static literal — hoisting it out of
+// the component avoids recreating the object on every render and keeps it
+// out of the useMemo dependency graph below.
+const INCEXP_CONFIG = {
+  income: { label: 'Income', color: 'hsl(var(--chart-6))' },
+  expenses: { label: 'Expenses', color: 'hsl(var(--chart-10))' },
+} satisfies ChartConfig;
+
 // TODO (spec §8 commit 10): DateRangePicker and Period Tabs (This Month /
 // Last Month / YTD / Custom) are deferred. Current Reports keeps its
 // four-section-at-once layout. Introducing the period-tabs + range-picker
@@ -56,14 +64,19 @@ function formatCurrency(amount: number): string {
 // shapes — out of scope for the visual-system rewrite.
 
 export function Reports() {
-  const now = new Date();
-  const thisYear = now.getFullYear();
-  const [yoyYear, setYoyYear] = useState(thisYear);
-  const [trendMonths, setTrendMonths] = useState(12);
-  const [merchantYear, setMerchantYear] = useState(thisYear);
-  const [merchantMonth, setMerchantMonth] = useState(now.getMonth() + 1);
+  const [yoyYear, setYoyYear] = useState<number>(() => new Date().getFullYear());
+  const [trendMonths, setTrendMonths] = useState<number>(12);
+  const [merchantYear, setMerchantYear] = useState<number>(() => new Date().getFullYear());
+  const [merchantMonth, setMerchantMonth] = useState<number>(() => new Date().getMonth() + 1);
 
-  const yearOptions = Array.from({ length: 5 }, (_, i) => thisYear - i);
+  // `new Date()` on each render is cheap compared to useMemo bookkeeping,
+  // but we still memoize `yearOptions` so its array identity is stable
+  // across renders that don't cross a year boundary.
+  const thisYear = new Date().getFullYear();
+  const yearOptions = useMemo(
+    () => Array.from({ length: 5 }, (_, i) => thisYear - i),
+    [thisYear],
+  );
 
   const yoy = useYearOverYear(yoyYear);
   const catTrends = useCategoryTrends(trendMonths);
@@ -77,80 +90,100 @@ export function Reports() {
   // characters in the key (spaces, slashes) break `var(--color-...)`
   // resolution. The human-facing year labels live in `config[key].label`
   // and are what the shadcn `ChartLegendContent` renders to the user.
-  const yoyData = yoy.data
-    ? yoy.data.current.map((cur, i) => ({
-        name: MONTH_NAMES[i],
-        currentExpenses: cur.expenses,
-        previousExpenses: yoy.data!.previous[i].expenses,
-      }))
-    : [];
+  const yoyData = useMemo(() => {
+    const data = yoy.data;
+    if (!data) return [];
+    return data.current.map((cur, i) => ({
+      name: MONTH_NAMES[i],
+      currentExpenses: cur.expenses,
+      previousExpenses: data.previous[i].expenses,
+    }));
+  }, [yoy.data]);
 
-  const yoyConfig: ChartConfig = yoy.data
-    ? {
-        currentExpenses: {
-          label: `${yoy.data.current_year}`,
-          color: 'hsl(var(--chart-10))',
-        },
-        previousExpenses: {
-          label: `${yoy.data.previous_year}`,
-          color: 'hsl(var(--chart-3))',
-        },
-      }
-    : {};
+  const yoyConfig = useMemo<ChartConfig>(() => {
+    const data = yoy.data;
+    if (!data) return {} as ChartConfig;
+    return {
+      currentExpenses: {
+        label: `${data.current_year}`,
+        color: 'hsl(var(--chart-10))',
+      },
+      previousExpenses: {
+        label: `${data.previous_year}`,
+        color: 'hsl(var(--chart-3))',
+      },
+    };
+  }, [yoy.data]);
 
   // --- Income vs Expenses chart data ---
-  const incExpData = incExp.data.map((entry) => ({
-    name: `${MONTH_NAMES[entry.month - 1]} ${entry.year}`,
-    income: entry.income,
-    expenses: entry.expenses,
-    net: entry.net,
-  }));
-
-  const incExpConfig = {
-    income: { label: 'Income', color: 'hsl(var(--chart-6))' },
-    expenses: { label: 'Expenses', color: 'hsl(var(--chart-10))' },
-  } satisfies ChartConfig;
+  const incExpData = useMemo(
+    () =>
+      incExp.data.map((entry) => ({
+        name: `${MONTH_NAMES[entry.month - 1]} ${entry.year}`,
+        income: entry.income,
+        expenses: entry.expenses,
+        net: entry.net,
+      })),
+    [incExp.data],
+  );
 
   // --- Category Trends: top 6 expense categories by total ---
-  const expenseCategories = catTrends.data
-    .filter((c) => c.type === 'expense')
-    .map((c) => ({
-      ...c,
-      totalSum: c.data.reduce((sum, d) => sum + d.total, 0),
-    }))
-    .sort((a, b) => b.totalSum - a.totalSum)
-    .slice(0, 6);
+  const expenseCategories = useMemo(
+    () =>
+      catTrends.data
+        .filter((c) => c.type === 'expense')
+        .map((c) => ({
+          ...c,
+          totalSum: c.data.reduce((sum, d) => sum + d.total, 0),
+        }))
+        .sort((a, b) => b.totalSum - a.totalSum)
+        .slice(0, 6),
+    [catTrends.data],
+  );
 
-  // Build category trend line data: one point per month
-  const catTrendData: Record<string, unknown>[] = [];
-  if (expenseCategories.length > 0) {
+  // Build category trend line data: one point per month.
+  // Pre-build a per-category lookup of "year-month" -> total to avoid the
+  // nested O(data-length) find during the outer month loop. Also collects
+  // the union of months across all categories in one pass.
+  const catTrendData = useMemo<Record<string, string | number>[]>(() => {
+    if (expenseCategories.length === 0) return [];
+
     const monthSet = new Set<string>();
+    const byCat = new Map<number, Map<string, number>>();
     for (const cat of expenseCategories) {
+      const inner = new Map<string, number>();
       for (const d of cat.data) {
-        monthSet.add(`${d.year}-${d.month}`);
+        const key = `${d.year}-${d.month}`;
+        inner.set(key, d.total);
+        monthSet.add(key);
       }
+      byCat.set(cat.id, inner);
     }
+
     const sortedMonths = Array.from(monthSet).sort();
-    for (const ym of sortedMonths) {
+    return sortedMonths.map((ym) => {
       const [y, m] = ym.split('-').map(Number);
-      const point: Record<string, unknown> = {
+      const point: Record<string, string | number> = {
         name: `${MONTH_NAMES[m - 1]} ${y}`,
       };
       for (const cat of expenseCategories) {
-        const found = cat.data.find((d) => d.year === y && d.month === m);
-        point[cat.name] = found ? found.total : 0;
+        point[cat.name] = byCat.get(cat.id)?.get(ym) ?? 0;
       }
-      catTrendData.push(point);
-    }
-  }
+      return point;
+    });
+  }, [expenseCategories]);
 
-  const catTrendConfig = expenseCategories.reduce<ChartConfig>((acc, cat) => {
-    acc[cat.name] = {
-      label: cat.name,
-      color: getCategoryColorVar({ id: cat.id }),
-    };
-    return acc;
-  }, {});
+  const catTrendConfig = useMemo<ChartConfig>(
+    () =>
+      expenseCategories.reduce<ChartConfig>((acc, cat) => {
+        acc[cat.name] = {
+          label: cat.name,
+          color: getCategoryColorVar({ id: cat.id }),
+        };
+        return acc;
+      }, {}),
+    [expenseCategories],
+  );
 
   return (
     <div className="space-y-6 p-6">
@@ -264,7 +297,7 @@ export function Reports() {
             )}
             {!incExp.loading && !incExp.error && (
               <ChartContainer
-                config={incExpConfig}
+                config={INCEXP_CONFIG}
                 className="h-[300px] w-full"
               >
                 <BarChart data={incExpData}>
@@ -444,7 +477,7 @@ export function Reports() {
                       {m.description}
                     </span>
                     <span className="text-muted-foreground text-xs">
-                      {m.tx_count} tx{m.tx_count !== 1 ? 's' : ''}
+                      {m.tx_count} transaction{m.tx_count !== 1 ? 's' : ''}
                     </span>
                     <span className="font-mono text-sm tabular-nums">
                       {formatCurrency(m.total)}
