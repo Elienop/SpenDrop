@@ -10,7 +10,6 @@ import {
   Pie,
   Cell,
 } from 'recharts';
-import { Wallet, TrendingUp, TrendingDown, Database } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
 import { useAuth } from '../hooks/useAuth';
@@ -78,8 +77,8 @@ const SHORT_MONTHS = [
 type CashFlowView = '6m' | '12m';
 
 const cashFlowConfig: ChartConfig = {
-  income: { label: 'Income', color: 'hsl(var(--chart-6))' },
-  expense: { label: 'Expense', color: 'hsl(var(--chart-10))' },
+  income: { label: 'Income', color: 'hsl(var(--chart-1))' },
+  expense: { label: 'Expense', color: 'hsl(var(--chart-2))' },
 };
 
 const savingsConfig: ChartConfig = {
@@ -307,32 +306,31 @@ export function Dashboard() {
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
           <KpiCard
             label="Total Balance"
-            icon={Wallet}
             dollars={balanceSplit.dollars}
             cents={balanceSplit.cents}
             delta={toDelta(balanceDelta)}
-            featured
+            footnote="vs last month"
           />
           <KpiCard
             label="Income"
-            icon={TrendingUp}
             dollars={incomeSplit.dollars}
             cents={incomeSplit.cents}
             delta={toDelta(incomeDelta)}
+            footnote="vs last month"
           />
           <KpiCard
             label="Expenses"
-            icon={TrendingDown}
             dollars={expenseSplit.dollars}
             cents={expenseSplit.cents}
             delta={toDelta(expenseDelta == null ? null : -expenseDelta)}
+            footnote="vs last month"
           />
           <KpiCard
             label="Savings Rate"
-            icon={Database}
             dollars={savingsRate.toFixed(1)}
             cents="%"
             delta={toDelta(savingsDelta)}
+            footnote="vs last month"
           />
         </div>
       )}

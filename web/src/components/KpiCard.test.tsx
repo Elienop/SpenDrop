@@ -1,6 +1,5 @@
 import { describe, test, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { Wallet } from 'lucide-react';
 import { KpiCard } from './KpiCard';
 
 describe('KpiCard', () => {
@@ -8,7 +7,6 @@ describe('KpiCard', () => {
     render(
       <KpiCard
         label="Total Balance"
-        icon={Wallet}
         dollars="$2,847"
         cents=".32"
       />,
@@ -18,7 +16,7 @@ describe('KpiCard', () => {
     expect(screen.getByText('.32')).toBeInTheDocument();
   });
 
-  test('renders delta with up arrow when positive', () => {
+  test('renders delta badge when positive', () => {
     render(
       <KpiCard
         label="Income"
@@ -28,10 +26,9 @@ describe('KpiCard', () => {
       />,
     );
     expect(screen.getByText(/3\.2%/)).toBeInTheDocument();
-    expect(screen.getByText(/vs last month/i)).toBeInTheDocument();
   });
 
-  test('renders delta with down arrow when negative', () => {
+  test('renders delta badge when negative', () => {
     render(
       <KpiCard
         label="Expenses"
@@ -43,18 +40,23 @@ describe('KpiCard', () => {
     expect(screen.getByText(/8\.1%/)).toBeInTheDocument();
   });
 
-  test('omits the delta row when delta is null', () => {
+  test('omits the delta badge when delta is null', () => {
     render(
       <KpiCard label="Savings Rate" dollars="45" cents="%" delta={null} />,
     );
-    expect(screen.queryByText(/vs last month/i)).not.toBeInTheDocument();
+    // No Badge element should render — the badge would contain a percentage like "+3.2%"
+    expect(screen.queryByText(/\+.*%|−.*%|-.*%/)).not.toBeInTheDocument();
   });
 
-  test('applies featured styling when featured is true', () => {
-    const { container } = render(
-      <KpiCard label="Total Balance" dollars="$100" cents=".00" featured />,
+  test('renders footnote when provided', () => {
+    render(
+      <KpiCard
+        label="Total Balance"
+        dollars="$100"
+        cents=".00"
+        footnote="vs last month"
+      />,
     );
-    const card = container.querySelector('[data-featured="true"]');
-    expect(card).not.toBeNull();
+    expect(screen.getByText('vs last month')).toBeInTheDocument();
   });
 });
