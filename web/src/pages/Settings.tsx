@@ -4,6 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
+import { AlertCircle } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
@@ -62,7 +63,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
+import { Separator } from '@/components/ui/separator';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -363,7 +366,8 @@ function CurrenciesSection() {
           </Button>
         </form>
 
-        <div className="border-t pt-6">
+        <Separator className="my-6" />
+        <div>
           <h3 className="mb-4 text-sm font-semibold">Add Currency</h3>
           <Form {...addForm}>
             <form
@@ -556,7 +560,8 @@ function SavingsSection() {
           </TableBody>
         </Table>
 
-        <div className="border-t pt-6">
+        <Separator className="my-6" />
+        <div>
           <h3 className="mb-4 text-sm font-semibold">Add Goal</h3>
           <Form {...form}>
             <form
@@ -766,7 +771,8 @@ function UsersSection() {
           </TableBody>
         </Table>
 
-        <div className="border-t pt-6">
+        <Separator className="my-6" />
+        <div>
           <h3 className="mb-4 text-sm font-semibold">Add User</h3>
           <Form {...form}>
             <form
@@ -974,9 +980,10 @@ function DataSection() {
         </CardHeader>
         <CardContent className="space-y-4">
           {importError && (
-            <div className="text-sm text-destructive" role="alert">
-              {importError}
-            </div>
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{importError}</AlertDescription>
+            </Alert>
           )}
 
           {importStep === 'upload' && (

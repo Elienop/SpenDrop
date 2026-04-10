@@ -46,8 +46,6 @@ All colors use HSL space-separated format: `H S% L%`. Consumed via `hsl(var(--to
 
 - **Income bars:** `hsl(var(--primary))` (near-white, high contrast)
 - **Expense bars:** `hsl(var(--muted-foreground))` (mid-gray, secondary)
-- **Savings filled:** `hsl(var(--primary))`
-- **Savings remaining:** `hsl(var(--muted))`
 - **YoY current year:** `hsl(var(--primary))`
 - **YoY previous year:** `hsl(var(--muted-foreground))`
 
@@ -95,7 +93,7 @@ fontFamily: {
 
 | Role | Classes | Usage |
 |------|---------|-------|
-| Page title | `text-2xl font-bold tracking-tight` | Welcome heading |
+| Page title | `text-2xl font-semibold tracking-tight` | Welcome heading |
 | Card title | `text-base font-semibold tracking-tight` | ChartCard titles |
 | Card description | `text-sm font-medium` + `text-muted-foreground` | KPI labels via `CardDescription` |
 | KPI value | `font-mono text-2xl font-semibold tabular-nums` | Dollar amounts |
@@ -162,13 +160,78 @@ Standard wrapper for chart sections:
 
 ### Badge (`ui/badge.tsx`)
 
-Used for KPI deltas with `variant="outline"`:
+Used for KPI deltas with `variant="outline"` and transaction tags with `variant="secondary"`:
 
 ```tsx
+// KPI delta
 <Badge variant="outline" className="gap-1 text-xs">
   <TrendingUp className="h-3 w-3" aria-hidden="true" />
   +3.2%
 </Badge>
+
+// Transaction tags
+<Badge variant="secondary" className="mr-1 font-normal">
+  {tag}
+</Badge>
+```
+
+### Alert (`ui/alert.tsx`)
+
+Used for all error callouts. Never use hand-rolled `<div>` or `<p>` error banners.
+
+```tsx
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle } from 'lucide-react';
+
+<Alert variant="destructive">
+  <AlertCircle className="h-4 w-4" />
+  <AlertDescription>{errorMessage}</AlertDescription>
+</Alert>
+```
+
+### Separator (`ui/separator.tsx`)
+
+Used for visual dividers between sections. Never use `<hr>` or `<div className="border-t">`.
+
+```tsx
+import { Separator } from '@/components/ui/separator';
+
+<Separator className="my-6" />
+```
+
+### Skeleton (`ui/skeleton.tsx`)
+
+Used for loading placeholders. Never use "Loading..." text.
+
+```tsx
+import { Skeleton } from '@/components/ui/skeleton';
+
+<Skeleton className="h-[300px] w-full" />
+```
+
+### ButtonGroup (`ui/button-group.tsx`)
+
+Used for segmented action controls (e.g. 6M/12M toggle on Cash Flow chart):
+
+```tsx
+import { ButtonGroup } from '@/components/ui/button-group';
+
+<ButtonGroup>
+  <Button variant={active === '6m' ? 'secondary' : 'outline'} size="sm" onClick={...}>6M</Button>
+  <Button variant={active === '12m' ? 'secondary' : 'outline'} size="sm" onClick={...}>12M</Button>
+</ButtonGroup>
+```
+
+### Avatar (`ui/avatar.tsx`)
+
+Used for user initials display. Always include `AvatarFallback`.
+
+```tsx
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+
+<Avatar className="size-8 text-sm font-medium">
+  <AvatarFallback>{initial}</AvatarFallback>
+</Avatar>
 ```
 
 ---
@@ -182,7 +245,7 @@ Used for KPI deltas with `variant="outline"`:
   {/* Header */}
   <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
     <div>
-      <h1 className="text-2xl font-bold tracking-tight">Title</h1>
+      <h1 className="text-2xl font-semibold tracking-tight">Title</h1>
       <p className="mt-0.5 text-sm text-muted-foreground">Subtitle</p>
     </div>
     <div className="flex items-center gap-2">{/* Controls */}</div>
@@ -193,11 +256,9 @@ Used for KPI deltas with `variant="outline"`:
     <KpiCard ... />
   </div>
 
-  {/* Content grid */}
-  <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-    <ChartCard className="lg:col-span-3">...</ChartCard>
-    <Card className="lg:col-span-2">...</Card>
-  </div>
+  {/* Full-width content sections */}
+  <ChartCard>...</ChartCard>
+  <Card>...</Card>
 </div>
 ```
 
@@ -209,11 +270,10 @@ Used for KPI deltas with `variant="outline"`:
 
 ### Responsive Breakpoints
 
-| Breakpoint | KPI grid | Content grid |
-|------------|----------|-------------|
-| Default | 1 column | 1 column |
+| Breakpoint | KPI grid | Content sections |
+|------------|----------|-----------------|
+| Default | 1 column | Full width, stacked |
 | `md` (768px) | 2 columns | — |
-| `lg` (1024px) | — | 5-column grid |
 | `xl` (1280px) | 4 columns | — |
 
 ---
@@ -267,7 +327,7 @@ Category pie charts and trend lines use `getCategoryColorVar()` — these are th
 
 ## Sidebar
 
-- Collapsible: 64px (collapsed) / 240px (expanded)
+- Collapsible: 48px / w-12 (collapsed) / 240px (expanded)
 - Background: `bg-card` with right border
 - Nav items: Lucide icons at 20px
 - Active state: primary-tinted background
@@ -296,9 +356,13 @@ Category pie charts and trend lines use `getCategoryColorVar()` — these are th
 
 ### Loading Skeletons
 
-Every data section needs a skeleton:
+Use the `Skeleton` component for all loading placeholders. Never use "Loading..." text.
 
 ```tsx
+// Chart loading
+<Skeleton className="h-[300px] w-full" />
+
+// Card field loading
 <Card className="p-6">
   <Skeleton className="mb-3 h-3 w-1/2" />
   <Skeleton className="mb-3 h-8 w-3/4" />
@@ -308,11 +372,13 @@ Every data section needs a skeleton:
 
 ### Error State
 
+Use the `Alert` component for all error displays:
+
 ```tsx
-<Card className="flex flex-col items-center gap-4 p-12 text-center" role="alert">
-  <p className="text-muted-foreground">{error}</p>
-  <Button onClick={() => window.location.reload()}>Retry</Button>
-</Card>
+<Alert variant="destructive">
+  <AlertCircle className="h-4 w-4" />
+  <AlertDescription>{error}</AlertDescription>
+</Alert>
 ```
 
 ### Empty State

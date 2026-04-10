@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { AlertCircle } from 'lucide-react';
 import {
   BarChart,
   Bar,
@@ -16,7 +17,9 @@ import {
   ChartLegendContent,
   type ChartConfig,
 } from '@/components/ui/chart';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
@@ -216,12 +219,13 @@ export function Reports() {
         </CardHeader>
         <CardContent>
           {yoy.loading && (
-            <div className="text-sm text-muted-foreground">Loading...</div>
+            <Skeleton className="h-[300px] w-full" />
           )}
           {yoy.error && (
-            <div className="text-sm text-destructive" role="alert">
-              {yoy.error}
-            </div>
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{yoy.error}</AlertDescription>
+            </Alert>
           )}
           {yoy.data && (
             <ChartContainer config={yoyConfig} className="h-[300px] w-full">
@@ -302,12 +306,13 @@ export function Reports() {
           </CardHeader>
           <CardContent>
             {incExp.loading && (
-              <div className="text-sm text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[300px] w-full" />
             )}
             {incExp.error && (
-              <div className="text-sm text-destructive" role="alert">
-                {incExp.error}
-              </div>
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{incExp.error}</AlertDescription>
+              </Alert>
             )}
             {!incExp.loading && !incExp.error && (
               <ChartContainer
@@ -376,12 +381,13 @@ export function Reports() {
           </CardHeader>
           <CardContent>
             {catTrends.loading && (
-              <div className="text-sm text-muted-foreground">Loading...</div>
+              <Skeleton className="h-[300px] w-full" />
             )}
             {catTrends.error && (
-              <div className="text-sm text-destructive" role="alert">
-                {catTrends.error}
-              </div>
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription>{catTrends.error}</AlertDescription>
+              </Alert>
             )}
             {!catTrends.loading && !catTrends.error && (
               <ChartContainer
@@ -475,12 +481,13 @@ export function Reports() {
         </CardHeader>
         <CardContent>
           {merchants.loading && (
-            <div className="text-sm text-muted-foreground">Loading...</div>
+            <Skeleton className="h-[200px] w-full" />
           )}
           {merchants.error && (
-            <div className="text-sm text-destructive" role="alert">
-              {merchants.error}
-            </div>
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{merchants.error}</AlertDescription>
+            </Alert>
           )}
           {!merchants.loading &&
             !merchants.error &&

@@ -5,6 +5,7 @@ import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import {
@@ -164,12 +165,13 @@ export function TransactionRow({
       <TableCell>
         {transaction.tags &&
           transaction.tags.split(',').map((tag, i) => (
-            <span
+            <Badge
               key={`${tag.trim()}-${i}`}
-              className="mr-1 inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground"
+              variant="secondary"
+              className="mr-1 font-normal"
             >
               {tag.trim()}
-            </span>
+            </Badge>
           ))}
       </TableCell>
       <TableCell

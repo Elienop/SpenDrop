@@ -3,7 +3,10 @@ import { Link } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
+import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import {
   Card,
   CardContent,
@@ -19,7 +22,6 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
-import { Button } from '@/components/ui/button';
 
 const registerSchema = z.object({
   username: z.string().min(1, 'Required'),
@@ -64,12 +66,10 @@ export function Register() {
               className="flex flex-col gap-4"
             >
               {serverError && (
-                <p
-                  role="alert"
-                  className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-                >
-                  {serverError}
-                </p>
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{serverError}</AlertDescription>
+                </Alert>
               )}
               <FormField
                 control={form.control}

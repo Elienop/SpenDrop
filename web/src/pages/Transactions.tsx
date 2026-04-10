@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { format } from 'date-fns';
-import { X } from 'lucide-react';
+import { AlertCircle, X } from 'lucide-react';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
@@ -10,6 +10,7 @@ import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntryRow } from '../components/TransactionEntryRow';
 import { TransactionRow } from '../components/TransactionRow';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
@@ -299,12 +300,10 @@ export function Transactions() {
       </div>
 
       {error && (
-        <div
-          role="alert"
-          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
       {loading ? (

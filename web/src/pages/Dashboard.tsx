@@ -25,6 +25,7 @@ import {
   type ChartConfig,
 } from '@/components/ui/chart';
 import { ButtonGroup } from '@/components/ui/button-group';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
@@ -255,10 +256,12 @@ export function Dashboard() {
     return (
       <div className="flex flex-col gap-6">
         <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-        <Card className="flex flex-col items-center gap-4 p-12 text-center" role="alert">
-          <p className="text-muted-foreground">{error}</p>
-          <Button onClick={() => window.location.reload()}>Retry</Button>
-        </Card>
+        <Alert variant="destructive">
+          <AlertDescription className="flex items-center justify-between">
+            {error}
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()}>Retry</Button>
+          </AlertDescription>
+        </Alert>
       </div>
     );
   }
