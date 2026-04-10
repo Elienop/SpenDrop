@@ -17,7 +17,6 @@ export interface Transaction {
   category_id: number;
   category_name: string;
   category_type: 'expense' | 'income';
-  category_color: string;
   tags: string | null;
   notes: string | null;
   created_at: string;
@@ -28,7 +27,6 @@ export interface Category {
   id: number;
   name: string;
   type: 'expense' | 'income';
-  color: string;
   icon: string | null;
   sort_order: number;
   is_active: boolean;
@@ -82,7 +80,6 @@ export interface DashboardTrendItem {
 export interface CategoryBreakdownItem {
   id: number;
   name: string;
-  color: string;
   total: number;
 }
 
@@ -144,7 +141,6 @@ export interface YoYResponse {
 export interface CategoryTrendEntry {
   id: number;
   name: string;
-  color: string;
   type: 'expense' | 'income';
   data: { year: number; month: number; total: number }[];
 }

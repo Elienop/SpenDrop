@@ -97,8 +97,10 @@ describe('Login', () => {
 
     await user.type(screen.getByLabelText(/username/i), 'alice');
     await user.type(screen.getByLabelText(/password/i), 'secret');
-    await user.click(screen.getByRole('button', { name: /log\s*in/i }));
+    await user.click(screen.getByRole('button', { name: /log/i }));
 
-    expect(screen.getByRole('button', { name: /log/i })).toBeDisabled();
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /log/i })).toBeDisabled();
+    });
   });
 });

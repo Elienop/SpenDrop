@@ -3,32 +3,40 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import React from 'react';
 
-vi.mock('../hooks/useChartTheme', () => ({
-  useChartTheme: () => ({
-    axisStroke: '#58585F',
-    gridStroke: '#1E1E23',
-    tooltipBg: '#1E1E23',
-    tooltipBorder: '#2A2A30',
-    tooltipText: '#F5F5F6',
-    hoverBg: 'rgba(129,140,248,0.08)',
-    incomeColor: '#7EC89B',
-    expenseColor: '#E88B9C',
-    categoryColors: ['#818CF8', '#7EC89B', '#E88B9C', '#E8A87C', '#7CAFD4', '#58585F'],
-  }),
-}));
-
+// Recharts mock — Recharts ships as ES modules that don't render in jsdom
+// without a ResizeObserver, so every component is stubbed to a passthrough.
+//
+// IMPORTANT: shadcn's `src/components/ui/chart.tsx` does:
+//
+//     import * as RechartsPrimitive from "recharts"
+//     const ChartLegend = RechartsPrimitive.Legend
+//     // and ChartStyle reads RechartsPrimitive.* directly
+//
+// Because it's a namespace import, any name referenced at module-eval time
+// that's missing from this mock becomes `undefined` and React crashes with
+// "Element type is invalid: expected a string or a class/function but got:
+// undefined" as soon as ChartContainer mounts. The mock below therefore
+// declares *every* Recharts surface shadcn's chart helper can touch, not
+// just the ones Dashboard.tsx uses directly. Add new stubs here whenever a
+// future chart primitive starts pulling in more Recharts exports.
 vi.mock('recharts', () => ({
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  // Used by Dashboard.tsx
   BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Bar: () => <div />,
   XAxis: () => <div />,
-  YAxis: () => <div />,
   CartesianGrid: () => <div />,
-  Tooltip: () => <div />,
-  ReferenceLine: () => <div />,
-  PieChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Pie: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
+  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  YAxis: () => <div />,
   Cell: () => <div />,
+  Tooltip: () => <div />,
+  Legend: () => <div />,
+  Surface: () => <div />,
+  Layer: () => <div />,
+  Sector: () => <div />,
+  LabelList: () => <div />,
+  Customized: () => <div />,
+  ReferenceLine: () => <div />,
 }));
 
 vi.mock('../hooks/useDashboard', () => ({
@@ -43,15 +51,19 @@ vi.mock('../hooks/useDashboard', () => ({
       savings_ytd: 7500,
       savings_goal_progress: 75,
     },
+    // Backend returns trend newest-first (see dashboard_handlers.go) — keep
+    // this fixture in the same order so chartData's `.reverse()` produces
+    // chronologically-sorted bars.
     trend: [
-      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
       { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
+      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
     ],
     categories: [
-      { id: 1, name: 'Food', color: '#818CF8', total: 1200, transaction_count: 15 },
-      { id: 2, name: 'Transport', color: '#7EC89B', total: 800, transaction_count: 8 },
+      { id: 1, name: 'Food', total: 1200 },
+      { id: 2, name: 'Transport', total: 800 },
     ],
     loading: false,
+    fetching: false,
     error: '',
   }),
 }));
@@ -62,13 +74,19 @@ vi.mock('../api/client', () => ({
       transactions: [
         {
           id: 1,
-          amount: 42.50,
-          description: 'Groceries',
+          user_id: 1,
           date: '2026-04-01',
+          amount: 42.50,
+          original_amount: null,
+          original_currency: null,
+          description: 'Groceries',
+          category_id: 1,
           category_name: 'Food',
           category_type: 'expense',
-          category_color: '#818CF8',
-          currency_code: 'USD',
+          tags: null,
+          notes: null,
+          created_at: '2026-04-01T00:00:00Z',
+          updated_at: '2026-04-01T00:00:00Z',
         },
       ],
       total: 1,
@@ -77,10 +95,6 @@ vi.mock('../api/client', () => ({
       total_pages: 1,
     }),
   },
-}));
-
-vi.mock('../components/ChartTooltip', () => ({
-  ChartTooltip: () => <div />,
 }));
 
 vi.mock('../hooks/useAuth', () => ({
@@ -92,20 +106,6 @@ vi.mock('../hooks/useAuth', () => ({
     register: vi.fn(),
     logout: vi.fn(),
   }),
-}));
-
-vi.mock('../hooks/useChartPatterns', () => ({
-  useChartPatterns: () => ({
-    cashFlow: {
-      income: { fill: '#5347CE', legendStyle: {} },
-      expense: { fill: 'url(#stripe)', stroke: '#5347CE', strokeWidth: 1.5, legendStyle: {} },
-    },
-    getCategoryPattern: () => ({ fill: '#5347CE', legendStyle: {} }),
-    getCategoryDefs: () => [],
-    buildStyleMap: () => ({}),
-    ChartPatternDefs: () => null,
-  }),
-  ChartPatternDefs: () => null,
 }));
 
 import { Dashboard } from './Dashboard';
@@ -133,6 +133,13 @@ describe('Dashboard', () => {
       expect(screen.getAllByText('Income').length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText('Expenses').length).toBeGreaterThanOrEqual(1);
       expect(screen.getByText('Savings Rate')).toBeInTheDocument();
+      // Assert the KPI row actually rendered values — "Income" / "Expenses"
+      // strings also appear in the cash-flow chart config, so label-only
+      // assertions would pass even if the KPI row were missing. These
+      // formatted dollar splits (4500-3200=1300) are unique to KPI cards.
+      expect(screen.getByText('$1,300.00')).toBeInTheDocument();
+      expect(screen.getByText('$4,500.00')).toBeInTheDocument();
+      expect(screen.getByText('$3,200.00')).toBeInTheDocument();
     });
   });
 
@@ -143,22 +150,41 @@ describe('Dashboard', () => {
     });
   });
 
-  test('renders Spending and Recent Transactions sections', async () => {
+  test('renders Spending by Category section', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
       expect(screen.getByText('Spending by Category')).toBeInTheDocument();
-      expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
     });
   });
 
-  test('renders Savings Progress section', async () => {
+  test('renders Recent Transactions in a table layout', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
-      expect(screen.getByText('Savings Progress')).toBeInTheDocument();
-      expect(screen.getByText('of goal')).toBeInTheDocument();
-      expect(screen.getByText('Saved YTD')).toBeInTheDocument();
-      expect(screen.getByText('Annual Goal')).toBeInTheDocument();
+      expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
+      // Should use a table element instead of a list
+      expect(screen.getByRole('table')).toBeInTheDocument();
+      // Should have a "View All" link
+      expect(screen.getByRole('link', { name: /view all/i })).toBeInTheDocument();
     });
+  });
+
+  test('renders transaction data in table rows', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      // The mock transaction "Groceries" should appear in a table row
+      expect(screen.getByText('Groceries')).toBeInTheDocument();
+      // "Food" appears in both the category bars and the transaction table
+      expect(screen.getAllByText('Food').length).toBeGreaterThanOrEqual(2);
+      // Category initial should appear in the icon cell
+      expect(screen.getByText('F')).toBeInTheDocument();
+    });
+  });
+
+  test('does not render Savings Progress section', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.queryByText('Savings Progress')).not.toBeInTheDocument();
+    expect(screen.queryByText('Saved YTD')).not.toBeInTheDocument();
+    expect(screen.queryByText('Annual Goal')).not.toBeInTheDocument();
   });
 
   test('does not render removed Monthly Budget section', () => {
@@ -166,10 +192,16 @@ describe('Dashboard', () => {
     expect(screen.queryByText('Monthly Budget')).not.toBeInTheDocument();
   });
 
-  test('renders 6M and 12M toggle buttons', () => {
+  test('renders 6M and 12M toggle buttons inside a ButtonGroup', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
-    expect(screen.getByText('6M')).toBeInTheDocument();
-    expect(screen.getByText('12M')).toBeInTheDocument();
+    const btn6 = screen.getByRole('button', { name: '6M' });
+    const btn12 = screen.getByRole('button', { name: '12M' });
+    expect(btn6).toBeInTheDocument();
+    expect(btn12).toBeInTheDocument();
+    // Both buttons should be inside a group container
+    const groups = screen.getAllByRole('group');
+    const cashFlowGroup = groups.find((g) => g.contains(btn6));
+    expect(cashFlowGroup).toBeDefined();
+    expect(cashFlowGroup).toContainElement(btn12);
   });
-
 });

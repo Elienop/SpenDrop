@@ -13,32 +13,25 @@ import (
 
 const createCategory = `-- name: CreateCategory :one
 
-INSERT INTO categories (name, type, color, sort_order)
-VALUES (?, ?, ?, ?)
-RETURNING id, name, type, color, icon, sort_order, is_active, created_at
+INSERT INTO categories (name, type, sort_order)
+VALUES (?, ?, ?)
+RETURNING id, name, type, icon, sort_order, is_active, created_at
 `
 
 type CreateCategoryParams struct {
 	Name      string `json:"name"`
 	Type      string `json:"type"`
-	Color     string `json:"color"`
 	SortOrder int64  `json:"sort_order"`
 }
 
 // Categories
 func (q *Queries) CreateCategory(ctx context.Context, arg CreateCategoryParams) (Category, error) {
-	row := q.db.QueryRowContext(ctx, createCategory,
-		arg.Name,
-		arg.Type,
-		arg.Color,
-		arg.SortOrder,
-	)
+	row := q.db.QueryRowContext(ctx, createCategory, arg.Name, arg.Type, arg.SortOrder)
 	var i Category
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Type,
-		&i.Color,
 		&i.Icon,
 		&i.SortOrder,
 		&i.IsActive,
@@ -187,7 +180,7 @@ func (q *Queries) DeleteExpiredSessions(ctx context.Context) error {
 	return err
 }
 
-const deleteSavedFilter = `-- name: DeleteSavedFilter :exec
+const deleteSavedFilter = `-- name: DeleteSavedFilter :execresult
 DELETE FROM saved_filters WHERE id = ? AND user_id = ?
 `
 
@@ -227,7 +220,7 @@ func (q *Queries) DeleteTransaction(ctx context.Context, id int64) error {
 	return err
 }
 
-const deleteUser = `-- name: DeleteUser :exec
+const deleteUser = `-- name: DeleteUser :execresult
 DELETE FROM users WHERE id = ?
 `
 
@@ -260,7 +253,7 @@ func (q *Queries) GetBudget(ctx context.Context, arg GetBudgetParams) (Budget, e
 }
 
 const getCategoryByID = `-- name: GetCategoryByID :one
-SELECT id, name, type, color, icon, sort_order, is_active, created_at FROM categories WHERE id = ?
+SELECT id, name, type, icon, sort_order, is_active, created_at FROM categories WHERE id = ?
 `
 
 func (q *Queries) GetCategoryByID(ctx context.Context, id int64) (Category, error) {
@@ -270,7 +263,6 @@ func (q *Queries) GetCategoryByID(ctx context.Context, id int64) (Category, erro
 		&i.ID,
 		&i.Name,
 		&i.Type,
-		&i.Color,
 		&i.Icon,
 		&i.SortOrder,
 		&i.IsActive,
@@ -429,7 +421,7 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 }
 
 const listActiveCategories = `-- name: ListActiveCategories :many
-SELECT id, name, type, color, icon, sort_order, is_active, created_at FROM categories WHERE is_active = 1 ORDER BY type, sort_order
+SELECT id, name, type, icon, sort_order, is_active, created_at FROM categories WHERE is_active = 1 ORDER BY type, sort_order
 `
 
 func (q *Queries) ListActiveCategories(ctx context.Context) ([]Category, error) {
@@ -445,7 +437,6 @@ func (q *Queries) ListActiveCategories(ctx context.Context) ([]Category, error) 
 			&i.ID,
 			&i.Name,
 			&i.Type,
-			&i.Color,
 			&i.Icon,
 			&i.SortOrder,
 			&i.IsActive,
@@ -465,7 +456,7 @@ func (q *Queries) ListActiveCategories(ctx context.Context) ([]Category, error) 
 }
 
 const listAllCategories = `-- name: ListAllCategories :many
-SELECT id, name, type, color, icon, sort_order, is_active, created_at FROM categories ORDER BY type, sort_order
+SELECT id, name, type, icon, sort_order, is_active, created_at FROM categories ORDER BY type, sort_order
 `
 
 func (q *Queries) ListAllCategories(ctx context.Context) ([]Category, error) {
@@ -481,7 +472,6 @@ func (q *Queries) ListAllCategories(ctx context.Context) ([]Category, error) {
 			&i.ID,
 			&i.Name,
 			&i.Type,
-			&i.Color,
 			&i.Icon,
 			&i.SortOrder,
 			&i.IsActive,
@@ -671,7 +661,7 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 const sumByCategoryForMonth = `-- name: SumByCategoryForMonth :many
-SELECT c.id, c.name, c.color, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -689,7 +679,6 @@ type SumByCategoryForMonthParams struct {
 type SumByCategoryForMonthRow struct {
 	ID    int64   `json:"id"`
 	Name  string  `json:"name"`
-	Color string  `json:"color"`
 	Total float64 `json:"total"`
 }
 
@@ -702,11 +691,120 @@ func (q *Queries) SumByCategoryForMonth(ctx context.Context, arg SumByCategoryFo
 	items := []SumByCategoryForMonthRow{}
 	for rows.Next() {
 		var i SumByCategoryForMonthRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumByCategoryForRange = `-- name: SumByCategoryForRange :many
+
+SELECT
+    c.id,
+    c.name,
+    c.type AS category_type,
+    CAST(strftime('%Y', t.date) AS INTEGER) AS year,
+    CAST(strftime('%m', t.date) AS INTEGER) AS month,
+    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+GROUP BY c.id, year, month
+ORDER BY c.name, year, month
+`
+
+type SumByCategoryForRangeParams struct {
+	DateFrom string `json:"date_from"`
+	DateTo   string `json:"date_to"`
+}
+
+type SumByCategoryForRangeRow struct {
+	ID           int64   `json:"id"`
+	Name         string  `json:"name"`
+	CategoryType string  `json:"category_type"`
+	Year         int64   `json:"year"`
+	Month        int64   `json:"month"`
+	Total        float64 `json:"total"`
+}
+
+// Reports
+func (q *Queries) SumByCategoryForRange(ctx context.Context, arg SumByCategoryForRangeParams) ([]SumByCategoryForRangeRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumByCategoryForRange, arg.DateFrom, arg.DateTo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumByCategoryForRangeRow{}
+	for rows.Next() {
+		var i SumByCategoryForRangeRow
 		if err := rows.Scan(
 			&i.ID,
 			&i.Name,
-			&i.Color,
+			&i.CategoryType,
+			&i.Year,
+			&i.Month,
 			&i.Total,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumByMonthRange = `-- name: SumByMonthRange :many
+SELECT
+    CAST(strftime('%Y', t.date) AS INTEGER) AS year,
+    CAST(strftime('%m', t.date) AS INTEGER) AS month,
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount ELSE 0 END), 0) AS REAL) AS expenses,
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+GROUP BY year, month
+ORDER BY year, month
+`
+
+type SumByMonthRangeParams struct {
+	DateFrom string `json:"date_from"`
+	DateTo   string `json:"date_to"`
+}
+
+type SumByMonthRangeRow struct {
+	Year     int64   `json:"year"`
+	Month    int64   `json:"month"`
+	Expenses float64 `json:"expenses"`
+	Income   float64 `json:"income"`
+}
+
+func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams) ([]SumByMonthRangeRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumByMonthRange, arg.DateFrom, arg.DateTo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumByMonthRangeRow{}
+	for rows.Next() {
+		var i SumByMonthRangeRow
+		if err := rows.Scan(
+			&i.Year,
+			&i.Month,
+			&i.Expenses,
+			&i.Income,
 		); err != nil {
 			return nil, err
 		}
@@ -765,29 +863,79 @@ func (q *Queries) SumIncomeByMonth(ctx context.Context, arg SumIncomeByMonthPara
 	return total, err
 }
 
-const updateCategory = `-- name: UpdateCategory :exec
+const topDescriptions = `-- name: TopDescriptions :many
+SELECT
+    t.description,
+    c.type AS category_type,
+    COUNT(*) AS tx_count,
+    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+GROUP BY t.description
+ORDER BY total DESC
+LIMIT ?3
+`
+
+type TopDescriptionsParams struct {
+	DateFrom string `json:"date_from"`
+	DateTo   string `json:"date_to"`
+	Limit    int64  `json:"limit"`
+}
+
+type TopDescriptionsRow struct {
+	Description  string  `json:"description"`
+	CategoryType string  `json:"category_type"`
+	TxCount      int64   `json:"tx_count"`
+	Total        float64 `json:"total"`
+}
+
+func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams) ([]TopDescriptionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, topDescriptions, arg.DateFrom, arg.DateTo, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TopDescriptionsRow{}
+	for rows.Next() {
+		var i TopDescriptionsRow
+		if err := rows.Scan(
+			&i.Description,
+			&i.CategoryType,
+			&i.TxCount,
+			&i.Total,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateCategory = `-- name: UpdateCategory :execresult
 UPDATE categories
-SET name = ?, color = ?, icon = ?
+SET name = ?, icon = ?
 WHERE id = ?
 `
 
 type UpdateCategoryParams struct {
-	Name  string         `json:"name"`
-	Color string         `json:"color"`
-	Icon  sql.NullString `json:"icon"`
-	ID    int64          `json:"id"`
+	Name string         `json:"name"`
+	Icon sql.NullString `json:"icon"`
+	ID   int64          `json:"id"`
 }
 
 func (q *Queries) UpdateCategory(ctx context.Context, arg UpdateCategoryParams) (sql.Result, error) {
-	return q.db.ExecContext(ctx, updateCategory,
-		arg.Name,
-		arg.Color,
-		arg.Icon,
-		arg.ID,
-	)
+	return q.db.ExecContext(ctx, updateCategory, arg.Name, arg.Icon, arg.ID)
 }
 
-const updateCategoryActive = `-- name: UpdateCategoryActive :exec
+const updateCategoryActive = `-- name: UpdateCategoryActive :execresult
 UPDATE categories SET is_active = ? WHERE id = ?
 `
 
@@ -814,7 +962,7 @@ func (q *Queries) UpdateCategorySortOrder(ctx context.Context, arg UpdateCategor
 	return err
 }
 
-const updateSavedFilter = `-- name: UpdateSavedFilter :exec
+const updateSavedFilter = `-- name: UpdateSavedFilter :execresult
 UPDATE saved_filters SET name = ?, filter_json = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND user_id = ?
 `
@@ -968,150 +1116,4 @@ type UpsertSettingParams struct {
 func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) error {
 	_, err := q.db.ExecContext(ctx, upsertSetting, arg.Key, arg.Value)
 	return err
-}
-
-const sumByMonthRange = `-- name: SumByMonthRange :many
-SELECT
-    CAST(strftime('%Y', t.date) AS INTEGER) AS year,
-    CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount ELSE 0 END), 0) AS REAL) AS expenses,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
-FROM transactions t
-JOIN categories c ON t.category_id = c.id
-WHERE t.date >= ? AND t.date <= ?
-GROUP BY year, month
-ORDER BY year, month
-`
-
-type SumByMonthRangeParams struct {
-	DateFrom string `json:"date_from"`
-	DateTo   string `json:"date_to"`
-}
-
-type SumByMonthRangeRow struct {
-	Year     int64   `json:"year"`
-	Month    int64   `json:"month"`
-	Expenses float64 `json:"expenses"`
-	Income   float64 `json:"income"`
-}
-
-func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams) ([]SumByMonthRangeRow, error) {
-	rows, err := q.db.QueryContext(ctx, sumByMonthRange, arg.DateFrom, arg.DateTo)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []SumByMonthRangeRow
-	for rows.Next() {
-		var i SumByMonthRangeRow
-		if err := rows.Scan(&i.Year, &i.Month, &i.Expenses, &i.Income); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-// Reports
-
-const sumByCategoryForRange = `-- name: SumByCategoryForRange :many
-SELECT
-    c.id,
-    c.name,
-    c.color,
-    c.type AS category_type,
-    CAST(strftime('%Y', t.date) AS INTEGER) AS year,
-    CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
-FROM transactions t
-JOIN categories c ON t.category_id = c.id
-WHERE t.date >= ? AND t.date <= ?
-GROUP BY c.id, year, month
-ORDER BY c.name, year, month
-`
-
-type SumByCategoryForRangeParams struct {
-	DateFrom string `json:"date_from"`
-	DateTo   string `json:"date_to"`
-}
-
-type SumByCategoryForRangeRow struct {
-	ID           int64   `json:"id"`
-	Name         string  `json:"name"`
-	Color        string  `json:"color"`
-	CategoryType string  `json:"category_type"`
-	Year         int64   `json:"year"`
-	Month        int64   `json:"month"`
-	Total        float64 `json:"total"`
-}
-
-func (q *Queries) SumByCategoryForRange(ctx context.Context, arg SumByCategoryForRangeParams) ([]SumByCategoryForRangeRow, error) {
-	rows, err := q.db.QueryContext(ctx, sumByCategoryForRange, arg.DateFrom, arg.DateTo)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []SumByCategoryForRangeRow
-	for rows.Next() {
-		var i SumByCategoryForRangeRow
-		if err := rows.Scan(&i.ID, &i.Name, &i.Color, &i.CategoryType, &i.Year, &i.Month, &i.Total); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const topDescriptions = `-- name: TopDescriptions :many
-SELECT
-    t.description,
-    c.type AS category_type,
-    COUNT(*) AS tx_count,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
-FROM transactions t
-JOIN categories c ON t.category_id = c.id
-WHERE c.type = 'expense'
-    AND t.date >= ? AND t.date <= ?
-GROUP BY t.description
-ORDER BY total DESC
-LIMIT ?
-`
-
-type TopDescriptionsParams struct {
-	DateFrom string `json:"date_from"`
-	DateTo   string `json:"date_to"`
-	Limit    int64  `json:"limit"`
-}
-
-type TopDescriptionsRow struct {
-	Description  string  `json:"description"`
-	CategoryType string  `json:"category_type"`
-	TxCount      int64   `json:"tx_count"`
-	Total        float64 `json:"total"`
-}
-
-func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams) ([]TopDescriptionsRow, error) {
-	rows, err := q.db.QueryContext(ctx, topDescriptions, arg.DateFrom, arg.DateTo, arg.Limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []TopDescriptionsRow
-	for rows.Next() {
-		var i TopDescriptionsRow
-		if err := rows.Scan(&i.Description, &i.CategoryType, &i.TxCount, &i.Total); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }

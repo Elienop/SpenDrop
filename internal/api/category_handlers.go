@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"regexp"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -11,25 +10,17 @@ import (
 	"github.com/elienop/spendrop/internal/database"
 )
 
-var hexColorRegexp = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
-
-func isValidHexColor(s string) bool {
-	return hexColorRegexp.MatchString(s)
-}
-
 // categoryCreateRequest is the JSON input for creating a category.
 type categoryCreateRequest struct {
 	Name      string `json:"name"`
 	Type      string `json:"type"`
-	Color     string `json:"color"`
 	SortOrder int64  `json:"sort_order"`
 }
 
 // categoryUpdateRequest is the JSON input for updating a category.
 type categoryUpdateRequest struct {
-	Name  string `json:"name"`
-	Color string `json:"color"`
-	Icon  string `json:"icon"`
+	Name string `json:"name"`
+	Icon string `json:"icon"`
 }
 
 // categoryPatchRequest is the JSON input for patching category active status.
@@ -93,10 +84,6 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
 		return
 	}
-	if req.Color != "" && !isValidHexColor(req.Color) {
-		writeError(w, http.StatusBadRequest, "color must be a valid hex color (e.g., #FF5733)")
-		return
-	}
 	if req.Type != "expense" && req.Type != "income" {
 		writeError(w, http.StatusBadRequest, "type must be 'expense' or 'income'")
 		return
@@ -105,7 +92,6 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 	cat, err := h.queries.CreateCategory(r.Context(), database.CreateCategoryParams{
 		Name:      req.Name,
 		Type:      req.Type,
-		Color:     req.Color,
 		SortOrder: req.SortOrder,
 	})
 	if err != nil {
@@ -116,7 +102,7 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, cat)
 }
 
-// handleUpdateCategory updates an existing category's name, color, and icon.
+// handleUpdateCategory updates an existing category's name and icon.
 // Admin only.
 func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.GetUser(r)
@@ -150,20 +136,15 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
 		return
 	}
-	if req.Color != "" && !isValidHexColor(req.Color) {
-		writeError(w, http.StatusBadRequest, "color must be a valid hex color (e.g., #FF5733)")
-		return
-	}
 	if len(req.Icon) > 100 {
 		writeError(w, http.StatusBadRequest, "icon must be 100 characters or less")
 		return
 	}
 
 	result, err := h.queries.UpdateCategory(r.Context(), database.UpdateCategoryParams{
-		Name:  req.Name,
-		Color: req.Color,
-		Icon:  toNullString(req.Icon),
-		ID:    id,
+		Name: req.Name,
+		Icon: toNullString(req.Icon),
+		ID:   id,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update category")

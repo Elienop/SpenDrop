@@ -27,7 +27,6 @@ type Category struct {
 	ID        int64          `json:"id"`
 	Name      string         `json:"name"`
 	Type      string         `json:"type"`
-	Color     string         `json:"color"`
 	Icon      sql.NullString `json:"icon"`
 	SortOrder int64          `json:"sort_order"`
 	IsActive  bool           `json:"is_active"`

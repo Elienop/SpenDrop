@@ -81,12 +81,11 @@ func seedTestUser(t *testing.T, q *database.Queries, username, role string) data
 }
 
 // seedTestCategory creates a test category.
-func seedTestCategory(t *testing.T, q *database.Queries, name, catType, color string) database.Category {
+func seedTestCategory(t *testing.T, q *database.Queries, name, catType string) database.Category {
 	t.Helper()
 	cat, err := q.CreateCategory(context.Background(), database.CreateCategoryParams{
 		Name:      name,
 		Type:      catType,
-		Color:     color,
 		SortOrder: 0,
 	})
 	if err != nil {
@@ -588,7 +587,7 @@ func TestHandleListTransactions_IncludesCategoryInfo(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	// Category 1 = "Food" (expense, #5347CE) from seed
+	// Category 1 = "Food" (expense) from seed
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 50.0, "Groceries")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
@@ -615,9 +614,6 @@ func TestHandleListTransactions_IncludesCategoryInfo(t *testing.T) {
 	}
 	if txn["category_type"] != "expense" {
 		t.Errorf("expected category_type 'expense', got %v", txn["category_type"])
-	}
-	if txn["category_color"] != "#5347CE" {
-		t.Errorf("expected category_color '#5347CE', got %v", txn["category_color"])
 	}
 }
 

@@ -1,85 +1,123 @@
 import { useState } from 'react';
-import type { FormEvent } from 'react';
 import { Link } from 'react-router-dom';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import styles from '../styles/Auth.module.css';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+} from '@/components/ui/card';
+import {
+  Form,
+  FormControl,
+  FormField,
+  FormItem,
+  FormLabel,
+  FormMessage,
+} from '@/components/ui/form';
+import { Input } from '@/components/ui/input';
+
+const loginSchema = z.object({
+  username: z.string().min(1, 'Required'),
+  password: z.string().min(1, 'Required'),
+});
+
+type LoginValues = z.infer<typeof loginSchema>;
 
 export function Login() {
   const { login } = useAuth();
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
+  const [serverError, setServerError] = useState('');
+  const form = useForm<LoginValues>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { username: '', password: '' },
+  });
 
-  async function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    setError('');
-    setSubmitting(true);
+  async function onSubmit(values: LoginValues) {
+    setServerError('');
     try {
-      await login(username, password);
+      await login(values.username, values.password);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
-      setSubmitting(false);
+      setServerError(err instanceof Error ? err.message : 'Login failed');
     }
   }
 
   return (
-    <div className={styles.wrapper}>
-      <div className={styles.card}>
-        <h1 className={styles.title}>Login</h1>
-        <p className={styles.subtitle}>Sign in to SpenDrop</p>
-
-        <form className={styles.form} onSubmit={(e) => void handleSubmit(e)}>
-          {error && (
-            <div className={styles.error} role="alert">
-              {error}
-            </div>
-          )}
-
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="username">
-              Username
-            </label>
-            <input
-              id="username"
-              className={styles.input}
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              autoComplete="username"
-              required
-            />
-          </div>
-
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="password">
-              Password
-            </label>
-            <input
-              id="password"
-              className={styles.input}
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="current-password"
-              required
-            />
-          </div>
-
-          <button
-            type="submit"
-            className={styles.submitButton}
-            disabled={submitting}
-          >
-            {submitting ? 'Logging in...' : 'Log in'}
-          </button>
-        </form>
-
-        <p className={styles.footer}>
-          Don&apos;t have an account?{' '}
-          <Link to="/register">Register</Link>
-        </p>
-      </div>
+    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+      <Card className="w-full max-w-sm">
+        <CardHeader>
+          <h1 className="text-2xl font-semibold leading-none tracking-tight">
+            Login
+          </h1>
+          <CardDescription>Welcome back to SpenDrop</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Form {...form}>
+            <form
+              onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
+              className="flex flex-col gap-4"
+            >
+              {serverError && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{serverError}</AlertDescription>
+                </Alert>
+              )}
+              <FormField
+                control={form.control}
+                name="username"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Username</FormLabel>
+                    <FormControl>
+                      <Input autoComplete="username" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="current-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <Button
+                type="submit"
+                className="w-full"
+                disabled={form.formState.isSubmitting}
+              >
+                {form.formState.isSubmitting ? 'Logging in...' : 'Log in'}
+              </Button>
+              <p className="text-center text-sm text-muted-foreground">
+                No account?{' '}
+                <Link
+                  to="/register"
+                  className="font-medium text-foreground underline-offset-4 hover:underline"
+                >
+                  Register
+                </Link>
+              </p>
+            </form>
+          </Form>
+        </CardContent>
+      </Card>
     </div>
   );
 }

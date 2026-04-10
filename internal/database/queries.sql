@@ -45,8 +45,8 @@ DELETE FROM sessions WHERE user_id = ?;
 -- Categories
 
 -- name: CreateCategory :one
-INSERT INTO categories (name, type, color, sort_order)
-VALUES (?, ?, ?, ?)
+INSERT INTO categories (name, type, sort_order)
+VALUES (?, ?, ?)
 RETURNING *;
 
 -- name: GetCategoryByID :one
@@ -60,7 +60,7 @@ SELECT * FROM categories ORDER BY type, sort_order;
 
 -- name: UpdateCategory :execresult
 UPDATE categories
-SET name = ?, color = ?, icon = ?
+SET name = ?, icon = ?
 WHERE id = ?;
 
 -- name: UpdateCategorySortOrder :exec
@@ -169,7 +169,7 @@ WHERE c.type = 'income'
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
 -- name: SumByCategoryForMonth :many
-SELECT c.id, c.name, c.color, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -186,7 +186,7 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= ? AND t.date <= ?
+WHERE t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY year, month
 ORDER BY year, month;
 
@@ -213,14 +213,13 @@ DELETE FROM saved_filters WHERE id = ? AND user_id = ?;
 SELECT
     c.id,
     c.name,
-    c.color,
     c.type AS category_type,
     CAST(strftime('%Y', t.date) AS INTEGER) AS year,
     CAST(strftime('%m', t.date) AS INTEGER) AS month,
     CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= ? AND t.date <= ?
+WHERE t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY c.id, year, month
 ORDER BY c.name, year, month;
 
@@ -233,7 +232,7 @@ SELECT
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
-    AND t.date >= ? AND t.date <= ?
+    AND t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY t.description
 ORDER BY total DESC
-LIMIT ?;
+LIMIT sqlc.arg(limit);

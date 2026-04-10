@@ -1,214 +1,131 @@
-import { useState, useEffect, useCallback } from 'react';
-import type { FormEvent, DragEvent } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { AlertCircle, MoreHorizontal, Plus } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type { Category } from '../api/types';
-import styles from '../styles/Categories.module.css';
+import { Button } from '@/components/ui/button';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+} from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetFooter,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+
+type CategoryType = 'expense' | 'income';
 
 interface CategoryFormData {
   name: string;
-  color: string;
+  type: CategoryType;
   icon: string;
 }
 
-function CategoryEditForm({
-  initial,
-  onSave,
-  onCancel,
-}: {
-  initial?: CategoryFormData;
-  onSave: (data: CategoryFormData) => void;
-  onCancel: () => void;
-}) {
-  const [name, setName] = useState(initial?.name ?? '');
-  const [color, setColor] = useState(initial?.color ?? '#5347CE');
-  const [icon, setIcon] = useState(initial?.icon ?? '');
-
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!name.trim()) return;
-    onSave({ name: name.trim(), color, icon });
-  }
-
-  return (
-    <form
-      className={styles.editForm}
-      onSubmit={handleSubmit}
-    >
-      <div className={styles.editFormRow}>
-        <input
-          type="text"
-          className={styles.editInput}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Category name"
-          aria-label="Category name"
-          required
-        />
-        <input
-          type="color"
-          className={styles.colorInput}
-          value={color}
-          onChange={(e) => setColor(e.target.value)}
-          aria-label="Category color"
-        />
-        <input
-          type="text"
-          className={styles.editInput}
-          value={icon}
-          onChange={(e) => setIcon(e.target.value)}
-          placeholder="Icon (optional)"
-          aria-label="Category icon"
-          style={{ maxWidth: 120 }}
-        />
-      </div>
-      <div className={styles.editFormActions}>
-        <button type="button" className={styles.cancelButton} onClick={onCancel}>
-          Cancel
-        </button>
-        <button type="submit" className={styles.saveButton}>
-          Save
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function CategoryCard({
-  category,
-  isAdmin,
-  onEdit,
-  onToggle,
-  onDragStart,
-  onDragOver,
-  onDrop,
-}: {
-  category: Category;
-  isAdmin: boolean;
-  onEdit: (cat: Category) => void;
-  onToggle: (cat: Category) => void;
-  onDragStart: (e: DragEvent, cat: Category) => void;
-  onDragOver: (e: DragEvent) => void;
-  onDrop: (e: DragEvent, cat: Category) => void;
-}) {
-  return (
-    <div
-      className={`${styles.card} ${!category.is_active ? styles.inactive : ''}`}
-      draggable={isAdmin}
-      onDragStart={(e) => onDragStart(e, category)}
-      onDragOver={onDragOver}
-      onDrop={(e) => onDrop(e, category)}
-    >
-      {isAdmin && (
-        <span className={styles.dragHandle} aria-hidden="true">
-          &#8942;&#8942;
-        </span>
-      )}
-      <div
-        className={styles.colorSwatch}
-        style={{ backgroundColor: category.color }}
-      />
-      <div className={styles.cardInfo}>
-        <div className={styles.cardName}>{category.name}</div>
-        <div className={styles.cardStatus}>
-          {category.is_active ? 'Active' : 'Inactive'}
-        </div>
-      </div>
-      {isAdmin && (
-        <div className={styles.cardActions}>
-          <button
-            type="button"
-            className={`${styles.toggleButton} ${
-              category.is_active ? styles.toggleActive : styles.toggleInactive
-            }`}
-            onClick={() => onToggle(category)}
-            aria-label={`${category.is_active ? 'Deactivate' : 'Activate'} ${category.name}`}
-          >
-            {category.is_active ? 'Deactivate' : 'Activate'}
-          </button>
-          <button
-            type="button"
-            className={styles.editButton}
-            onClick={() => onEdit(category)}
-            aria-label={`Edit ${category.name}`}
-          >
-            Edit
-          </button>
-        </div>
-      )}
-    </div>
-  );
+interface CategoryEditorState {
+  mode: 'create' | 'edit';
+  category?: Category;
 }
 
 export function Categories() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [addingType, setAddingType] = useState<'expense' | 'income' | null>(
-    null,
-  );
-  const [draggedId, setDraggedId] = useState<number | null>(null);
+  const [editor, setEditor] = useState<CategoryEditorState | null>(null);
+  const fetchSeqRef = useRef(0);
 
   const fetchCategories = useCallback(() => {
+    const seq = ++fetchSeqRef.current;
     setLoading(true);
     api
       .get<Category[]>('categories?include_inactive=true')
-      .then(setCategories)
+      .then((cats) => {
+        if (seq !== fetchSeqRef.current) return;
+        setCategories(cats);
+        setError('');
+      })
       .catch((err) => {
+        if (seq !== fetchSeqRef.current) return;
+        setCategories([]);
         setError(
           err instanceof Error ? err.message : 'Failed to load categories',
         );
       })
-      .finally(() => setLoading(false));
+      .finally(() => {
+        if (seq !== fetchSeqRef.current) return;
+        setLoading(false);
+      });
   }, []);
 
   useEffect(() => {
     fetchCategories();
   }, [fetchCategories]);
 
-  const expenseCategories = categories
-    .filter((c) => c.type === 'expense')
-    .sort((a, b) => a.sort_order - b.sort_order);
-
-  const incomeCategories = categories
-    .filter((c) => c.type === 'income')
-    .sort((a, b) => a.sort_order - b.sort_order);
-
-  async function handleCreate(
-    type: 'expense' | 'income',
-    data: CategoryFormData,
-  ) {
+  async function handleSave(data: CategoryFormData) {
     try {
-      await api.post('categories', { ...data, type });
-      setAddingType(null);
+      if (editor?.mode === 'edit' && editor.category) {
+        // PUT only sends `name` and `icon` — the backend's
+        // `handleUpdateCategory` accepts only {name, color, icon}, and a
+        // category's `type` is immutable after creation. `color` is
+        // intentionally omitted; the backend keeps the stored value until
+        // commit 12 drops the column.
+        await api.put(`categories/${editor.category.id}`, {
+          name: data.name,
+          icon: data.icon,
+        });
+      } else {
+        await api.post('categories', {
+          name: data.name,
+          type: data.type,
+          icon: data.icon,
+        });
+      }
+      setEditor(null);
       fetchCategories();
     } catch (err) {
       setError(
-        err instanceof Error ? err.message : 'Failed to create category',
+        err instanceof Error ? err.message : 'Failed to save category',
       );
     }
   }
 
-  async function handleUpdate(id: number, data: CategoryFormData) {
+  async function handleToggleActive(cat: Category) {
     try {
-      await api.put(`categories/${id}`, data);
-      setEditingId(null);
-      fetchCategories();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to update category',
-      );
-    }
-  }
-
-  async function handleToggle(cat: Category) {
-    try {
-      await api.patch(`categories/${cat.id}`, {
-        is_active: !cat.is_active,
-      });
+      await api.patch(`categories/${cat.id}`, { is_active: !cat.is_active });
       fetchCategories();
     } catch (err) {
       setError(
@@ -217,130 +134,249 @@ export function Categories() {
     }
   }
 
-  function handleDragStart(e: DragEvent, cat: Category) {
-    setDraggedId(cat.id);
-    e.dataTransfer.effectAllowed = 'move';
-  }
+  // Sort: expense first, then income; within each group, by sort_order
+  const sortedCategories = useMemo(
+    () =>
+      [...categories].sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'expense' ? -1 : 1;
+        return a.sort_order - b.sort_order;
+      }),
+    [categories],
+  );
 
-  function handleDragOver(e: DragEvent) {
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-  }
-
-  async function handleDrop(_e: DragEvent, target: Category) {
-    if (draggedId === null || draggedId === target.id) return;
-
-    // Find the dragged and target categories in the same type group
-    const dragged = categories.find((c) => c.id === draggedId);
-    if (!dragged || dragged.type !== target.type) {
-      setDraggedId(null);
-      return;
-    }
-
-    // Get the sorted list for this type
-    const typeList = categories
-      .filter((c) => c.type === dragged.type)
-      .sort((a, b) => a.sort_order - b.sort_order);
-
-    // Remove dragged from list and insert at target position
-    const filtered = typeList.filter((c) => c.id !== draggedId);
-    const targetIdx = filtered.findIndex((c) => c.id === target.id);
-    filtered.splice(targetIdx, 0, dragged);
-
-    // Build reorder payload
-    const reorderPayload = filtered.map((c, i) => ({
-      id: c.id,
-      sort_order: i,
-    }));
-
-    try {
-      await api.post('categories/reorder', reorderPayload);
-      fetchCategories();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to reorder',
-      );
-    } finally {
-      setDraggedId(null);
-    }
-  }
-
-  function renderSection(
-    title: string,
-    type: 'expense' | 'income',
-    cats: Category[],
-  ) {
-    return (
-      <section className={styles.section}>
-        <h2 className={styles.sectionTitle}>{title}</h2>
-        <div className={styles.grid}>
-          {cats.map((cat) =>
-            editingId === cat.id ? (
-              <CategoryEditForm
-                key={cat.id}
-                initial={{
-                  name: cat.name,
-                  color: cat.color,
-                  icon: cat.icon ?? '',
-                }}
-                onSave={(data) => void handleUpdate(cat.id, data)}
-                onCancel={() => setEditingId(null)}
-              />
-            ) : (
-              <CategoryCard
-                key={cat.id}
-                category={cat}
-                isAdmin={isAdmin}
-                onEdit={(c) => setEditingId(c.id)}
-                onToggle={(c) => void handleToggle(c)}
-                onDragStart={handleDragStart}
-                onDragOver={handleDragOver}
-                onDrop={(e, c) => void handleDrop(e, c)}
-              />
-            ),
-          )}
-          {isAdmin && addingType === type && (
-            <CategoryEditForm
-              onSave={(data) => void handleCreate(type, data)}
-              onCancel={() => setAddingType(null)}
-            />
-          )}
-          {isAdmin && addingType !== type && (
-            <button
-              type="button"
-              className={styles.addCard}
-              onClick={() => setAddingType(type)}
-              aria-label={`Add ${type} category`}
-            >
-              + Add Category
-            </button>
-          )}
-        </div>
-        {cats.length === 0 && !addingType && (
-          <p className={styles.emptyState}>No {type} categories yet</p>
+  return (
+    <div className="container mx-auto max-w-4xl space-y-6 p-6">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">Categories</h1>
+        {isAdmin && (
+          <Button
+            onClick={() => setEditor({ mode: 'create' })}
+            aria-label="Add category"
+          >
+            <Plus className="mr-2 h-4 w-4" />
+            Add category
+          </Button>
         )}
-      </section>
-    );
+      </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardDescription>
+            Manage expense and income categories. Deactivated categories stay
+            attached to past transactions but no longer appear in the entry row.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <p className="text-sm text-muted-foreground">
+              Loading categories…
+            </p>
+          ) : sortedCategories.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No categories yet.
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead className="text-right">Transactions</TableHead>
+                  <TableHead className="w-12">
+                    <span className="sr-only">Actions</span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {sortedCategories.map((cat) => (
+                  <TableRow
+                    key={cat.id}
+                    className={!cat.is_active ? 'opacity-60' : undefined}
+                  >
+                    <TableCell className="font-medium">
+                      {cat.name}
+                      {!cat.is_active && (
+                        <span className="ml-2 text-xs text-muted-foreground">
+                          (inactive)
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Badge
+                        variant={cat.type === 'expense' ? 'outline' : 'secondary'}
+                      >
+                        {cat.type === 'expense' ? 'Expense' : 'Income'}
+                      </Badge>
+                    </TableCell>
+                    {/* TODO: transaction count requires backend API change (spec §3) */}
+                    <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
+                      —
+                    </TableCell>
+                    <TableCell>
+                      {isAdmin && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-8 w-8"
+                              aria-label={`Actions for ${cat.name}`}
+                            >
+                              <MoreHorizontal className="h-4 w-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem
+                              onClick={() =>
+                                setEditor({ mode: 'edit', category: cat })
+                              }
+                            >
+                              Edit
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={() => void handleToggleActive(cat)}
+                            >
+                              {cat.is_active ? 'Deactivate' : 'Activate'}
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
+
+      <CategoryEditorSheet
+        state={editor}
+        onClose={() => setEditor(null)}
+        onSave={(data) => void handleSave(data)}
+      />
+    </div>
+  );
+}
+
+function CategoryEditorSheet({
+  state,
+  onClose,
+  onSave,
+}: {
+  state: CategoryEditorState | null;
+  onClose: () => void;
+  onSave: (data: CategoryFormData) => void;
+}) {
+  const [name, setName] = useState('');
+  const [type, setType] = useState<CategoryType>('expense');
+  const [icon, setIcon] = useState('');
+
+  const mode = state?.mode;
+  const editingId = state?.mode === 'edit' ? state.category?.id : undefined;
+
+  // Seed the form whenever the editor is (re)opened.
+  // We intentionally depend on the identity fields (`mode` + editing category id),
+  // not the whole `state` object, so unrelated parent re-renders don't re-seed
+  // the form mid-edit.
+  useEffect(() => {
+    if (!state) return;
+    if (state.mode === 'edit' && state.category) {
+      setName(state.category.name);
+      setType(state.category.type);
+      setIcon(state.category.icon ?? '');
+    } else {
+      setName('');
+      setType('expense');
+      setIcon('');
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, editingId]);
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!name.trim()) return;
+    onSave({ name: name.trim(), type, icon: icon.trim() });
   }
 
   return (
-    <div className={styles.page}>
-      <h1>Categories</h1>
+    <Sheet
+      open={state !== null}
+      onOpenChange={(open) => {
+        if (!open) onClose();
+      }}
+    >
+      <SheetContent side="right" className="sm:max-w-md">
+        <SheetHeader>
+          <SheetTitle>
+            {state?.mode === 'edit' ? 'Edit category' : 'Add category'}
+          </SheetTitle>
+          <SheetDescription>
+            {state?.mode === 'edit'
+              ? "Update this category's name or icon. Type can't be changed after creation."
+              : 'Create a new expense or income category.'}
+          </SheetDescription>
+        </SheetHeader>
 
-      {error && (
-        <div className={styles.error} role="alert">
-          {error}
-        </div>
-      )}
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="category-name">Name</Label>
+            <Input
+              id="category-name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Groceries"
+              required
+              pattern=".*\S.*"
+              title="Name must contain at least one non-whitespace character"
+            />
+          </div>
 
-      {loading ? (
-        <div className={styles.loading}>Loading categories...</div>
-      ) : (
-        <>
-          {renderSection('Expense Categories', 'expense', expenseCategories)}
-          {renderSection('Income Categories', 'income', incomeCategories)}
-        </>
-      )}
-    </div>
+          {state?.mode === 'create' && (
+            <div className="space-y-2">
+              <Label htmlFor="category-type">Type</Label>
+              <Select
+                value={type}
+                onValueChange={(v) => setType(v as CategoryType)}
+              >
+                <SelectTrigger id="category-type">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value="expense">Expense</SelectItem>
+                    <SelectItem value="income">Income</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
+          <div className="space-y-2">
+            <Label htmlFor="category-icon">Icon (optional)</Label>
+            <Input
+              id="category-icon"
+              value={icon}
+              onChange={(e) => setIcon(e.target.value)}
+              placeholder="e.g. 🛒"
+            />
+          </div>
+
+          <SheetFooter className="mt-6 gap-2">
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button type="submit">Save</Button>
+          </SheetFooter>
+        </form>
+      </SheetContent>
+    </Sheet>
   );
 }

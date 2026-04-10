@@ -42,7 +42,7 @@ interface UseTransactionsResult {
   loading: boolean;
   error: string;
   refetch: () => void;
-  createTransaction: (input: CreateTransactionInput) => Promise<void>;
+  createTransaction: (input: CreateTransactionInput) => Promise<Transaction>;
   updateTransaction: (input: UpdateTransactionInput) => Promise<void>;
   deleteTransaction: (id: number) => Promise<void>;
 }
@@ -136,9 +136,10 @@ export function useTransactions(): UseTransactionsResult {
   }, []);
 
   const createTransaction = useCallback(
-    async (input: CreateTransactionInput) => {
-      await api.post('transactions', input);
+    async (input: CreateTransactionInput): Promise<Transaction> => {
+      const created = await api.post<Transaction>('transactions', input);
       fetchTransactions();
+      return created;
     },
     [fetchTransactions],
   );

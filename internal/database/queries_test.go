@@ -271,7 +271,6 @@ func TestCategories(t *testing.T) {
 	cat, err := q.CreateCategory(ctx, CreateCategoryParams{
 		Name:      "TestCat",
 		Type:      "expense",
-		Color:     "#ff0000",
 		SortOrder: 99,
 	})
 	if err != nil {
@@ -327,9 +326,8 @@ func TestCategories(t *testing.T) {
 
 	// Update category
 	_, err = q.UpdateCategory(ctx, UpdateCategoryParams{
-		ID:    cat.ID,
-		Name:  "UpdatedCat",
-		Color: "#00ff00",
+		ID:   cat.ID,
+		Name: "UpdatedCat",
 	})
 	if err != nil {
 		t.Fatalf("UpdateCategory: %v", err)

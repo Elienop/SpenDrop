@@ -1,4 +1,8 @@
-import styles from '../styles/Transactions.module.css';
+import { Search } from 'lucide-react';
+import { Button } from '@/components/ui/button';
+import { ButtonGroup } from '@/components/ui/button-group';
+import { Input } from '@/components/ui/input';
+import { Badge } from '@/components/ui/badge';
 
 interface TransactionToolbarProps {
   search: string;
@@ -24,75 +28,69 @@ export function TransactionToolbar({
   onToggleEntry,
 }: TransactionToolbarProps) {
   return (
-    <div className={styles.toolbar}>
-      {/* Search */}
-      <div className={styles.toolbarSearch}>
-        <span className={styles.toolbarSearchIcon} aria-hidden="true">
-          &#128269;
-        </span>
-        <input
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-card p-2">
+      {/* 240px is the min width where the "Search transactions..." placeholder fits without truncation */}
+      <div className="relative min-w-[240px] flex-1">
+        <Search
+          aria-hidden="true"
+          className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground"
+        />
+        <Input
           type="text"
-          className={styles.toolbarSearchInput}
-          placeholder="Search transactions..."
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
+          placeholder="Search transactions..."
           aria-label="Search transactions"
+          className="h-9 pl-8"
         />
       </div>
 
-      {/* Divider */}
-      <div className={styles.toolbarDivider} />
+      <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
-      {/* Type Toggle */}
-      <div className={styles.typeToggle}>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === '' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('')}
-        >
-          All
-        </button>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === 'expense' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('expense')}
-        >
-          Expenses
-        </button>
-        <button
-          type="button"
-          className={`${styles.typeButton} ${type === 'income' ? styles.typeActive : ''}`}
-          onClick={() => onTypeChange('income')}
-        >
-          Income
-        </button>
-      </div>
+      <ButtonGroup>
+        {([
+          { value: '', label: 'All' },
+          { value: 'expense', label: 'Expenses' },
+          { value: 'income', label: 'Income' },
+        ] as const).map((opt) => (
+          <Button
+            key={opt.value || 'all'}
+            type="button"
+            variant={type === opt.value ? 'secondary' : 'outline'}
+            size="sm"
+            className="text-xs"
+            onClick={() => onTypeChange(opt.value)}
+          >
+            {opt.label}
+          </Button>
+        ))}
+      </ButtonGroup>
 
-      {/* Divider */}
-      <div className={styles.toolbarDivider} />
+      <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
-      {/* Filters Button */}
-      <button
+      <Button
         type="button"
-        className={styles.filterButton}
+        variant="outline"
+        size="sm"
         onClick={onToggleFilters}
         aria-expanded={showFilters}
       >
+        Filters
         {activeFilterCount > 0 && (
-          <span className={styles.filterDot} aria-hidden="true" />
+          <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-[10px]">
+            {activeFilterCount}
+          </Badge>
         )}
-        Filters{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
-      </button>
+      </Button>
 
-      {/* + Add / Cancel Button */}
-      <button
+      <Button
         type="button"
-        className={styles.addButtonToolbar}
+        size="sm"
         onClick={onToggleEntry}
         aria-expanded={showEntry}
       >
         {showEntry ? 'Cancel' : '+ Add'}
-      </button>
+      </Button>
     </div>
   );
 }

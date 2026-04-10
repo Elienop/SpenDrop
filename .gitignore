@@ -36,6 +36,9 @@ Thumbs.db
 
 # Claude Code (local-only)
 .claude/
+.mcp.json
+.agents/
+skills-lock.json
 
 # Superpowers (local-only)
 docs/superpowers/

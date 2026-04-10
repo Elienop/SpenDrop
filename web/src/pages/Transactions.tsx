@@ -1,14 +1,137 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { format } from 'date-fns';
+import { AlertCircle, X } from 'lucide-react';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
+import type { TransactionFilters } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
 import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
-import { TransactionEntry } from '../components/TransactionEntry';
+import { TransactionEntryRow } from '../components/TransactionEntryRow';
 import { TransactionRow } from '../components/TransactionRow';
-import styles from '../styles/Transactions.module.css';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
+import { Card } from '@/components/ui/card';
+import {
+  Pagination,
+  PaginationContent,
+  PaginationEllipsis,
+  PaginationItem,
+  PaginationLink,
+  PaginationNext,
+  PaginationPrevious,
+} from '@/components/ui/pagination';
+import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
+  Table,
+  TableBody,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
+
+// TODO(post-migration): Bulk select + bulk categorize (Checkbox column + Dialog)
+// are deferred. They require a new `useTransactions` hook method and a new
+// backend endpoint — spec §3 line 305 flags this as out of scope for the
+// migration. Do not add here without extending the hook.
+
+interface ActiveChip {
+  key: string;
+  label: string;
+  onClear: () => void;
+}
+
+function buildActiveChips(
+  filters: TransactionFilters,
+  categories: Category[],
+  setFilter: (key: keyof TransactionFilters, value: string) => void,
+): ActiveChip[] {
+  const chips: ActiveChip[] = [];
+
+  if (filters.dateFrom || filters.dateTo) {
+    let label: string;
+    if (filters.dateFrom && filters.dateTo) {
+      label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
+    } else if (filters.dateFrom) {
+      label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
+    } else {
+      label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
+    }
+    chips.push({
+      key: 'date',
+      label,
+      onClear: () => {
+        setFilter('dateFrom', '');
+        setFilter('dateTo', '');
+      },
+    });
+  }
+
+  if (filters.categoryIds || filters.categoryId) {
+    const ids = filters.categoryIds
+      ? filters.categoryIds.split(',')
+      : [filters.categoryId];
+    const names = ids
+      .map((id) => categories.find((c) => String(c.id) === id)?.name)
+      .filter(Boolean);
+    chips.push({
+      key: 'category',
+      label: names.join(', ') || 'Categories',
+      onClear: () => {
+        setFilter('categoryIds', '');
+        setFilter('categoryId', '');
+      },
+    });
+  }
+
+  if (filters.amountMin || filters.amountMax) {
+    let label: string;
+    if (filters.amountMin && filters.amountMax) {
+      label = `$${filters.amountMin} - $${filters.amountMax}`;
+    } else if (filters.amountMin) {
+      label = `Min $${filters.amountMin}`;
+    } else {
+      label = `Max $${filters.amountMax}`;
+    }
+    chips.push({
+      key: 'amount',
+      label,
+      onClear: () => {
+        setFilter('amountMin', '');
+        setFilter('amountMax', '');
+      },
+    });
+  }
+
+  if (filters.tags) {
+    chips.push({
+      key: 'tags',
+      label: filters.tags,
+      onClear: () => setFilter('tags', ''),
+    });
+  }
+
+  return chips;
+}
+
+function getPageNumbers(current: number, total: number): (number | 'ellipsis')[] {
+  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
+  const pages: (number | 'ellipsis')[] = [1];
+  if (current > 3) pages.push('ellipsis');
+  const start = Math.max(2, current - 1);
+  const end = Math.min(total - 1, current + 1);
+  for (let i = start; i <= end; i++) pages.push(i);
+  if (current < total - 2) pages.push('ellipsis');
+  pages.push(total);
+  return pages;
+}
 
 export function Transactions() {
   const {
@@ -78,16 +201,21 @@ export function Transactions() {
   const handleLoadFilter = useCallback(
     (sf: SavedFilter) => {
       try {
-        const parsed = JSON.parse(sf.filter_json) as Record<string, string>;
+        const parsed = JSON.parse(sf.filter_json) as Record<string, unknown>;
         clearFilters();
-        for (const [key, value] of Object.entries(parsed)) {
-          setFilter(key as keyof typeof filters, value);
+        // Only apply keys that are part of our known filter shape and carry strings.
+        const knownKeys = Object.keys(filters) as (keyof typeof filters)[];
+        for (const key of knownKeys) {
+          const value = parsed[key];
+          if (typeof value === 'string') {
+            setFilter(key, value);
+          }
         }
-      } catch {
-        /* invalid JSON — ignore */
+      } catch (err) {
+        console.warn('Failed to load saved filter', err);
       }
     },
-    [setFilter, clearFilters],
+    [setFilter, clearFilters, filters],
   );
 
   const handleDeleteFilter = useCallback(
@@ -97,7 +225,6 @@ export function Transactions() {
     [deleteSavedFilter],
   );
 
-  // Count active filter groups (excluding search and type — they're in the toolbar)
   const activeFilterCount = useMemo(() => {
     let count = 0;
     if (filters.dateFrom || filters.dateTo) count++;
@@ -107,90 +234,20 @@ export function Transactions() {
     return count;
   }, [filters]);
 
-  // Build active filter chips data
-  const activeChips = useMemo(() => {
-    if (showFilters) return [];
-    const chips: { key: string; label: string; onClear: () => void }[] = [];
-
-    // Date chip
-    if (filters.dateFrom || filters.dateTo) {
-      let label: string;
-      if (filters.dateFrom && filters.dateTo) {
-        label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
-      } else if (filters.dateFrom) {
-        label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
-      } else {
-        label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
-      }
-      chips.push({
-        key: 'date',
-        label,
-        onClear: () => {
-          setFilter('dateFrom', '');
-          setFilter('dateTo', '');
-        },
-      });
-    }
-
-    // Category chip
-    if (filters.categoryIds || filters.categoryId) {
-      const ids = filters.categoryIds
-        ? filters.categoryIds.split(',')
-        : [filters.categoryId];
-      const names = ids
-        .map((id) => categories.find((c) => String(c.id) === id)?.name)
-        .filter(Boolean);
-      chips.push({
-        key: 'category',
-        label: names.join(', ') || 'Categories',
-        onClear: () => {
-          setFilter('categoryIds', '');
-          setFilter('categoryId', '');
-        },
-      });
-    }
-
-    // Amount chip
-    if (filters.amountMin || filters.amountMax) {
-      let label: string;
-      if (filters.amountMin && filters.amountMax) {
-        label = `$${filters.amountMin} - $${filters.amountMax}`;
-      } else if (filters.amountMin) {
-        label = `Min $${filters.amountMin}`;
-      } else {
-        label = `Max $${filters.amountMax}`;
-      }
-      chips.push({
-        key: 'amount',
-        label,
-        onClear: () => {
-          setFilter('amountMin', '');
-          setFilter('amountMax', '');
-        },
-      });
-    }
-
-    // Tags chip
-    if (filters.tags) {
-      chips.push({
-        key: 'tags',
-        label: filters.tags,
-        onClear: () => setFilter('tags', ''),
-      });
-    }
-
-    return chips;
-  }, [filters, showFilters, categories, setFilter]);
+  const activeChips = useMemo(
+    () => (showFilters ? [] : buildActiveChips(filters, categories, setFilter)),
+    [filters, showFilters, categories, setFilter],
+  );
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
-    <div className={styles.page}>
-      <div className={styles.pageHeader}>
-        <h1>Transactions</h1>
-        <button type="button" className={styles.exportButton} onClick={handleExport}>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <Button variant="outline" size="sm" onClick={handleExport}>
           Export Excel
-        </button>
+        </Button>
       </div>
 
       <TransactionToolbar
@@ -205,73 +262,95 @@ export function Transactions() {
         onToggleEntry={() => setShowEntry((p) => !p)}
       />
 
-      {/* Active filter chips — only when filters active and panel closed */}
       {activeChips.length > 0 && (
-        <div className={styles.activeChips}>
+        <div className="flex flex-wrap gap-1.5">
           {activeChips.map((chip) => (
-            <span key={chip.key} className={styles.activeChip}>
+            <span
+              key={chip.key}
+              className="inline-flex items-center gap-1 rounded-full border bg-secondary px-2.5 py-0.5 text-xs"
+            >
               {chip.label}
               <button
                 type="button"
-                className={styles.activeChipRemove}
+                className="text-muted-foreground hover:text-foreground"
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
               >
-                &times;
+                <X className="h-3 w-3" />
               </button>
             </span>
           ))}
         </div>
       )}
 
-      {/* Filter panel — conditional rendering */}
-      {showFilters && (
-        <FilterPanel
-          filters={filters}
-          setFilter={setFilter}
-          clearPanelFilters={clearPanelFilters}
-          categories={categories}
-          savedFilters={savedFilters}
-          onSaveFilter={handleSaveFilter}
-          onLoadFilter={handleLoadFilter}
-          onDeleteFilter={handleDeleteFilter}
-        />
-      )}
+      <Sheet open={showFilters} onOpenChange={setShowFilters}>
+        <SheetContent side="right" className="w-full sm:max-w-md">
+          <SheetHeader>
+            <SheetTitle>Filters</SheetTitle>
+            <SheetDescription>
+              Narrow the transaction list by date, category, amount, or a saved
+              preset.
+            </SheetDescription>
+          </SheetHeader>
+          <div className="mt-4">
+            <FilterPanel
+              filters={filters}
+              setFilter={setFilter}
+              clearPanelFilters={clearPanelFilters}
+              categories={categories}
+              savedFilters={savedFilters}
+              onSaveFilter={handleSaveFilter}
+              onLoadFilter={handleLoadFilter}
+              onDeleteFilter={handleDeleteFilter}
+            />
+          </div>
+        </SheetContent>
+      </Sheet>
 
-      {/* Entry form — display:none to preserve state */}
-      <div className={showEntry ? undefined : styles.entryFormHidden}>
-        <TransactionEntry
+      {/*
+        TransactionEntryRow is shown/hidden via Tailwind `hidden` so that its
+        internal form state (date, amount, description, tags) is preserved
+        across open/close.
+      */}
+      <div className={showEntry ? undefined : 'hidden'}>
+        <TransactionEntryRow
           categories={categories}
           onSubmit={createTransaction}
+          onDelete={deleteTransaction}
         />
       </div>
 
       {error && (
-        <div className={styles.error} role="alert">
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
 
       {loading ? (
-        <div className={styles.loading}>Loading transactions...</div>
+        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
+          Loading transactions...
+        </div>
       ) : transactions.length === 0 ? (
-        <div className={styles.emptyState}>
+        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
           No transactions found. Add one above to get started.
         </div>
       ) : (
-        <div className={styles.tableWrapper}>
-          <table className={styles.table}>
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Description</th>
-                <th>Category</th>
-                <th>Tags</th>
-                <th>Amount</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
+        <Card className="overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Date</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Category</TableHead>
+                <TableHead>Tags</TableHead>
+                <TableHead className="text-right">Amount</TableHead>
+                <TableHead className="w-10 text-right">
+                  <span className="sr-only">Actions</span>
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {transactions.map((tx) => (
                 <TransactionRow
                   key={tx.id}
@@ -281,33 +360,47 @@ export function Transactions() {
                   onDelete={deleteTransaction}
                 />
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
 
           {totalPages > 1 && (
-            <div className={styles.pagination}>
-              <button
-                type="button"
-                className={styles.pageButton}
-                disabled={page <= 1}
-                onClick={() => setPage(page - 1)}
-              >
-                Previous
-              </button>
-              <span className={styles.pageInfo}>
-                Page {page} of {totalPages}
-              </span>
-              <button
-                type="button"
-                className={styles.pageButton}
-                disabled={page >= totalPages}
-                onClick={() => setPage(page + 1)}
-              >
-                Next
-              </button>
+            <div className="border-t px-4 py-3">
+              <Pagination>
+                <PaginationContent>
+                  <PaginationItem>
+                    <PaginationPrevious
+                      onClick={() => page > 1 && setPage(page - 1)}
+                      className={page <= 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                    />
+                  </PaginationItem>
+                  {getPageNumbers(page, totalPages).map((p, i) =>
+                    p === 'ellipsis' ? (
+                      <PaginationItem key={`e${i}`}>
+                        <PaginationEllipsis />
+                      </PaginationItem>
+                    ) : (
+                      <PaginationItem key={p}>
+                        <PaginationLink
+                          isActive={p === page}
+                          onClick={() => setPage(p)}
+                          className="cursor-pointer"
+                        >
+                          {p}
+                        </PaginationLink>
+                      </PaginationItem>
+                    ),
+                  )}
+                  <PaginationItem>
+                    <PaginationNext
+                      onClick={() => page < totalPages && setPage(page + 1)}
+                      className={page >= totalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
+                    />
+                  </PaginationItem>
+                </PaginationContent>
+              </Pagination>
             </div>
           )}
-        </div>
+        </Card>
       )}
     </div>
   );

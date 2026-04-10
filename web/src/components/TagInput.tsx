@@ -1,6 +1,6 @@
 import { useState, useRef } from 'react';
 import type { KeyboardEvent } from 'react';
-import styles from '../styles/Transactions.module.css';
+import { cn } from '@/lib/utils';
 
 interface TagInputProps {
   value: string; // comma-separated
@@ -40,15 +40,21 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
 
   return (
     <div
-      className={`${styles.tagInputWrapper} ${className ?? ''}`}
+      className={cn(
+        'flex flex-wrap items-center gap-1 min-h-9 rounded-md border border-input bg-background px-2 py-1 cursor-text transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring',
+        className,
+      )}
       onClick={() => inputRef.current?.focus()}
     >
       {tags.map((tag, i) => (
-        <span key={tag} className={styles.tagPill}>
+        <span
+          key={`${tag}-${i}`}
+          className="inline-flex items-center gap-1 rounded-sm bg-primary/15 px-2 py-0.5 text-xs font-semibold text-primary whitespace-nowrap"
+        >
           {tag}
           <button
             type="button"
-            className={styles.tagRemove}
+            className="border-0 bg-transparent p-0 text-sm leading-none text-primary opacity-70 transition-opacity hover:opacity-100"
             onClick={(e) => {
               e.stopPropagation();
               removeTag(i);
@@ -62,12 +68,13 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
       <input
         ref={inputRef}
         type="text"
-        className={styles.tagInput}
+        className="flex-1 min-w-[60px] border-0 bg-transparent px-1 py-0.5 text-sm text-foreground outline-none placeholder:text-muted-foreground"
         value={input}
         onChange={(e) => setInput(e.target.value)}
         onKeyDown={handleKeyDown}
         onBlur={() => addTag(input)}
         placeholder={tags.length === 0 ? placeholder : ''}
+        aria-label="Add tag"
       />
     </div>
   );

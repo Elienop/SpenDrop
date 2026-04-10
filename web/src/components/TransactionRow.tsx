@@ -1,10 +1,28 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
 import { format } from 'date-fns';
+import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
-import styles from '../styles/Transactions.module.css';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { TableCell, TableRow } from '@/components/ui/table';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { cn } from '@/lib/utils';
 
 function formatCurrency(amount: number): string {
   return amount.toLocaleString('en-US', {
@@ -13,7 +31,7 @@ function formatCurrency(amount: number): string {
   });
 }
 
-interface TransactionRowProps {
+export interface TransactionRowProps {
   transaction: Transaction;
   categories: Category[];
   onUpdate: (input: {
@@ -70,113 +88,131 @@ export function TransactionRow({
 
   if (editing) {
     return (
-      <tr className={styles.editRow}>
-        <td>
-          <input
+      <TableRow>
+        <TableCell>
+          <Input
             type="date"
-            className={styles.editInput}
             value={date}
             onChange={(e) => setDate(e.target.value)}
           />
-        </td>
-        <td>
-          <input
+        </TableCell>
+        <TableCell>
+          <Input
             type="text"
-            className={styles.editInput}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
           />
-        </td>
-        <td>
-          <select
-            className={styles.editSelect}
-            value={categoryId}
-            onChange={(e) => setCategoryId(e.target.value)}
-          >
-            {categories.map((cat) => (
-              <option key={cat.id} value={cat.id}>
-                {cat.name}
-              </option>
-            ))}
-          </select>
-        </td>
-        <td>
+        </TableCell>
+        <TableCell>
+          <Select value={categoryId} onValueChange={setCategoryId}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {categories.map((cat) => (
+                <SelectItem key={cat.id} value={String(cat.id)}>
+                  {cat.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </TableCell>
+        <TableCell>
           <TagInput value={tags} onChange={setTags} placeholder="Add tags..." />
-        </td>
-        <td>
-          <input
+        </TableCell>
+        <TableCell className="text-right font-mono tabular-nums">
+          <Input
             type="number"
-            className={styles.editInput}
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
             step="0.01"
+            className="text-right"
           />
-        </td>
-        <td className={styles.actionCell}>
-          <form onSubmit={(e) => void handleSave(e)} className={styles.editActions}>
-            <button
-              type="submit"
-              className={styles.saveButton}
-              disabled={saving}
-            >
+        </TableCell>
+        <TableCell>
+          <form
+            onSubmit={(e) => void handleSave(e)}
+            className="flex items-center justify-end gap-1"
+          >
+            <Button type="submit" size="sm" disabled={saving}>
               Save
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className={styles.cancelButton}
+              size="sm"
+              variant="ghost"
               onClick={handleCancel}
             >
               Cancel
-            </button>
+            </Button>
           </form>
-        </td>
-      </tr>
+        </TableCell>
+      </TableRow>
     );
   }
 
   return (
-    <tr className={styles.row}>
-      <td>{format(new Date(transaction.date), 'MMM d, yyyy')}</td>
-      <td>{transaction.description}</td>
-      <td>
+    <TableRow className="hover:bg-muted/50">
+      <TableCell className="whitespace-nowrap text-muted-foreground">
+        {format(new Date(transaction.date), 'MMM d, yyyy')}
+      </TableCell>
+      <TableCell className="font-medium">{transaction.description}</TableCell>
+      <TableCell>
         <CategoryBadge
-          name={transaction.category_name}
-          color={transaction.category_color}
+          category={{ id: transaction.category_id, name: transaction.category_name }}
         />
-      </td>
-      <td>
-        {transaction.tags && transaction.tags.split(',').map((tag) => (
-          <span key={tag.trim()} className={styles.tagPill}>{tag.trim()}</span>
-        ))}
-      </td>
-      <td
-        className={
+      </TableCell>
+      <TableCell>
+        {transaction.tags &&
+          transaction.tags.split(',').map((tag, i) => (
+            <Badge
+              key={`${tag.trim()}-${i}`}
+              variant="secondary"
+              className="mr-1 font-normal"
+            >
+              {tag.trim()}
+            </Badge>
+          ))}
+      </TableCell>
+      <TableCell
+        className={cn(
+          'text-right font-mono tabular-nums',
           transaction.category_type === 'expense'
-            ? styles.expense
-            : styles.income
-        }
+            ? 'text-foreground'
+            : 'text-[var(--color-income)]',
+        )}
       >
         {transaction.category_type === 'expense' ? '-' : '+'}
         {formatCurrency(transaction.amount)}
-      </td>
-      <td className={styles.actionCell}>
-        <button
-          type="button"
-          className={styles.editButton}
-          onClick={() => setEditing(true)}
-          aria-label={`Edit ${transaction.description}`}
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          className={styles.deleteButton}
-          onClick={() => void onDelete(transaction.id)}
-          aria-label={`Delete ${transaction.description}`}
-        >
-          Delete
-        </button>
-      </td>
-    </tr>
+      </TableCell>
+      <TableCell className="text-right">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8"
+              aria-label={`Actions for ${transaction.description}`}
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onSelect={() => setEditing(true)}>
+              Edit
+            </DropdownMenuItem>
+            {/* TODO(post-migration): wrap Delete in AlertDialog — kebab menu items auto-dismiss,
+                making mis-clicks easier than the pre-migration visible Delete button. */}
+            <DropdownMenuItem
+              onSelect={() => void onDelete(transaction.id)}
+              className="text-destructive focus:text-destructive"
+            >
+              Delete
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </TableCell>
+    </TableRow>
   );
 }

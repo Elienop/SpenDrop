@@ -1,20 +1,21 @@
-import '@fontsource-variable/inter';
+import '@fontsource-variable/geist';
+import '@fontsource-variable/geist-mono';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { AuthProvider } from './hooks/useAuth';
-import { ThemeProvider } from './hooks/useTheme';
+import { ThemeProvider } from './components/theme-provider';
 import App from './App';
-import './styles/global.css';
+import './globals.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <BrowserRouter>
-      <AuthProvider>
-        <ThemeProvider>
+      <ThemeProvider defaultTheme="dark" storageKey="spendrop-theme">
+        <AuthProvider>
           <App />
-        </ThemeProvider>
-      </AuthProvider>
+        </AuthProvider>
+      </ThemeProvider>
     </BrowserRouter>
   </StrictMode>,
 );

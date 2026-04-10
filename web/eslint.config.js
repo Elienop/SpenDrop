@@ -20,4 +20,25 @@ export default defineConfig([
       globals: globals.browser,
     },
   },
+  // shadcn/ui primitives export variants + types alongside components
+  {
+    files: ['src/components/ui/**/*.{ts,tsx}', 'src/hooks/useAuth.tsx'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
+    },
+  },
+  // Data-fetching hooks use setState inside useEffect — established pattern
+  {
+    files: ['src/hooks/**/*.{ts,tsx}', 'src/pages/**/*.{ts,tsx}'],
+    rules: {
+      'react-hooks/set-state-in-effect': 'off',
+    },
+  },
+  // Tailwind config uses require() for plugins
+  {
+    files: ['tailwind.config.ts'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+    },
+  },
 ])

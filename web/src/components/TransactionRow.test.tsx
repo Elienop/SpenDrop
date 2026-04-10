@@ -1,7 +1,9 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { Mock } from 'vitest';
 import { TransactionRow } from './TransactionRow';
+import type { TransactionRowProps } from './TransactionRow';
 import type { Transaction, Category } from '../api/types';
 
 const mockCategories: Category[] = [
@@ -9,7 +11,6 @@ const mockCategories: Category[] = [
     id: 1,
     name: 'Groceries',
     type: 'expense',
-    color: '#e94560',
     icon: null,
     sort_order: 1,
     is_active: true,
@@ -29,7 +30,6 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     category_id: 1,
     category_name: 'Groceries',
     category_type: 'expense',
-    category_color: '#e94560',
     tags: null,
     notes: null,
     created_at: '2026-04-01T00:00:00Z',
@@ -40,21 +40,31 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
 
 function renderRow(
   transaction: Transaction,
-  onUpdate?: ReturnType<typeof vi.fn>,
-  onDelete?: ReturnType<typeof vi.fn>,
+  onUpdate?: TransactionRowProps['onUpdate'],
+  onDelete?: TransactionRowProps['onDelete'],
 ) {
+  const update = onUpdate ?? vi.fn().mockResolvedValue(undefined);
+  const del = onDelete ?? vi.fn().mockResolvedValue(undefined);
   return render(
     <table>
       <tbody>
         <TransactionRow
           transaction={transaction}
           categories={mockCategories}
-          onUpdate={(onUpdate ?? vi.fn().mockResolvedValue(undefined)) as never}
-          onDelete={(onDelete ?? vi.fn().mockResolvedValue(undefined)) as never}
+          onUpdate={update}
+          onDelete={del}
         />
       </tbody>
     </table>,
   );
+}
+
+async function openActionsMenu(description: string) {
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole('button', { name: `Actions for ${description}` }),
+  );
+  return user;
 }
 
 describe('TransactionRow tags display', () => {
@@ -66,7 +76,6 @@ describe('TransactionRow tags display', () => {
 
   it('renders empty cell when tags are null', () => {
     renderRow(makeTx({ tags: null }));
-    // No tag pills
     expect(screen.queryByText('groceries')).not.toBeInTheDocument();
   });
 
@@ -76,63 +85,82 @@ describe('TransactionRow tags display', () => {
   });
 });
 
+describe('TransactionRow actions menu', () => {
+  it('exposes an actions menu trigger with an explicit aria-label', () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    expect(
+      screen.getByRole('button', { name: 'Actions for Weekly groceries' }),
+    ).toBeInTheDocument();
+  });
+
+  it('opens a menu with Edit and Delete items when the trigger is clicked', async () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    await openActionsMenu('Weekly groceries');
+    expect(screen.getByRole('menuitem', { name: /edit/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('menuitem', { name: /delete/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('calls onDelete when Delete is chosen', async () => {
+    const onDelete = vi
+      .fn<TransactionRowProps['onDelete']>()
+      .mockResolvedValue(undefined);
+    renderRow(
+      makeTx({ description: 'Weekly groceries' }),
+      undefined,
+      onDelete,
+    );
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+    expect(onDelete).toHaveBeenCalledWith(1);
+  });
+});
+
 describe('TransactionRow tags editing', () => {
-  let onUpdate: ReturnType<typeof vi.fn>;
+  let onUpdate: Mock<TransactionRowProps['onUpdate']>;
 
   beforeEach(() => {
-    onUpdate = vi.fn().mockResolvedValue(undefined);
+    onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
   });
 
   it('shows TagInput with existing tags in edit mode', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries,weekly' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Tag pills should still be visible in TagInput
     expect(screen.getByText('groceries')).toBeInTheDocument();
     expect(screen.getByText('weekly')).toBeInTheDocument();
   });
 
   it('includes tags in save/update call', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Save via fireEvent.submit (happy-dom doesn't fire submit from button click)
     const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
     fireEvent.submit(form);
 
     await waitFor(() => {
       expect(onUpdate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tags: 'groceries',
-        }),
+        expect.objectContaining({ tags: 'groceries' }),
       );
     });
   });
 
   it('resets tags on cancel', async () => {
-    const user = userEvent.setup();
     renderRow(makeTx({ tags: 'groceries' }), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    // Enter edit mode
-    await user.click(screen.getByRole('button', { name: /edit/i }));
-
-    // Find the tag text input within the TagInput wrapper
-    // Placeholder is empty when tags exist, so query by the tagInput class
-    const tagInputEl = document.querySelector('.tagInput') as HTMLInputElement;
-    expect(tagInputEl).not.toBeNull();
+    const tagInputEl = screen.getByLabelText('Add tag');
     await user.type(tagInputEl, 'extra{Enter}');
     expect(screen.getByText('extra')).toBeInTheDocument();
 
-    // Cancel
     await user.click(screen.getByRole('button', { name: /cancel/i }));
 
-    // Should show original tags only (in display mode pills)
     expect(screen.getByText('groceries')).toBeInTheDocument();
     expect(screen.queryByText('extra')).not.toBeInTheDocument();
   });
