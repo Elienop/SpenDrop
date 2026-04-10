@@ -220,7 +220,6 @@ export function Dashboard() {
   const expenseSplit = splitCurrency(totalExpense);
 
   const savingsGoalPct = summary?.savings_goal_progress ?? 0;
-  const savingsEndAngle = 90 - (360 * Math.min(savingsGoalPct, 100) / 100);
 
   /* ── Loading state ── */
   if (loading) {
@@ -558,11 +557,10 @@ export function Dashboard() {
         subtitle={`${savingsGoalPct.toFixed(0)}% of goal`}
       >
         <div className="flex flex-col items-center gap-6 md:flex-row md:justify-around">
-          <ChartContainer config={savingsConfig} className="mx-auto aspect-square max-h-[200px]">
+          <ChartContainer config={savingsConfig} className="h-48 w-48">
             <RadialBarChart
               data={[{ name: 'savings', value: savingsGoalPct, fill: 'var(--color-savings)' }]}
-              startAngle={90}
-              endAngle={savingsEndAngle}
+              endAngle={(Math.min(savingsGoalPct, 100) / 100) * 360}
               innerRadius={65}
               outerRadius={95}
             >
@@ -573,7 +571,7 @@ export function Dashboard() {
                 className="first:fill-muted last:fill-background"
                 polarRadius={[86, 74]}
               />
-              <RadialBar dataKey="value" background cornerRadius={10} />
+              <RadialBar dataKey="value" cornerRadius={10} />
               <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
                 <RechartsLabel
                   content={({ viewBox }) => {
