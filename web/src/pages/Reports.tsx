@@ -53,8 +53,8 @@ function formatCurrency(amount: number): string {
 // the component avoids recreating the object on every render and keeps it
 // out of the useMemo dependency graph below.
 const INCEXP_CONFIG = {
-  income: { label: 'Income', color: 'hsl(var(--chart-6))' },
-  expenses: { label: 'Expenses', color: 'hsl(var(--chart-10))' },
+  income: { label: 'Income', color: 'hsl(var(--primary))' },
+  expenses: { label: 'Expenses', color: 'hsl(var(--muted-foreground))' },
 } satisfies ChartConfig;
 
 // TODO (spec §8 commit 10): DateRangePicker and Period Tabs (This Month /
@@ -106,11 +106,11 @@ export function Reports() {
     return {
       currentExpenses: {
         label: `${data.current_year}`,
-        color: 'hsl(var(--chart-10))',
+        color: 'hsl(var(--primary))',
       },
       previousExpenses: {
         label: `${data.previous_year}`,
-        color: 'hsl(var(--chart-3))',
+        color: 'hsl(var(--muted-foreground))',
       },
     };
   }, [yoy.data]);

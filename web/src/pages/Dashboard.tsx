@@ -77,12 +77,12 @@ const SHORT_MONTHS = [
 type CashFlowView = '6m' | '12m';
 
 const cashFlowConfig: ChartConfig = {
-  income: { label: 'Income', color: 'hsl(var(--chart-1))' },
-  expense: { label: 'Expense', color: 'hsl(var(--chart-2))' },
+  income: { label: 'Income', color: 'hsl(var(--primary))' },
+  expense: { label: 'Expense', color: 'hsl(var(--muted-foreground))' },
 };
 
 const savingsConfig: ChartConfig = {
-  filled: { label: 'Saved', color: 'hsl(var(--chart-1))' },
+  filled: { label: 'Saved', color: 'hsl(var(--primary))' },
   rest: { label: 'Remaining', color: 'hsl(var(--muted))' },
 };
 
@@ -526,7 +526,7 @@ export function Dashboard() {
                   startAngle={90}
                   endAngle={-270}
                 >
-                  <Cell fill="hsl(var(--chart-1))" />
+                  <Cell fill="hsl(var(--primary))" />
                   <Cell fill="hsl(var(--muted))" />
                 </Pie>
               </PieChart>
