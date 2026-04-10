@@ -58,7 +58,12 @@ export function Sidebar() {
           expanded ? 'w-60' : 'w-16',
         )}
       >
-        <div className="flex h-14 items-center justify-between border-b border-border px-4">
+        <div
+          className={cn(
+            'flex h-14 items-center border-b border-border',
+            expanded ? 'justify-between px-4' : 'justify-center',
+          )}
+        >
           {expanded ? (
             <span className="font-semibold tracking-tight">SpenDrop</span>
           ) : (
@@ -96,7 +101,12 @@ export function Sidebar() {
                   <button
                     type="button"
                     onClick={() => void logout()}
-                    className="mx-1 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground"
+                    className={cn(
+                      'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
+                      expanded
+                        ? 'mx-1 gap-3 px-3 py-2'
+                        : 'mx-auto h-9 w-9 justify-center',
+                    )}
                   >
                     <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
                     <span className={expanded ? undefined : 'sr-only'}>
@@ -112,7 +122,12 @@ export function Sidebar() {
           </nav>
         </ScrollArea>
 
-        <div className="flex items-center gap-3 border-t border-border px-3 py-3">
+        <div
+          className={cn(
+            'flex items-center border-t border-border py-3',
+            expanded ? 'gap-3 px-3' : 'justify-center',
+          )}
+        >
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
             {initial}
           </div>
@@ -180,8 +195,11 @@ function SidebarLink({
       end={item.end}
       className={({ isActive }) =>
         cn(
-          'mx-1 flex items-center gap-3 rounded-md px-3 py-2 text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
+          'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
           isActive && 'bg-muted text-foreground',
+          expanded
+            ? 'mx-1 gap-3 px-3 py-2'
+            : 'mx-auto h-9 w-9 justify-center',
         )
       }
     >
