@@ -1,4 +1,4 @@
-import { useTheme } from '@/components/theme-provider';
+import { useTheme } from '@/hooks/useTheme';
 import { type ColorThemeId, colorThemes, colorThemeIds } from '@/lib/color-themes';
 import {
   Select,
