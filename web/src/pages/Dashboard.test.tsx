@@ -23,12 +23,12 @@ vi.mock('recharts', () => ({
   // Used by Dashboard.tsx
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Bar: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
+  Bar: () => <div />,
   XAxis: () => <div />,
   YAxis: () => <div />,
   CartesianGrid: () => <div />,
-  Cell: () => <div />,
   // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
+  Cell: () => <div />,
   Tooltip: () => <div />,
   Legend: () => <div />,
   Surface: () => <div />,
@@ -172,8 +172,8 @@ describe('Dashboard', () => {
     await waitFor(() => {
       // The mock transaction "Groceries" should appear in a table row
       expect(screen.getByText('Groceries')).toBeInTheDocument();
-      // "Food" appears in the transaction table category column
-      expect(screen.getByText('Food')).toBeInTheDocument();
+      // "Food" appears in both the category bars and the transaction table
+      expect(screen.getAllByText('Food').length).toBeGreaterThanOrEqual(2);
       // Category initial should appear in the icon cell
       expect(screen.getByText('F')).toBeInTheDocument();
     });

@@ -6,8 +6,6 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Cell,
-  LabelList,
 } from 'recharts';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
@@ -92,10 +90,6 @@ type CashFlowView = '6m' | '12m';
 const cashFlowConfig: ChartConfig = {
   income: { label: 'Income', color: 'hsl(var(--primary))' },
   expense: { label: 'Expense', color: 'hsl(var(--muted-foreground))' },
-};
-
-const categoryBarConfig: ChartConfig = {
-  value: { label: 'Amount' },
 };
 
 /* ── Component ── */
@@ -402,40 +396,32 @@ export function Dashboard() {
               No spending yet this month.
             </div>
           ) : (
-            <ChartContainer
-              config={categoryBarConfig}
-              className="aspect-auto w-full"
-              style={{ height: gaugeData.length * 48 + 16 }}
-            >
-              <BarChart
-                layout="vertical"
-                data={gaugeData}
-                margin={{ top: 0, right: 80, bottom: 0, left: 0 }}
-                barSize={24}
-              >
-                <XAxis type="number" hide />
-                <YAxis
-                  dataKey="name"
-                  type="category"
-                  tickLine={false}
-                  axisLine={false}
-                  width={90}
-                  className="text-xs"
-                  stroke="hsl(var(--muted-foreground))"
-                />
-                <Bar dataKey="value" radius={4}>
-                  <LabelList
-                    dataKey="value"
-                    position="right"
-                    className="fill-foreground text-xs"
-                    formatter={(v: number) => formatFull(v)}
-                  />
-                  {gaugeData.map((slice) => (
-                    <Cell key={slice.id} fill={slice.color} />
-                  ))}
-                </Bar>
-              </BarChart>
-            </ChartContainer>
+            <div className="flex flex-col gap-3">
+              {gaugeData.map((slice) => {
+                const pct = totalCategorySpent > 0
+                  ? (slice.value / totalCategorySpent) * 100
+                  : 0;
+                return (
+                  <div key={slice.id} className="flex flex-col gap-1.5">
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="font-medium">{slice.name}</span>
+                      <span className="font-mono tabular-nums text-muted-foreground">
+                        {formatFull(slice.value)}
+                      </span>
+                    </div>
+                    <div className="h-2.5 w-full rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full transition-all"
+                        style={{
+                          width: `${Math.max(pct, 2)}%`,
+                          backgroundColor: slice.color,
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           )}
         </ChartCard>
 
