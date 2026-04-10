@@ -40,6 +40,10 @@
     --radius: 0.625rem;
   }
 
+  * {
+    @apply border-border;
+  }
+
   body {
     font-family: theme('fontFamily.sans');
     background: hsl(var(--background));
