@@ -23,14 +23,11 @@ vi.mock('recharts', () => ({
   // Used by Dashboard.tsx
   ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Bar: () => <div />,
+  Bar: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
   XAxis: () => <div />,
   YAxis: () => <div />,
   CartesianGrid: () => <div />,
-  RadialBarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  RadialBar: () => <div />,
-  PolarRadiusAxis: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Label: () => <div />,
+  Cell: () => <div />,
   // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
   Tooltip: () => <div />,
   Legend: () => <div />,
@@ -152,7 +149,7 @@ describe('Dashboard', () => {
     });
   });
 
-  test('renders Spending by Category as full-width card', async () => {
+  test('renders Spending by Category section', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
       expect(screen.getByText('Spending by Category')).toBeInTheDocument();
@@ -175,8 +172,8 @@ describe('Dashboard', () => {
     await waitFor(() => {
       // The mock transaction "Groceries" should appear in a table row
       expect(screen.getByText('Groceries')).toBeInTheDocument();
-      // "Food" appears in both the category legend and the transaction table
-      expect(screen.getAllByText('Food').length).toBeGreaterThanOrEqual(2);
+      // "Food" appears in the transaction table category column
+      expect(screen.getByText('Food')).toBeInTheDocument();
       // Category initial should appear in the icon cell
       expect(screen.getByText('F')).toBeInTheDocument();
     });

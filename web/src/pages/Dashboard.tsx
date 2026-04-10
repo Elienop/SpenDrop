@@ -6,10 +6,8 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  RadialBarChart,
-  RadialBar,
-  PolarRadiusAxis,
-  Label as RechartsLabel,
+  Cell,
+  LabelList,
 } from 'recharts';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
@@ -96,6 +94,10 @@ const cashFlowConfig: ChartConfig = {
   expense: { label: 'Expense', color: 'hsl(var(--muted-foreground))' },
 };
 
+const categoryBarConfig: ChartConfig = {
+  value: { label: 'Amount' },
+};
+
 /* ── Component ── */
 
 export function Dashboard() {
@@ -178,27 +180,6 @@ export function Dashboard() {
         : []),
     ];
   }, [categories]);
-
-  // Key by a stable slug (`cat-${id}`), not by name. shadcn's ChartStyle
-  // turns every ChartConfig key into a `--color-${key}` CSS custom property,
-  // so keys must be valid CSS identifiers — user-editable names like
-  // "Food & Drink" would produce malformed CSS and break tooltip color
-  // lookup silently. The id-derived slug also prevents duplicate-name
-  // categories from clobbering each other in the config map.
-  const categoryChartConfig = useMemo<ChartConfig>(() => {
-    return gaugeData.reduce<ChartConfig>((acc, slice) => {
-      acc[`cat-${slice.id}`] = { label: slice.name, color: slice.color };
-      return acc;
-    }, {});
-  }, [gaugeData]);
-
-  const radialCategoryData = useMemo(() => {
-    const point: Record<string, number> = {};
-    for (const slice of gaugeData) {
-      point[`cat-${slice.id}`] = slice.value;
-    }
-    return [point];
-  }, [gaugeData]);
 
   const savingsRate = totalIncome > 0
     ? ((totalIncome - totalExpense) / totalIncome * 100)
@@ -410,168 +391,126 @@ export function Dashboard() {
         </ChartContainer>
       </ChartCard>
 
-      {/* Spending by Category — full width */}
-      <ChartCard
-        title="Spending by Category"
-        subtitle={formatFull(totalCategorySpent)}
-      >
-        {gaugeData.length === 0 ? (
-          <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-            No spending yet this month.
-          </div>
-        ) : (
-          <div className="flex flex-1 flex-col gap-4 md:flex-row md:items-center">
-            <ChartContainer
-              config={categoryChartConfig}
-              className="mx-auto aspect-square w-full max-w-[300px] md:w-1/3"
-            >
-              <RadialBarChart
-                data={radialCategoryData}
-                endAngle={180}
-                innerRadius={80}
-                outerRadius={130}
-              >
-                <ChartTooltip
-                  cursor={false}
-                  content={<ChartTooltipContent hideLabel />}
-                />
-                {gaugeData.map((slice) => (
-                  <RadialBar
-                    key={slice.id}
-                    dataKey={`cat-${slice.id}`}
-                    stackId="a"
-                    fill={slice.color}
-                    cornerRadius={5}
-                    className="stroke-transparent stroke-2"
-                  />
-                ))}
-                <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
-                  <RechartsLabel
-                    content={({ viewBox }) => {
-                      if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                        return (
-                          <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle">
-                            <tspan
-                              x={viewBox.cx}
-                              y={(viewBox.cy || 0) - 16}
-                              className="fill-foreground text-2xl font-bold"
-                            >
-                              {formatFull(totalCategorySpent)}
-                            </tspan>
-                            <tspan
-                              x={viewBox.cx}
-                              y={(viewBox.cy || 0) + 4}
-                              className="fill-muted-foreground text-sm"
-                            >
-                              Total Spent
-                            </tspan>
-                          </text>
-                        );
-                      }
-                    }}
-                  />
-                </PolarRadiusAxis>
-              </RadialBarChart>
-            </ChartContainer>
-            <ul className="flex flex-1 flex-col gap-2 md:w-2/3">
-              {gaugeData.map((slice) => {
-                const pct = totalCategorySpent > 0
-                  ? (slice.value / totalCategorySpent) * 100
-                  : 0;
-                return (
-                  <li key={slice.id} className="flex items-center gap-3 text-sm">
-                    <span
-                      className="h-2.5 w-2.5 shrink-0 rounded-sm"
-                      style={{ backgroundColor: slice.color }}
-                      aria-hidden="true"
-                    />
-                    <span className="flex-1 truncate font-medium">{slice.name}</span>
-                    <span className="font-mono tabular-nums text-muted-foreground">
-                      {pct.toFixed(0)}%
-                    </span>
-                    <span className="min-w-20 text-right font-mono font-semibold tabular-nums">
-                      {formatFull(slice.value)}
-                    </span>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        )}
-      </ChartCard>
-
-      {/* Recent Transactions — shadcn table style */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <div>
-            <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
-            <CardDescription>
-              <button
-                type="button"
-                aria-pressed={showLatest}
-                className="text-xs font-medium text-primary hover:underline"
-                onClick={() => setShowLatest((v) => !v)}
-              >
-                {showLatest ? 'Show this month' : 'Show latest'}
-              </button>
-            </CardDescription>
-          </div>
-          <Button variant="outline" size="sm" asChild>
-            <Link to="/transactions">View All</Link>
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {recentTransactions.length === 0 ? (
-            <div className="flex items-center justify-center p-8 text-sm text-muted-foreground">
-              No transactions yet.
+      {/* Category breakdown + Recent Transactions — side by side */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        <ChartCard
+          title="Spending by Category"
+          subtitle={formatFull(totalCategorySpent)}
+        >
+          {gaugeData.length === 0 ? (
+            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+              No spending yet this month.
             </div>
           ) : (
-            <Table>
-              <TableBody>
-                {recentTransactions.map((tx) => {
-                  const color = getCategoryColorVar({ id: tx.category_id });
-                  return (
-                    <TableRow key={tx.id}>
-                      <TableCell className="w-10">
-                        <div
-                          className="flex size-10 items-center justify-center rounded-lg"
-                          style={{
-                            backgroundColor: `color-mix(in srgb, ${color} 15%, transparent)`,
-                          }}
-                        >
-                          <span className="text-xs font-medium" style={{ color }}>
-                            {tx.category_name?.[0]?.toUpperCase() ?? '?'}
-                          </span>
-                        </div>
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex flex-col">
-                          <span className="font-medium">{tx.description}</span>
-                          <span className="text-sm text-muted-foreground">{tx.category_name}</span>
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {tx.date}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <span
-                          className={cn(
-                            'text-sm font-semibold tabular-nums',
-                            tx.category_type === 'income' && 'text-emerald-500',
-                          )}
-                        >
-                          {tx.category_type === 'income' ? '+' : '-'}
-                          {formatFull(tx.amount)}
-                        </span>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <ChartContainer
+              config={categoryBarConfig}
+              className="aspect-auto w-full"
+              style={{ height: gaugeData.length * 48 + 16 }}
+            >
+              <BarChart
+                layout="vertical"
+                data={gaugeData}
+                margin={{ top: 0, right: 80, bottom: 0, left: 0 }}
+                barSize={24}
+              >
+                <XAxis type="number" hide />
+                <YAxis
+                  dataKey="name"
+                  type="category"
+                  tickLine={false}
+                  axisLine={false}
+                  width={90}
+                  className="text-xs"
+                  stroke="hsl(var(--muted-foreground))"
+                />
+                <Bar dataKey="value" radius={4}>
+                  <LabelList
+                    dataKey="value"
+                    position="right"
+                    className="fill-foreground text-xs"
+                    formatter={(v: number) => formatFull(v)}
+                  />
+                  {gaugeData.map((slice) => (
+                    <Cell key={slice.id} fill={slice.color} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ChartContainer>
           )}
-        </CardContent>
-      </Card>
+        </ChartCard>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div>
+              <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
+              <CardDescription>
+                <button
+                  type="button"
+                  aria-pressed={showLatest}
+                  className="text-xs font-medium text-primary hover:underline"
+                  onClick={() => setShowLatest((v) => !v)}
+                >
+                  {showLatest ? 'Show this month' : 'Show latest'}
+                </button>
+              </CardDescription>
+            </div>
+            <Button variant="outline" size="sm" asChild>
+              <Link to="/transactions">View All</Link>
+            </Button>
+          </CardHeader>
+          <CardContent>
+            {recentTransactions.length === 0 ? (
+              <div className="flex items-center justify-center p-8 text-sm text-muted-foreground">
+                No transactions yet.
+              </div>
+            ) : (
+              <Table>
+                <TableBody>
+                  {recentTransactions.map((tx) => {
+                    const color = getCategoryColorVar({ id: tx.category_id });
+                    return (
+                      <TableRow key={tx.id}>
+                        <TableCell className="w-10">
+                          <div
+                            className="flex size-10 items-center justify-center rounded-lg"
+                            style={{
+                              backgroundColor: `color-mix(in srgb, ${color} 15%, transparent)`,
+                            }}
+                          >
+                            <span className="text-xs font-medium" style={{ color }}>
+                              {tx.category_name?.[0]?.toUpperCase() ?? '?'}
+                            </span>
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-col">
+                            <span className="font-medium">{tx.description}</span>
+                            <span className="text-sm text-muted-foreground">{tx.category_name}</span>
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-sm text-muted-foreground">
+                          {tx.date}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <span
+                            className={cn(
+                              'text-sm font-semibold tabular-nums',
+                              tx.category_type === 'income' && 'text-emerald-500',
+                            )}
+                          >
+                            {tx.category_type === 'income' ? '+' : '-'}
+                            {formatFull(tx.amount)}
+                          </span>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
 }
