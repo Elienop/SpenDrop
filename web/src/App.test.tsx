@@ -53,9 +53,11 @@ vi.mock('recharts', () => ({
   Tooltip: () => <div />,
   Legend: () => <div />,
   CartesianGrid: () => <div />,
-  PieChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Pie: () => <div />,
-  Cell: () => <div />,
+  RadialBarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  RadialBar: () => <div />,
+  PolarGrid: () => <div />,
+  PolarRadiusAxis: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  Label: () => <div />,
 }));
 
 import { useAuth } from './hooks/useAuth';

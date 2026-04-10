@@ -6,9 +6,11 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  PieChart,
-  Pie,
-  Cell,
+  RadialBarChart,
+  RadialBar,
+  PolarGrid,
+  PolarRadiusAxis,
+  Label as RechartsLabel,
 } from 'recharts';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
@@ -82,8 +84,7 @@ const cashFlowConfig: ChartConfig = {
 };
 
 const savingsConfig: ChartConfig = {
-  filled: { label: 'Saved', color: 'hsl(var(--primary))' },
-  rest: { label: 'Remaining', color: 'hsl(var(--muted))' },
+  savings: { label: 'Progress', color: 'hsl(var(--primary))' },
 };
 
 /* ── Component ── */
@@ -182,6 +183,14 @@ export function Dashboard() {
     }, {});
   }, [gaugeData]);
 
+  const radialCategoryData = useMemo(() => {
+    const point: Record<string, number> = {};
+    for (const slice of gaugeData) {
+      point[`cat-${slice.id}`] = slice.value;
+    }
+    return [point];
+  }, [gaugeData]);
+
   const savingsRate = totalIncome > 0
     ? ((totalIncome - totalExpense) / totalIncome * 100)
     : 0;
@@ -211,10 +220,7 @@ export function Dashboard() {
   const expenseSplit = splitCurrency(totalExpense);
 
   const savingsGoalPct = summary?.savings_goal_progress ?? 0;
-  const savingsData = useMemo(() => [
-    { name: 'filled', value: savingsGoalPct },
-    { name: 'rest', value: Math.max(0, 100 - savingsGoalPct) },
-  ], [savingsGoalPct]);
+  const savingsEndAngle = 90 - (360 * Math.min(savingsGoalPct, 100) / 100);
 
   /* ── Loading state ── */
   if (loading) {
@@ -406,26 +412,55 @@ export function Dashboard() {
             <div className="flex flex-1 flex-col gap-4 md:flex-row md:items-center">
               <ChartContainer
                 config={categoryChartConfig}
-                className="h-48 w-full md:w-1/2"
+                className="mx-auto aspect-square w-full max-w-[250px] md:w-1/2"
               >
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <ChartTooltip content={<ChartTooltipContent hideLabel />} />
-                    <Pie
-                      data={gaugeData}
-                      dataKey="value"
-                      nameKey="name"
-                      innerRadius={60}
-                      outerRadius={90}
-                      paddingAngle={2}
-                      strokeWidth={0}
-                    >
-                      {gaugeData.map((slice) => (
-                        <Cell key={slice.id} fill={slice.color} />
-                      ))}
-                    </Pie>
-                  </PieChart>
-                </ResponsiveContainer>
+                <RadialBarChart
+                  data={radialCategoryData}
+                  endAngle={180}
+                  innerRadius={80}
+                  outerRadius={130}
+                >
+                  <ChartTooltip
+                    cursor={false}
+                    content={<ChartTooltipContent hideLabel />}
+                  />
+                  {gaugeData.map((slice) => (
+                    <RadialBar
+                      key={slice.id}
+                      dataKey={`cat-${slice.id}`}
+                      stackId="a"
+                      fill={slice.color}
+                      cornerRadius={5}
+                      className="stroke-transparent stroke-2"
+                    />
+                  ))}
+                  <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+                    <RechartsLabel
+                      content={({ viewBox }) => {
+                        if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                          return (
+                            <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle">
+                              <tspan
+                                x={viewBox.cx}
+                                y={(viewBox.cy || 0) - 16}
+                                className="fill-foreground text-2xl font-bold"
+                              >
+                                {formatFull(totalCategorySpent)}
+                              </tspan>
+                              <tspan
+                                x={viewBox.cx}
+                                y={(viewBox.cy || 0) + 4}
+                                className="fill-muted-foreground text-sm"
+                              >
+                                Total Spent
+                              </tspan>
+                            </text>
+                          );
+                        }
+                      }}
+                    />
+                  </PolarRadiusAxis>
+                </RadialBarChart>
               </ChartContainer>
               <ul className="flex flex-1 flex-col gap-2 md:w-1/2">
                 {gaugeData.map((slice) => {
@@ -523,31 +558,55 @@ export function Dashboard() {
         subtitle={`${savingsGoalPct.toFixed(0)}% of goal`}
       >
         <div className="flex flex-col items-center gap-6 md:flex-row md:justify-around">
-          <ChartContainer config={savingsConfig} className="h-48 w-48">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={savingsData}
-                  dataKey="value"
-                  nameKey="name"
-                  innerRadius={60}
-                  outerRadius={88}
-                  strokeWidth={0}
-                  startAngle={90}
-                  endAngle={-270}
-                >
-                  <Cell fill="hsl(var(--primary))" />
-                  <Cell fill="hsl(var(--muted))" />
-                </Pie>
-              </PieChart>
-            </ResponsiveContainer>
+          <ChartContainer config={savingsConfig} className="mx-auto aspect-square max-h-[200px]">
+            <RadialBarChart
+              data={[{ name: 'savings', value: savingsGoalPct, fill: 'var(--color-savings)' }]}
+              startAngle={90}
+              endAngle={savingsEndAngle}
+              innerRadius={65}
+              outerRadius={95}
+            >
+              <PolarGrid
+                gridType="circle"
+                radialLines={false}
+                stroke="none"
+                className="first:fill-muted last:fill-background"
+                polarRadius={[86, 74]}
+              />
+              <RadialBar dataKey="value" background cornerRadius={10} />
+              <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+                <RechartsLabel
+                  content={({ viewBox }) => {
+                    if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                      return (
+                        <text
+                          x={viewBox.cx}
+                          y={viewBox.cy}
+                          textAnchor="middle"
+                          dominantBaseline="middle"
+                        >
+                          <tspan
+                            x={viewBox.cx}
+                            y={viewBox.cy}
+                            className="fill-foreground text-4xl font-bold"
+                          >
+                            {savingsGoalPct.toFixed(0)}%
+                          </tspan>
+                          <tspan
+                            x={viewBox.cx}
+                            y={(viewBox.cy || 0) + 24}
+                            className="fill-muted-foreground"
+                          >
+                            of goal
+                          </tspan>
+                        </text>
+                      );
+                    }
+                  }}
+                />
+              </PolarRadiusAxis>
+            </RadialBarChart>
           </ChartContainer>
-          <div className="flex flex-col items-center gap-1 text-center">
-            <div className="font-mono text-3xl font-bold tracking-tight tabular-nums">
-              {savingsGoalPct.toFixed(0)}%
-            </div>
-            <div className="text-xs text-muted-foreground">of goal</div>
-          </div>
           <div className="flex gap-8">
             <div className="text-center">
               <div className="font-mono text-base font-semibold tabular-nums">
