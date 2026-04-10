@@ -556,68 +556,67 @@ export function Dashboard() {
         title="Savings Progress"
         subtitle={`${savingsGoalPct.toFixed(0)}% of goal`}
       >
-        <div className="flex flex-col items-center gap-6 md:flex-row md:justify-around">
-          <ChartContainer config={savingsConfig} className="h-48 w-48">
-            <RadialBarChart
-              data={[{ name: 'savings', value: savingsGoalPct, fill: 'var(--color-savings)' }]}
-              endAngle={(Math.min(savingsGoalPct, 100) / 100) * 360}
-              innerRadius={65}
-              outerRadius={95}
-            >
-              <PolarGrid
-                gridType="circle"
-                radialLines={false}
-                stroke="none"
-                className="first:fill-muted last:fill-background"
-                polarRadius={[86, 74]}
-              />
-              <RadialBar dataKey="value" cornerRadius={10} />
-              <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
-                <RechartsLabel
-                  content={({ viewBox }) => {
-                    if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                      return (
-                        <text
+        <ChartContainer config={savingsConfig} className="mx-auto aspect-square max-h-[250px]">
+          <RadialBarChart
+            data={[{ name: 'savings', value: savingsGoalPct, fill: 'var(--color-savings)' }]}
+            startAngle={0}
+            endAngle={(Math.max(0, Math.min(savingsGoalPct, 100)) / 100) * 360}
+            innerRadius={80}
+            outerRadius={90}
+          >
+            <PolarGrid
+              gridType="circle"
+              radialLines={false}
+              stroke="none"
+              className="first:fill-muted last:fill-background"
+              polarRadius={[90, 80]}
+            />
+            <RadialBar dataKey="value" background cornerRadius={10} />
+            <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+              <RechartsLabel
+                content={({ viewBox }) => {
+                  if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                    return (
+                      <text
+                        x={viewBox.cx}
+                        y={viewBox.cy}
+                        textAnchor="middle"
+                        dominantBaseline="middle"
+                      >
+                        <tspan
                           x={viewBox.cx}
                           y={viewBox.cy}
-                          textAnchor="middle"
-                          dominantBaseline="middle"
+                          className="fill-foreground text-4xl font-bold"
                         >
-                          <tspan
-                            x={viewBox.cx}
-                            y={viewBox.cy}
-                            className="fill-foreground text-4xl font-bold"
-                          >
-                            {savingsGoalPct.toFixed(0)}%
-                          </tspan>
-                          <tspan
-                            x={viewBox.cx}
-                            y={(viewBox.cy || 0) + 24}
-                            className="fill-muted-foreground"
-                          >
-                            of goal
-                          </tspan>
-                        </text>
-                      );
-                    }
-                  }}
-                />
-              </PolarRadiusAxis>
-            </RadialBarChart>
-          </ChartContainer>
-          <div className="flex gap-8">
-            <div className="text-center">
-              <div className="font-mono text-base font-semibold tabular-nums">
-                {formatFull(summary?.savings_ytd ?? 0)}
-              </div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Saved YTD</div>
+                          {savingsGoalPct.toFixed(0)}%
+                        </tspan>
+                        <tspan
+                          x={viewBox.cx}
+                          y={(viewBox.cy || 0) + 24}
+                          className="fill-muted-foreground"
+                        >
+                          of goal
+                        </tspan>
+                      </text>
+                    );
+                  }
+                }}
+              />
+            </PolarRadiusAxis>
+          </RadialBarChart>
+        </ChartContainer>
+        <div className="flex items-center justify-center gap-8 pb-2">
+          <div className="text-center">
+            <div className="font-mono text-base font-semibold tabular-nums">
+              {formatFull(summary?.savings_ytd ?? 0)}
             </div>
-            <div className="text-center">
-              <div className="font-mono text-base font-semibold tabular-nums">
-                {formatFull(summary?.savings_goal ?? 0)}
-              </div>
-              <div className="mt-0.5 text-xs text-muted-foreground">Annual Goal</div>
+            <div className="mt-0.5 text-xs text-muted-foreground">Saved YTD</div>
+          </div>
+          <div className="text-center">
+            <div className="font-mono text-base font-semibold tabular-nums">
+              {formatFull(summary?.savings_goal ?? 0)}
             </div>
+            <div className="mt-0.5 text-xs text-muted-foreground">Annual Goal</div>
           </div>
         </div>
       </ChartCard>
