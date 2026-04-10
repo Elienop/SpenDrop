@@ -91,6 +91,9 @@ const cashFlowConfig: ChartConfig = {
   expense: { label: 'Expense', color: 'hsl(var(--primary) / 0.35)' },
 };
 
+/** Number of categories shown in the collapsed "Spending by Category" card. */
+const CATEGORY_COLLAPSED_LIMIT = 6;
+
 /* ── Component ── */
 
 export function Dashboard() {
@@ -114,6 +117,7 @@ export function Dashboard() {
   );
   const [recentTransactions, setRecentTransactions] = useState<Transaction[]>([]);
   const [showLatest, setShowLatest] = useState(false);
+  const [categoriesExpanded, setCategoriesExpanded] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -160,28 +164,19 @@ export function Dashboard() {
 
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
 
+  const hasMoreCategories = categories.length > CATEGORY_COLLAPSED_LIMIT;
+
   const gaugeData = useMemo(() => {
-    const topCats = categories.slice(0, 5);
-    const otherTotal = categories
-      .slice(5)
-      .reduce((sum, cat) => sum + cat.total, 0);
-    return [
-      ...topCats.map((cat) => ({
-        id: cat.id,
-        name: cat.name,
-        value: cat.total,
-        color: getCategoryColorVar({ id: cat.id }),
-      })),
-      ...(otherTotal > 0
-        ? [{
-            id: -1,
-            name: 'Other',
-            value: otherTotal,
-            color: 'hsl(var(--muted-foreground))',
-          }]
-        : []),
-    ];
-  }, [categories]);
+    const visibleCats = categoriesExpanded
+      ? categories
+      : categories.slice(0, CATEGORY_COLLAPSED_LIMIT);
+    return visibleCats.map((cat) => ({
+      id: cat.id,
+      name: cat.name,
+      value: cat.total,
+      color: getCategoryColorVar({ id: cat.id }),
+    }));
+  }, [categories, categoriesExpanded]);
 
   const savingsRate = totalIncome > 0
     ? ((totalIncome - totalExpense) / totalIncome * 100)
@@ -428,6 +423,16 @@ export function Dashboard() {
                     </div>
                   );
                 })}
+                {hasMoreCategories && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="w-full"
+                    onClick={() => setCategoriesExpanded((prev) => !prev)}
+                  >
+                    {categoriesExpanded ? 'Show less' : 'Show more'}
+                  </Button>
+                )}
               </div>
             )}
           </CardContent>
