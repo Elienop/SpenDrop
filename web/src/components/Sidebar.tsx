@@ -93,7 +93,7 @@ export function Sidebar() {
           aria-label="Primary"
         >
           {/* Menu group — matches SidebarGroup: p-2 */}
-          <div className="flex flex-col gap-0.5 p-2">
+          <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
             <SidebarSectionTitle expanded={expanded} title="Menu" />
             {menuItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
@@ -101,7 +101,7 @@ export function Sidebar() {
           </div>
 
           {/* General group */}
-          <div className="flex flex-col gap-0.5 p-2">
+          <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
             <SidebarSectionTitle expanded={expanded} title="General" />
             {generalItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
@@ -165,7 +165,7 @@ function SidebarSectionTitle({
   return (
     <p
       className={cn(
-        'px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
+        'h-8 px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
         expanded ? 'pb-1' : '-mt-8 opacity-0',
       )}
     >
