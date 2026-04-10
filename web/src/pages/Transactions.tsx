@@ -274,6 +274,7 @@ interface SortableHeaderProps {
   label: string;
   column: SortColumn;
   onSort: (column: SortColumn) => void;
+  align?: 'left' | 'right';
   className?: string;
 }
 
@@ -281,12 +282,15 @@ function SortableHeader({
   label,
   column,
   onSort,
+  align = 'left',
   className,
 }: SortableHeaderProps) {
   return (
-    <TableHead className={className}>
+    <TableHead className={cn(align === 'right' ? 'text-right' : undefined, className)}>
       <Button
         variant="ghost"
+        size="sm"
+        className={cn('h-8', align === 'right' ? '-mr-3' : '-ml-3')}
         onClick={() => onSort(column)}
       >
         {label}
@@ -533,15 +537,15 @@ export function Transactions() {
             onPerPageChange={setPerPage}
           />
 
-          <Table>
+          <Table className="table-fixed">
             <TableHeader>
               <TableRow>
-                <SortableHeader label="Date" column="date" onSort={setSort} />
+                <SortableHeader label="Date" column="date" onSort={setSort} className="w-[120px]" />
                 <SortableHeader label="Description" column="description" onSort={setSort} />
-                <SortableHeader label="Category" column="category" onSort={setSort} />
-                <SortableHeader label="Tags" column="tags" onSort={setSort} />
-                <SortableHeader label="Amount" column="amount" onSort={setSort} className="justify-end" />
-                <TableHead className="w-10 text-right">
+                <SortableHeader label="Category" column="category" onSort={setSort} className="w-[180px]" />
+                <SortableHeader label="Tags" column="tags" onSort={setSort} className="w-[140px]" />
+                <SortableHeader label="Amount" column="amount" onSort={setSort} align="right" className="w-[140px]" />
+                <TableHead className="w-12 text-right">
                   <span className="sr-only">Actions</span>
                 </TableHead>
               </TableRow>
