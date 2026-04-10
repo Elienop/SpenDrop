@@ -30,7 +30,7 @@ export function AppShell() {
         className={
           sidebarExpanded
             ? 'flex-1 max-w-[1640px] py-8 pr-10 pl-[calc(240px+2.5rem)]'
-            : 'flex-1 max-w-[1464px] py-8 pr-10 pl-[calc(64px+2.5rem)]'
+            : 'flex-1 max-w-[1464px] py-8 pr-10 pl-[calc(48px+2.5rem)]'
         }
       >
         <Routes>

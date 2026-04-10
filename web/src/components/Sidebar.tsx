@@ -54,8 +54,8 @@ export function Sidebar() {
       <aside
         role="complementary"
         className={cn(
-          'fixed left-0 top-0 flex h-screen flex-col border-r border-border bg-card transition-[width] duration-150',
-          expanded ? 'w-60' : 'w-16',
+          'fixed left-0 top-0 flex h-screen flex-col border-r border-border bg-card transition-[width] duration-200 ease-linear',
+          expanded ? 'w-60' : 'w-12',
         )}
       >
         <div
@@ -85,24 +85,13 @@ export function Sidebar() {
         </div>
 
         <ScrollArea className="flex-1">
-          <nav
-            className={cn(
-              'flex flex-col gap-6 px-2 py-4',
-              !expanded && 'items-center',
-            )}
-            aria-label="Primary"
-          >
+          <nav className="flex flex-col gap-6 px-2 py-4" aria-label="Primary">
             <SidebarSection
               title="Menu"
               items={menuItems}
               expanded={expanded}
             />
-            <div
-              className={cn(
-                'flex flex-col gap-1',
-                expanded ? 'w-full' : 'items-center',
-              )}
-            >
+            <div className="flex flex-col gap-1">
               <SidebarSectionTitle expanded={expanded} title="General" />
               {generalItems.map((item) => (
                 <SidebarLink key={item.path} item={item} expanded={expanded} />
@@ -168,12 +157,7 @@ function SidebarSection({
   expanded: boolean;
 }) {
   return (
-    <div
-      className={cn(
-        'flex flex-col gap-1',
-        expanded ? 'w-full' : 'items-center',
-      )}
-    >
+    <div className="flex flex-col gap-1">
       <SidebarSectionTitle expanded={expanded} title={title} />
       {items.map((item) => (
         <SidebarLink key={item.path} item={item} expanded={expanded} />
