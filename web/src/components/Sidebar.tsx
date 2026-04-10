@@ -85,13 +85,24 @@ export function Sidebar() {
         </div>
 
         <ScrollArea className="flex-1">
-          <nav className="flex flex-col gap-6 px-2 py-4" aria-label="Primary">
+          <nav
+            className={cn(
+              'flex flex-col gap-6 px-2 py-4',
+              !expanded && 'items-center',
+            )}
+            aria-label="Primary"
+          >
             <SidebarSection
               title="Menu"
               items={menuItems}
               expanded={expanded}
             />
-            <div className="flex flex-col gap-1">
+            <div
+              className={cn(
+                'flex flex-col gap-1',
+                expanded ? 'w-full' : 'items-center',
+              )}
+            >
               <SidebarSectionTitle expanded={expanded} title="General" />
               {generalItems.map((item) => (
                 <SidebarLink key={item.path} item={item} expanded={expanded} />
@@ -104,8 +115,8 @@ export function Sidebar() {
                     className={cn(
                       'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
                       expanded
-                        ? 'mx-1 gap-3 px-3 py-2'
-                        : 'mx-auto h-9 w-9 justify-center',
+                        ? 'gap-3 px-3 py-2'
+                        : 'h-8 w-8 justify-center p-2',
                     )}
                   >
                     <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
@@ -157,7 +168,12 @@ function SidebarSection({
   expanded: boolean;
 }) {
   return (
-    <div className="flex flex-col gap-1">
+    <div
+      className={cn(
+        'flex flex-col gap-1',
+        expanded ? 'w-full' : 'items-center',
+      )}
+    >
       <SidebarSectionTitle expanded={expanded} title={title} />
       {items.map((item) => (
         <SidebarLink key={item.path} item={item} expanded={expanded} />
@@ -198,8 +214,8 @@ function SidebarLink({
           'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
           isActive && 'bg-muted text-foreground',
           expanded
-            ? 'mx-1 gap-3 px-3 py-2'
-            : 'mx-auto h-9 w-9 justify-center',
+            ? 'gap-3 px-3 py-2'
+            : 'h-8 w-8 justify-center p-2',
         )
       }
     >
