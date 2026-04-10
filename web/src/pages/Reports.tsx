@@ -226,6 +226,16 @@ export function Reports() {
           {yoy.data && (
             <ChartContainer config={yoyConfig} className="h-[300px] w-full">
               <BarChart data={yoyData}>
+                <defs>
+                  <linearGradient id="fillYoyCurrent" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--color-currentExpenses)" stopOpacity={0.8} />
+                    <stop offset="95%" stopColor="var(--color-currentExpenses)" stopOpacity={0.1} />
+                  </linearGradient>
+                  <linearGradient id="fillYoyPrevious" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="var(--color-previousExpenses)" stopOpacity={0.8} />
+                    <stop offset="95%" stopColor="var(--color-previousExpenses)" stopOpacity={0.1} />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid
                   strokeDasharray="3 3"
                   stroke="hsl(var(--border))"
@@ -250,12 +260,16 @@ export function Reports() {
                 <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="currentExpenses"
-                  fill="var(--color-currentExpenses)"
+                  fill="url(#fillYoyCurrent)"
+                  stroke="var(--color-currentExpenses)"
+                  strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
                 <Bar
                   dataKey="previousExpenses"
-                  fill="var(--color-previousExpenses)"
+                  fill="url(#fillYoyPrevious)"
+                  stroke="var(--color-previousExpenses)"
+                  strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
               </BarChart>
@@ -301,6 +315,16 @@ export function Reports() {
                 className="h-[300px] w-full"
               >
                 <BarChart data={incExpData}>
+                  <defs>
+                    <linearGradient id="fillIncExpIncome" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="var(--color-income)" stopOpacity={0.8} />
+                      <stop offset="95%" stopColor="var(--color-income)" stopOpacity={0.1} />
+                    </linearGradient>
+                    <linearGradient id="fillIncExpExpenses" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="var(--color-expenses)" stopOpacity={0.8} />
+                      <stop offset="95%" stopColor="var(--color-expenses)" stopOpacity={0.1} />
+                    </linearGradient>
+                  </defs>
                   <CartesianGrid
                     strokeDasharray="3 3"
                     stroke="hsl(var(--border))"
@@ -325,12 +349,16 @@ export function Reports() {
                   <ChartLegend content={<ChartLegendContent />} />
                   <Bar
                     dataKey="income"
-                    fill="var(--color-income)"
+                    fill="url(#fillIncExpIncome)"
+                    stroke="var(--color-income)"
+                    strokeOpacity={0.3}
                     radius={[4, 4, 0, 0]}
                   />
                   <Bar
                     dataKey="expenses"
-                    fill="var(--color-expenses)"
+                    fill="url(#fillIncExpExpenses)"
+                    stroke="var(--color-expenses)"
+                    strokeOpacity={0.3}
                     radius={[4, 4, 0, 0]}
                   />
                 </BarChart>

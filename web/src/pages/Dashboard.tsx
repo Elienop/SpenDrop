@@ -354,6 +354,16 @@ export function Dashboard() {
         <ChartContainer config={cashFlowConfig} className="h-64 w-full">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
+              <defs>
+                <linearGradient id="fillIncome" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-income)" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="var(--color-income)" stopOpacity={0.1} />
+                </linearGradient>
+                <linearGradient id="fillExpense" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="var(--color-expense)" stopOpacity={0.8} />
+                  <stop offset="95%" stopColor="var(--color-expense)" stopOpacity={0.1} />
+                </linearGradient>
+              </defs>
               <CartesianGrid
                 strokeDasharray="3 3"
                 stroke="hsl(var(--border))"
@@ -373,8 +383,8 @@ export function Dashboard() {
                 stroke="hsl(var(--muted-foreground))"
               />
               <ChartTooltip content={<ChartTooltipContent />} />
-              <Bar dataKey="income" fill="var(--color-income)" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="expense" fill="var(--color-expense)" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
+              <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </ChartContainer>
