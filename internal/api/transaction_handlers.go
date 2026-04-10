@@ -22,6 +22,7 @@ var sortColumnWhitelist = map[string]string{
 	"amount":      "t.amount",
 	"description": "t.description",
 	"category":    "c.name",
+	"tags":        "t.tags",
 }
 
 // parseSortParams extracts and validates sort_by and sort_dir from query params.

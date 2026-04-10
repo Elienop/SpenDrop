@@ -1426,3 +1426,42 @@ func TestSortByDescriptionDesc(t *testing.T) {
 		t.Errorf("expected third result 'Alpha', got %q", resp.Transactions[2].Description)
 	}
 }
+
+func TestSortByTagsAsc(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransactionWithTags(t, q, user.ID, 1, "2026-04-01", 10.0, "Item C", "zebra")
+	seedTestTransactionWithTags(t, q, user.ID, 1, "2026-04-02", 20.0, "Item A", "alpha")
+	seedTestTransactionWithTags(t, q, user.ID, 1, "2026-04-03", 30.0, "Item B", "middle")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=tags&sort_dir=asc", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Tags ASC: alpha, middle, zebra
+	if resp.Transactions[0].Tags != "alpha" {
+		t.Errorf("expected first result tags 'alpha' (tags ASC), got %q", resp.Transactions[0].Tags)
+	}
+	if resp.Transactions[1].Tags != "middle" {
+		t.Errorf("expected second result tags 'middle', got %q", resp.Transactions[1].Tags)
+	}
+	if resp.Transactions[2].Tags != "zebra" {
+		t.Errorf("expected third result tags 'zebra', got %q", resp.Transactions[2].Tags)
+	}
+}

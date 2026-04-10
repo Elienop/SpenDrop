@@ -2,8 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { format } from 'date-fns';
 import {
   AlertCircle,
-  ArrowDown,
-  ArrowUp,
   ArrowUpDown,
   ChevronLeft,
   ChevronRight,
@@ -144,6 +142,32 @@ interface PaginationBarProps {
   onPerPageChange: (perPage: number) => void;
 }
 
+/**
+ * Compute which page numbers to show between prev/next arrows.
+ * Always shows first, last, and up to 2 pages around the current page,
+ * with -1 as a sentinel for ellipsis gaps.
+ */
+function getPageNumbers(page: number, totalPages: number): number[] {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, i) => i + 1);
+  }
+  const pages = new Set<number>();
+  pages.add(1);
+  pages.add(totalPages);
+  for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) {
+    pages.add(i);
+  }
+  const sorted = [...pages].sort((a, b) => a - b);
+  const result: number[] = [];
+  for (let i = 0; i < sorted.length; i++) {
+    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
+      result.push(-1); // ellipsis
+    }
+    result.push(sorted[i]);
+  }
+  return result;
+}
+
 function PaginationBar({
   page,
   totalPages,
@@ -151,6 +175,8 @@ function PaginationBar({
   onPageChange,
   onPerPageChange,
 }: PaginationBarProps) {
+  const pageNumbers = getPageNumbers(page, totalPages);
+
   return (
     <div className="flex items-center justify-between px-4 py-3">
       <div className="flex items-center gap-2">
@@ -174,52 +200,71 @@ function PaginationBar({
         </Select>
       </div>
 
-      <div className="flex items-center gap-6 lg:gap-8">
-        <div className="flex w-[100px] items-center justify-center text-sm font-medium">
-          Page {page} of {totalPages}
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            size="icon"
-            className="hidden size-8 lg:flex"
-            onClick={() => onPageChange(1)}
-            disabled={page <= 1}
-          >
-            <span className="sr-only">Go to first page</span>
-            <ChevronsLeft />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="size-8"
-            onClick={() => onPageChange(page - 1)}
-            disabled={page <= 1}
-          >
-            <span className="sr-only">Go to previous page</span>
-            <ChevronLeft />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="size-8"
-            onClick={() => onPageChange(page + 1)}
-            disabled={page >= totalPages}
-          >
-            <span className="sr-only">Go to next page</span>
-            <ChevronRight />
-          </Button>
-          <Button
-            variant="outline"
-            size="icon"
-            className="hidden size-8 lg:flex"
-            onClick={() => onPageChange(totalPages)}
-            disabled={page >= totalPages}
-          >
-            <span className="sr-only">Go to last page</span>
-            <ChevronsRight />
-          </Button>
-        </div>
+      <div className="flex items-center gap-1">
+        <Button
+          variant="outline"
+          size="icon"
+          className="hidden size-8 lg:flex"
+          onClick={() => onPageChange(1)}
+          disabled={page <= 1}
+        >
+          <span className="sr-only">Go to first page</span>
+          <ChevronsLeft />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-8"
+          onClick={() => onPageChange(page - 1)}
+          disabled={page <= 1}
+        >
+          <span className="sr-only">Go to previous page</span>
+          <ChevronLeft />
+        </Button>
+
+        {pageNumbers.map((p, i) =>
+          p === -1 ? (
+            <span
+              key={`ellipsis-${i}`}
+              className="flex size-8 items-center justify-center text-sm text-muted-foreground"
+              aria-hidden
+            >
+              ...
+            </span>
+          ) : (
+            <Button
+              key={p}
+              variant={p === page ? 'outline' : 'ghost'}
+              size="icon"
+              className="size-8 text-xs"
+              onClick={() => onPageChange(p)}
+              aria-current={p === page ? 'page' : undefined}
+            >
+              {p}
+            </Button>
+          ),
+        )}
+
+        <Button
+          variant="outline"
+          size="icon"
+          className="size-8"
+          onClick={() => onPageChange(page + 1)}
+          disabled={page >= totalPages}
+        >
+          <span className="sr-only">Go to next page</span>
+          <ChevronRight />
+        </Button>
+        <Button
+          variant="outline"
+          size="icon"
+          className="hidden size-8 lg:flex"
+          onClick={() => onPageChange(totalPages)}
+          disabled={page >= totalPages}
+        >
+          <span className="sr-only">Go to last page</span>
+          <ChevronsRight />
+        </Button>
       </div>
     </div>
   );
@@ -228,8 +273,6 @@ function PaginationBar({
 interface SortableHeaderProps {
   label: string;
   column: SortColumn;
-  activeSortBy: SortColumn;
-  activeSortDir: 'asc' | 'desc';
   onSort: (column: SortColumn) => void;
   className?: string;
 }
@@ -237,31 +280,17 @@ interface SortableHeaderProps {
 function SortableHeader({
   label,
   column,
-  activeSortBy,
-  activeSortDir,
   onSort,
   className,
 }: SortableHeaderProps) {
-  const isActive = activeSortBy === column;
-
   return (
     <TableHead className={className}>
       <Button
         variant="ghost"
-        size="sm"
-        className="-ml-3"
         onClick={() => onSort(column)}
       >
         {label}
-        {isActive ? (
-          activeSortDir === 'asc' ? (
-            <ArrowUp className="ml-2 size-4" />
-          ) : (
-            <ArrowDown className="ml-2 size-4" />
-          )
-        ) : (
-          <ArrowUpDown className="ml-2 size-4" />
-        )}
+        <ArrowUpDown />
       </Button>
     </TableHead>
   );
@@ -285,8 +314,6 @@ export function Transactions() {
     total,
     page,
     perPage,
-    sortBy,
-    sortDir,
     filters,
     setFilter,
     clearFilters,
@@ -294,7 +321,7 @@ export function Transactions() {
     setPage,
     setPerPage,
     setSort,
-    loading,
+    initialLoad,
     error,
     createTransaction,
     updateTransaction,
@@ -490,7 +517,7 @@ export function Transactions() {
         </Alert>
       )}
 
-      {loading ? (
+      {initialLoad ? (
         <TableSkeleton />
       ) : transactions.length === 0 ? (
         <Card className="p-6 text-center text-sm text-muted-foreground">
@@ -509,36 +536,11 @@ export function Transactions() {
           <Table>
             <TableHeader>
               <TableRow>
-                <SortableHeader
-                  label="Date"
-                  column="date"
-                  activeSortBy={sortBy}
-                  activeSortDir={sortDir}
-                  onSort={setSort}
-                />
-                <SortableHeader
-                  label="Description"
-                  column="description"
-                  activeSortBy={sortBy}
-                  activeSortDir={sortDir}
-                  onSort={setSort}
-                />
-                <SortableHeader
-                  label="Category"
-                  column="category"
-                  activeSortBy={sortBy}
-                  activeSortDir={sortDir}
-                  onSort={setSort}
-                />
-                <TableHead>Tags</TableHead>
-                <SortableHeader
-                  label="Amount"
-                  column="amount"
-                  activeSortBy={sortBy}
-                  activeSortDir={sortDir}
-                  onSort={setSort}
-                  className="text-right"
-                />
+                <SortableHeader label="Date" column="date" onSort={setSort} />
+                <SortableHeader label="Description" column="description" onSort={setSort} />
+                <SortableHeader label="Category" column="category" onSort={setSort} />
+                <SortableHeader label="Tags" column="tags" onSort={setSort} />
+                <SortableHeader label="Amount" column="amount" onSort={setSort} className="justify-end" />
                 <TableHead className="w-10 text-right">
                   <span className="sr-only">Actions</span>
                 </TableHead>

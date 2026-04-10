@@ -61,7 +61,7 @@ vi.mock('../hooks/useSavedFilters', () => ({
         updated_at: '',
       },
     ],
-    loading: false,
+    initialLoad: false,
     saveFilter: mockSaveFilter,
     deleteFilter: mockDeleteFilter,
     refetch: vi.fn(),
@@ -89,7 +89,7 @@ function defaultHookReturn(overrides = {}) {
     setPage: mockSetPage,
     setPerPage: mockSetPerPage,
     setSort: mockSetSort,
-    loading: false,
+    initialLoad: false,
     error: '',
     createTransaction: vi.fn(),
     updateTransaction: vi.fn(),
@@ -424,7 +424,7 @@ describe('Transactions page', () => {
   });
 
   describe('sortable headers', () => {
-    it('renders clickable sort buttons for Date, Description, Category, Amount', () => {
+    it('renders sort dropdown trigger buttons for Date, Description, Category, Amount, Tags', () => {
       render(<Transactions />);
       const thead = screen.getAllByRole('rowgroup')[0];
       const headerScope = within(thead);
@@ -432,12 +432,7 @@ describe('Transactions page', () => {
       expect(headerScope.getByRole('button', { name: /description/i })).toBeInTheDocument();
       expect(headerScope.getByRole('button', { name: /category/i })).toBeInTheDocument();
       expect(headerScope.getByRole('button', { name: /amount/i })).toBeInTheDocument();
-    });
-
-    it('Tags header is NOT sortable (no button)', () => {
-      render(<Transactions />);
-      const thead = screen.getAllByRole('rowgroup')[0];
-      expect(within(thead).queryByRole('button', { name: /^tags$/i })).not.toBeInTheDocument();
+      expect(headerScope.getByRole('button', { name: /tags/i })).toBeInTheDocument();
     });
 
     it('calls setSort with column name when header is clicked', async () => {
@@ -448,21 +443,12 @@ describe('Transactions page', () => {
       expect(mockSetSort).toHaveBeenCalledWith('amount');
     });
 
-    it('shows active sort indicator on the sorted column', () => {
-      mockUseTransactions.mockReturnValue(
-        defaultHookReturn({ sortBy: 'amount', sortDir: 'asc' }),
-      );
-      render(<Transactions />);
-      const thead = screen.getAllByRole('rowgroup')[0];
-      const amountBtn = within(thead).getByRole('button', { name: /amount/i });
-      expect(amountBtn).toBeInTheDocument();
-    });
   });
 
   describe('loading state', () => {
-    it('renders Skeleton elements during loading', () => {
+    it('renders Skeleton elements during initial load', () => {
       mockUseTransactions.mockReturnValue(
-        defaultHookReturn({ loading: true, transactions: [] }),
+        defaultHookReturn({ initialLoad: true, transactions: [] }),
       );
       const { container } = render(<Transactions />);
       // Skeleton components have animate-pulse class

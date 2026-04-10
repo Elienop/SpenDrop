@@ -29,7 +29,7 @@ interface UpdateTransactionInput extends CreateTransactionInput {
   id: number;
 }
 
-export type SortColumn = 'date' | 'description' | 'category' | 'amount';
+export type SortColumn = 'date' | 'description' | 'category' | 'amount' | 'tags';
 export type SortDirection = 'asc' | 'desc';
 
 interface UseTransactionsResult {
@@ -46,7 +46,7 @@ interface UseTransactionsResult {
   setPage: (page: number) => void;
   setPerPage: (perPage: number) => void;
   setSort: (column: SortColumn) => void;
-  loading: boolean;
+  initialLoad: boolean;
   error: string;
   refetch: () => void;
   createTransaction: (input: CreateTransactionInput) => Promise<Transaction>;
@@ -87,7 +87,7 @@ export function useTransactions(): UseTransactionsResult {
   const [sortBy, setSortBy] = useState<SortColumn>('date');
   const [sortDir, setSortDir] = useState<SortDirection>('desc');
   const [filters, setFilters] = useState<TransactionFilters>(defaultFilters);
-  const [loading, setLoading] = useState(true);
+  const [initialLoad, setInitialLoad] = useState(true);
   const [error, setError] = useState('');
 
   const buildQuery = useCallback(() => {
@@ -112,7 +112,6 @@ export function useTransactions(): UseTransactionsResult {
   }, [page, perPage, sortBy, sortDir, filters]);
 
   const fetchTransactions = useCallback(() => {
-    setLoading(true);
     setError('');
     api
       .get<PaginatedResponse<Transaction>>(`transactions?${buildQuery()}`)
@@ -124,7 +123,7 @@ export function useTransactions(): UseTransactionsResult {
         setError(err instanceof Error ? err.message : 'Failed to load transactions');
       })
       .finally(() => {
-        setLoading(false);
+        setInitialLoad(false);
       });
   }, [buildQuery]);
 
@@ -156,14 +155,15 @@ export function useTransactions(): UseTransactionsResult {
   }, []);
 
   const setSort = useCallback((column: SortColumn) => {
-    setSortBy((prevBy) => {
-      if (prevBy === column) {
-        setSortDir((prevDir) => (prevDir === 'desc' ? 'asc' : 'desc'));
+    setSortBy((prev) => {
+      if (prev === column) {
+        setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'));
       } else {
         setSortDir('desc');
       }
       return column;
     });
+    setPage(1);
   }, []);
 
   const clearPanelFilters = useCallback(() => {
@@ -220,7 +220,7 @@ export function useTransactions(): UseTransactionsResult {
     setPage,
     setPerPage,
     setSort,
-    loading,
+    initialLoad,
     error,
     refetch: fetchTransactions,
     createTransaction,
