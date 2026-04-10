@@ -34,6 +34,7 @@ import {
   useTopMerchants,
 } from '../hooks/useReports';
 import { getCategoryColorVar } from '@/lib/chart-colors';
+import { cn } from '@/lib/utils';
 
 const MONTH_NAMES = [
   'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
@@ -57,7 +58,7 @@ function formatCurrency(amount: number): string {
 // out of the useMemo dependency graph below.
 const INCEXP_CONFIG = {
   income: { label: 'Income', color: 'hsl(var(--primary))' },
-  expenses: { label: 'Expenses', color: 'hsl(var(--muted-foreground))' },
+  expenses: { label: 'Expenses', color: 'hsl(var(--primary) / 0.35)' },
 } satisfies ChartConfig;
 
 // TODO (spec §8 commit 10): DateRangePicker and Period Tabs (This Month /
@@ -113,7 +114,7 @@ export function Reports() {
       },
       previousExpenses: {
         label: `${data.previous_year}`,
-        color: 'hsl(var(--muted-foreground))',
+        color: 'hsl(var(--primary) / 0.35)',
       },
     };
   }, [yoy.data]);
@@ -230,7 +231,7 @@ export function Reports() {
             </Alert>
           )}
           {yoy.data && (
-            <ChartContainer config={yoyConfig} className="h-[300px] w-full">
+            <ChartContainer config={yoyConfig} className={cn("h-[300px] w-full transition-opacity duration-200", yoy.fetching && !yoy.loading && "opacity-60")}>
               <BarChart data={yoyData}>
                 <defs>
                   <linearGradient id="fillYoyCurrent" x1="0" y1="0" x2="0" y2="1">
@@ -249,7 +250,7 @@ export function Reports() {
                   axisLine={false}
                   tickMargin={10}
                 />
-                <ChartTooltip content={<ChartTooltipContent />} />
+                <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
                 <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="currentExpenses"
@@ -308,7 +309,7 @@ export function Reports() {
             {!incExp.loading && !incExp.error && (
               <ChartContainer
                 config={INCEXP_CONFIG}
-                className="h-[300px] w-full"
+                className={cn("h-[300px] w-full transition-opacity duration-200", incExp.fetching && !incExp.loading && "opacity-60")}
               >
                 <BarChart data={incExpData}>
                   <defs>
@@ -328,7 +329,7 @@ export function Reports() {
                     axisLine={false}
                     tickMargin={10}
                   />
-                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
                   <ChartLegend content={<ChartLegendContent />} />
                   <Bar
                     dataKey="income"
@@ -370,7 +371,7 @@ export function Reports() {
             {!catTrends.loading && !catTrends.error && (
               <ChartContainer
                 config={catTrendConfig}
-                className="h-[300px] w-full"
+                className={cn("h-[300px] w-full transition-opacity duration-200", catTrends.fetching && !catTrends.loading && "opacity-60")}
               >
                 <LineChart data={catTrendData}>
                   <CartesianGrid vertical={false} />
@@ -468,7 +469,7 @@ export function Reports() {
           {!merchants.loading &&
             !merchants.error &&
             merchants.data.length > 0 && (
-              <ul className="divide-border divide-y">
+              <ul className={cn("divide-border divide-y transition-opacity duration-200", merchants.fetching && !merchants.loading && "opacity-60")}>
                 {merchants.data.map((m, i) => (
                   <li
                     key={m.description}

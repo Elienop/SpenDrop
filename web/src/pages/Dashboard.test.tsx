@@ -63,6 +63,7 @@ vi.mock('../hooks/useDashboard', () => ({
       { id: 2, name: 'Transport', total: 800 },
     ],
     loading: false,
+    fetching: false,
     error: '',
   }),
 }));

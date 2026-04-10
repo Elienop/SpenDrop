@@ -134,7 +134,7 @@ export function Sidebar() {
 
         {/* Color theme select — above footer */}
         {expanded && (
-          <div className="px-3 pb-2">
+          <div className="px-3 py-3">
             <ColorThemePicker />
           </div>
         )}

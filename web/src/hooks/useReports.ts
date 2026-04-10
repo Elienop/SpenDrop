@@ -10,64 +10,68 @@ import type {
 export function useYearOverYear(year: number) {
   const [data, setData] = useState<YoYResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setLoading(true);
+    setFetching(true);
     setError('');
     api
       .get<YoYResponse>(`reports/year-over-year?year=${year}`)
       .then(setData)
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
-      .finally(() => setLoading(false));
+      .finally(() => { setLoading(false); setFetching(false); });
   }, [year]);
 
-  return { data, loading, error };
+  return { data, loading, fetching, error };
 }
 
 export function useCategoryTrends(months: number) {
   const [data, setData] = useState<CategoryTrendEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setLoading(true);
+    setFetching(true);
     setError('');
     api
       .get<{ categories: CategoryTrendEntry[] }>(`reports/category-trends?months=${months}`)
       .then((res) => setData(res.categories))
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
-      .finally(() => setLoading(false));
+      .finally(() => { setLoading(false); setFetching(false); });
   }, [months]);
 
-  return { data, loading, error };
+  return { data, loading, fetching, error };
 }
 
 export function useIncomeExpenses(months: number) {
   const [data, setData] = useState<IncomeExpenseEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setLoading(true);
+    setFetching(true);
     setError('');
     api
       .get<{ data: IncomeExpenseEntry[] }>(`reports/income-expenses?months=${months}`)
       .then((res) => setData(res.data))
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
-      .finally(() => setLoading(false));
+      .finally(() => { setLoading(false); setFetching(false); });
   }, [months]);
 
-  return { data, loading, error };
+  return { data, loading, fetching, error };
 }
 
 export function useTopMerchants(year: number, month: number, limit = 10) {
   const [data, setData] = useState<TopMerchantEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setLoading(true);
+    setFetching(true);
     setError('');
     api
       .get<{ merchants: TopMerchantEntry[] }>(
@@ -75,8 +79,8 @@ export function useTopMerchants(year: number, month: number, limit = 10) {
       )
       .then((res) => setData(res.merchants))
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load'))
-      .finally(() => setLoading(false));
+      .finally(() => { setLoading(false); setFetching(false); });
   }, [year, month, limit]);
 
-  return { data, loading, error };
+  return { data, loading, fetching, error };
 }

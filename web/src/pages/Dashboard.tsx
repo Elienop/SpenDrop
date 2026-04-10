@@ -97,10 +97,19 @@ const cashFlowConfig: ChartConfig = {
 export function Dashboard() {
   const { user } = useAuth();
   const now = new Date();
-  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
-  const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState(() => {
+    const stored = localStorage.getItem('spendrop-dash-year');
+    return stored ? Number(stored) : now.getFullYear();
+  });
+  const [selectedMonth, setSelectedMonth] = useState(() => {
+    const stored = localStorage.getItem('spendrop-dash-month');
+    return stored ? Number(stored) : now.getMonth() + 1;
+  });
+  useEffect(() => { localStorage.setItem('spendrop-dash-year', String(selectedYear)); }, [selectedYear]);
+  useEffect(() => { localStorage.setItem('spendrop-dash-month', String(selectedMonth)); }, [selectedMonth]);
+
   const [cashFlowView, setCashFlowView] = useState<CashFlowView>('6m');
-  const { summary, trend, categories, loading, error } = useDashboard(
+  const { summary, trend, categories, loading, fetching, error } = useDashboard(
     selectedYear,
     selectedMonth,
   );
@@ -248,8 +257,10 @@ export function Dashboard() {
   }
 
   /* ── Render ── */
+  const refetching = fetching && !loading;
+
   return (
-    <div className="flex flex-col gap-6">
+    <div className={cn('flex flex-col gap-6 transition-opacity duration-200', refetching && 'opacity-60')}>
       {/* Header */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
@@ -366,7 +377,7 @@ export function Dashboard() {
               axisLine={false}
               tickMargin={10}
             />
-            <ChartTooltip content={<ChartTooltipContent />} />
+            <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
             <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
             <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
           </BarChart>

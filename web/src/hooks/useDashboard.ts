@@ -10,7 +10,10 @@ interface UseDashboardResult {
   summary: DashboardSummary | null;
   trend: DashboardTrendItem[];
   categories: CategoryBreakdownItem[];
+  /** True only on the very first load (no data yet). */
   loading: boolean;
+  /** True during any fetch (including refetches). */
+  fetching: boolean;
   error: string;
 }
 
@@ -22,10 +25,11 @@ export function useDashboard(
   const [trend, setTrend] = useState<DashboardTrendItem[]>([]);
   const [categories, setCategories] = useState<CategoryBreakdownItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    setLoading(true);
+    setFetching(true);
     setError('');
 
     const params =
@@ -48,8 +52,9 @@ export function useDashboard(
       })
       .finally(() => {
         setLoading(false);
+        setFetching(false);
       });
   }, [year, month]);
 
-  return { summary, trend, categories, loading, error };
+  return { summary, trend, categories, loading, fetching, error };
 }
