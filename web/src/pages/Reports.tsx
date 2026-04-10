@@ -204,7 +204,7 @@ export function Reports() {
           >
             <SelectTrigger
               aria-label="Year-over-Year Year"
-              className="w-[180px]"
+              className="h-9 w-[180px]"
             >
               <SelectValue />
             </SelectTrigger>
@@ -294,7 +294,7 @@ export function Reports() {
               value={String(trendMonths)}
               onValueChange={(v) => setTrendMonths(Number(v))}
             >
-              <SelectTrigger aria-label="Time Period" className="w-[140px]">
+              <SelectTrigger aria-label="Time Period" className="h-9 w-[140px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -447,7 +447,7 @@ export function Reports() {
             >
               <SelectTrigger
                 aria-label="Merchant Month"
-                className="w-[140px]"
+                className="h-9 w-[140px]"
               >
                 <SelectValue />
               </SelectTrigger>
@@ -465,7 +465,7 @@ export function Reports() {
             >
               <SelectTrigger
                 aria-label="Merchant Year"
-                className="w-[120px]"
+                className="h-9 w-[120px]"
               >
                 <SelectValue />
               </SelectTrigger>
