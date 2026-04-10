@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -70,17 +70,25 @@ vi.mock('../hooks/useSavedFilters', () => ({
 
 import { Transactions } from './Transactions';
 
+const mockSetPage = vi.fn();
+const mockSetPerPage = vi.fn();
+const mockSetSort = vi.fn();
+
 function defaultHookReturn(overrides = {}) {
   return {
     transactions: [defaultTransaction],
     total: 1,
     page: 1,
     perPage: 20,
+    sortBy: 'date' as const,
+    sortDir: 'desc' as const,
     filters: { ...defaultFilters },
     setFilter: mockSetFilter,
     clearFilters: mockClearFilters,
     clearPanelFilters: mockClearPanelFilters,
-    setPage: vi.fn(),
+    setPage: mockSetPage,
+    setPerPage: mockSetPerPage,
+    setSort: mockSetSort,
     loading: false,
     error: '',
     createTransaction: vi.fn(),
@@ -369,8 +377,107 @@ describe('Transactions page', () => {
     it('renders a Tags column header in the table', () => {
       render(<Transactions />);
       const headers = screen.getAllByRole('columnheader');
-      const tagsHeader = headers.find((h) => h.textContent === 'Tags');
+      const tagsHeader = headers.find((h) => h.textContent?.includes('Tags'));
       expect(tagsHeader).toBeDefined();
+    });
+  });
+
+  describe('pagination bar', () => {
+    it('renders rows per page select with options 10, 20, 50, 100', () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ total: 100 }),
+      );
+      render(<Transactions />);
+      // Should have "Rows per page" label
+      const labels = screen.getAllByText('Rows per page');
+      expect(labels.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('renders pagination bar both above and below the table', () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ total: 100 }),
+      );
+      render(<Transactions />);
+      // Both top and bottom should have "Rows per page" text
+      const labels = screen.getAllByText('Rows per page');
+      expect(labels).toHaveLength(2);
+    });
+
+    it('calls setPerPage when rows per page changes', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ total: 100 }),
+      );
+      render(<Transactions />);
+
+      // Find the first select trigger (rows per page)
+      const triggers = screen.getAllByRole('combobox');
+      expect(triggers.length).toBeGreaterThanOrEqual(1);
+      await user.click(triggers[0]);
+
+      // Click the "50" option
+      const option50 = screen.getByRole('option', { name: '50' });
+      await user.click(option50);
+
+      expect(mockSetPerPage).toHaveBeenCalledWith(50);
+    });
+  });
+
+  describe('sortable headers', () => {
+    it('renders clickable sort buttons for Date, Description, Category, Amount', () => {
+      render(<Transactions />);
+      const thead = screen.getAllByRole('rowgroup')[0];
+      const headerScope = within(thead);
+      expect(headerScope.getByRole('button', { name: /date/i })).toBeInTheDocument();
+      expect(headerScope.getByRole('button', { name: /description/i })).toBeInTheDocument();
+      expect(headerScope.getByRole('button', { name: /category/i })).toBeInTheDocument();
+      expect(headerScope.getByRole('button', { name: /amount/i })).toBeInTheDocument();
+    });
+
+    it('Tags header is NOT sortable (no button)', () => {
+      render(<Transactions />);
+      const thead = screen.getAllByRole('rowgroup')[0];
+      expect(within(thead).queryByRole('button', { name: /^tags$/i })).not.toBeInTheDocument();
+    });
+
+    it('calls setSort with column name when header is clicked', async () => {
+      const user = userEvent.setup();
+      render(<Transactions />);
+      const thead = screen.getAllByRole('rowgroup')[0];
+      await user.click(within(thead).getByRole('button', { name: /amount/i }));
+      expect(mockSetSort).toHaveBeenCalledWith('amount');
+    });
+
+    it('shows active sort indicator on the sorted column', () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ sortBy: 'amount', sortDir: 'asc' }),
+      );
+      render(<Transactions />);
+      const thead = screen.getAllByRole('rowgroup')[0];
+      const amountBtn = within(thead).getByRole('button', { name: /amount/i });
+      expect(amountBtn).toBeInTheDocument();
+    });
+  });
+
+  describe('loading state', () => {
+    it('renders Skeleton elements during loading', () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ loading: true, transactions: [] }),
+      );
+      const { container } = render(<Transactions />);
+      // Skeleton components have animate-pulse class
+      const skeletons = container.querySelectorAll('.animate-pulse');
+      expect(skeletons.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe('empty state', () => {
+    it('renders empty state message when no transactions', () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: [], total: 0 }),
+      );
+      render(<Transactions />);
+      expect(screen.getByText(/no transactions found/i)).toBeInTheDocument();
     });
   });
 });

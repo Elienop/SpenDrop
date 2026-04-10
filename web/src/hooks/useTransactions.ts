@@ -29,16 +29,23 @@ interface UpdateTransactionInput extends CreateTransactionInput {
   id: number;
 }
 
+export type SortColumn = 'date' | 'description' | 'category' | 'amount';
+export type SortDirection = 'asc' | 'desc';
+
 interface UseTransactionsResult {
   transactions: Transaction[];
   total: number;
   page: number;
   perPage: number;
+  sortBy: SortColumn;
+  sortDir: SortDirection;
   filters: TransactionFilters;
   setFilter: (key: keyof TransactionFilters, value: string) => void;
   clearFilters: () => void;
   clearPanelFilters: () => void;
   setPage: (page: number) => void;
+  setPerPage: (perPage: number) => void;
+  setSort: (column: SortColumn) => void;
   loading: boolean;
   error: string;
   refetch: () => void;
@@ -59,11 +66,26 @@ const defaultFilters: TransactionFilters = {
   search: '',
 };
 
+function getInitialPerPage(): number {
+  try {
+    const stored = localStorage.getItem('spendrop-tx-per-page');
+    if (stored) {
+      const parsed = Number(stored);
+      if ([10, 20, 50, 100].includes(parsed)) return parsed;
+    }
+  } catch {
+    // localStorage not available
+  }
+  return 20;
+}
+
 export function useTransactions(): UseTransactionsResult {
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [perPage] = useState(20);
+  const [perPage, setPerPageState] = useState(getInitialPerPage);
+  const [sortBy, setSortBy] = useState<SortColumn>('date');
+  const [sortDir, setSortDir] = useState<SortDirection>('desc');
   const [filters, setFilters] = useState<TransactionFilters>(defaultFilters);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -72,6 +94,8 @@ export function useTransactions(): UseTransactionsResult {
     const params = new URLSearchParams();
     params.set('page', String(page));
     params.set('per_page', String(perPage));
+    params.set('sort_by', sortBy);
+    params.set('sort_dir', sortDir);
     if (filters.dateFrom) params.set('date_from', filters.dateFrom);
     if (filters.dateTo) params.set('date_to', filters.dateTo);
     if (filters.categoryIds) {
@@ -85,7 +109,7 @@ export function useTransactions(): UseTransactionsResult {
     if (filters.type) params.set('type', filters.type);
     if (filters.search) params.set('search', filters.search);
     return params.toString();
-  }, [page, perPage, filters]);
+  }, [page, perPage, sortBy, sortDir, filters]);
 
   const fetchTransactions = useCallback(() => {
     setLoading(true);
@@ -119,6 +143,27 @@ export function useTransactions(): UseTransactionsResult {
   const clearFilters = useCallback(() => {
     setFilters(defaultFilters);
     setPage(1);
+  }, []);
+
+  const setPerPage = useCallback((value: number) => {
+    setPerPageState(value);
+    setPage(1);
+    try {
+      localStorage.setItem('spendrop-tx-per-page', String(value));
+    } catch {
+      // localStorage not available
+    }
+  }, []);
+
+  const setSort = useCallback((column: SortColumn) => {
+    setSortBy((prevBy) => {
+      if (prevBy === column) {
+        setSortDir((prevDir) => (prevDir === 'desc' ? 'asc' : 'desc'));
+      } else {
+        setSortDir('desc');
+      }
+      return column;
+    });
   }, []);
 
   const clearPanelFilters = useCallback(() => {
@@ -166,11 +211,15 @@ export function useTransactions(): UseTransactionsResult {
     total,
     page,
     perPage,
+    sortBy,
+    sortDir,
     filters,
     setFilter,
     clearFilters,
     clearPanelFilters,
     setPage,
+    setPerPage,
+    setSort,
     loading,
     error,
     refetch: fetchTransactions,

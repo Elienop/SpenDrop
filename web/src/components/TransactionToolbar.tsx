@@ -58,7 +58,7 @@ export function TransactionToolbar({
             type="button"
             variant={type === opt.value ? 'secondary' : 'outline'}
             size="sm"
-            className="text-xs"
+            className="h-8 text-xs"
             onClick={() => onTypeChange(opt.value)}
           >
             {opt.label}
@@ -72,6 +72,7 @@ export function TransactionToolbar({
         type="button"
         variant="outline"
         size="sm"
+        className="h-8 text-xs"
         onClick={onToggleFilters}
         aria-expanded={showFilters}
       >
@@ -86,6 +87,7 @@ export function TransactionToolbar({
       <Button
         type="button"
         size="sm"
+        className="h-8 text-xs"
         onClick={onToggleEntry}
         aria-expanded={showEntry}
       >

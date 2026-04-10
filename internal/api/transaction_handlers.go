@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -14,6 +15,38 @@ import (
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
 )
+
+// sortColumnWhitelist maps frontend sort_by values to safe SQL column expressions.
+var sortColumnWhitelist = map[string]string{
+	"date":        "t.date",
+	"amount":      "t.amount",
+	"description": "t.description",
+	"category":    "c.name",
+}
+
+// parseSortParams extracts and validates sort_by and sort_dir from query params.
+// Invalid or missing values fall back to "t.date" and "DESC".
+func parseSortParams(q map[string][]string) (column, dir string) {
+	column = "t.date"
+	dir = "DESC"
+
+	if vals, ok := q["sort_by"]; ok && len(vals) > 0 {
+		if col, valid := sortColumnWhitelist[vals[0]]; valid {
+			column = col
+		}
+	}
+
+	if vals, ok := q["sort_dir"]; ok && len(vals) > 0 {
+		switch strings.ToLower(vals[0]) {
+		case "asc":
+			dir = "ASC"
+		case "desc":
+			dir = "DESC"
+		}
+	}
+
+	return column, dir
+}
 
 // transactionRequest is the JSON input for creating or updating a transaction.
 type transactionRequest struct {
@@ -172,13 +205,17 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// Sorting
+	sortCol, sortDir := parseSortParams(q)
+	orderClause := fmt.Sprintf(" ORDER BY %s %s, t.id %s", sortCol, sortDir, sortDir)
+
 	// Data query
 	offset := (page - 1) * perPage
 	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
 		c.name AS category_name, c.type AS category_type
 		FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + whereClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ? OFFSET ?`
+		JOIN categories c ON t.category_id = c.id` + whereClause + orderClause + ` LIMIT ? OFFSET ?`
 
 	dataArgs := make([]any, len(args))
 	copy(dataArgs, args)

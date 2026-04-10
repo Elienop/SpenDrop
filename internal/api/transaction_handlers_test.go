@@ -1198,3 +1198,231 @@ func TestHandleListTransactions_InvalidAmountFilterIgnored(t *testing.T) {
 		t.Errorf("expected total=1 (invalid filter ignored), got %d", resp.Total)
 	}
 }
+
+// --- handleListTransactions: sort params ---
+
+func TestSortDefaultIsDateDesc(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Create transactions on different dates
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "First")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "Third")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Second")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Default sort: date DESC — Third (Apr 3), Second (Apr 2), First (Apr 1)
+	if resp.Transactions[0].Description != "Third" {
+		t.Errorf("expected first result 'Third' (date DESC default), got %q", resp.Transactions[0].Description)
+	}
+	if resp.Transactions[1].Description != "Second" {
+		t.Errorf("expected second result 'Second', got %q", resp.Transactions[1].Description)
+	}
+	if resp.Transactions[2].Description != "First" {
+		t.Errorf("expected third result 'First', got %q", resp.Transactions[2].Description)
+	}
+}
+
+func TestSortByAmountAsc(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 50.0, "Medium")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 10.0, "Small")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 99.0, "Large")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=amount&sort_dir=asc", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Amount ASC: Small (10), Medium (50), Large (99)
+	if resp.Transactions[0].Description != "Small" {
+		t.Errorf("expected first result 'Small' (amount ASC), got %q", resp.Transactions[0].Description)
+	}
+	if resp.Transactions[1].Description != "Medium" {
+		t.Errorf("expected second result 'Medium', got %q", resp.Transactions[1].Description)
+	}
+	if resp.Transactions[2].Description != "Large" {
+		t.Errorf("expected third result 'Large', got %q", resp.Transactions[2].Description)
+	}
+}
+
+func TestSortByInvalidColumnFallsBackToDate(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "First")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "Third")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Second")
+
+	// "hacked" is not in the whitelist — should fall back to date DESC
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=hacked", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Should fall back to date DESC
+	if resp.Transactions[0].Description != "Third" {
+		t.Errorf("expected first result 'Third' (fallback to date DESC), got %q", resp.Transactions[0].Description)
+	}
+}
+
+func TestSortByInvalidDirFallsBackToDesc(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "First")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "Third")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Second")
+
+	// "INVALID" is not asc/desc — should fall back to desc
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=date&sort_dir=INVALID", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Should fall back to DESC
+	if resp.Transactions[0].Description != "Third" {
+		t.Errorf("expected first result 'Third' (fallback to DESC), got %q", resp.Transactions[0].Description)
+	}
+	if resp.Transactions[2].Description != "First" {
+		t.Errorf("expected last result 'First', got %q", resp.Transactions[2].Description)
+	}
+}
+
+func TestSortByCategoryName(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Category 1 = Food, Category 2 = Gifts, Category 3 = Health/medical (from seeds)
+	seedTestTransaction(t, q, user.ID, 2, "2026-04-01", 20.0, "Gift item")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 10.0, "Food item")
+	seedTestTransaction(t, q, user.ID, 3, "2026-04-03", 30.0, "Health item")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=category&sort_dir=asc", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Category ASC: Food, Gifts, Health/medical
+	if resp.Transactions[0].CategoryName != "Food" {
+		t.Errorf("expected first category 'Food' (category ASC), got %q", resp.Transactions[0].CategoryName)
+	}
+	if resp.Transactions[1].CategoryName != "Gifts" {
+		t.Errorf("expected second category 'Gifts', got %q", resp.Transactions[1].CategoryName)
+	}
+}
+
+func TestSortByDescriptionDesc(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "Alpha")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Charlie")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "Bravo")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=description&sort_dir=desc", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Transactions) != 3 {
+		t.Fatalf("expected 3 transactions, got %d", len(resp.Transactions))
+	}
+	// Description DESC: Charlie, Bravo, Alpha
+	if resp.Transactions[0].Description != "Charlie" {
+		t.Errorf("expected first result 'Charlie' (description DESC), got %q", resp.Transactions[0].Description)
+	}
+	if resp.Transactions[1].Description != "Bravo" {
+		t.Errorf("expected second result 'Bravo', got %q", resp.Transactions[1].Description)
+	}
+	if resp.Transactions[2].Description != "Alpha" {
+		t.Errorf("expected third result 'Alpha', got %q", resp.Transactions[2].Description)
+	}
+}

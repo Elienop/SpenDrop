@@ -358,7 +358,7 @@ export function TransactionEntryRow({
             )}
           />
 
-          <Button type="submit" className="h-10">
+          <Button type="submit" size="sm" className="h-8 text-xs">
             Add
           </Button>
         </form>

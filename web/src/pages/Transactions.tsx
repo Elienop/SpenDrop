@@ -1,27 +1,38 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { format } from 'date-fns';
-import { AlertCircle, X } from 'lucide-react';
+import {
+  AlertCircle,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  ChevronLeft,
+  ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
+  X,
+} from 'lucide-react';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
+import type { SortColumn } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
 import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntryRow } from '../components/TransactionEntryRow';
 import { TransactionRow } from '../components/TransactionRow';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import {
-  Pagination,
-  PaginationContent,
-  PaginationEllipsis,
-  PaginationItem,
-  PaginationLink,
-  PaginationNext,
-  PaginationPrevious,
-} from '@/components/ui/pagination';
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Sheet,
   SheetContent,
@@ -29,6 +40,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
   TableBody,
@@ -36,6 +48,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { cn } from '@/lib/utils';
 
 // TODO(post-migration): Bulk select + bulk categorize (Checkbox column + Dialog)
 // are deferred. They require a new `useTransactions` hook method and a new
@@ -121,16 +134,149 @@ function buildActiveChips(
   return chips;
 }
 
-function getPageNumbers(current: number, total: number): (number | 'ellipsis')[] {
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1);
-  const pages: (number | 'ellipsis')[] = [1];
-  if (current > 3) pages.push('ellipsis');
-  const start = Math.max(2, current - 1);
-  const end = Math.min(total - 1, current + 1);
-  for (let i = start; i <= end; i++) pages.push(i);
-  if (current < total - 2) pages.push('ellipsis');
-  pages.push(total);
-  return pages;
+const PER_PAGE_OPTIONS = [10, 20, 50, 100] as const;
+
+interface PaginationBarProps {
+  page: number;
+  totalPages: number;
+  perPage: number;
+  onPageChange: (page: number) => void;
+  onPerPageChange: (perPage: number) => void;
+}
+
+function PaginationBar({
+  page,
+  totalPages,
+  perPage,
+  onPageChange,
+  onPerPageChange,
+}: PaginationBarProps) {
+  return (
+    <div className="flex items-center justify-between px-4 py-3">
+      <div className="flex items-center gap-2">
+        <p className="text-sm font-medium">Rows per page</p>
+        <Select
+          value={String(perPage)}
+          onValueChange={(v) => onPerPageChange(Number(v))}
+        >
+          <SelectTrigger className="h-8 w-[70px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent side="top">
+            <SelectGroup>
+              {PER_PAGE_OPTIONS.map((opt) => (
+                <SelectItem key={opt} value={String(opt)}>
+                  {opt}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      </div>
+
+      <div className="flex items-center gap-6 lg:gap-8">
+        <div className="flex w-[100px] items-center justify-center text-sm font-medium">
+          Page {page} of {totalPages}
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="icon"
+            className="hidden size-8 lg:flex"
+            onClick={() => onPageChange(1)}
+            disabled={page <= 1}
+          >
+            <span className="sr-only">Go to first page</span>
+            <ChevronsLeft />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-8"
+            onClick={() => onPageChange(page - 1)}
+            disabled={page <= 1}
+          >
+            <span className="sr-only">Go to previous page</span>
+            <ChevronLeft />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="size-8"
+            onClick={() => onPageChange(page + 1)}
+            disabled={page >= totalPages}
+          >
+            <span className="sr-only">Go to next page</span>
+            <ChevronRight />
+          </Button>
+          <Button
+            variant="outline"
+            size="icon"
+            className="hidden size-8 lg:flex"
+            onClick={() => onPageChange(totalPages)}
+            disabled={page >= totalPages}
+          >
+            <span className="sr-only">Go to last page</span>
+            <ChevronsRight />
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface SortableHeaderProps {
+  label: string;
+  column: SortColumn;
+  activeSortBy: SortColumn;
+  activeSortDir: 'asc' | 'desc';
+  onSort: (column: SortColumn) => void;
+  className?: string;
+}
+
+function SortableHeader({
+  label,
+  column,
+  activeSortBy,
+  activeSortDir,
+  onSort,
+  className,
+}: SortableHeaderProps) {
+  const isActive = activeSortBy === column;
+
+  return (
+    <TableHead className={className}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="-ml-3"
+        onClick={() => onSort(column)}
+      >
+        {label}
+        {isActive ? (
+          activeSortDir === 'asc' ? (
+            <ArrowUp className="ml-2 size-4" />
+          ) : (
+            <ArrowDown className="ml-2 size-4" />
+          )
+        ) : (
+          <ArrowUpDown className="ml-2 size-4" />
+        )}
+      </Button>
+    </TableHead>
+  );
+}
+
+function TableSkeleton() {
+  return (
+    <Card className="overflow-hidden">
+      <div className="flex flex-col gap-2 p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-12 w-full" />
+        ))}
+      </div>
+    </Card>
+  );
 }
 
 export function Transactions() {
@@ -139,11 +285,15 @@ export function Transactions() {
     total,
     page,
     perPage,
+    sortBy,
+    sortDir,
     filters,
     setFilter,
     clearFilters,
     clearPanelFilters,
     setPage,
+    setPerPage,
+    setSort,
     loading,
     error,
     createTransaction,
@@ -153,6 +303,15 @@ export function Transactions() {
 
   const [showFilters, setShowFilters] = useState(false);
   const [showEntry, setShowEntry] = useState(false);
+  const cardRef = useRef<HTMLDivElement>(null);
+
+  const handlePageChange = useCallback(
+    (newPage: number) => {
+      setPage(newPage);
+      cardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+    [setPage],
+  );
 
   const handleExport = useCallback(() => {
     const params = new URLSearchParams();
@@ -242,7 +401,7 @@ export function Transactions() {
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
         <Button variant="outline" size="sm" onClick={handleExport}>
@@ -265,20 +424,24 @@ export function Transactions() {
       {activeChips.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
           {activeChips.map((chip) => (
-            <span
+            <Badge
               key={chip.key}
-              className="inline-flex items-center gap-1 rounded-full border bg-secondary px-2.5 py-0.5 text-xs"
+              variant="secondary"
+              className="gap-1"
             >
               {chip.label}
               <button
                 type="button"
-                className="text-muted-foreground hover:text-foreground"
+                className={cn(
+                  'text-muted-foreground hover:text-foreground',
+                  'rounded-full p-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                )}
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
               >
-                <X className="h-3 w-3" />
+                <X className="size-3" />
               </button>
-            </span>
+            </Badge>
           ))}
         </div>
       )}
@@ -322,29 +485,60 @@ export function Transactions() {
 
       {error && (
         <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
+          <AlertCircle className="size-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       {loading ? (
-        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
-          Loading transactions...
-        </div>
+        <TableSkeleton />
       ) : transactions.length === 0 ? (
-        <div className="rounded-md border bg-card p-6 text-center text-sm text-muted-foreground">
+        <Card className="p-6 text-center text-sm text-muted-foreground">
           No transactions found. Add one above to get started.
-        </div>
+        </Card>
       ) : (
-        <Card className="overflow-hidden">
+        <Card ref={cardRef} className="overflow-hidden">
+          <PaginationBar
+            page={page}
+            totalPages={totalPages}
+            perPage={perPage}
+            onPageChange={handlePageChange}
+            onPerPageChange={setPerPage}
+          />
+
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead>Date</TableHead>
-                <TableHead>Description</TableHead>
-                <TableHead>Category</TableHead>
+                <SortableHeader
+                  label="Date"
+                  column="date"
+                  activeSortBy={sortBy}
+                  activeSortDir={sortDir}
+                  onSort={setSort}
+                />
+                <SortableHeader
+                  label="Description"
+                  column="description"
+                  activeSortBy={sortBy}
+                  activeSortDir={sortDir}
+                  onSort={setSort}
+                />
+                <SortableHeader
+                  label="Category"
+                  column="category"
+                  activeSortBy={sortBy}
+                  activeSortDir={sortDir}
+                  onSort={setSort}
+                />
                 <TableHead>Tags</TableHead>
-                <TableHead className="text-right">Amount</TableHead>
+                <SortableHeader
+                  label="Amount"
+                  column="amount"
+                  activeSortBy={sortBy}
+                  activeSortDir={sortDir}
+                  onSort={setSort}
+                  className="text-right"
+                />
                 <TableHead className="w-10 text-right">
                   <span className="sr-only">Actions</span>
                 </TableHead>
@@ -363,43 +557,15 @@ export function Transactions() {
             </TableBody>
           </Table>
 
-          {totalPages > 1 && (
-            <div className="border-t px-4 py-3">
-              <Pagination>
-                <PaginationContent>
-                  <PaginationItem>
-                    <PaginationPrevious
-                      onClick={() => page > 1 && setPage(page - 1)}
-                      className={page <= 1 ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
-                    />
-                  </PaginationItem>
-                  {getPageNumbers(page, totalPages).map((p, i) =>
-                    p === 'ellipsis' ? (
-                      <PaginationItem key={`e${i}`}>
-                        <PaginationEllipsis />
-                      </PaginationItem>
-                    ) : (
-                      <PaginationItem key={p}>
-                        <PaginationLink
-                          isActive={p === page}
-                          onClick={() => setPage(p)}
-                          className="cursor-pointer"
-                        >
-                          {p}
-                        </PaginationLink>
-                      </PaginationItem>
-                    ),
-                  )}
-                  <PaginationItem>
-                    <PaginationNext
-                      onClick={() => page < totalPages && setPage(page + 1)}
-                      className={page >= totalPages ? 'pointer-events-none opacity-50' : 'cursor-pointer'}
-                    />
-                  </PaginationItem>
-                </PaginationContent>
-              </Pagination>
-            </div>
-          )}
+          <div className="border-t">
+            <PaginationBar
+              page={page}
+              totalPages={totalPages}
+              perPage={perPage}
+              onPageChange={handlePageChange}
+              onPerPageChange={setPerPage}
+            />
+          </div>
         </Card>
       )}
     </div>
