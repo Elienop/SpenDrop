@@ -18,7 +18,6 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart';
-import { ButtonGroup } from '@/components/ui/button-group';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -37,7 +36,7 @@ import {
   TableRow,
   TableCell,
 } from '@/components/ui/table';
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
+import { ButtonGroup } from '@/components/ui/button-group';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 
@@ -342,7 +341,7 @@ export function Dashboard() {
             <Button
               variant={cashFlowView === '6m' ? 'secondary' : 'outline'}
               size="sm"
-              className="h-7 px-3 text-xs"
+              className="h-8 px-3 text-xs"
               onClick={() => setCashFlowView('6m')}
             >
               6M
@@ -350,7 +349,7 @@ export function Dashboard() {
             <Button
               variant={cashFlowView === '12m' ? 'secondary' : 'outline'}
               size="sm"
-              className="h-7 px-3 text-xs"
+              className="h-8 px-3 text-xs"
               onClick={() => setCashFlowView('12m')}
             >
               12M
@@ -436,26 +435,30 @@ export function Dashboard() {
 
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
-            <div className="flex flex-col gap-1.5">
-              <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
-              <ToggleGroup
-                type="single"
-                size="sm"
-                variant="outline"
-                value={showLatest ? 'latest' : 'month'}
-                onValueChange={(v) => { if (v) setShowLatest(v === 'latest'); }}
-              >
-                <ToggleGroupItem value="month" className="h-6 px-2 text-xs">
+            <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
+            <div className="flex items-center gap-2">
+              <ButtonGroup>
+                <Button
+                  variant={!showLatest ? 'secondary' : 'outline'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                  onClick={() => setShowLatest(false)}
+                >
                   {SHORT_MONTHS[selectedMonth - 1]}
-                </ToggleGroupItem>
-                <ToggleGroupItem value="latest" className="h-6 px-2 text-xs">
+                </Button>
+                <Button
+                  variant={showLatest ? 'secondary' : 'outline'}
+                  size="sm"
+                  className="h-8 px-3 text-xs"
+                  onClick={() => setShowLatest(true)}
+                >
                   Latest
-                </ToggleGroupItem>
-              </ToggleGroup>
+                </Button>
+              </ButtonGroup>
+              <Button variant="outline" size="sm" asChild>
+                <Link to="/transactions">View All</Link>
+              </Button>
             </div>
-            <Button variant="outline" size="sm" asChild>
-              <Link to="/transactions">View All</Link>
-            </Button>
           </CardHeader>
           <CardContent>
             {recentTransactions.length === 0 ? (
