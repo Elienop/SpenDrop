@@ -112,12 +112,14 @@ export function Sidebar() {
                   type="button"
                   onClick={() => void logout()}
                   className={cn(
-                    'flex w-full items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
-                    expanded ? 'gap-2 px-3 py-2' : 'size-8 p-2',
+                    'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+                    expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
                   )}
                 >
                   <LogOut aria-hidden="true" />
-                  <span className="truncate">Log out</span>
+                  <span className={expanded ? 'truncate' : 'sr-only'}>
+                    Log out
+                  </span>
                 </button>
               </TooltipTrigger>
               {!expanded && (
@@ -191,14 +193,16 @@ function SidebarLink({
       end={item.end}
       className={({ isActive }) =>
         cn(
-          'flex w-full items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+          'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
           isActive && 'bg-muted text-foreground',
-          expanded ? 'gap-2 px-3 py-2' : 'size-8 p-2',
+          expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
         )
       }
     >
       <Icon aria-hidden="true" />
-      <span className="truncate">{item.label}</span>
+      <span className={expanded ? 'truncate' : 'sr-only'}>
+        {item.label}
+      </span>
     </NavLink>
   );
   if (expanded) return link;
