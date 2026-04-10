@@ -21,13 +21,13 @@ import React from 'react';
 // future chart primitive starts pulling in more Recharts exports.
 vi.mock('recharts', () => ({
   // Used by Dashboard.tsx
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Bar: () => <div />,
   XAxis: () => <div />,
-  YAxis: () => <div />,
   CartesianGrid: () => <div />,
   // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
+  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
+  YAxis: () => <div />,
   Cell: () => <div />,
   Tooltip: () => <div />,
   Legend: () => <div />,
@@ -198,8 +198,9 @@ describe('Dashboard', () => {
     expect(btn6).toBeInTheDocument();
     expect(btn12).toBeInTheDocument();
     // Both buttons should be inside a group container
-    const group = screen.getByRole('group');
-    expect(group).toContainElement(btn6);
-    expect(group).toContainElement(btn12);
+    const groups = screen.getAllByRole('group');
+    const cashFlowGroup = groups.find((g) => g.contains(btn6));
+    expect(cashFlowGroup).toBeDefined();
+    expect(cashFlowGroup).toContainElement(btn12);
   });
 });

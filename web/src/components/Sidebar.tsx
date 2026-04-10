@@ -18,6 +18,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import { ModeToggle } from '@/components/ModeToggle';
+import { ColorThemePicker } from '@/components/ColorThemePicker';
 import { cn } from '@/lib/utils';
 
 const menuItems = [
@@ -130,18 +132,25 @@ export function Sidebar() {
           </div>
         </nav>
 
+        {/* Color theme select — above footer */}
+        {expanded && (
+          <div className="px-3 pb-2">
+            <ColorThemePicker />
+          </div>
+        )}
+
         {/* Footer — matches SidebarFooter: gap-2 p-2 */}
         <div
           className={cn(
             'flex items-center border-t border-border p-2',
-            expanded ? 'gap-3 px-3 py-3' : 'justify-center py-3',
+            expanded ? 'gap-3 px-3 py-3' : 'flex-col gap-2 py-3',
           )}
         >
-          <Avatar className="h-8 w-8 text-sm font-medium">
+          <Avatar className="size-8 text-sm font-medium">
             <AvatarFallback>{initial}</AvatarFallback>
           </Avatar>
           {expanded && user && (
-            <div className="min-w-0">
+            <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">
                 {user.display_name}
               </p>
@@ -150,6 +159,7 @@ export function Sidebar() {
               </p>
             </div>
           )}
+          <ModeToggle />
         </div>
       </aside>
     </TooltipProvider>

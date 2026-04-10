@@ -35,6 +35,7 @@ import {
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -750,8 +751,10 @@ function UsersSection() {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="admin">Admin</SelectItem>
-                      <SelectItem value="member">Member</SelectItem>
+                      <SelectGroup>
+                        <SelectItem value="admin">Admin</SelectItem>
+                        <SelectItem value="member">Member</SelectItem>
+                      </SelectGroup>
                     </SelectContent>
                   </Select>
                 </TableCell>
@@ -839,8 +842,10 @@ function UsersSection() {
                         </SelectTrigger>
                       </FormControl>
                       <SelectContent>
-                        <SelectItem value="admin">Admin</SelectItem>
-                        <SelectItem value="member">Member</SelectItem>
+                        <SelectGroup>
+                          <SelectItem value="admin">Admin</SelectItem>
+                          <SelectItem value="member">Member</SelectItem>
+                        </SelectGroup>
                       </SelectContent>
                     </Select>
                     <FormMessage />
@@ -1050,11 +1055,13 @@ function DataSection() {
                     <SelectValue placeholder="-- Select --" />
                   </SelectTrigger>
                   <SelectContent>
-                    {categories.map((c) => (
-                      <SelectItem key={c.id} value={String(c.id)}>
-                        {c.name}
-                      </SelectItem>
-                    ))}
+                    <SelectGroup>
+                      {categories.map((c) => (
+                        <SelectItem key={c.id} value={String(c.id)}>
+                          {c.name}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
               </div>
@@ -1080,11 +1087,13 @@ function DataSection() {
                           <SelectValue placeholder="-- Use Default --" />
                         </SelectTrigger>
                         <SelectContent>
-                          {categories.map((c) => (
-                            <SelectItem key={c.id} value={String(c.id)}>
-                              {c.name}
-                            </SelectItem>
-                          ))}
+                          <SelectGroup>
+                            {categories.map((c) => (
+                              <SelectItem key={c.id} value={String(c.id)}>
+                                {c.name}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
                         </SelectContent>
                       </Select>
                     </div>
@@ -1187,11 +1196,13 @@ function DataSection() {
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
-                  {MONTH_NAMES.map((m, i) => (
-                    <SelectItem key={m} value={String(i + 1)}>
-                      {m}
-                    </SelectItem>
-                  ))}
+                  <SelectGroup>
+                    {MONTH_NAMES.map((m, i) => (
+                      <SelectItem key={m} value={String(i + 1)}>
+                        {m}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
                 </SelectContent>
               </Select>
             </div>

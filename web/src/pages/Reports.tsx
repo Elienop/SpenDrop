@@ -6,7 +6,6 @@ import {
   LineChart,
   Line,
   XAxis,
-  YAxis,
   CartesianGrid,
 } from 'recharts';
 import {
@@ -23,6 +22,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -209,11 +209,13 @@ export function Reports() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {yearOptions.map((y) => (
-                <SelectItem key={y} value={String(y)}>
-                  {y} vs {y - 1}
-                </SelectItem>
-              ))}
+              <SelectGroup>
+                {yearOptions.map((y) => (
+                  <SelectItem key={y} value={String(y)}>
+                    {y} vs {y - 1}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
         </CardHeader>
@@ -240,25 +242,12 @@ export function Reports() {
                     <stop offset="95%" stopColor="var(--color-previousExpenses)" stopOpacity={0.1} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid
-                  strokeDasharray="3 3"
-                  stroke="hsl(var(--border))"
-                  strokeOpacity={0.4}
-                  vertical={false}
-                />
+                <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="name"
-                  fontSize={11}
-                  stroke="hsl(var(--muted-foreground))"
-                  tickLine={false}
-                  axisLine={{ stroke: 'hsl(var(--border))' }}
-                />
-                <YAxis
-                  fontSize={11}
-                  stroke="hsl(var(--muted-foreground))"
                   tickLine={false}
                   axisLine={false}
-                  tickFormatter={(v: number) => formatCurrency(v)}
+                  tickMargin={10}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <ChartLegend content={<ChartLegendContent />} />
@@ -298,9 +287,11 @@ export function Reports() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="6">6 months</SelectItem>
-                <SelectItem value="12">12 months</SelectItem>
-                <SelectItem value="24">24 months</SelectItem>
+                <SelectGroup>
+                  <SelectItem value="6">6 months</SelectItem>
+                  <SelectItem value="12">12 months</SelectItem>
+                  <SelectItem value="24">24 months</SelectItem>
+                </SelectGroup>
               </SelectContent>
             </Select>
           </CardHeader>
@@ -330,25 +321,12 @@ export function Reports() {
                       <stop offset="95%" stopColor="var(--color-expenses)" stopOpacity={0.1} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="hsl(var(--border))"
-                    strokeOpacity={0.4}
-                    vertical={false}
-                  />
+                  <CartesianGrid vertical={false} />
                   <XAxis
                     dataKey="name"
-                    fontSize={11}
-                    stroke="hsl(var(--muted-foreground))"
-                    tickLine={false}
-                    axisLine={{ stroke: 'hsl(var(--border))' }}
-                  />
-                  <YAxis
-                    fontSize={11}
-                    stroke="hsl(var(--muted-foreground))"
                     tickLine={false}
                     axisLine={false}
-                    tickFormatter={(v: number) => formatCurrency(v)}
+                    tickMargin={10}
                   />
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <ChartLegend content={<ChartLegendContent />} />
@@ -395,25 +373,12 @@ export function Reports() {
                 className="h-[300px] w-full"
               >
                 <LineChart data={catTrendData}>
-                  <CartesianGrid
-                    strokeDasharray="3 3"
-                    stroke="hsl(var(--border))"
-                    strokeOpacity={0.4}
-                    vertical={false}
-                  />
+                  <CartesianGrid vertical={false} />
                   <XAxis
                     dataKey="name"
-                    fontSize={11}
-                    stroke="hsl(var(--muted-foreground))"
-                    tickLine={false}
-                    axisLine={{ stroke: 'hsl(var(--border))' }}
-                  />
-                  <YAxis
-                    fontSize={11}
-                    stroke="hsl(var(--muted-foreground))"
                     tickLine={false}
                     axisLine={false}
-                    tickFormatter={(v: number) => formatCurrency(v)}
+                    tickMargin={10}
                   />
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <ChartLegend content={<ChartLegendContent />} />
@@ -452,11 +417,13 @@ export function Reports() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {MONTH_FULL_NAMES.map((m, i) => (
-                  <SelectItem key={m} value={String(i + 1)}>
-                    {m}
-                  </SelectItem>
-                ))}
+                <SelectGroup>
+                  {MONTH_FULL_NAMES.map((m, i) => (
+                    <SelectItem key={m} value={String(i + 1)}>
+                      {m}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
               </SelectContent>
             </Select>
             <Select
@@ -470,11 +437,13 @@ export function Reports() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {yearOptions.map((y) => (
-                  <SelectItem key={y} value={String(y)}>
-                    {y}
-                  </SelectItem>
-                ))}
+                <SelectGroup>
+                  {yearOptions.map((y) => (
+                    <SelectItem key={y} value={String(y)}>
+                      {y}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
               </SelectContent>
             </Select>
           </div>

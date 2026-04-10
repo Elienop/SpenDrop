@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
@@ -11,11 +11,12 @@
         var theme;
         if (stored === 'light' || stored === 'dark') {
           theme = stored;
-        } else {
-          theme = window.matchMedia('(prefers-color-scheme: light)').matches
-            ? 'light' : 'dark';
+        } else if (stored === 'system' || !stored) {
+          theme = window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark' : 'light';
         }
-        document.documentElement.setAttribute('data-theme', theme);
+        document.documentElement.classList.remove('light', 'dark');
+        document.documentElement.classList.add(theme || 'dark');
       })();
     </script>
   </head>

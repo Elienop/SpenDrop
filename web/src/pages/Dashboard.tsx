@@ -1,10 +1,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
-  ResponsiveContainer,
   BarChart,
   Bar,
   XAxis,
-  YAxis,
   CartesianGrid,
 } from 'recharts';
 import { Link } from 'react-router-dom';
@@ -26,6 +24,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -38,6 +37,7 @@ import {
   TableRow,
   TableCell,
 } from '@/components/ui/table';
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 
@@ -89,7 +89,7 @@ type CashFlowView = '6m' | '12m';
 
 const cashFlowConfig: ChartConfig = {
   income: { label: 'Income', color: 'hsl(var(--primary))' },
-  expense: { label: 'Expense', color: 'hsl(var(--muted-foreground))' },
+  expense: { label: 'Expense', color: 'hsl(var(--primary) / 0.35)' },
 };
 
 /* ── Component ── */
@@ -266,9 +266,11 @@ export function Dashboard() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {MONTHS.map((m, i) => (
-                <SelectItem key={m} value={String(i + 1)}>{m}</SelectItem>
-              ))}
+              <SelectGroup>
+                {MONTHS.map((m, i) => (
+                  <SelectItem key={m} value={String(i + 1)}>{m}</SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
           <Select value={String(selectedYear)} onValueChange={(v) => setSelectedYear(Number(v))}>
@@ -276,9 +278,11 @@ export function Dashboard() {
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
-              {yearOptions.map((y) => (
-                <SelectItem key={y} value={String(y)}>{y}</SelectItem>
-              ))}
+              <SelectGroup>
+                {yearOptions.map((y) => (
+                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+                ))}
+              </SelectGroup>
             </SelectContent>
           </Select>
         </div>
@@ -343,102 +347,100 @@ export function Dashboard() {
           </ButtonGroup>
         }
       >
-        <ChartContainer config={cashFlowConfig} className="h-64 w-full">
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 4, right: 12, bottom: 0, left: 12 }} barGap={4}>
-              <defs>
-                <linearGradient id="fillIncome" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-income)" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="var(--color-income)" stopOpacity={0.1} />
-                </linearGradient>
-                <linearGradient id="fillExpense" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="var(--color-expense)" stopOpacity={0.8} />
-                  <stop offset="95%" stopColor="var(--color-expense)" stopOpacity={0.1} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid
-                strokeDasharray="3 3"
-                stroke="hsl(var(--border))"
-                vertical={false}
-              />
-              <XAxis
-                dataKey="name"
-                tickLine={false}
-                axisLine={false}
-                className="text-xs"
-                stroke="hsl(var(--muted-foreground))"
-              />
-              <YAxis
-                tickLine={false}
-                axisLine={false}
-                className="text-xs"
-                stroke="hsl(var(--muted-foreground))"
-                tickFormatter={(v: number) =>
-                  v >= 1000 ? `${(v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })}K` : String(v)
-                }
-              />
-              <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
-              <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
-              <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
+        <ChartContainer config={cashFlowConfig} className="aspect-auto h-64 w-full">
+          <BarChart accessibilityLayer data={chartData} barGap={4}>
+            <defs>
+              <linearGradient id="fillIncome" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-income)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="var(--color-income)" stopOpacity={0.1} />
+              </linearGradient>
+              <linearGradient id="fillExpense" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-expense)" stopOpacity={0.8} />
+                <stop offset="95%" stopColor="var(--color-expense)" stopOpacity={0.1} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} />
+            <XAxis
+              dataKey="name"
+              tickLine={false}
+              axisLine={false}
+              tickMargin={10}
+            />
+            <ChartTooltip content={<ChartTooltipContent />} />
+            <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
+            <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
+          </BarChart>
         </ChartContainer>
       </ChartCard>
 
       {/* Category breakdown + Recent Transactions — side by side */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <ChartCard
-          title="Spending by Category"
-          subtitle={formatFull(totalCategorySpent)}
-        >
-          {gaugeData.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-              No spending yet this month.
-            </div>
-          ) : (
-            <div className="flex flex-col gap-3">
-              {gaugeData.map((slice) => {
-                const pct = totalCategorySpent > 0
-                  ? (slice.value / totalCategorySpent) * 100
-                  : 0;
-                return (
-                  <div key={slice.id} className="flex flex-col gap-1.5">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="font-medium">{slice.name}</span>
-                      <span className="font-mono tabular-nums text-muted-foreground">
-                        {formatFull(slice.value)}
-                      </span>
-                    </div>
-                    <div className="h-2.5 w-full rounded-full bg-muted">
-                      <div
-                        className="h-full rounded-full transition-all"
-                        style={{
-                          width: `${Math.max(pct, 2)}%`,
-                          backgroundColor: slice.color,
-                        }}
-                      />
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </ChartCard>
-
         <Card>
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <div>
-              <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
-              <CardDescription>
-                <button
-                  type="button"
-                  aria-pressed={showLatest}
-                  className="text-xs font-medium text-primary hover:underline"
-                  onClick={() => setShowLatest((v) => !v)}
-                >
-                  {showLatest ? 'Show this month' : 'Show latest'}
-                </button>
+              <CardTitle className="text-base font-semibold">Spending by Category</CardTitle>
+              <CardDescription className="text-xs text-muted-foreground">
+                {MONTHS[selectedMonth - 1]} {selectedYear}
               </CardDescription>
+            </div>
+            <span className="text-lg font-bold tabular-nums">
+              {formatFull(totalCategorySpent)}
+            </span>
+          </CardHeader>
+          <CardContent>
+            {gaugeData.length === 0 ? (
+              <div className="flex items-center justify-center p-8 text-sm text-muted-foreground">
+                No spending yet this month.
+              </div>
+            ) : (
+              <div className="flex flex-1 flex-col justify-between gap-4">
+                {gaugeData.map((slice) => {
+                  const pct = totalCategorySpent > 0
+                    ? (slice.value / totalCategorySpent) * 100
+                    : 0;
+                  return (
+                    <div key={slice.id} className="flex flex-col gap-2">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">{slice.name}</span>
+                        <span className="font-mono tabular-nums text-muted-foreground">
+                          {formatFull(slice.value)}
+                        </span>
+                      </div>
+                      <div className="h-5 w-full rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full transition-all"
+                          style={{
+                            width: `${Math.max(pct, 2)}%`,
+                            backgroundColor: slice.color,
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <div className="flex flex-col gap-1.5">
+              <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
+              <ToggleGroup
+                type="single"
+                size="sm"
+                variant="outline"
+                value={showLatest ? 'latest' : 'month'}
+                onValueChange={(v) => { if (v) setShowLatest(v === 'latest'); }}
+              >
+                <ToggleGroupItem value="month" className="h-6 px-2 text-xs">
+                  {SHORT_MONTHS[selectedMonth - 1]}
+                </ToggleGroupItem>
+                <ToggleGroupItem value="latest" className="h-6 px-2 text-xs">
+                  Latest
+                </ToggleGroupItem>
+              </ToggleGroup>
             </div>
             <Button variant="outline" size="sm" asChild>
               <Link to="/transactions">View All</Link>
