@@ -68,7 +68,6 @@ const mockCatTrends = {
     {
       id: 1,
       name: 'Food',
-      color: '#ff0000',
       type: 'expense',
       data: [{ year: 2026, month: 1, total: 500 }],
     },

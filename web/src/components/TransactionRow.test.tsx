@@ -11,10 +11,6 @@ const mockCategories: Category[] = [
     id: 1,
     name: 'Groceries',
     type: 'expense',
-    // NOTE: color field still exists on the Category type until commit 12 drops
-    // the DB column. We keep a dummy value to satisfy TypeScript but no test
-    // below asserts on it — the new CategoryBadge derives color from id alone.
-    color: '#e94560',
     icon: null,
     sort_order: 1,
     is_active: true,
@@ -34,8 +30,6 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     category_id: 1,
     category_name: 'Groceries',
     category_type: 'expense',
-    // Same note as mockCategories above — kept for type-correctness only.
-    category_color: '#e94560',
     tags: null,
     notes: null,
     created_at: '2026-04-01T00:00:00Z',

@@ -39,7 +39,6 @@ type trendEntry struct {
 type categoryEntry struct {
 	ID    int64   `json:"id"`
 	Name  string  `json:"name"`
-	Color string  `json:"color"`
 	Total float64 `json:"total"`
 }
 
@@ -291,7 +290,6 @@ func (h *Handler) handleDashboardCategories(w http.ResponseWriter, r *http.Reque
 		categories[i] = categoryEntry{
 			ID:    row.ID,
 			Name:  row.Name,
-			Color: row.Color,
 			Total: row.Total,
 		}
 	}

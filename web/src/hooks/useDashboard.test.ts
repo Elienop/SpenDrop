@@ -31,8 +31,8 @@ const mockTrend = [
 ];
 
 const mockCategories = [
-  { id: 1, name: 'Food', color: '#ff0000', total: 500 },
-  { id: 2, name: 'Rent', color: '#00ff00', total: 700 },
+  { id: 1, name: 'Food', total: 500 },
+  { id: 2, name: 'Rent', total: 700 },
 ];
 
 describe('useDashboard', () => {

@@ -426,9 +426,9 @@ describe('Settings', () => {
 
   describe('Import Wizard', () => {
     const mockCategories: Category[] = [
-      { id: 1, name: 'Food', type: 'expense', color: '#ff0000', icon: null, sort_order: 1, is_active: true, created_at: '2026-01-01' },
-      { id: 2, name: 'Transport', type: 'expense', color: '#00ff00', icon: null, sort_order: 2, is_active: true, created_at: '2026-01-01' },
-      { id: 3, name: 'Salary', type: 'income', color: '#0000ff', icon: null, sort_order: 3, is_active: true, created_at: '2026-01-01' },
+      { id: 1, name: 'Food', type: 'expense', icon: null, sort_order: 1, is_active: true, created_at: '2026-01-01' },
+      { id: 2, name: 'Transport', type: 'expense', icon: null, sort_order: 2, is_active: true, created_at: '2026-01-01' },
+      { id: 3, name: 'Salary', type: 'income', icon: null, sort_order: 3, is_active: true, created_at: '2026-01-01' },
     ];
 
     const mockPreview: ImportPreview = {

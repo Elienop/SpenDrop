@@ -44,7 +44,6 @@ type transactionResponse struct {
 	UpdatedAt        string   `json:"updated_at"`
 	CategoryName     string   `json:"category_name,omitempty"`
 	CategoryType     string   `json:"category_type,omitempty"`
-	CategoryColor    string   `json:"category_color,omitempty"`
 }
 
 // transactionListResponse wraps a paginated list of transactions.
@@ -177,7 +176,7 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	offset := (page - 1) * perPage
 	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
-		c.name AS category_name, c.type AS category_type, c.color AS category_color
+		c.name AS category_name, c.type AS category_type
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id` + whereClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ? OFFSET ?`
 
@@ -195,22 +194,21 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	transactions := make([]transactionResponse, 0)
 	for rows.Next() {
 		var (
-			tr            transactionResponse
-			origAmt       sql.NullFloat64
-			origCur       sql.NullString
-			tags          sql.NullString
-			notes         sql.NullString
-			date          time.Time
-			createdAt     time.Time
-			updatedAt     time.Time
-			categoryName  string
-			categoryType  string
-			categoryColor string
+			tr           transactionResponse
+			origAmt      sql.NullFloat64
+			origCur      sql.NullString
+			tags         sql.NullString
+			notes        sql.NullString
+			date         time.Time
+			createdAt    time.Time
+			updatedAt    time.Time
+			categoryName string
+			categoryType string
 		)
 		if err := rows.Scan(
 			&tr.ID, &tr.UserID, &date, &tr.Amount, &origAmt, &origCur,
 			&tr.Description, &tr.CategoryID, &tags, &notes, &createdAt, &updatedAt,
-			&categoryName, &categoryType, &categoryColor,
+			&categoryName, &categoryType,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
@@ -220,7 +218,6 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 		tr.UpdatedAt = updatedAt.Format(time.RFC3339)
 		tr.CategoryName = categoryName
 		tr.CategoryType = categoryType
-		tr.CategoryColor = categoryColor
 		if origAmt.Valid {
 			v := origAmt.Float64
 			tr.OriginalAmount = &v

@@ -31,9 +31,6 @@ const defaultTransaction = {
   category_id: 1,
   category_name: 'Groceries',
   category_type: 'expense',
-  // Kept for type-correctness against the Transaction type. No test asserts on
-  // it — the column is dropped in commit 12.
-  category_color: '#e94560',
   tags: 'food,weekly',
   notes: null,
   created_at: '2026-04-01T00:00:00Z',

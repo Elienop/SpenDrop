@@ -24,14 +24,11 @@ import { Categories } from './Categories';
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
 
-// Fixtures still carry `color` — the backend still returns it until commit 12.
-// These tests no longer assert anything about `color` visually.
 const mockCategories = [
   {
     id: 1,
     name: 'Food',
     type: 'expense' as const,
-    color: '#ff0000',
     icon: null,
     sort_order: 0,
     is_active: true,
@@ -41,7 +38,6 @@ const mockCategories = [
     id: 2,
     name: 'Salary',
     type: 'income' as const,
-    color: '#00ff00',
     icon: null,
     sort_order: 0,
     is_active: true,
@@ -51,7 +47,6 @@ const mockCategories = [
     id: 3,
     name: 'Transport',
     type: 'expense' as const,
-    color: '#0000ff',
     icon: null,
     sort_order: 1,
     is_active: false,
@@ -277,8 +272,7 @@ describe('Categories', () => {
         );
       });
       const payload = mockedApi.put.mock.calls[0][1] as Record<string, unknown>;
-      // Backend only accepts {name, color, icon}; color is intentionally
-      // omitted until commit 12 drops the column, and type is immutable.
+      // Backend accepts {name, icon}; type is immutable after creation.
       expect(payload).not.toHaveProperty('color');
       expect(payload).not.toHaveProperty('type');
     });

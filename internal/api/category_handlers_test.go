@@ -98,7 +98,7 @@ func TestHandleCreateCategory_AdminCanCreate(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"name":"TestCat","type":"expense","color":"#ff0000","sort_order":99}`)
+	body := strings.NewReader(`{"name":"TestCat","type":"expense","sort_order":99}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/categories", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -117,9 +117,6 @@ func TestHandleCreateCategory_AdminCanCreate(t *testing.T) {
 	if resp["type"] != "expense" {
 		t.Errorf("expected type 'expense', got %v", resp["type"])
 	}
-	if resp["color"] != "#ff0000" {
-		t.Errorf("expected color '#ff0000', got %v", resp["color"])
-	}
 }
 
 func TestHandleCreateCategory_MemberForbidden(t *testing.T) {
@@ -127,7 +124,7 @@ func TestHandleCreateCategory_MemberForbidden(t *testing.T) {
 	h := NewHandler(q, db)
 	member := seedTestUser(t, q, "alice", "member")
 
-	body := strings.NewReader(`{"name":"TestCat","type":"expense","color":"#ff0000","sort_order":99}`)
+	body := strings.NewReader(`{"name":"TestCat","type":"expense","sort_order":99}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/categories", body)
 	req = withUser(req, member)
 	rec := httptest.NewRecorder()
@@ -144,7 +141,7 @@ func TestHandleCreateCategory_MissingName_Returns400(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"type":"expense","color":"#ff0000","sort_order":1}`)
+	body := strings.NewReader(`{"type":"expense","sort_order":1}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/categories", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -161,7 +158,7 @@ func TestHandleCreateCategory_InvalidType_Returns400(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"name":"TestCat","type":"invalid","color":"#ff0000","sort_order":1}`)
+	body := strings.NewReader(`{"name":"TestCat","type":"invalid","sort_order":1}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/categories", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -197,7 +194,7 @@ func TestHandleUpdateCategory_AdminCanUpdate(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"name":"Updated Food","color":"#00ff00"}`)
+	body := strings.NewReader(`{"name":"Updated Food"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/categories/1", body)
 	req = withUserAndURLParam(req, admin, "id", "1")
 	rec := httptest.NewRecorder()
@@ -214,7 +211,7 @@ func TestHandleUpdateCategory_MemberForbidden(t *testing.T) {
 	h := NewHandler(q, db)
 	member := seedTestUser(t, q, "alice", "member")
 
-	body := strings.NewReader(`{"name":"Hacked","color":"#00ff00"}`)
+	body := strings.NewReader(`{"name":"Hacked"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/categories/1", body)
 	req = withUserAndURLParam(req, member, "id", "1")
 	rec := httptest.NewRecorder()
@@ -231,7 +228,7 @@ func TestHandleUpdateCategory_InvalidID_Returns400(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"name":"X","color":"#000"}`)
+	body := strings.NewReader(`{"name":"X"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/categories/abc", body)
 	req = withUserAndURLParam(req, admin, "id", "abc")
 	rec := httptest.NewRecorder()
@@ -248,7 +245,7 @@ func TestHandleUpdateCategory_MissingName_Returns400(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "admin", "admin")
 
-	body := strings.NewReader(`{"color":"#00ff00"}`)
+	body := strings.NewReader(`{}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/categories/1", body)
 	req = withUserAndURLParam(req, admin, "id", "1")
 	rec := httptest.NewRecorder()

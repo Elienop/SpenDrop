@@ -91,11 +91,10 @@ func (h *Handler) handleReportYoY(w http.ResponseWriter, r *http.Request) {
 // --- Category Trends ---
 
 type categoryTrendEntry struct {
-	ID    int64        `json:"id"`
-	Name  string       `json:"name"`
-	Color string       `json:"color"`
-	Type  string       `json:"type"`
-	Data  []monthTotal `json:"data"`
+	ID   int64        `json:"id"`
+	Name string       `json:"name"`
+	Type string       `json:"type"`
+	Data []monthTotal `json:"data"`
 }
 
 type monthTotal struct {
@@ -145,7 +144,7 @@ func (h *Handler) handleReportCategoryTrends(w http.ResponseWriter, r *http.Requ
 		entry, exists := catMap[row.ID]
 		if !exists {
 			entry = &categoryTrendEntry{
-				ID: row.ID, Name: row.Name, Color: row.Color, Type: row.CategoryType,
+				ID: row.ID, Name: row.Name, Type: row.CategoryType,
 			}
 			catMap[row.ID] = entry
 			catOrder = append(catOrder, row.ID)
