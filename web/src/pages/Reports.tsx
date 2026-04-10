@@ -192,7 +192,7 @@ export function Reports() {
       {/* Year-over-Year */}
       <Card aria-labelledby="yoy-heading">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle id="yoy-heading" className="text-base font-medium">
+          <CardTitle id="yoy-heading" className="text-base font-semibold">
             Year-over-Year Comparison
           </CardTitle>
           <Select
@@ -216,10 +216,10 @@ export function Reports() {
         </CardHeader>
         <CardContent>
           {yoy.loading && (
-            <div className="text-muted-foreground text-sm">Loading...</div>
+            <div className="text-sm text-muted-foreground">Loading...</div>
           )}
           {yoy.error && (
-            <div className="text-destructive text-sm" role="alert">
+            <div className="text-sm text-destructive" role="alert">
               {yoy.error}
             </div>
           )}
@@ -283,7 +283,7 @@ export function Reports() {
         {/* Income vs Expenses */}
         <Card aria-labelledby="incexp-heading">
           <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-            <CardTitle id="incexp-heading" className="text-base font-medium">
+            <CardTitle id="incexp-heading" className="text-base font-semibold">
               Income vs Expenses
             </CardTitle>
             <Select
@@ -302,10 +302,10 @@ export function Reports() {
           </CardHeader>
           <CardContent>
             {incExp.loading && (
-              <div className="text-muted-foreground text-sm">Loading...</div>
+              <div className="text-sm text-muted-foreground">Loading...</div>
             )}
             {incExp.error && (
-              <div className="text-destructive text-sm" role="alert">
+              <div className="text-sm text-destructive" role="alert">
                 {incExp.error}
               </div>
             )}
@@ -370,16 +370,16 @@ export function Reports() {
         {/* Category Trends */}
         <Card aria-labelledby="cattrend-heading">
           <CardHeader className="pb-2">
-            <CardTitle id="cattrend-heading" className="text-base font-medium">
+            <CardTitle id="cattrend-heading" className="text-base font-semibold">
               Category Trends
             </CardTitle>
           </CardHeader>
           <CardContent>
             {catTrends.loading && (
-              <div className="text-muted-foreground text-sm">Loading...</div>
+              <div className="text-sm text-muted-foreground">Loading...</div>
             )}
             {catTrends.error && (
-              <div className="text-destructive text-sm" role="alert">
+              <div className="text-sm text-destructive" role="alert">
                 {catTrends.error}
               </div>
             )}
@@ -431,7 +431,7 @@ export function Reports() {
       {/* Top Merchants */}
       <Card aria-labelledby="merchants-heading">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle id="merchants-heading" className="text-base font-medium">
+          <CardTitle id="merchants-heading" className="text-base font-semibold">
             Top Merchants
           </CardTitle>
           <div className="flex gap-2">
@@ -475,17 +475,17 @@ export function Reports() {
         </CardHeader>
         <CardContent>
           {merchants.loading && (
-            <div className="text-muted-foreground text-sm">Loading...</div>
+            <div className="text-sm text-muted-foreground">Loading...</div>
           )}
           {merchants.error && (
-            <div className="text-destructive text-sm" role="alert">
+            <div className="text-sm text-destructive" role="alert">
               {merchants.error}
             </div>
           )}
           {!merchants.loading &&
             !merchants.error &&
             merchants.data.length === 0 && (
-              <p className="text-muted-foreground text-sm">
+              <p className="text-sm text-muted-foreground">
                 No transactions for this period
               </p>
             )}
@@ -504,7 +504,7 @@ export function Reports() {
                     <span className="flex-1 truncate text-sm">
                       {m.description}
                     </span>
-                    <span className="text-muted-foreground text-xs">
+                    <span className="text-xs text-muted-foreground">
                       {m.tx_count} transaction{m.tx_count !== 1 ? 's' : ''}
                     </span>
                     <span className="font-mono text-sm tabular-nums">

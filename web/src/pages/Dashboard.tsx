@@ -254,7 +254,7 @@ export function Dashboard() {
   if (error) {
     return (
       <div className="flex flex-col gap-6">
-        <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
         <Card className="flex flex-col items-center gap-4 p-12 text-center" role="alert">
           <p className="text-muted-foreground">{error}</p>
           <Button onClick={() => window.location.reload()}>Retry</Button>
@@ -269,7 +269,7 @@ export function Dashboard() {
       {/* Header */}
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">
+          <h1 className="text-2xl font-semibold tracking-tight">
             Welcome back, {user?.display_name ?? 'there'}
           </h1>
           <p className="mt-0.5 text-sm text-muted-foreground">

@@ -195,7 +195,7 @@ function GeneralSection() {
                       }
                     />
                   </FormControl>
-                  <p className="text-muted-foreground text-xs">
+                  <p className="text-xs text-muted-foreground">
                     Budget for {year}-{String(month).padStart(2, '0')}
                   </p>
                   <FormMessage />
@@ -974,14 +974,14 @@ function DataSection() {
         </CardHeader>
         <CardContent className="space-y-4">
           {importError && (
-            <div className="text-destructive text-sm" role="alert">
+            <div className="text-sm text-destructive" role="alert">
               {importError}
             </div>
           )}
 
           {importStep === 'upload' && (
             <div className="space-y-4">
-              <p className="text-muted-foreground text-sm">
+              <p className="text-sm text-muted-foreground">
                 Upload an Excel file with columns: date, description, amount.
                 Optional columns: category, tags, notes, original_amount,
                 original_currency.
