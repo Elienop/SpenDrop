@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -431,5 +432,133 @@ func TestHandleReorderCategories_InvalidJSON_Returns400(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+// --- handleDeleteCategory ---
+
+func TestHandleDeleteCategory_AdminCanDelete(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Create a category to delete
+	cat, err := q.CreateCategory(context.Background(), database.CreateCategoryParams{
+		Name:      "ToDelete",
+		Type:      "expense",
+		SortOrder: 99,
+	})
+	if err != nil {
+		t.Fatalf("create category: %v", err)
+	}
+
+	idStr := fmt.Sprintf("%d", cat.ID)
+	req := httptest.NewRequest(http.MethodDelete, "/api/categories/"+idStr, nil)
+	req = withUserAndURLParam(req, admin, "id", idStr)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteCategory(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	decodeResponse(t, rec, &resp)
+	if resp["status"] != "deleted" {
+		t.Errorf("expected status 'deleted', got %q", resp["status"])
+	}
+
+	// Verify category is actually gone
+	_, err = q.GetCategoryByID(context.Background(), cat.ID)
+	if err == nil {
+		t.Error("expected category to be deleted, but it still exists")
+	}
+}
+
+func TestHandleDeleteCategory_MemberForbidden(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "alice", "member")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/categories/1", nil)
+	req = withUserAndURLParam(req, member, "id", "1")
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteCategory(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteCategory_InvalidID_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/categories/abc", nil)
+	req = withUserAndURLParam(req, admin, "id", "abc")
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteCategory(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleDeleteCategory_NotFound_Returns404(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/categories/99999", nil)
+	req = withUserAndURLParam(req, admin, "id", "99999")
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteCategory(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleDeleteCategory_WithTransactions_Returns409(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Enable foreign keys (test DSN doesn't include _foreign_keys=on)
+	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+
+	// Create a category and a transaction referencing it
+	cat, err := q.CreateCategory(context.Background(), database.CreateCategoryParams{
+		Name:      "HasTxns",
+		Type:      "expense",
+		SortOrder: 50,
+	})
+	if err != nil {
+		t.Fatalf("create category: %v", err)
+	}
+	seedTestTransaction(t, q, admin.ID, cat.ID, "2025-01-15", 42.0, "test txn")
+
+	idStr := fmt.Sprintf("%d", cat.ID)
+	req := httptest.NewRequest(http.MethodDelete, "/api/categories/"+idStr, nil)
+	req = withUserAndURLParam(req, admin, "id", idStr)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteCategory(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]string
+	decodeResponse(t, rec, &resp)
+	if !strings.Contains(resp["error"], "deactivate") {
+		t.Errorf("expected helpful message mentioning deactivation, got %q", resp["error"])
 	}
 }

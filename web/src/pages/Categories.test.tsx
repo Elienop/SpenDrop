@@ -297,14 +297,43 @@ describe('Categories', () => {
       });
     });
 
-    test('renders em-dash placeholder in transactions column', async () => {
+    test('Delete menu item DELETEs category', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue(undefined);
       renderCategories();
       await waitFor(() => {
         expect(screen.getByText('Food')).toBeInTheDocument();
       });
-      // One em-dash per row (3 fixtures)
-      const emdashes = screen.getAllByText('—');
-      expect(emdashes.length).toBe(3);
+
+      await user.click(
+        screen.getByRole('button', { name: /actions for food/i }),
+      );
+      await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.del).toHaveBeenCalledWith('categories/1');
+      });
+    });
+
+    test('Delete failure surfaces error in alert banner', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockRejectedValueOnce(
+        new Error(
+          'cannot delete category that has transactions — deactivate it instead, or reassign its transactions first',
+        ),
+      );
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /actions for food/i }),
+      );
+      await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+
+      const banner = await screen.findByRole('alert');
+      expect(banner).toHaveTextContent(/cannot delete category/);
     });
 
     test('surfaces load failure in an alert banner', async () => {

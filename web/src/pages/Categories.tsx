@@ -30,6 +30,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -44,6 +45,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Skeleton } from '@/components/ui/skeleton';
 
 type CategoryType = 'expense' | 'income';
 
@@ -64,13 +66,14 @@ export function Categories() {
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
   const [editor, setEditor] = useState<CategoryEditorState | null>(null);
   const fetchSeqRef = useRef(0);
 
   const fetchCategories = useCallback(() => {
     const seq = ++fetchSeqRef.current;
-    setLoading(true);
+    setFetching(true);
     api
       .get<Category[]>('categories?include_inactive=true')
       .then((cats) => {
@@ -88,6 +91,7 @@ export function Categories() {
       .finally(() => {
         if (seq !== fetchSeqRef.current) return;
         setLoading(false);
+        setFetching(false);
       });
   }, []);
 
@@ -134,6 +138,17 @@ export function Categories() {
     }
   }
 
+  async function handleDelete(cat: Category) {
+    try {
+      await api.del(`categories/${cat.id}`);
+      fetchCategories();
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to delete category',
+      );
+    }
+  }
+
   // Sort: expense first, then income; within each group, by sort_order
   const sortedCategories = useMemo(
     () =>
@@ -145,7 +160,7 @@ export function Categories() {
   );
 
   return (
-    <div className="container mx-auto max-w-4xl space-y-6 p-6">
+    <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Categories</h1>
         {isAdmin && (
@@ -153,7 +168,7 @@ export function Categories() {
             onClick={() => setEditor({ mode: 'create' })}
             aria-label="Add category"
           >
-            <Plus className="mr-2 h-4 w-4" />
+            <Plus data-icon="inline-start" />
             Add category
           </Button>
         )}
@@ -161,7 +176,7 @@ export function Categories() {
 
       {error && (
         <Alert variant="destructive">
-          <AlertCircle className="h-4 w-4" />
+          <AlertCircle />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
@@ -175,23 +190,22 @@ export function Categories() {
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">
-              Loading categories…
-            </p>
+            <div className="flex flex-col gap-2">
+              {Array.from({ length: 4 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
           ) : sortedCategories.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               No categories yet.
             </p>
           ) : (
-            <Table>
+            <Table className={fetching ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
                   <TableHead>Type</TableHead>
-                  <TableHead className="text-right">Transactions</TableHead>
-                  <TableHead className="w-12">
-                    <span className="sr-only">Actions</span>
-                  </TableHead>
+                  <TableHead className="text-right">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -215,21 +229,18 @@ export function Categories() {
                         {cat.type === 'expense' ? 'Expense' : 'Income'}
                       </Badge>
                     </TableCell>
-                    {/* TODO: transaction count requires backend API change (spec §3) */}
-                    <TableCell className="text-right font-mono tabular-nums text-muted-foreground">
-                      —
-                    </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       {isAdmin && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
                               size="icon"
-                              className="h-8 w-8"
+                              className="size-8 data-[state=open]:bg-accent"
                               aria-label={`Actions for ${cat.name}`}
                             >
-                              <MoreHorizontal className="h-4 w-4" />
+                              <MoreHorizontal />
+                              <span className="sr-only">Open menu</span>
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end">
@@ -244,6 +255,13 @@ export function Categories() {
                               onClick={() => void handleToggleActive(cat)}
                             >
                               {cat.is_active ? 'Deactivate' : 'Activate'}
+                            </DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              variant="destructive"
+                              onClick={() => void handleDelete(cat)}
+                            >
+                              Delete
                             </DropdownMenuItem>
                           </DropdownMenuContent>
                         </DropdownMenu>
@@ -325,8 +343,8 @@ function CategoryEditorSheet({
           </SheetDescription>
         </SheetHeader>
 
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-          <div className="space-y-2">
+        <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-4">
+          <div className="flex flex-col gap-2">
             <Label htmlFor="category-name">Name</Label>
             <Input
               id="category-name"
@@ -340,7 +358,7 @@ function CategoryEditorSheet({
           </div>
 
           {state?.mode === 'create' && (
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="category-type">Type</Label>
               <Select
                 value={type}
@@ -359,7 +377,7 @@ function CategoryEditorSheet({
             </div>
           )}
 
-          <div className="space-y-2">
+          <div className="flex flex-col gap-2">
             <Label htmlFor="category-icon">Icon (optional)</Label>
             <Input
               id="category-icon"

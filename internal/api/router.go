@@ -56,6 +56,7 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		r.Post("/categories", h.handleCreateCategory)
 		r.Put("/categories/{id}", h.handleUpdateCategory)
 		r.Patch("/categories/{id}", h.handlePatchCategory)
+		r.Delete("/categories/{id}", h.handleDeleteCategory)
 		r.Post("/categories/reorder", h.handleReorderCategories)
 
 		// Currencies
