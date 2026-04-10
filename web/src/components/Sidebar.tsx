@@ -11,7 +11,6 @@ import {
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Tooltip,
   TooltipContent,
@@ -58,9 +57,10 @@ export function Sidebar() {
           expanded ? 'w-60' : 'w-12',
         )}
       >
+        {/* Header — matches SidebarHeader: gap-2 p-2 */}
         <div
           className={cn(
-            'flex h-14 items-center border-b border-border',
+            'flex h-14 shrink-0 items-center border-b border-border p-2',
             expanded ? 'justify-between px-4' : 'justify-center',
           )}
         >
@@ -84,48 +84,54 @@ export function Sidebar() {
           </button>
         </div>
 
-        <ScrollArea className="flex-1">
-          <nav className="flex flex-col gap-6 px-2 py-4" aria-label="Primary">
-            <SidebarSection
-              title="Menu"
-              items={menuItems}
-              expanded={expanded}
-            />
-            <div className="flex flex-col gap-1">
-              <SidebarSectionTitle expanded={expanded} title="General" />
-              {generalItems.map((item) => (
-                <SidebarLink key={item.path} item={item} expanded={expanded} />
-              ))}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={() => void logout()}
-                    className={cn(
-                      'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
-                      expanded
-                        ? 'gap-3 px-3 py-2'
-                        : 'h-8 w-8 justify-center p-2',
-                    )}
-                  >
-                    <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span className={expanded ? undefined : 'sr-only'}>
-                      Log out
-                    </span>
-                  </button>
-                </TooltipTrigger>
-                {!expanded && (
-                  <TooltipContent side="right">Log out</TooltipContent>
-                )}
-              </Tooltip>
-            </div>
-          </nav>
-        </ScrollArea>
+        {/* Content — matches SidebarContent: gap-2, overflow-hidden when collapsed */}
+        <nav
+          className={cn(
+            'flex min-h-0 flex-1 flex-col gap-2',
+            expanded ? 'overflow-auto' : 'overflow-hidden',
+          )}
+          aria-label="Primary"
+        >
+          {/* Menu group — matches SidebarGroup: p-2 */}
+          <div className="flex flex-col gap-0.5 p-2">
+            <SidebarSectionTitle expanded={expanded} title="Menu" />
+            {menuItems.map((item) => (
+              <SidebarLink key={item.path} item={item} expanded={expanded} />
+            ))}
+          </div>
 
+          {/* General group */}
+          <div className="flex flex-col gap-0.5 p-2">
+            <SidebarSectionTitle expanded={expanded} title="General" />
+            {generalItems.map((item) => (
+              <SidebarLink key={item.path} item={item} expanded={expanded} />
+            ))}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={() => void logout()}
+                  className={cn(
+                    'flex w-full items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+                    expanded ? 'gap-2 px-3 py-2' : 'size-8 p-2',
+                  )}
+                >
+                  <LogOut aria-hidden="true" />
+                  <span className="truncate">Log out</span>
+                </button>
+              </TooltipTrigger>
+              {!expanded && (
+                <TooltipContent side="right">Log out</TooltipContent>
+              )}
+            </Tooltip>
+          </div>
+        </nav>
+
+        {/* Footer — matches SidebarFooter: gap-2 p-2 */}
         <div
           className={cn(
-            'flex items-center border-t border-border py-3',
-            expanded ? 'gap-3 px-3' : 'justify-center',
+            'flex items-center border-t border-border p-2',
+            expanded ? 'gap-3 px-3 py-3' : 'justify-center py-3',
           )}
         >
           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
@@ -147,25 +153,6 @@ export function Sidebar() {
   );
 }
 
-function SidebarSection({
-  title,
-  items,
-  expanded,
-}: {
-  title: string;
-  items: typeof menuItems;
-  expanded: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-1">
-      <SidebarSectionTitle expanded={expanded} title={title} />
-      {items.map((item) => (
-        <SidebarLink key={item.path} item={item} expanded={expanded} />
-      ))}
-    </div>
-  );
-}
-
 function SidebarSectionTitle({
   title,
   expanded,
@@ -173,9 +160,13 @@ function SidebarSectionTitle({
   title: string;
   expanded: boolean;
 }) {
-  if (!expanded) return null;
   return (
-    <p className="px-3 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+    <p
+      className={cn(
+        'px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
+        expanded ? 'pb-1' : '-mt-8 opacity-0',
+      )}
+    >
       {title}
     </p>
   );
@@ -185,7 +176,12 @@ function SidebarLink({
   item,
   expanded,
 }: {
-  item: { path: string; label: string; icon: React.ElementType; end?: boolean };
+  item: {
+    path: string;
+    label: string;
+    icon: React.ElementType;
+    end?: boolean;
+  };
   expanded: boolean;
 }) {
   const Icon = item.icon;
@@ -195,16 +191,14 @@ function SidebarLink({
       end={item.end}
       className={({ isActive }) =>
         cn(
-          'flex items-center rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground',
+          'flex w-full items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
           isActive && 'bg-muted text-foreground',
-          expanded
-            ? 'gap-3 px-3 py-2'
-            : 'h-8 w-8 justify-center p-2',
+          expanded ? 'gap-2 px-3 py-2' : 'size-8 p-2',
         )
       }
     >
-      <Icon className="h-4 w-4 shrink-0" aria-hidden="true" />
-      <span className={expanded ? undefined : 'sr-only'}>{item.label}</span>
+      <Icon aria-hidden="true" />
+      <span className="truncate">{item.label}</span>
     </NavLink>
   );
   if (expanded) return link;
