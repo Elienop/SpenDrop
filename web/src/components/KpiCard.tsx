@@ -51,10 +51,7 @@ export function KpiCard({
       </CardHeader>
       <CardContent className="pb-2">
         <div className="font-mono text-2xl font-semibold tabular-nums">
-          {dollars}
-          <span className="text-lg font-medium text-muted-foreground">
-            {cents}
-          </span>
+          {dollars}{cents}
         </div>
       </CardContent>
       {footnote && (

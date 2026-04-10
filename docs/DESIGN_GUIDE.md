@@ -129,8 +129,8 @@ Follows the shadcn dashboard pattern:
 ```tsx
 <KpiCard
   label="Total Balance"        // CardDescription
-  dollars="$2,847"              // Main value
-  cents=".32"                   // Muted decimal
+  dollars="$2,847"              // Integer portion
+  cents=".32"                   // Decimal portion (same style as dollars)
   delta={{ percent: 3.2, direction: 'up' }}  // Badge with TrendingUp/Down
   footnote="vs last month"     // CardFooter text
 />
@@ -138,8 +138,7 @@ Follows the shadcn dashboard pattern:
 
 - **Label:** `CardDescription` with `text-sm font-medium`
 - **Delta:** `Badge variant="outline"` with `TrendingUp`/`TrendingDown` icons (3x3)
-- **Value:** `font-mono text-2xl font-semibold tabular-nums`
-- **Cents:** `text-lg font-medium text-muted-foreground`
+- **Value:** `font-mono text-2xl font-semibold tabular-nums` (dollars + cents rendered as single text)
 - **Footnote:** `CardFooter` > `text-xs text-muted-foreground`
 
 No icon badges, no featured/accent variant, no gradient backgrounds.

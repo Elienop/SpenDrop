@@ -368,7 +368,7 @@ export function Dashboard() {
       >
         <ChartContainer config={cashFlowConfig} className="h-64 w-full">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 4, right: 0, bottom: 0, left: 0 }} barGap={4}>
+            <BarChart data={chartData} margin={{ top: 4, right: 12, bottom: 0, left: 12 }} barGap={4}>
               <defs>
                 <linearGradient id="fillIncome" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor="var(--color-income)" stopOpacity={0.8} />
@@ -396,8 +396,11 @@ export function Dashboard() {
                 axisLine={false}
                 className="text-xs"
                 stroke="hsl(var(--muted-foreground))"
+                tickFormatter={(v: number) =>
+                  v >= 1000 ? `${(v / 1000).toLocaleString(undefined, { maximumFractionDigits: 1 })}K` : String(v)
+                }
               />
-              <ChartTooltip content={<ChartTooltipContent />} />
+              <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
               <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
               <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
             </BarChart>

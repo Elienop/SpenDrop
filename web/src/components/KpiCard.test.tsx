@@ -12,8 +12,7 @@ describe('KpiCard', () => {
       />,
     );
     expect(screen.getByText('Total Balance')).toBeInTheDocument();
-    expect(screen.getByText('$2,847')).toBeInTheDocument();
-    expect(screen.getByText('.32')).toBeInTheDocument();
+    expect(screen.getByText('$2,847.32')).toBeInTheDocument();
   });
 
   test('renders delta badge when positive', () => {

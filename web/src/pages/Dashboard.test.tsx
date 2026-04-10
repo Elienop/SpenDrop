@@ -139,9 +139,9 @@ describe('Dashboard', () => {
       // strings also appear in the cash-flow chart config, so label-only
       // assertions would pass even if the KPI row were missing. These
       // formatted dollar splits (4500-3200=1300) are unique to KPI cards.
-      expect(screen.getByText('$1,300')).toBeInTheDocument();
-      expect(screen.getByText('$4,500')).toBeInTheDocument();
-      expect(screen.getByText('$3,200')).toBeInTheDocument();
+      expect(screen.getByText('$1,300.00')).toBeInTheDocument();
+      expect(screen.getByText('$4,500.00')).toBeInTheDocument();
+      expect(screen.getByText('$3,200.00')).toBeInTheDocument();
     });
   });
 
