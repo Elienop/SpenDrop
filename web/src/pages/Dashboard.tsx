@@ -8,7 +8,6 @@ import {
   CartesianGrid,
   RadialBarChart,
   RadialBar,
-  PolarGrid,
   PolarRadiusAxis,
   Label as RechartsLabel,
 } from 'recharts';
@@ -25,11 +24,18 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart';
-import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { ButtonGroup } from '@/components/ui/button-group';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Label } from '@/components/ui/label';
 import { Button } from '@/components/ui/button';
-import { Card } from '@/components/ui/card';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import {
+  Table,
+  TableBody,
+  TableRow,
+  TableCell,
+} from '@/components/ui/table';
+import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 
 /* ── Formatters ── */
@@ -81,10 +87,6 @@ type CashFlowView = '6m' | '12m';
 const cashFlowConfig: ChartConfig = {
   income: { label: 'Income', color: 'hsl(var(--primary))' },
   expense: { label: 'Expense', color: 'hsl(var(--muted-foreground))' },
-};
-
-const savingsConfig: ChartConfig = {
-  savings: { label: 'Progress', color: 'hsl(var(--primary))' },
 };
 
 /* ── Component ── */
@@ -219,8 +221,6 @@ export function Dashboard() {
   const incomeSplit = splitCurrency(totalIncome);
   const expenseSplit = splitCurrency(totalExpense);
 
-  const savingsGoalPct = summary?.savings_goal_progress ?? 0;
-
   /* ── Loading state ── */
   if (loading) {
     return (
@@ -238,16 +238,14 @@ export function Dashboard() {
             </Card>
           ))}
         </div>
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-          <Card className="p-6 lg:col-span-3">
-            <Skeleton className="mb-4 h-4 w-1/4" />
-            <Skeleton className="h-64 w-full" />
-          </Card>
-          <Card className="p-6 lg:col-span-2">
-            <Skeleton className="mb-4 h-4 w-1/3" />
-            <Skeleton className="h-48 w-full" />
-          </Card>
-        </div>
+        <Card className="p-6">
+          <Skeleton className="mb-4 h-4 w-1/4" />
+          <Skeleton className="h-64 w-full" />
+        </Card>
+        <Card className="p-6">
+          <Skeleton className="mb-4 h-4 w-1/3" />
+          <Skeleton className="h-48 w-full" />
+        </Card>
       </div>
     );
   }
@@ -345,15 +343,24 @@ export function Dashboard() {
         title="Cash Flow"
         subtitle="Income vs expenses over time"
         action={
-          <Tabs
-            value={cashFlowView}
-            onValueChange={(v) => setCashFlowView(v as CashFlowView)}
-          >
-            <TabsList className="h-8">
-              <TabsTrigger value="6m" className="h-6 px-3 text-xs">6M</TabsTrigger>
-              <TabsTrigger value="12m" className="h-6 px-3 text-xs">12M</TabsTrigger>
-            </TabsList>
-          </Tabs>
+          <ButtonGroup>
+            <Button
+              variant={cashFlowView === '6m' ? 'secondary' : 'outline'}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={() => setCashFlowView('6m')}
+            >
+              6M
+            </Button>
+            <Button
+              variant={cashFlowView === '12m' ? 'secondary' : 'outline'}
+              size="sm"
+              className="h-7 px-3 text-xs"
+              onClick={() => setCashFlowView('12m')}
+            >
+              12M
+            </Button>
+          </ButtonGroup>
         }
       >
         <ChartContainer config={cashFlowConfig} className="h-64 w-full">
@@ -395,231 +402,168 @@ export function Dashboard() {
         </ChartContainer>
       </ChartCard>
 
-      {/* Bottom grid */}
-      <div className="grid grid-cols-1 gap-3 lg:grid-cols-5">
-        {/* Spending by Category */}
-        <ChartCard
-          title="Spending by Category"
-          subtitle={formatFull(totalCategorySpent)}
-          className="lg:col-span-3"
-        >
-          {gaugeData.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-              No spending yet this month.
-            </div>
-          ) : (
-            <div className="flex flex-1 flex-col gap-4 md:flex-row md:items-center">
-              <ChartContainer
-                config={categoryChartConfig}
-                className="mx-auto aspect-square w-full max-w-[250px] md:w-1/2"
-              >
-                <RadialBarChart
-                  data={radialCategoryData}
-                  endAngle={180}
-                  innerRadius={80}
-                  outerRadius={130}
-                >
-                  <ChartTooltip
-                    cursor={false}
-                    content={<ChartTooltipContent hideLabel />}
-                  />
-                  {gaugeData.map((slice) => (
-                    <RadialBar
-                      key={slice.id}
-                      dataKey={`cat-${slice.id}`}
-                      stackId="a"
-                      fill={slice.color}
-                      cornerRadius={5}
-                      className="stroke-transparent stroke-2"
-                    />
-                  ))}
-                  <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
-                    <RechartsLabel
-                      content={({ viewBox }) => {
-                        if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                          return (
-                            <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle">
-                              <tspan
-                                x={viewBox.cx}
-                                y={(viewBox.cy || 0) - 16}
-                                className="fill-foreground text-2xl font-bold"
-                              >
-                                {formatFull(totalCategorySpent)}
-                              </tspan>
-                              <tspan
-                                x={viewBox.cx}
-                                y={(viewBox.cy || 0) + 4}
-                                className="fill-muted-foreground text-sm"
-                              >
-                                Total Spent
-                              </tspan>
-                            </text>
-                          );
-                        }
-                      }}
-                    />
-                  </PolarRadiusAxis>
-                </RadialBarChart>
-              </ChartContainer>
-              <ul className="flex flex-1 flex-col gap-2 md:w-1/2">
-                {gaugeData.map((slice) => {
-                  const pct = totalCategorySpent > 0
-                    ? (slice.value / totalCategorySpent) * 100
-                    : 0;
-                  return (
-                    <li key={slice.id} className="flex items-center gap-3 text-sm">
-                      <span
-                        className="h-2.5 w-2.5 shrink-0 rounded-sm"
-                        style={{ backgroundColor: slice.color }}
-                        aria-hidden="true"
-                      />
-                      <span className="flex-1 truncate font-medium">{slice.name}</span>
-                      <span className="font-mono tabular-nums text-muted-foreground">
-                        {pct.toFixed(0)}%
-                      </span>
-                      <span className="min-w-20 text-right font-mono font-semibold tabular-nums">
-                        {formatFull(slice.value)}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          )}
-        </ChartCard>
-
-        {/* Recent Transactions */}
-        <Card className="flex flex-col p-6 lg:col-span-2">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <h2 className="text-base font-semibold tracking-tight">Recent Transactions</h2>
-              <button
-                type="button"
-                aria-pressed={showLatest}
-                className="mt-0.5 text-xs font-medium text-primary hover:underline"
-                onClick={() => setShowLatest((v) => !v)}
-              >
-                {showLatest ? 'Show this month' : 'Show latest'}
-              </button>
-            </div>
-            <Link
-              to="/transactions"
-              className="text-xs font-medium text-primary hover:underline"
-            >
-              View all →
-            </Link>
+      {/* Spending by Category — full width */}
+      <ChartCard
+        title="Spending by Category"
+        subtitle={formatFull(totalCategorySpent)}
+      >
+        {gaugeData.length === 0 ? (
+          <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
+            No spending yet this month.
           </div>
-          {recentTransactions.length === 0 ? (
-            <div className="flex flex-1 items-center justify-center p-8 text-sm text-muted-foreground">
-              No transactions yet.
-            </div>
-          ) : (
-            <ul className="flex flex-col divide-y divide-border">
-              {recentTransactions.map((tx) => {
-                const color = getCategoryColorVar({ id: tx.category_id });
+        ) : (
+          <div className="flex flex-1 flex-col gap-4 md:flex-row md:items-center">
+            <ChartContainer
+              config={categoryChartConfig}
+              className="mx-auto aspect-square w-full max-w-[300px] md:w-1/3"
+            >
+              <RadialBarChart
+                data={radialCategoryData}
+                endAngle={180}
+                innerRadius={80}
+                outerRadius={130}
+              >
+                <ChartTooltip
+                  cursor={false}
+                  content={<ChartTooltipContent hideLabel />}
+                />
+                {gaugeData.map((slice) => (
+                  <RadialBar
+                    key={slice.id}
+                    dataKey={`cat-${slice.id}`}
+                    stackId="a"
+                    fill={slice.color}
+                    cornerRadius={5}
+                    className="stroke-transparent stroke-2"
+                  />
+                ))}
+                <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
+                  <RechartsLabel
+                    content={({ viewBox }) => {
+                      if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
+                        return (
+                          <text x={viewBox.cx} y={viewBox.cy} textAnchor="middle">
+                            <tspan
+                              x={viewBox.cx}
+                              y={(viewBox.cy || 0) - 16}
+                              className="fill-foreground text-2xl font-bold"
+                            >
+                              {formatFull(totalCategorySpent)}
+                            </tspan>
+                            <tspan
+                              x={viewBox.cx}
+                              y={(viewBox.cy || 0) + 4}
+                              className="fill-muted-foreground text-sm"
+                            >
+                              Total Spent
+                            </tspan>
+                          </text>
+                        );
+                      }
+                    }}
+                  />
+                </PolarRadiusAxis>
+              </RadialBarChart>
+            </ChartContainer>
+            <ul className="flex flex-1 flex-col gap-2 md:w-2/3">
+              {gaugeData.map((slice) => {
+                const pct = totalCategorySpent > 0
+                  ? (slice.value / totalCategorySpent) * 100
+                  : 0;
                 return (
-                  <li key={tx.id} className="flex items-center gap-3 py-2.5">
+                  <li key={slice.id} className="flex items-center gap-3 text-sm">
                     <span
-                      className="h-9 w-9 shrink-0 rounded-full"
-                      style={{
-                        backgroundColor: `color-mix(in srgb, ${color} 15%, transparent)`,
-                      }}
+                      className="h-2.5 w-2.5 shrink-0 rounded-sm"
+                      style={{ backgroundColor: slice.color }}
                       aria-hidden="true"
                     />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium">{tx.description}</div>
-                      <div className="text-xs text-muted-foreground">{tx.category_name}</div>
-                    </div>
-                    <div className="text-right">
-                      <div
-                        className={
-                          tx.category_type === 'income'
-                            ? 'font-mono text-sm font-semibold tabular-nums text-emerald-500'
-                            : 'font-mono text-sm font-semibold tabular-nums'
-                        }
-                      >
-                        {tx.category_type === 'income' ? '+' : '-'}
-                        {formatFull(tx.amount)}
-                      </div>
-                      <div className="text-xs text-muted-foreground">{tx.date}</div>
-                    </div>
+                    <span className="flex-1 truncate font-medium">{slice.name}</span>
+                    <span className="font-mono tabular-nums text-muted-foreground">
+                      {pct.toFixed(0)}%
+                    </span>
+                    <span className="min-w-20 text-right font-mono font-semibold tabular-nums">
+                      {formatFull(slice.value)}
+                    </span>
                   </li>
                 );
               })}
             </ul>
-          )}
-        </Card>
-      </div>
-
-      {/* Savings Progress — full width */}
-      <ChartCard
-        title="Savings Progress"
-        subtitle={`${savingsGoalPct.toFixed(0)}% of goal`}
-      >
-        <ChartContainer config={savingsConfig} className="mx-auto aspect-square max-h-[250px]">
-          <RadialBarChart
-            data={[{ name: 'savings', value: savingsGoalPct, fill: 'var(--color-savings)' }]}
-            startAngle={0}
-            endAngle={(Math.max(0, Math.min(savingsGoalPct, 100)) / 100) * 360}
-            innerRadius={80}
-            outerRadius={90}
-          >
-            <PolarGrid
-              gridType="circle"
-              radialLines={false}
-              stroke="none"
-              className="first:fill-muted last:fill-background"
-              polarRadius={[90, 80]}
-            />
-            <RadialBar dataKey="value" background cornerRadius={10} />
-            <PolarRadiusAxis tick={false} tickLine={false} axisLine={false}>
-              <RechartsLabel
-                content={({ viewBox }) => {
-                  if (viewBox && 'cx' in viewBox && 'cy' in viewBox) {
-                    return (
-                      <text
-                        x={viewBox.cx}
-                        y={viewBox.cy}
-                        textAnchor="middle"
-                        dominantBaseline="middle"
-                      >
-                        <tspan
-                          x={viewBox.cx}
-                          y={viewBox.cy}
-                          className="fill-foreground text-4xl font-bold"
-                        >
-                          {savingsGoalPct.toFixed(0)}%
-                        </tspan>
-                        <tspan
-                          x={viewBox.cx}
-                          y={(viewBox.cy || 0) + 24}
-                          className="fill-muted-foreground"
-                        >
-                          of goal
-                        </tspan>
-                      </text>
-                    );
-                  }
-                }}
-              />
-            </PolarRadiusAxis>
-          </RadialBarChart>
-        </ChartContainer>
-        <div className="flex items-center justify-center gap-8 pb-2">
-          <div className="text-center">
-            <div className="font-mono text-base font-semibold tabular-nums">
-              {formatFull(summary?.savings_ytd ?? 0)}
-            </div>
-            <div className="mt-0.5 text-xs text-muted-foreground">Saved YTD</div>
           </div>
-          <div className="text-center">
-            <div className="font-mono text-base font-semibold tabular-nums">
-              {formatFull(summary?.savings_goal ?? 0)}
-            </div>
-            <div className="mt-0.5 text-xs text-muted-foreground">Annual Goal</div>
-          </div>
-        </div>
+        )}
       </ChartCard>
+
+      {/* Recent Transactions — shadcn table style */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <div>
+            <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
+            <CardDescription>
+              <button
+                type="button"
+                aria-pressed={showLatest}
+                className="text-xs font-medium text-primary hover:underline"
+                onClick={() => setShowLatest((v) => !v)}
+              >
+                {showLatest ? 'Show this month' : 'Show latest'}
+              </button>
+            </CardDescription>
+          </div>
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/transactions">View All</Link>
+          </Button>
+        </CardHeader>
+        <CardContent>
+          {recentTransactions.length === 0 ? (
+            <div className="flex items-center justify-center p-8 text-sm text-muted-foreground">
+              No transactions yet.
+            </div>
+          ) : (
+            <Table>
+              <TableBody>
+                {recentTransactions.map((tx) => {
+                  const color = getCategoryColorVar({ id: tx.category_id });
+                  return (
+                    <TableRow key={tx.id}>
+                      <TableCell className="w-10">
+                        <div
+                          className="flex size-10 items-center justify-center rounded-lg"
+                          style={{
+                            backgroundColor: `color-mix(in srgb, ${color} 15%, transparent)`,
+                          }}
+                        >
+                          <span className="text-xs font-medium" style={{ color }}>
+                            {tx.category_name?.[0]?.toUpperCase() ?? '?'}
+                          </span>
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <div className="flex flex-col">
+                          <span className="font-medium">{tx.description}</span>
+                          <span className="text-sm text-muted-foreground">{tx.category_name}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-sm text-muted-foreground">
+                        {tx.date}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <span
+                          className={cn(
+                            'text-sm font-semibold tabular-nums',
+                            tx.category_type === 'income' && 'text-emerald-500',
+                          )}
+                        >
+                          {tx.category_type === 'income' ? '+' : '-'}
+                          {formatFull(tx.amount)}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

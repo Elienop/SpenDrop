@@ -1,8 +1,8 @@
 import { Search } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { ButtonGroup } from '@/components/ui/button-group';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
-import { cn } from '@/lib/utils';
 
 interface TransactionToolbarProps {
   search: string;
@@ -41,16 +41,13 @@ export function TransactionToolbar({
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search transactions..."
           aria-label="Search transactions"
-          className="pl-8"
+          className="h-9 pl-8"
         />
       </div>
 
       <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 
-      {/* Inner bg-background is intentionally distinct from the toolbar's bg-card
-          wrapper so the segmented control reads as a sunken track — tokens.css
-          and globals.css resolve --background and --card to different HSL values. */}
-      <div className="inline-flex items-center gap-0.5 rounded-md border bg-background p-0.5">
+      <ButtonGroup>
         {([
           { value: '', label: 'All' },
           { value: 'expense', label: 'Expenses' },
@@ -59,18 +56,15 @@ export function TransactionToolbar({
           <Button
             key={opt.value || 'all'}
             type="button"
-            variant={type === opt.value ? 'secondary' : 'ghost'}
+            variant={type === opt.value ? 'secondary' : 'outline'}
             size="sm"
-            className={cn(
-              'h-7 px-3 text-xs',
-              type === opt.value && 'shadow-sm',
-            )}
+            className="text-xs"
             onClick={() => onTypeChange(opt.value)}
           >
             {opt.label}
           </Button>
         ))}
-      </div>
+      </ButtonGroup>
 
       <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
 

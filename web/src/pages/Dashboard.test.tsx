@@ -29,7 +29,6 @@ vi.mock('recharts', () => ({
   CartesianGrid: () => <div />,
   RadialBarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   RadialBar: () => <div />,
-  PolarGrid: () => <div />,
   PolarRadiusAxis: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   Label: () => <div />,
   // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
@@ -153,21 +152,41 @@ describe('Dashboard', () => {
     });
   });
 
-  test('renders Spending and Recent Transactions sections', async () => {
+  test('renders Spending by Category as full-width card', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
       expect(screen.getByText('Spending by Category')).toBeInTheDocument();
-      expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
     });
   });
 
-  test('renders Savings Progress section', async () => {
+  test('renders Recent Transactions in a table layout', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {
-      expect(screen.getByText('Savings Progress')).toBeInTheDocument();
-      expect(screen.getByText('Saved YTD')).toBeInTheDocument();
-      expect(screen.getByText('Annual Goal')).toBeInTheDocument();
+      expect(screen.getByText('Recent Transactions')).toBeInTheDocument();
+      // Should use a table element instead of a list
+      expect(screen.getByRole('table')).toBeInTheDocument();
+      // Should have a "View All" link
+      expect(screen.getByRole('link', { name: /view all/i })).toBeInTheDocument();
     });
+  });
+
+  test('renders transaction data in table rows', async () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      // The mock transaction "Groceries" should appear in a table row
+      expect(screen.getByText('Groceries')).toBeInTheDocument();
+      // "Food" appears in both the category legend and the transaction table
+      expect(screen.getAllByText('Food').length).toBeGreaterThanOrEqual(2);
+      // Category initial should appear in the icon cell
+      expect(screen.getByText('F')).toBeInTheDocument();
+    });
+  });
+
+  test('does not render Savings Progress section', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.queryByText('Savings Progress')).not.toBeInTheDocument();
+    expect(screen.queryByText('Saved YTD')).not.toBeInTheDocument();
+    expect(screen.queryByText('Annual Goal')).not.toBeInTheDocument();
   });
 
   test('does not render removed Monthly Budget section', () => {
@@ -175,9 +194,15 @@ describe('Dashboard', () => {
     expect(screen.queryByText('Monthly Budget')).not.toBeInTheDocument();
   });
 
-  test('renders 6M and 12M toggle buttons', () => {
+  test('renders 6M and 12M toggle buttons inside a ButtonGroup', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
-    expect(screen.getByRole('tab', { name: '6M' })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: '12M' })).toBeInTheDocument();
+    const btn6 = screen.getByRole('button', { name: '6M' });
+    const btn12 = screen.getByRole('button', { name: '12M' });
+    expect(btn6).toBeInTheDocument();
+    expect(btn12).toBeInTheDocument();
+    // Both buttons should be inside a group container
+    const group = screen.getByRole('group');
+    expect(group).toContainElement(btn6);
+    expect(group).toContainElement(btn12);
   });
 });

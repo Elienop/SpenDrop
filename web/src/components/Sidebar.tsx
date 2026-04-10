@@ -17,6 +17,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 
 const menuItems = [
@@ -136,9 +137,9 @@ export function Sidebar() {
             expanded ? 'gap-3 px-3 py-3' : 'justify-center py-3',
           )}
         >
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-muted text-sm font-medium">
-            {initial}
-          </div>
+          <Avatar className="h-8 w-8 text-sm font-medium">
+            <AvatarFallback>{initial}</AvatarFallback>
+          </Avatar>
           {expanded && user && (
             <div className="min-w-0">
               <p className="truncate text-sm font-medium">
