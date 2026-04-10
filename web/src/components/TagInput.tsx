@@ -48,7 +48,7 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
     >
       {tags.map((tag, i) => (
         <span
-          key={tag}
+          key={`${tag}-${i}`}
           className="inline-flex items-center gap-1 rounded-sm bg-primary/15 px-2 py-0.5 text-xs font-semibold text-primary whitespace-nowrap"
         >
           {tag}
