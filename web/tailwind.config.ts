@@ -4,7 +4,7 @@ const config: Config = {
   darkMode: 'class',
   content: ['./index.html', './src/**/*.{ts,tsx}'],
   corePlugins: {
-    preflight: false,
+    preflight: true,
   },
   theme: {
     container: {

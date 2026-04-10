@@ -478,7 +478,6 @@ function SavingsSection() {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchGoals().catch(() => {
       /* initial load failure is non-critical; list will show empty */
     });
@@ -659,7 +658,6 @@ function UsersSection() {
   }, []);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchUsers().catch(() => {
       /* initial load failure is non-critical; list will show empty */
     });

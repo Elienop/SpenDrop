@@ -10,15 +10,6 @@ vi.mock('./hooks/useAuth', () => ({
   ),
 }));
 
-// Mock useTheme (Sidebar uses it)
-vi.mock('./hooks/useTheme', () => ({
-  useTheme: vi.fn().mockReturnValue({
-    theme: 'dark',
-    resolvedTheme: 'dark',
-    setTheme: vi.fn(),
-  }),
-}));
-
 // Mock the API client (real pages call api.get, etc.)
 vi.mock('./api/client', () => ({
   api: {
@@ -48,41 +39,6 @@ vi.mock('./hooks/useDashboard', () => ({
     loading: false,
     error: '',
   }),
-}));
-
-// Mock useChartPatterns (Dashboard uses it)
-vi.mock('./hooks/useChartPatterns', () => ({
-  useChartPatterns: () => ({
-    cashFlow: {
-      income: { fill: '#5347CE', legendStyle: {} },
-      expense: { fill: 'url(#stripe)', stroke: '#5347CE', strokeWidth: 1.5, legendStyle: {} },
-    },
-    getCategoryPattern: () => ({ fill: '#5347CE', legendStyle: {} }),
-    getCategoryDefs: () => [],
-    buildStyleMap: () => ({}),
-    ChartPatternDefs: () => null,
-  }),
-  ChartPatternDefs: () => null,
-}));
-
-// Mock useChartTheme (Dashboard charts use it)
-vi.mock('./hooks/useChartTheme', () => ({
-  useChartTheme: () => ({
-    axisStroke: '#58585F',
-    gridStroke: '#1E1E23',
-    tooltipBg: '#1E1E23',
-    tooltipBorder: '#2A2A30',
-    tooltipText: '#F5F5F6',
-    hoverBg: 'rgba(129,140,248,0.08)',
-    incomeColor: '#7EC89B',
-    expenseColor: '#E88B9C',
-    categoryColors: ['#818CF8', '#7EC89B', '#E88B9C', '#E8A87C', '#7CAFD4', '#58585F'],
-  }),
-}));
-
-// Mock ChartTooltip
-vi.mock('./components/ChartTooltip', () => ({
-  ChartTooltip: () => <div />,
 }));
 
 // Mock recharts (Dashboard and Reports use it)
