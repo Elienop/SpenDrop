@@ -239,3 +239,52 @@ WHERE c.type = 'expense'
 GROUP BY t.description
 ORDER BY total DESC
 LIMIT sqlc.arg(limit);
+
+-- Spending Heatmap
+
+-- name: SumExpensesByDay :many
+SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
+GROUP BY t.date
+ORDER BY t.date;
+
+-- Expense Velocity
+
+-- name: SumExpensesByDayInMonth :many
+SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
+       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS daily_total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
+    AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT)
+GROUP BY day
+ORDER BY day;
+
+-- Recurring Expenses
+
+-- name: RecurringDescriptions :many
+SELECT t.description,
+       COUNT(DISTINCT strftime('%Y-%m', t.date)) AS month_count,
+       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS annual_total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
+GROUP BY t.description
+HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
+ORDER BY annual_total DESC;
+
+-- Tag Breakdown (raw data for Go-side aggregation)
+
+-- name: TransactionAmountsAndTags :many
+SELECT t.amount, t.tags
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND t.tags IS NOT NULL AND t.tags != ''
+    AND t.date >= CAST(sqlc.arg(date_from) AS TEXT)
+    AND t.date <= CAST(sqlc.arg(date_to) AS TEXT);
