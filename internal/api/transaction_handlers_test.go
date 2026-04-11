@@ -1465,3 +1465,243 @@ func TestSortByTagsAsc(t *testing.T) {
 		t.Errorf("expected third result tags 'zebra', got %q", resp.Transactions[2].Tags)
 	}
 }
+
+// --- handleBulkRename ---
+
+func TestHandleBulkRename_RenamesMatchingTransactions(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "starbucks")
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(2) {
+		t.Errorf("expected updated=2, got %v", resp["updated"])
+	}
+
+	// Verify the descriptions were actually changed in the DB
+	listReq := httptest.NewRequest(http.MethodGet, "/api/transactions?search=MR+BROWN", nil)
+	listReq = withUser(listReq, user)
+	listRec := httptest.NewRecorder()
+	h.handleListTransactions(listRec, listReq)
+
+	var listResp transactionListResponse
+	decodeResponse(t, listRec, &listResp)
+	if listResp.Total != 2 {
+		t.Errorf("expected 2 renamed transactions, got %d", listResp.Total)
+	}
+	for _, txn := range listResp.Transactions {
+		if txn.Description != "MR BROWN" {
+			t.Errorf("expected description 'MR BROWN', got %q", txn.Description)
+		}
+	}
+}
+
+func TestHandleBulkRename_CaseInsensitiveSearch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "MR BROWN COFFEE")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Mr Brown Bakery")
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "Mr. Brown"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(2) {
+		t.Errorf("expected updated=2 (case-insensitive), got %v", resp["updated"])
+	}
+}
+
+func TestHandleBulkRename_NoMatches_ReturnsZero(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "starbucks")
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(0) {
+		t.Errorf("expected updated=0, got %v", resp["updated"])
+	}
+}
+
+func TestHandleBulkRename_EmptySearch_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	body := strings.NewReader(`{"search": "", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBulkRename_EmptyNewDescription_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": ""}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBulkRename_NewDescriptionTooLong_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	longDesc := strings.Repeat("x", 501)
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "` + longDesc + `"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBulkRename_InvalidJSON_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	body := strings.NewReader(`not json`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleBulkRename_NoAuth_Returns401(t *testing.T) {
+	h := setupHandler(t)
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleBulkRename_EscapesSQLWildcards(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Create transactions with SQL LIKE wildcards in the description
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "100% discount store")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "100 percent store")
+
+	// Searching for "100%" should only match the first one (% is escaped)
+	body := strings.NewReader(`{"search": "100%", "new_description": "HUNDRED PERCENT"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(1) {
+		t.Errorf("expected updated=1 (only exact '100%%' match), got %v", resp["updated"])
+	}
+}
+
+func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	txn := seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown")
+	origUpdatedAt := txn.UpdatedAt
+
+	// Small delay to ensure timestamp differs
+	time.Sleep(10 * time.Millisecond)
+
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify updated_at changed
+	updated, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("get transaction: %v", err)
+	}
+	if !updated.UpdatedAt.After(origUpdatedAt) {
+		t.Errorf("expected updated_at to advance; before=%v, after=%v", origUpdatedAt, updated.UpdatedAt)
+	}
+}

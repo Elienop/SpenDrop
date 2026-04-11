@@ -552,6 +552,129 @@ func validateTransactionRequest(req transactionRequest) error {
 	return nil
 }
 
+// bulkRenameRequest is the JSON input for bulk-renaming transaction descriptions.
+type bulkRenameRequest struct {
+	Search         string `json:"search"`
+	NewDescription string `json:"new_description"`
+}
+
+// handleBulkRename updates the description of all transactions matching a
+// case-insensitive LIKE search.
+func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
+	_, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req bulkRenameRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	req.Search = strings.TrimSpace(req.Search)
+	req.NewDescription = strings.TrimSpace(req.NewDescription)
+
+	if req.Search == "" {
+		writeError(w, http.StatusBadRequest, "search is required")
+		return
+	}
+	if req.NewDescription == "" {
+		writeError(w, http.StatusBadRequest, "new_description is required")
+		return
+	}
+	if len(req.NewDescription) > 500 {
+		writeError(w, http.StatusBadRequest, "new_description must be 500 characters or less")
+		return
+	}
+
+	// Escape SQL LIKE wildcards (same pattern as buildTransactionWhereClause)
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(req.Search)
+
+	result, err := h.db.ExecContext(r.Context(),
+		`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
+		req.NewDescription, "%"+escaped+"%",
+	)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update transactions")
+		return
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to get update count")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int64{"updated": rowsAffected})
+}
+
+// batchDeleteRequest is the JSON input for deleting multiple transactions.
+type batchDeleteRequest struct {
+	IDs []int64 `json:"ids"`
+}
+
+// handleBatchDeleteTransactions deletes multiple transactions in a single
+// database transaction. IDs that don't exist or aren't owned by the caller
+// are silently skipped. Returns the count of actually deleted rows.
+func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req batchDeleteRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one id is required")
+		return
+	}
+	if len(req.IDs) > 500 {
+		writeError(w, http.StatusBadRequest, "batch size cannot exceed 500")
+		return
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
+	qtx := h.queries.WithTx(tx)
+	deleted := 0
+
+	for _, id := range req.IDs {
+		existing, err := qtx.GetTransactionByID(r.Context(), id)
+		if err != nil {
+			continue
+		}
+
+		if user.Role != "admin" && existing.UserID != user.ID {
+			continue
+		}
+
+		if err := qtx.DeleteTransaction(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to delete transaction")
+			return
+		}
+		deleted++
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit batch delete")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
+}
+
 // toNullString converts a string to sql.NullString, treating empty as NULL.
 func toNullString(s string) sql.NullString {
 	if s == "" {
