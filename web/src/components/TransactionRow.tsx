@@ -20,6 +20,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
@@ -176,7 +177,7 @@ export function TransactionRow({
       </TableCell>
       <TableCell
         className={cn(
-          'text-right font-mono tabular-nums',
+          'whitespace-nowrap text-right font-mono tabular-nums',
           transaction.category_type === 'expense'
             ? 'text-foreground'
             : 'text-[var(--color-income)]',
@@ -192,21 +193,21 @@ export function TransactionRow({
               type="button"
               variant="ghost"
               size="icon"
-              className="h-8 w-8"
+              className="size-8 data-[state=open]:bg-accent"
               aria-label={`Actions for ${transaction.description}`}
             >
-              <MoreHorizontal className="h-4 w-4" />
+              <MoreHorizontal />
+              <span className="sr-only">Open menu</span>
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
             <DropdownMenuItem onSelect={() => setEditing(true)}>
               Edit
             </DropdownMenuItem>
-            {/* TODO(post-migration): wrap Delete in AlertDialog — kebab menu items auto-dismiss,
-                making mis-clicks easier than the pre-migration visible Delete button. */}
+            <DropdownMenuSeparator />
             <DropdownMenuItem
+              variant="destructive"
               onSelect={() => void onDelete(transaction.id)}
-              className="text-destructive focus:text-destructive"
             >
               Delete
             </DropdownMenuItem>

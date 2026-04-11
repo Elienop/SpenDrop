@@ -1,5 +1,6 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import React from 'react';
 
@@ -39,33 +40,37 @@ vi.mock('recharts', () => ({
   ReferenceLine: () => <div />,
 }));
 
+const defaultDashboardData = {
+  summary: {
+    budget: 5000,
+    total_spent: 3200,
+    total_income: 4500,
+    remaining: 1300,
+    savings_this_month: 500,
+    savings_goal: 10000,
+    savings_ytd: 7500,
+    savings_goal_progress: 75,
+  },
+  // Backend returns trend newest-first (see dashboard_handlers.go) — keep
+  // this fixture in the same order so chartData's `.reverse()` produces
+  // chronologically-sorted bars.
+  trend: [
+    { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
+    { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
+  ],
+  categories: [
+    { id: 1, name: 'Food', total: 1200 },
+    { id: 2, name: 'Transport', total: 800 },
+  ],
+  loading: false,
+  fetching: false,
+  error: '',
+};
+
+const mockUseDashboard = vi.fn(() => defaultDashboardData);
+
 vi.mock('../hooks/useDashboard', () => ({
-  useDashboard: () => ({
-    summary: {
-      budget: 5000,
-      total_spent: 3200,
-      total_income: 4500,
-      remaining: 1300,
-      savings_this_month: 500,
-      savings_goal: 10000,
-      savings_ytd: 7500,
-      savings_goal_progress: 75,
-    },
-    // Backend returns trend newest-first (see dashboard_handlers.go) — keep
-    // this fixture in the same order so chartData's `.reverse()` produces
-    // chronologically-sorted bars.
-    trend: [
-      { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
-      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
-    ],
-    categories: [
-      { id: 1, name: 'Food', total: 1200 },
-      { id: 2, name: 'Transport', total: 800 },
-    ],
-    loading: false,
-    fetching: false,
-    error: '',
-  }),
+  useDashboard: (...args: unknown[]) => mockUseDashboard(...(args as [])),
 }));
 
 vi.mock('../api/client', () => ({
@@ -203,5 +208,79 @@ describe('Dashboard', () => {
     const cashFlowGroup = groups.find((g) => g.contains(btn6));
     expect(cashFlowGroup).toBeDefined();
     expect(cashFlowGroup).toContainElement(btn12);
+  });
+
+  test('does not show "Other" category or "Show more" when <= 6 categories', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    expect(screen.queryByText('Other')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
+  });
+
+  describe('with more than 6 categories', () => {
+    const manyCategories = [
+      { id: 1, name: 'Food', total: 1200 },
+      { id: 2, name: 'Transport', total: 800 },
+      { id: 3, name: 'Housing', total: 700 },
+      { id: 4, name: 'Entertainment', total: 500 },
+      { id: 5, name: 'Healthcare', total: 400 },
+      { id: 6, name: 'Utilities', total: 300 },
+      { id: 7, name: 'Shopping', total: 200 },
+      { id: 8, name: 'Education', total: 100 },
+    ];
+
+    beforeEach(() => {
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: manyCategories,
+      });
+    });
+
+    test('shows first 6 categories and hides the rest when collapsed', () => {
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      // First 6 should be visible
+      expect(screen.getByText('Food')).toBeInTheDocument();
+      expect(screen.getByText('Transport')).toBeInTheDocument();
+      expect(screen.getByText('Housing')).toBeInTheDocument();
+      expect(screen.getByText('Entertainment')).toBeInTheDocument();
+      expect(screen.getByText('Healthcare')).toBeInTheDocument();
+      expect(screen.getByText('Utilities')).toBeInTheDocument();
+      // 7th and 8th should NOT be visible
+      expect(screen.queryByText('Shopping')).not.toBeInTheDocument();
+      expect(screen.queryByText('Education')).not.toBeInTheDocument();
+      // No "Other" bucket
+      expect(screen.queryByText('Other')).not.toBeInTheDocument();
+    });
+
+    test('shows "Show more" button when more than 6 categories', () => {
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      expect(screen.getByRole('button', { name: /show more/i })).toBeInTheDocument();
+    });
+
+    test('expands to show all categories and "Show less" on click', async () => {
+      const user = userEvent.setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      const showMoreBtn = screen.getByRole('button', { name: /show more/i });
+      await user.click(showMoreBtn);
+      // All 8 categories should now be visible
+      expect(screen.getByText('Shopping')).toBeInTheDocument();
+      expect(screen.getByText('Education')).toBeInTheDocument();
+      // "Show more" replaced by "Show less"
+      expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /show less/i })).toBeInTheDocument();
+    });
+
+    test('collapses back to 6 categories when "Show less" is clicked', async () => {
+      const user = userEvent.setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      // Expand
+      await user.click(screen.getByRole('button', { name: /show more/i }));
+      // Collapse
+      await user.click(screen.getByRole('button', { name: /show less/i }));
+      // 7th and 8th hidden again
+      expect(screen.queryByText('Shopping')).not.toBeInTheDocument();
+      expect(screen.queryByText('Education')).not.toBeInTheDocument();
+      // "Show more" is back
+      expect(screen.getByRole('button', { name: /show more/i })).toBeInTheDocument();
+    });
   });
 });

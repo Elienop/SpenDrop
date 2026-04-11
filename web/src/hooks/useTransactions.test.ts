@@ -153,3 +153,222 @@ describe('useTransactions filters', () => {
     });
   });
 });
+
+describe('useTransactions perPage', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  const emptyResponse = {
+    transactions: [],
+    total: 0,
+    page: 1,
+    per_page: 20,
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(emptyResponse),
+    } as Response);
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    localStorage.clear();
+  });
+
+  function getLastFetchUrl(): string {
+    const lastCall = fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1];
+    return lastCall[0] as string;
+  }
+
+  it('exposes setPerPage and defaults to 20', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    expect(result.current.perPage).toBe(20);
+    expect(typeof result.current.setPerPage).toBe('function');
+  });
+
+  it('changes per_page param in query when setPerPage is called', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      result.current.setPerPage(50);
+    });
+
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('per_page=50');
+    });
+  });
+
+  it('resets to page 1 when perPage changes', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    // First go to page 2
+    await act(async () => {
+      result.current.setPage(2);
+    });
+    await vi.waitFor(() => {
+      expect(getLastFetchUrl()).toContain('page=2');
+    });
+
+    // Change perPage — should reset to page 1
+    await act(async () => {
+      result.current.setPerPage(10);
+    });
+
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('page=1');
+      expect(url).toContain('per_page=10');
+    });
+  });
+
+  it('persists perPage to localStorage', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      result.current.setPerPage(50);
+    });
+
+    expect(localStorage.getItem('spendrop-tx-per-page')).toBe('50');
+  });
+
+  it('reads perPage from localStorage on mount', async () => {
+    localStorage.setItem('spendrop-tx-per-page', '100');
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    expect(result.current.perPage).toBe(100);
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('per_page=100');
+    });
+  });
+});
+
+describe('useTransactions sorting', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  const emptyResponse = {
+    transactions: [],
+    total: 0,
+    page: 1,
+    per_page: 20,
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(emptyResponse),
+    } as Response);
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    localStorage.clear();
+  });
+
+  function getLastFetchUrl(): string {
+    const lastCall = fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1];
+    return lastCall[0] as string;
+  }
+
+  it('exposes sortBy and sortDir with defaults date/desc', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    expect(result.current.sortBy).toBe('date');
+    expect(result.current.sortDir).toBe('desc');
+  });
+
+  it('includes sort_by and sort_dir in query string', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    const url = getLastFetchUrl();
+    expect(url).toContain('sort_by=date');
+    expect(url).toContain('sort_dir=desc');
+
+    // Verify the exposed values
+    expect(result.current.sortBy).toBe('date');
+    expect(result.current.sortDir).toBe('desc');
+  });
+
+  it('setSort changes column and defaults to desc', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      result.current.setSort('amount');
+    });
+
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('sort_by=amount');
+      expect(url).toContain('sort_dir=desc');
+    });
+    expect(result.current.sortBy).toBe('amount');
+    expect(result.current.sortDir).toBe('desc');
+  });
+
+  it('setSort toggles direction when same column is clicked', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    // Default is date/desc. Clicking date should toggle to asc.
+    await act(async () => {
+      result.current.setSort('date');
+    });
+
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('sort_by=date');
+      expect(url).toContain('sort_dir=asc');
+    });
+    expect(result.current.sortDir).toBe('asc');
+
+    // Clicking date again should toggle back to desc.
+    await act(async () => {
+      result.current.setSort('date');
+    });
+
+    await vi.waitFor(() => {
+      const url = getLastFetchUrl();
+      expect(url).toContain('sort_dir=desc');
+    });
+  });
+
+  it('exposes setSort function', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    expect(typeof result.current.setSort).toBe('function');
+  });
+});

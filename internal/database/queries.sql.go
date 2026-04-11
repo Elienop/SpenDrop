@@ -171,6 +171,14 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const deleteCategory = `-- name: DeleteCategory :execresult
+DELETE FROM categories WHERE id = ?
+`
+
+func (q *Queries) DeleteCategory(ctx context.Context, id int64) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteCategory, id)
+}
+
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :exec
 DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP
 `

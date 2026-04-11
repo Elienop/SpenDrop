@@ -69,6 +69,9 @@ UPDATE categories SET sort_order = ? WHERE id = ?;
 -- name: UpdateCategoryActive :execresult
 UPDATE categories SET is_active = ? WHERE id = ?;
 
+-- name: DeleteCategory :execresult
+DELETE FROM categories WHERE id = ?;
+
 -- Currencies
 
 -- name: ListCurrencies :many

@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 
@@ -205,6 +206,44 @@ func (h *Handler) handlePatchCategory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleDeleteCategory permanently deletes a category. Admin only.
+// Returns 409 Conflict if transactions reference the category (FK constraint).
+func (h *Handler) handleDeleteCategory(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if user.Role != "admin" {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid category ID")
+		return
+	}
+
+	result, err := h.queries.DeleteCategory(r.Context(), id)
+	if err != nil {
+		if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			writeError(w, http.StatusConflict, "cannot delete category that has transactions — deactivate it instead, or reassign its transactions first")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to delete category")
+		return
+	}
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		writeError(w, http.StatusNotFound, "category not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
 // handleReorderCategories updates sort_order for multiple categories in a
