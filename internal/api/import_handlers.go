@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/xuri/excelize/v2"
 
 	"github.com/elienop/spendrop/internal/auth"
@@ -132,7 +133,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := f.GetRows(sheetName)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("failed to read sheet %q: %v", sheetName, err))
+		log.Printf("import: failed to read sheet %q: %v", sheetName, err)
+		writeError(w, http.StatusBadRequest, "failed to read spreadsheet data")
 		return
 	}
 
@@ -332,7 +334,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req importConfirmRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -466,7 +468,7 @@ func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	importID := r.PathValue("id")
+	importID := chi.URLParam(r, "id")
 	if len(importID) != 32 {
 		writeError(w, http.StatusBadRequest, "invalid import_id")
 		return

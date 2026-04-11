@@ -93,7 +93,7 @@ export function FilterPanel({
           <TabsTrigger value="saved">Saved</TabsTrigger>
         </TabsList>
 
-        <TabsContent value="date" className="space-y-3 pt-4">
+        <TabsContent value="date" className="flex flex-col gap-3 pt-4">
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -137,7 +137,7 @@ export function FilterPanel({
           </div>
         </TabsContent>
 
-        <TabsContent value="category" className="space-y-3 pt-4">
+        <TabsContent value="category" className="flex flex-col gap-3 pt-4">
           <div className="flex flex-wrap gap-2">
             {categories.map((cat) => {
               const selected = selectedCategoryIds.includes(String(cat.id));
@@ -173,7 +173,7 @@ export function FilterPanel({
               );
             })}
           </div>
-          <div className="space-y-1.5">
+          <div className="flex flex-col gap-1.5">
             <Label htmlFor="filter-tags">Tags</Label>
             <Input
               id="filter-tags"
@@ -186,7 +186,7 @@ export function FilterPanel({
           </div>
         </TabsContent>
 
-        <TabsContent value="amount" className="space-y-3 pt-4">
+        <TabsContent value="amount" className="flex flex-col gap-3 pt-4">
           <div className="flex items-center gap-2">
             <Input
               type="number"
@@ -210,7 +210,7 @@ export function FilterPanel({
           </div>
         </TabsContent>
 
-        <TabsContent value="saved" className="space-y-3 pt-4">
+        <TabsContent value="saved" className="flex flex-col gap-3 pt-4">
           <div className="flex flex-col gap-2">
             {savedFilters.map((sf) => (
               <div

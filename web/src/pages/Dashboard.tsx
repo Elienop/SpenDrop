@@ -388,7 +388,7 @@ export function Dashboard() {
                 {MONTHS[selectedMonth - 1]} {selectedYear}
               </CardDescription>
             </div>
-            <span className="text-lg font-bold tabular-nums">
+            <span className="font-mono text-lg font-semibold tabular-nums">
               {formatFull(totalCategorySpent)}
             </span>
           </CardHeader>

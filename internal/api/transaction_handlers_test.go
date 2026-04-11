@@ -1646,6 +1646,72 @@ func TestHandleBulkRename_NoAuth_Returns401(t *testing.T) {
 	}
 }
 
+func TestHandleBulkRename_MemberOnlyRenamesOwnTransactions(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+
+	// Both users have "mr brown" transactions
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
+
+	// Alice renames — should only affect her own transaction
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, alice)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(1) {
+		t.Errorf("expected updated=1 (only alice's), got %v", resp["updated"])
+	}
+
+	// Verify bob's transaction is unchanged
+	bobTxn, err := q.GetTransactionByID(context.Background(), 2) // bob's txn
+	if err != nil {
+		t.Fatalf("get bob txn: %v", err)
+	}
+	if bobTxn.Description != "mr brown bakery" {
+		t.Errorf("expected bob's transaction unchanged, got %q", bobTxn.Description)
+	}
+}
+
+func TestHandleBulkRename_AdminRenamesAllTransactions(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
+
+	// Admin renames — should affect all transactions
+	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["updated"] != float64(2) {
+		t.Errorf("expected updated=2 (admin renames all), got %v", resp["updated"])
+	}
+}
+
 func TestHandleBulkRename_EscapesSQLWildcards(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

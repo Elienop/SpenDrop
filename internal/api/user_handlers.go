@@ -45,7 +45,7 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		Role        string `json:"role"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -133,7 +133,7 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		Role        string `json:"role"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

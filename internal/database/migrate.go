@@ -48,22 +48,31 @@ func RunMigrations(db *sql.DB) error {
 			continue
 		}
 
-		// Read and execute
+		// Read and execute within a transaction
 		content, err := migrationsFS.ReadFile("migrations/" + entry.Name())
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
 
 		log.Printf("Applying migration: %s", entry.Name())
-		_, err = db.Exec(string(content))
+
+		tx, err := db.Begin()
 		if err != nil {
+			return fmt.Errorf("begin tx for migration %s: %w", entry.Name(), err)
+		}
+
+		if _, err := tx.Exec(string(content)); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", entry.Name(), err)
 		}
 
-		// Record migration
-		_, err = db.Exec("INSERT INTO schema_migrations (version) VALUES (?)", entry.Name())
-		if err != nil {
+		if _, err := tx.Exec("INSERT INTO schema_migrations (version) VALUES (?)", entry.Name()); err != nil {
+			tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", entry.Name(), err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit migration %s: %w", entry.Name(), err)
 		}
 	}
 

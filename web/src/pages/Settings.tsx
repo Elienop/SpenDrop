@@ -952,7 +952,7 @@ function ImportPreviewStep({
           {matched.length > 0 && (
             <div className="flex flex-col gap-2 rounded-md border p-3">
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                <CheckCircle2 className="h-4 w-4 text-emerald-500" />
                 <span>
                   {matched.length} of {uniqueImportCategories.length} categories
                   matched automatically
@@ -972,9 +972,9 @@ function ImportPreviewStep({
 
           {/* Unmatched categories - show dropdowns */}
           {unmatched.length > 0 && (
-            <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+            <div className="flex flex-col gap-3 rounded-md border border-yellow-500/30 bg-yellow-500/5 p-3">
               <div className="flex items-center gap-2 text-sm">
-                <CircleAlert className="h-4 w-4 text-amber-500" />
+                <CircleAlert className="h-4 w-4 text-yellow-500" />
                 <span>
                   {unmatched.length} {unmatched.length === 1 ? 'category needs' : 'categories need'} mapping
                 </span>

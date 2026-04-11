@@ -8,6 +8,7 @@ vi.mock('../hooks/useAuth', () => ({
 }));
 
 import { useAuth } from '../hooks/useAuth';
+import { ThemeProvider } from './theme-provider';
 import { Sidebar } from './Sidebar';
 
 const mockedUseAuth = vi.mocked(useAuth);
@@ -22,9 +23,11 @@ const mockUser = {
 
 function renderSidebar(currentPath = '/') {
   return render(
-    <MemoryRouter initialEntries={[currentPath]}>
-      <Sidebar />
-    </MemoryRouter>,
+    <ThemeProvider>
+      <MemoryRouter initialEntries={[currentPath]}>
+        <Sidebar />
+      </MemoryRouter>
+    </ThemeProvider>,
   );
 }
 

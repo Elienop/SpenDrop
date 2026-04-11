@@ -58,11 +58,16 @@ export function SavingsTab() {
 
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
   const [goalsLoading, setGoalsLoading] = useState(true);
+  const [goalsError, setGoalsError] = useState('');
   useEffect(() => {
     api
       .get<SavingsGoal[]>('savings-goals')
       .then(setGoals)
-      .catch((err) => console.error('Failed to load savings goals:', err))
+      .catch((err) =>
+        setGoalsError(
+          err instanceof Error ? err.message : 'Failed to load savings goals',
+        ),
+      )
       .finally(() => setGoalsLoading(false));
   }, []);
 
@@ -140,13 +145,13 @@ export function SavingsTab() {
           {(incExp.loading || goalsLoading) && (
             <Skeleton className="h-[300px] w-full" />
           )}
-          {incExp.error && (
+          {(incExp.error || goalsError) && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{incExp.error}</AlertDescription>
+              <AlertDescription>{incExp.error || goalsError}</AlertDescription>
             </Alert>
           )}
-          {!incExp.loading && !goalsLoading && !incExp.error && (
+          {!incExp.loading && !goalsLoading && !incExp.error && !goalsError && (
             <div
               className={cn(
                 'transition-opacity duration-200',
@@ -180,7 +185,7 @@ export function SavingsTab() {
                         <tspan
                           x="50%"
                           dy="-8"
-                          className="fill-foreground text-2xl font-bold"
+                          className="fill-foreground text-2xl font-semibold"
                         >
                           {progress}%
                         </tspan>
@@ -206,7 +211,7 @@ export function SavingsTab() {
                   </div>
                 </div>
               ) : (
-                <p className="text-sm text-muted-foreground mb-4">
+                <p className="text-sm text-muted-foreground">
                   No savings goal set for {year}. Set one in Settings.
                 </p>
               )}

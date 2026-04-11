@@ -10,12 +10,7 @@ export interface ThemeProviderState {
   setColorTheme: (id: ColorThemeId | null) => void;
 }
 
-export const ThemeProviderContext = createContext<ThemeProviderState>({
-  theme: 'system',
-  setTheme: () => null,
-  colorTheme: null,
-  setColorTheme: () => null,
-});
+export const ThemeProviderContext = createContext<ThemeProviderState | undefined>(undefined);
 
 export function useTheme() {
   const context = useContext(ThemeProviderContext);

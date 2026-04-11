@@ -93,7 +93,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -239,7 +239,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

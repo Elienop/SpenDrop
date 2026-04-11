@@ -14,24 +14,9 @@ export function ProtectedRoute({ children }: ProtectedRouteProps) {
       <div
         role="status"
         aria-label="Loading"
-        style={{
-          display: 'flex',
-          justifyContent: 'center',
-          alignItems: 'center',
-          minHeight: '100vh',
-        }}
+        className="flex min-h-screen items-center justify-center"
       >
-        <div
-          style={{
-            width: '32px',
-            height: '32px',
-            border: '3px solid var(--border-color)',
-            borderTopColor: 'var(--color-primary)',
-            borderRadius: '50%',
-            animation: 'spin 0.8s linear infinite',
-          }}
-        />
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <div className="size-8 animate-spin rounded-full border-[3px] border-border border-t-primary" />
       </div>
     );
   }

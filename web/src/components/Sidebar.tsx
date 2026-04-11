@@ -21,6 +21,7 @@ import {
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { ModeToggle } from '@/components/ModeToggle';
 import { ColorThemePicker } from '@/components/ColorThemePicker';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 const menuItems = [
@@ -71,27 +72,29 @@ export function Sidebar() {
           {expanded ? (
             <>
               <LogoWordmark className="h-6" />
-              <button
-                type="button"
+              <Button
+                variant="ghost"
+                size="icon"
                 aria-label="Toggle sidebar"
                 aria-expanded={expanded}
                 onClick={() => setExpanded((v) => !v)}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                className="size-8 text-muted-foreground"
               >
                 <ChevronLeft className="h-4 w-4" />
-              </button>
+              </Button>
             </>
           ) : (
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="icon"
               aria-label="Toggle sidebar"
               aria-expanded={expanded}
               onClick={() => setExpanded((v) => !v)}
-              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              className="size-8 text-muted-foreground"
             >
               <Logo className="size-5" />
               <span className="sr-only">SpenDrop</span>
-            </button>
+            </Button>
           )}
         </div>
 
@@ -119,19 +122,19 @@ export function Sidebar() {
             ))}
             <Tooltip>
               <TooltipTrigger asChild>
-                <button
-                  type="button"
+                <Button
+                  variant="ghost"
                   onClick={() => void logout()}
                   className={cn(
-                    'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
-                    expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
+                    'flex items-center overflow-hidden text-muted-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+                    expanded ? 'w-full justify-start gap-2 px-3 py-2' : 'size-8 p-2',
                   )}
                 >
                   <LogOut aria-hidden="true" />
                   <span className={expanded ? 'truncate' : 'sr-only'}>
                     Log out
                   </span>
-                </button>
+                </Button>
               </TooltipTrigger>
               {!expanded && (
                 <TooltipContent side="right">Log out</TooltipContent>
@@ -184,7 +187,7 @@ function SidebarSectionTitle({
   return (
     <p
       className={cn(
-        'h-8 px-3 text-[10px] font-medium uppercase tracking-wider text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
+        'h-8 px-3 text-xs font-medium tracking-wide text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
         expanded ? 'pb-1' : '-mt-8 opacity-0',
       )}
     >

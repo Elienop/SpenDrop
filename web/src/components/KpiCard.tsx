@@ -1,4 +1,3 @@
-import type { LucideIcon } from 'lucide-react';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 import {
   Card,
@@ -16,7 +15,6 @@ export interface KpiDelta {
 
 interface KpiCardProps {
   label: string;
-  icon?: LucideIcon;
   dollars: string;
   cents: string;
   delta?: KpiDelta | null;

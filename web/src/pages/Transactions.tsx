@@ -345,6 +345,7 @@ export function Transactions() {
   const [replacing, setReplacing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [deleting, setDeleting] = useState(false);
+  const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
 
   const handlePageChange = useCallback(
@@ -465,8 +466,10 @@ export function Transactions() {
       try {
         const parsed = JSON.parse(sf.filter_json) as Record<string, unknown>;
         clearFilters();
-        // Only apply keys that are part of our known filter shape and carry strings.
-        const knownKeys = Object.keys(filters) as (keyof typeof filters)[];
+        const knownKeys: (keyof TransactionFilters)[] = [
+          'dateFrom', 'dateTo', 'categoryId', 'categoryIds',
+          'amountMin', 'amountMax', 'tags', 'type', 'search',
+        ];
         for (const key of knownKeys) {
           const value = parsed[key];
           if (typeof value === 'string') {
@@ -477,7 +480,7 @@ export function Transactions() {
         console.warn('Failed to load saved filter', err);
       }
     },
-    [setFilter, clearFilters, filters],
+    [setFilter, clearFilters],
   );
 
   const handleDeleteFilter = useCallback(
@@ -504,7 +507,7 @@ export function Transactions() {
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
         <Button variant="outline" size="sm" onClick={handleExport}>
@@ -641,10 +644,10 @@ export function Transactions() {
         />
       </div>
 
-      {error && (
+      {(error || rowError) && (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
-          <AlertDescription>{error}</AlertDescription>
+          <AlertDescription>{error || rowError}</AlertDescription>
         </Alert>
       )}
 
@@ -723,6 +726,7 @@ export function Transactions() {
                   onSelect={handleSelect}
                   onUpdate={updateTransaction}
                   onDelete={deleteTransaction}
+                  onError={setRowError}
                 />
               ))}
             </TableBody>

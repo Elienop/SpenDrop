@@ -293,7 +293,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	var req transactionRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -362,7 +362,7 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	var req transactionRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -447,7 +447,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	}
 
 	var reqs []transactionRequest
-	if err := decodeJSON(r, &reqs); err != nil {
+	if err := decodeJSON(w, r, &reqs); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -559,16 +559,17 @@ type bulkRenameRequest struct {
 }
 
 // handleBulkRename updates the description of all transactions matching a
-// case-insensitive LIKE search.
+// case-insensitive LIKE search. Non-admin users can only rename their own
+// transactions; admins can rename across all users.
 func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
-	_, ok := auth.GetUser(r)
+	user, ok := auth.GetUser(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
 	var req bulkRenameRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -592,10 +593,19 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	// Escape SQL LIKE wildcards (same pattern as buildTransactionWhereClause)
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(req.Search)
 
-	result, err := h.db.ExecContext(r.Context(),
-		`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
-		req.NewDescription, "%"+escaped+"%",
-	)
+	var result sql.Result
+	var err error
+	if user.Role == "admin" {
+		result, err = h.db.ExecContext(r.Context(),
+			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
+			req.NewDescription, "%"+escaped+"%",
+		)
+	} else {
+		result, err = h.db.ExecContext(r.Context(),
+			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ?`,
+			req.NewDescription, "%"+escaped+"%", user.ID,
+		)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update transactions")
 		return
@@ -626,7 +636,7 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	}
 
 	var req batchDeleteRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
