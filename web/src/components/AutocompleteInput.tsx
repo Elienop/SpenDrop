@@ -36,7 +36,7 @@ export const AutocompleteInput = forwardRef<
   }
 
   return (
-    <div className="relative">
+    <div className="relative rounded-md bg-background">
       {/* Ghost text layer */}
       <div
         aria-hidden
