@@ -911,7 +911,10 @@ function ImportPreviewStep({
   onConfirm,
   onCancel,
 }: ImportPreviewStepProps) {
-  const uniqueImportCategories = preview.unique_categories ?? [];
+  const uniqueImportCategories = useMemo(
+    () => preview.unique_categories ?? [],
+    [preview.unique_categories],
+  );
 
   const { matched, unmatched } = useMemo(() => {
     const m: { name: string; target: string }[] = [];

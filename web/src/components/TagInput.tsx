@@ -14,7 +14,10 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
   const [input, setInput] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const tags = value ? value.split(',').map((t) => t.trim()).filter(Boolean) : [];
+  const tags = useMemo(
+    () => (value ? value.split(',').map((t) => t.trim()).filter(Boolean) : []),
+    [value],
+  );
 
   function addTag(tag: string) {
     const trimmed = tag.trim();
