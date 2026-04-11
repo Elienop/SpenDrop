@@ -4,7 +4,7 @@ import { useSearchParams } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
-import { AlertCircle, CheckCircle2, CircleAlert } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
@@ -20,6 +20,7 @@ import type {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { cn } from '@/lib/utils';
 import {
   Card,
   CardContent,
@@ -1187,16 +1188,58 @@ function DataSection() {
                 Optional columns: category, tags, notes, original_amount,
                 original_currency.
               </p>
-              <div className="flex max-w-sm flex-col gap-2">
-                <Label htmlFor="excel-file">Excel File</Label>
-                <Input
-                  ref={fileInputRef}
-                  id="excel-file"
-                  type="file"
-                  accept=".xlsx,.xls"
-                  onChange={(e) => void handleFileChange(e)}
-                />
-              </div>
+              <Input
+                ref={fileInputRef}
+                id="excel-file"
+                type="file"
+                accept=".xlsx,.xls"
+                aria-label="Excel File"
+                onChange={(e) => void handleFileChange(e)}
+                className="hidden"
+              />
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  e.currentTarget.setAttribute('data-drag-over', 'true');
+                }}
+                onDragLeave={(e) => {
+                  e.preventDefault();
+                  e.currentTarget.removeAttribute('data-drag-over');
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  e.currentTarget.removeAttribute('data-drag-over');
+                  const file = e.dataTransfer.files[0];
+                  if (file) {
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    if (fileInputRef.current) {
+                      fileInputRef.current.files = dt.files;
+                      fileInputRef.current.dispatchEvent(
+                        new Event('change', { bubbles: true }),
+                      );
+                    }
+                  }
+                }}
+                className={cn(
+                  'flex max-w-sm flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 px-6 py-8 text-center transition-colors',
+                  'hover:border-muted-foreground/50 hover:bg-muted/50',
+                  'data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/5',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+                )}
+              >
+                <Upload className="size-8 text-muted-foreground" />
+                <div className="flex flex-col gap-1">
+                  <span className="text-sm font-medium">
+                    Drag & drop your Excel file here, or click to browse
+                  </span>
+                  <span className="text-xs text-muted-foreground">
+                    .xlsx, .xls
+                  </span>
+                </div>
+              </button>
             </div>
           )}
 
