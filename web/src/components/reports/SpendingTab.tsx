@@ -149,7 +149,7 @@ export function SpendingTab() {
     for (const cat of expenseCategories) {
       const inner = new Map<string, number>();
       for (const d of cat.data) {
-        const key = `${d.year}-${d.month}`;
+        const key = `${d.year}-${String(d.month).padStart(2, '0')}`;
         inner.set(key, d.total);
         monthSet.add(key);
       }
@@ -159,7 +159,7 @@ export function SpendingTab() {
     return sortedMonths.map((ym) => {
       const [y, m] = ym.split('-').map(Number);
       const point: Record<string, string | number> = {
-        name: `${MONTH_NAMES[m - 1]} ${y}`,
+        name: `${MONTH_NAMES[m - 1]} '${String(y).slice(2)}`,
       };
       for (const cat of expenseCategories) {
         point[`cat-${cat.id}`] = byCat.get(cat.id)?.get(ym) ?? 0;
