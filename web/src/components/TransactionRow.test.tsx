@@ -53,6 +53,7 @@ function renderRow(
           categories={mockCategories}
           onUpdate={update}
           onDelete={del}
+          onError={vi.fn()}
         />
       </tbody>
     </table>,

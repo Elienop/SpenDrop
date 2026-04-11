@@ -62,6 +62,7 @@ vi.mock('recharts', () => ({
 
 import { useAuth } from './hooks/useAuth';
 import App from './App';
+import { ThemeProvider } from './components/theme-provider';
 
 const mockedUseAuth = vi.mocked(useAuth);
 
@@ -75,9 +76,11 @@ const authenticatedUser = {
 
 function renderApp(initialPath = '/') {
   return render(
-    <MemoryRouter initialEntries={[initialPath]}>
-      <App />
-    </MemoryRouter>,
+    <ThemeProvider>
+      <MemoryRouter initialEntries={[initialPath]}>
+        <App />
+      </MemoryRouter>
+    </ThemeProvider>,
   );
 }
 

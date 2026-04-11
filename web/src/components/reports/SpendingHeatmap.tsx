@@ -6,6 +6,7 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip';
+import { cn } from '@/lib/utils';
 import { formatCurrency } from './utils';
 
 interface SpendingHeatmapProps {
@@ -103,7 +104,7 @@ function HeatmapCell({
     <Tooltip>
       <TooltipTrigger asChild>
         <div
-          className={`aspect-square rounded-sm ${total === 0 ? 'bg-muted' : ''}`}
+          className={cn('aspect-square rounded-sm', total === 0 && 'bg-muted')}
           style={
             total > 0
               ? {

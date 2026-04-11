@@ -253,6 +253,25 @@ func TestHandleDismissRecurring(t *testing.T) {
 	}
 }
 
+func TestHandleDismissRecurring_DescriptionTooLong_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	longDesc := strings.Repeat("x", 501)
+	body := strings.NewReader(`{"year":2026,"description":"` + longDesc + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/reports/recurring/dismiss", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleDismissRecurring(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for description > 500 chars, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleTagBreakdown_GroupsByTag(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

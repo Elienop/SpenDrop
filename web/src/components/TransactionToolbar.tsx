@@ -78,7 +78,7 @@ export function TransactionToolbar({
       >
         Filters
         {activeFilterCount > 0 && (
-          <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-[10px]">
+          <Badge variant="secondary" className="ml-2 h-5 px-1.5 text-xs">
             {activeFilterCount}
           </Badge>
         )}

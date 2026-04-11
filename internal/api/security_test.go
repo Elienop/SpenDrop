@@ -502,6 +502,65 @@ func TestSecurityHeaders_SetOnResponse(t *testing.T) {
 	if v := rec.Header().Get("Referrer-Policy"); v != "strict-origin-when-cross-origin" {
 		t.Errorf("expected Referrer-Policy 'strict-origin-when-cross-origin', got %q", v)
 	}
+	if v := rec.Header().Get("Content-Security-Policy"); v == "" {
+		t.Error("expected Content-Security-Policy header to be set")
+	}
+}
+
+func TestSecurityHeaders_CSPContentsCorrect(t *testing.T) {
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	expectedParts := []string{"default-src 'self'", "script-src 'self'", "frame-ancestors 'none'"}
+	for _, part := range expectedParts {
+		if !strings.Contains(csp, part) {
+			t.Errorf("CSP header missing %q; got %q", part, csp)
+		}
+	}
+}
+
+func TestSecurityHeaders_HSTSSetByDefault(t *testing.T) {
+	// HSTS should be set when SPENDROP_INSECURE is not "true"
+	t.Setenv("SPENDROP_INSECURE", "")
+
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	hsts := rec.Header().Get("Strict-Transport-Security")
+	if hsts == "" {
+		t.Error("expected Strict-Transport-Security header to be set by default")
+	}
+	if !strings.Contains(hsts, "max-age=31536000") {
+		t.Errorf("expected max-age=31536000, got %q", hsts)
+	}
+}
+
+func TestSecurityHeaders_HSTSSkippedWhenInsecure(t *testing.T) {
+	t.Setenv("SPENDROP_INSECURE", "true")
+
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	hsts := rec.Header().Get("Strict-Transport-Security")
+	if hsts != "" {
+		t.Errorf("expected no HSTS header when SPENDROP_INSECURE=true, got %q", hsts)
+	}
 }
 
 // --- CORS origin from env ---

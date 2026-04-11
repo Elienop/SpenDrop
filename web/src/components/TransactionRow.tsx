@@ -47,6 +47,7 @@ export interface TransactionRowProps {
     tags: string;
   }) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
+  onError: (message: string) => void;
 }
 
 export function TransactionRow({
@@ -56,6 +57,7 @@ export function TransactionRow({
   onSelect,
   onUpdate,
   onDelete,
+  onError,
 }: TransactionRowProps) {
   const [editing, setEditing] = useState(false);
   const [date, setDate] = useState(transaction.date);
@@ -78,6 +80,8 @@ export function TransactionRow({
         tags,
       });
       setEditing(false);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       setSaving(false);
     }
@@ -199,7 +203,7 @@ export function TransactionRow({
           'whitespace-nowrap text-right font-mono tabular-nums',
           transaction.category_type === 'expense'
             ? 'text-foreground'
-            : 'text-[var(--color-income)]',
+            : 'text-emerald-500',
         )}
       >
         {transaction.category_type === 'expense' ? '-' : '+'}

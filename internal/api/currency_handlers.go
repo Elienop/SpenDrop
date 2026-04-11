@@ -55,7 +55,7 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req currencyCreateRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -149,7 +149,7 @@ func (h *Handler) handleUpdateCurrency(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req currencyUpdateRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

@@ -72,7 +72,7 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req categoryCreateRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -124,7 +124,7 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req categoryUpdateRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -181,7 +181,7 @@ func (h *Handler) handlePatchCategory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req categoryPatchRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -260,7 +260,7 @@ func (h *Handler) handleReorderCategories(w http.ResponseWriter, r *http.Request
 	}
 
 	var items []reorderItem
-	if err := decodeJSON(r, &items); err != nil {
+	if err := decodeJSON(w, r, &items); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

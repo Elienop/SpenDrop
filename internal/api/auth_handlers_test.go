@@ -95,7 +95,7 @@ func TestDecodeJSON_ValidBody(t *testing.T) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 	}
-	if err := decodeJSON(req, &data); err != nil {
+	if err := decodeJSON(httptest.NewRecorder(), req, &data); err != nil {
 		t.Fatalf("decodeJSON: %v", err)
 	}
 	if data.Username != "alice" {
@@ -111,7 +111,7 @@ func TestDecodeJSON_InvalidBody(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/", body)
 
 	var data struct{ Name string }
-	if err := decodeJSON(req, &data); err == nil {
+	if err := decodeJSON(httptest.NewRecorder(), req, &data); err == nil {
 		t.Error("expected error for invalid JSON, got nil")
 	}
 }

@@ -91,7 +91,7 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req budgetSetRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -151,7 +151,7 @@ func (h *Handler) handleDefaultBudget(w http.ResponseWriter, r *http.Request) {
 
 	case http.MethodPut:
 		var req defaultBudgetRequest
-		if err := decodeJSON(r, &req); err != nil {
+		if err := decodeJSON(w, r, &req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request body")
 			return
 		}

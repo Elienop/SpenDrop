@@ -723,6 +723,84 @@ func TestHandleImportConfirm_ZeroAmount_Skipped(t *testing.T) {
 	}
 }
 
+// --- handleImportCancel ---
+
+func TestHandleImportCancel_OwnerCanCancel(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "canceler", "member")
+
+	// Upload to get an import_id
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50"},
+	})
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Cancel the import using chi URL param
+	req := httptest.NewRequest(http.MethodDelete, "/api/import/"+importID, nil)
+	req = withUserAndURLParam(req, user, "id", importID)
+	rec := httptest.NewRecorder()
+
+	h.handleImportCancel(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("cancel: expected 204, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify the import is gone
+	_, found := importStore.Load(importID)
+	if found {
+		t.Error("expected import to be deleted after cancel")
+	}
+}
+
+func TestHandleImportCancel_WrongUser_Returns403(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user1 := seedTestUser(t, q, "owner", "member")
+	user2 := seedTestUser(t, q, "attacker", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50"},
+	})
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user1)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// User2 tries to cancel user1's import
+	req := httptest.NewRequest(http.MethodDelete, "/api/import/"+importID, nil)
+	req = withUserAndURLParam(req, user2, "id", importID)
+	rec := httptest.NewRecorder()
+
+	h.handleImportCancel(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleImportConfirm_Unauthenticated_Returns401(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)

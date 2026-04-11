@@ -114,6 +114,7 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		// Import
 		r.Post("/import/upload", h.handleImportUpload)
 		r.Post("/import/confirm", h.handleImportConfirm)
+		r.Delete("/import/{id}", h.handleImportCancel)
 
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)
@@ -135,6 +136,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
+		if os.Getenv("SPENDROP_INSECURE") != "true" {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
