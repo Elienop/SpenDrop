@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, CheckCircle2, CircleAlert } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
@@ -167,13 +167,13 @@ function GeneralSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>General Settings</CardTitle>
+        <CardTitle className="text-base">General Settings</CardTitle>
       </CardHeader>
       <CardContent>
         <Form {...form}>
           <form
             onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
-            className="max-w-sm space-y-4"
+            className="flex max-w-sm flex-col gap-4"
             noValidate
           >
             <FormField
@@ -206,7 +206,7 @@ function GeneralSection() {
                 </FormItem>
               )}
             />
-            <Button type="submit" disabled={form.formState.isSubmitting}>
+            <Button type="submit" className="w-fit" disabled={form.formState.isSubmitting}>
               {form.formState.isSubmitting ? 'Saving...' : 'Save Budget'}
             </Button>
           </form>
@@ -309,12 +309,12 @@ function CurrenciesSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Currencies</CardTitle>
+        <CardTitle className="text-base">Currencies</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="flex flex-col gap-6">
         <form
           onSubmit={(e) => void handleSaveRates(e)}
-          className="space-y-4"
+          className="flex flex-col gap-4"
           noValidate
         >
           <Table>
@@ -335,7 +335,7 @@ function CurrenciesSection() {
                   <TableCell>{c.symbol}</TableCell>
                   <TableCell>
                     {c.is_base ? (
-                      <span className="text-muted-foreground font-mono">
+                      <span className="text-muted-foreground font-mono tabular-nums">
                         1.0000
                       </span>
                     ) : (
@@ -362,14 +362,14 @@ function CurrenciesSection() {
               ))}
             </TableBody>
           </Table>
-          <Button type="submit" disabled={saving}>
+          <Button type="submit" className="w-fit" disabled={saving}>
             {saving ? 'Saving...' : 'Save Rates'}
           </Button>
         </form>
 
-        <Separator className="my-6" />
-        <div>
-          <h3 className="mb-4 text-sm font-semibold">Add Currency</h3>
+        <Separator />
+        <div className="flex flex-col gap-4">
+          <h3 className="text-sm font-semibold">Add Currency</h3>
           <Form {...addForm}>
             <form
               onSubmit={(e) => void addForm.handleSubmit(onAddCurrency)(e)}
@@ -524,9 +524,9 @@ function SavingsSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Savings Goals</CardTitle>
+        <CardTitle className="text-base">Savings Goals</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="flex flex-col gap-6">
         <Table>
           <TableHeader>
             <TableRow>
@@ -561,9 +561,9 @@ function SavingsSection() {
           </TableBody>
         </Table>
 
-        <Separator className="my-6" />
-        <div>
-          <h3 className="mb-4 text-sm font-semibold">Add Goal</h3>
+        <Separator />
+        <div className="flex flex-col gap-4">
+          <h3 className="text-sm font-semibold">Add Goal</h3>
           <Form {...form}>
             <form
               onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
@@ -716,9 +716,9 @@ function UsersSection() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Users</CardTitle>
+        <CardTitle className="text-base">Users</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-6">
+      <CardContent className="flex flex-col gap-6">
         <Table>
           <TableHeader>
             <TableRow>
@@ -774,9 +774,9 @@ function UsersSection() {
           </TableBody>
         </Table>
 
-        <Separator className="my-6" />
-        <div>
-          <h3 className="mb-4 text-sm font-semibold">Add User</h3>
+        <Separator />
+        <div className="flex flex-col gap-4">
+          <h3 className="text-sm font-semibold">Add User</h3>
           <Form {...form}>
             <form
               onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
@@ -863,6 +863,195 @@ function UsersSection() {
   );
 }
 
+/* ---------- Import Preview Step ---------- */
+
+interface ImportPreviewStepProps {
+  preview: ImportPreview;
+  categories: Category[];
+  categoryMap: Record<string, string>;
+  setCategoryMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
+  defaultCategoryId: number | null;
+  setDefaultCategoryId: (id: number | null) => void;
+  onConfirm: () => void;
+  onCancel: () => void;
+}
+
+function ImportPreviewStep({
+  preview,
+  categories,
+  categoryMap,
+  setCategoryMap,
+  defaultCategoryId,
+  setDefaultCategoryId,
+  onConfirm,
+  onCancel,
+}: ImportPreviewStepProps) {
+  const uniqueImportCategories = preview.unique_categories ?? [];
+
+  const { matched, unmatched } = useMemo(() => {
+    const m: { name: string; target: string }[] = [];
+    const u: string[] = [];
+    for (const catName of uniqueImportCategories) {
+      const mappedId = categoryMap[catName];
+      if (mappedId) {
+        const target = categories.find((c) => String(c.id) === mappedId);
+        m.push({ name: catName, target: target?.name ?? mappedId });
+      } else {
+        u.push(catName);
+      }
+    }
+    return { matched: m, unmatched: u };
+  }, [uniqueImportCategories, categoryMap, categories]);
+
+  const rowsWithoutCategory = useMemo(
+    () => preview.rows.filter((r) => !r.category).length,
+    [preview.rows],
+  );
+
+  const needsDefaultCategory = unmatched.length > 0 || rowsWithoutCategory > 0;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <p className="text-sm font-medium">
+        {`Found ${preview.row_count} rows to import.`}
+      </p>
+
+      {/* Data table */}
+      <div className="max-h-[400px] overflow-auto rounded-md border">
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead className="sticky top-0 bg-card">Date</TableHead>
+              <TableHead className="sticky top-0 bg-card">Description</TableHead>
+              <TableHead className="sticky top-0 bg-card text-right">Amount</TableHead>
+              <TableHead className="sticky top-0 bg-card">Category</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {preview.rows.map((row, i) => (
+              <TableRow key={i}>
+                <TableCell className="whitespace-nowrap">{row.date}</TableCell>
+                <TableCell>{row.description}</TableCell>
+                <TableCell className="text-right font-mono tabular-nums">
+                  {row.amount.toFixed(2)}
+                </TableCell>
+                <TableCell>{row.category}</TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+
+      {/* Category mapping summary */}
+      {uniqueImportCategories.length > 0 && (
+        <div className="flex flex-col gap-3">
+          <h3 className="text-sm font-semibold">Category Mapping</h3>
+
+          {/* Matched categories - compact summary */}
+          {matched.length > 0 && (
+            <div className="flex flex-col gap-2 rounded-md border p-3">
+              <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                <CheckCircle2 className="h-4 w-4 text-green-500" />
+                <span>
+                  {matched.length} of {uniqueImportCategories.length} categories
+                  matched automatically
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                {matched.map((m) => (
+                  <span key={m.name}>
+                    {m.name === m.target
+                      ? m.name
+                      : `${m.name} \u2192 ${m.target}`}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Unmatched categories - show dropdowns */}
+          {unmatched.length > 0 && (
+            <div className="flex flex-col gap-3 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+              <div className="flex items-center gap-2 text-sm">
+                <CircleAlert className="h-4 w-4 text-amber-500" />
+                <span>
+                  {unmatched.length} {unmatched.length === 1 ? 'category needs' : 'categories need'} mapping
+                </span>
+              </div>
+              {unmatched.map((catName) => (
+                <div key={catName} className="flex max-w-sm items-center gap-3">
+                  <Label className="w-32 shrink-0 text-sm">{catName}</Label>
+                  <Select
+                    value={categoryMap[catName] ?? undefined}
+                    onValueChange={(v) =>
+                      setCategoryMap((prev) => ({
+                        ...prev,
+                        [catName]: v,
+                      }))
+                    }
+                  >
+                    <SelectTrigger aria-label={`Map category ${catName}`}>
+                      <SelectValue placeholder="Select category..." />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {categories.map((c) => (
+                          <SelectItem key={c.id} value={String(c.id)}>
+                            {c.name}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Default category - only when needed */}
+      {needsDefaultCategory && (
+        <div className="flex max-w-sm flex-col gap-2">
+          <Label htmlFor="default-category">
+            Default Category
+            <span className="ml-1 text-xs font-normal text-muted-foreground">
+              (for unmapped or missing categories)
+            </span>
+          </Label>
+          <Select
+            value={defaultCategoryId ? String(defaultCategoryId) : undefined}
+            onValueChange={(v) => setDefaultCategoryId(Number(v))}
+          >
+            <SelectTrigger id="default-category" aria-label="Default Category">
+              <SelectValue placeholder="Select default..." />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {categories.map((c) => (
+                  <SelectItem key={c.id} value={String(c.id)}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+
+      {/* Actions */}
+      <div className="flex gap-2">
+        <Button type="button" variant="outline" onClick={onConfirm}>
+          Import {preview.row_count} Rows
+        </Button>
+        <Button type="button" variant="outline" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- Import / Export Tab ---------- */
 
 type ImportStep = 'upload' | 'preview' | 'done';
@@ -946,6 +1135,10 @@ function DataSection() {
   }
 
   function handleCancelImport() {
+    // Tell backend to free the import slot
+    if (preview?.import_id) {
+      void api.del(`import/${preview.import_id}`).catch(() => {});
+    }
     setImportStep('upload');
     setPreview(null);
     setImportError(null);
@@ -972,18 +1165,14 @@ function DataSection() {
     window.open(`/api/export/yearly/${year}`, '_blank');
   }
 
-  const uniqueImportCategories = preview?.unique_categories ?? [];
-
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-6">
       {/* ---------- Import card ---------- */}
       <Card>
         <CardHeader>
-          <h2 className="text-2xl font-semibold leading-none tracking-tight">
-            Import
-          </h2>
+          <CardTitle className="text-base">Import</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="flex flex-col gap-4">
           {importError && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -992,13 +1181,13 @@ function DataSection() {
           )}
 
           {importStep === 'upload' && (
-            <div className="space-y-4">
+            <div className="flex flex-col gap-4">
               <p className="text-sm text-muted-foreground">
                 Upload an Excel file with columns: date, description, amount.
                 Optional columns: category, tags, notes, original_amount,
                 original_currency.
               </p>
-              <div className="max-w-sm space-y-2">
+              <div className="flex max-w-sm flex-col gap-2">
                 <Label htmlFor="excel-file">Excel File</Label>
                 <Input
                   ref={fileInputRef}
@@ -1012,110 +1201,17 @@ function DataSection() {
           )}
 
           {importStep === 'preview' && preview && (
-            <div className="space-y-4">
-              <p className="text-sm font-medium">
-                {`Found ${preview.row_count} rows to import. Preview of first ${preview.preview.length} rows:`}
-              </p>
-
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Date</TableHead>
-                    <TableHead>Description</TableHead>
-                    <TableHead>Amount</TableHead>
-                    <TableHead>Category</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {preview.preview.map((row, i) => (
-                    <TableRow key={i}>
-                      <TableCell>{row.date}</TableCell>
-                      <TableCell>{row.description}</TableCell>
-                      <TableCell className="font-mono tabular-nums">
-                        {row.amount.toFixed(2)}
-                      </TableCell>
-                      <TableCell>{row.category}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-
-              <div className="max-w-sm space-y-2">
-                <Label htmlFor="default-category">Default Category</Label>
-                <Select
-                  value={
-                    defaultCategoryId ? String(defaultCategoryId) : undefined
-                  }
-                  onValueChange={(v) => setDefaultCategoryId(Number(v))}
-                >
-                  <SelectTrigger
-                    id="default-category"
-                    aria-label="Default Category"
-                  >
-                    <SelectValue placeholder="-- Select --" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      {categories.map((c) => (
-                        <SelectItem key={c.id} value={String(c.id)}>
-                          {c.name}
-                        </SelectItem>
-                      ))}
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {uniqueImportCategories.length > 0 && (
-                <div className="space-y-3">
-                  <h3 className="text-sm font-semibold">Category Mapping</h3>
-                  {uniqueImportCategories.map((catName) => (
-                    <div key={catName} className="max-w-sm space-y-2">
-                      <Label>{catName}</Label>
-                      <Select
-                        value={categoryMap[catName] ?? undefined}
-                        onValueChange={(v) =>
-                          setCategoryMap((prev) => ({
-                            ...prev,
-                            [catName]: v,
-                          }))
-                        }
-                      >
-                        <SelectTrigger
-                          aria-label={`Map category ${catName}`}
-                        >
-                          <SelectValue placeholder="-- Use Default --" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectGroup>
-                            {categories.map((c) => (
-                              <SelectItem key={c.id} value={String(c.id)}>
-                                {c.name}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  onClick={() => setConfirmOpen(true)}
-                >
-                  Import
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={handleCancelImport}
-                >
-                  Cancel
-                </Button>
-              </div>
+            <>
+              <ImportPreviewStep
+                preview={preview}
+                categories={categories}
+                categoryMap={categoryMap}
+                setCategoryMap={setCategoryMap}
+                defaultCategoryId={defaultCategoryId}
+                setDefaultCategoryId={setDefaultCategoryId}
+                onConfirm={() => setConfirmOpen(true)}
+                onCancel={handleCancelImport}
+              />
 
               <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
                 <DialogContent aria-label="Confirm Import">
@@ -1150,15 +1246,15 @@ function DataSection() {
                   </DialogFooter>
                 </DialogContent>
               </Dialog>
-            </div>
+            </>
           )}
 
           {importStep === 'done' && result && (
-            <div className="space-y-4">
+            <div className="flex flex-col gap-4">
               <p className="text-sm font-medium">
                 {`${result.imported} imported, ${result.skipped} skipped out of ${result.total} total rows.`}
               </p>
-              <Button type="button" onClick={handleImportAnother}>
+              <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
                 Import Another
               </Button>
             </div>
@@ -1169,13 +1265,11 @@ function DataSection() {
       {/* ---------- Export card ---------- */}
       <Card>
         <CardHeader>
-          <h2 className="text-2xl font-semibold leading-none tracking-tight">
-            Export
-          </h2>
+          <CardTitle className="text-base">Export</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="flex flex-col gap-4">
           <div className="grid max-w-md gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
               <Input
                 id="export-year"
@@ -1186,7 +1280,7 @@ function DataSection() {
                 max={2099}
               />
             </div>
-            <div className="space-y-2">
+            <div className="flex flex-col gap-2">
               <Label>Month</Label>
               <Select
                 value={String(month)}
@@ -1208,14 +1302,10 @@ function DataSection() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button type="button" onClick={handleExportMonthly}>
+            <Button type="button" variant="outline" onClick={handleExportMonthly}>
               Export Monthly
             </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={handleExportYearly}
-            >
+            <Button type="button" variant="outline" onClick={handleExportYearly}>
               Export Yearly
             </Button>
           </div>
@@ -1243,7 +1333,7 @@ export function Settings() {
   }, [tabParam]);
 
   return (
-    <div className="space-y-6 p-6">
+    <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
       <Tabs
         value={activeTab}

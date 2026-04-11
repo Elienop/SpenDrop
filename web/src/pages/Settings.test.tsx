@@ -434,7 +434,7 @@ describe('Settings', () => {
     const mockPreview: ImportPreview = {
       import_id: 'abc-123',
       row_count: 5,
-      preview: [
+      rows: [
         { date: '2026-01-15', description: 'Grocery Store', amount: 45.50, category: 'Food' },
         { date: '2026-01-16', description: 'Bus Ticket', amount: 2.50, category: 'Transport' },
         { date: '2026-01-17', description: 'Coffee Shop', amount: 5.00, category: 'Unknown' },

@@ -87,7 +87,7 @@ export function TransactionToolbar({
       <Button
         type="button"
         size="sm"
-        className="h-8 text-xs"
+        className="h-8 min-w-[76px] text-xs"
         onClick={onToggleEntry}
         aria-expanded={showEntry}
       >

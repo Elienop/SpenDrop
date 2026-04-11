@@ -48,6 +48,8 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		r.Get("/transactions", h.handleListTransactions)
 		r.Post("/transactions", h.handleCreateTransaction)
 		r.Post("/transactions/batch", h.handleBatchCreateTransactions)
+		r.Put("/transactions/bulk-rename", h.handleBulkRename)
+		r.Post("/transactions/batch-delete", h.handleBatchDeleteTransactions)
 		r.Put("/transactions/{id}", h.handleUpdateTransaction)
 		r.Delete("/transactions/{id}", h.handleDeleteTransaction)
 
@@ -82,12 +84,6 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		r.Get("/reports/category-trends", h.handleReportCategoryTrends)
 		r.Get("/reports/income-expenses", h.handleReportIncomeExpenses)
 		r.Get("/reports/top-merchants", h.handleReportTopMerchants)
-		r.Get("/reports/budget-vs-actual", h.handleBudgetVsActual)
-		r.Get("/reports/expense-velocity", h.handleExpenseVelocity)
-		r.Get("/reports/spending-heatmap", h.handleSpendingHeatmap)
-		r.Get("/reports/recurring", h.handleRecurring)
-		r.Post("/reports/recurring/dismiss", h.handleDismissRecurring)
-		r.Get("/reports/tag-breakdown", h.handleTagBreakdown)
 
 		// Users (admin only)
 		r.Route("/users", func(r chi.Router) {

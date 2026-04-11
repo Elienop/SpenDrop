@@ -102,7 +102,7 @@ export interface PaginatedResponse<T> {
 export interface ImportPreview {
   import_id: string;
   row_count: number;
-  preview: ImportRow[];
+  rows: ImportRow[];
   columns: string[];
   unique_categories: string[];
 }
