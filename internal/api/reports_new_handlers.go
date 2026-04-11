@@ -290,7 +290,7 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 	}
 
 	var req dismissRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -302,9 +302,18 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	key := fmt.Sprintf("dismissed_recurring_%d", req.Year)
 
+	// Use a transaction to prevent TOCTOU race on the dismissed list
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+	qtx := h.queries.WithTx(tx)
+
 	// Load existing dismissed list
 	var list []string
-	setting, err := h.queries.GetSetting(ctx, key)
+	setting, err := qtx.GetSetting(ctx, key)
 	if err == nil && setting.Value != "" {
 		json.Unmarshal([]byte(setting.Value), &list)
 	}
@@ -323,10 +332,14 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to encode dismissed list")
 		return
 	}
-	if err := h.queries.UpsertSetting(ctx, database.UpsertSettingParams{
+	if err := qtx.UpsertSetting(ctx, database.UpsertSettingParams{
 		Key: key, Value: string(encoded),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to save dismissed list")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit dismissed list")
 		return
 	}
 

@@ -103,7 +103,7 @@ export function SpendingTab() {
   const breakdownConfig = useMemo<ChartConfig>(
     () =>
       catBreakdown.data.reduce<ChartConfig>((acc, cat) => {
-        acc[cat.name] = {
+        acc[`cat-${cat.id}`] = {
           label: cat.name,
           color: getCategoryColorVar({ id: cat.id }),
         };
@@ -146,7 +146,7 @@ export function SpendingTab() {
         name: `${MONTH_NAMES[m - 1]} ${y}`,
       };
       for (const cat of expenseCategories) {
-        point[cat.name] = byCat.get(cat.id)?.get(ym) ?? 0;
+        point[`cat-${cat.id}`] = byCat.get(cat.id)?.get(ym) ?? 0;
       }
       return point;
     });
@@ -155,7 +155,7 @@ export function SpendingTab() {
   const catTrendConfig = useMemo<ChartConfig>(
     () =>
       expenseCategories.reduce<ChartConfig>((acc, cat) => {
-        acc[cat.name] = {
+        acc[`cat-${cat.id}`] = {
           label: cat.name,
           color: getCategoryColorVar({ id: cat.id }),
         };
@@ -240,9 +240,12 @@ export function SpendingTab() {
                 <PieChart>
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <Pie
-                    data={catBreakdown.data}
+                    data={catBreakdown.data.map((c) => ({
+                      ...c,
+                      configKey: `cat-${c.id}`,
+                    }))}
                     dataKey="total"
-                    nameKey="name"
+                    nameKey="configKey"
                     innerRadius={60}
                     outerRadius={80}
                   >
@@ -339,7 +342,7 @@ export function SpendingTab() {
                   <Line
                     key={cat.id}
                     type="monotone"
-                    dataKey={cat.name}
+                    dataKey={`cat-${cat.id}`}
                     stroke={getCategoryColorVar({ id: cat.id })}
                     strokeWidth={2}
                     dot={false}

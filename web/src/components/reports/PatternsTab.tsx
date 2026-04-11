@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle, X } from 'lucide-react';
+import { toast } from 'sonner';
 import {
   useSpendingHeatmap,
   useRecurring,
@@ -166,8 +167,8 @@ export function PatternsTab() {
                                   entry.description,
                                 );
                                 recurring.refetch();
-                              } catch (err) {
-                                console.error('Failed to dismiss:', err);
+                              } catch {
+                                toast.error('Failed to dismiss recurring expense');
                               }
                             }}
                           >

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useId, useMemo, useState } from 'react';
 import { BarChart, Bar, AreaChart, Area, XAxis, CartesianGrid, Cell } from 'recharts';
 import {
   ChartContainer,
@@ -37,6 +37,7 @@ export function OverviewTab() {
   const [bvaYear, setBvaYear] = useState(new Date().getFullYear());
   const incExp = useIncomeExpenses(months);
   const bva = useBudgetVsActual(bvaYear);
+  const gradientId = useId();
 
   const incExpData = useMemo(
     () =>
@@ -117,7 +118,7 @@ export function OverviewTab() {
               <BarChart data={incExpData}>
                 <defs>
                   <linearGradient
-                    id="fillIncExpIncome"
+                    id={`${gradientId}-income`}
                     x1="0"
                     y1="0"
                     x2="0"
@@ -135,7 +136,7 @@ export function OverviewTab() {
                     />
                   </linearGradient>
                   <linearGradient
-                    id="fillIncExpExpenses"
+                    id={`${gradientId}-expenses`}
                     x1="0"
                     y1="0"
                     x2="0"
@@ -166,14 +167,14 @@ export function OverviewTab() {
                 <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="income"
-                  fill="url(#fillIncExpIncome)"
+                  fill={`url(#${gradientId}-income)`}
                   stroke="var(--color-income)"
                   strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
                 <Bar
                   dataKey="expenses"
-                  fill="url(#fillIncExpExpenses)"
+                  fill={`url(#${gradientId}-expenses)`}
                   stroke="var(--color-expenses)"
                   strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
@@ -213,7 +214,7 @@ export function OverviewTab() {
               <AreaChart data={cashFlowData}>
                 <defs>
                   <linearGradient
-                    id="fillCashFlow"
+                    id={`${gradientId}-cashflow`}
                     x1="0"
                     y1="0"
                     x2="0"
@@ -242,7 +243,7 @@ export function OverviewTab() {
                 <Area
                   type="monotone"
                   dataKey="cumulative"
-                  fill="url(#fillCashFlow)"
+                  fill={`url(#${gradientId}-cashflow)`}
                   stroke="var(--color-cumulative)"
                   strokeWidth={2}
                 />
@@ -285,7 +286,7 @@ export function OverviewTab() {
               <AlertDescription>{bva.error}</AlertDescription>
             </Alert>
           )}
-          {bva.data.length > 0 && (
+          {!bva.loading && !bva.error && bva.data.length > 0 && (
             <ChartContainer
               config={BVA_CONFIG}
               className={cn(
@@ -323,6 +324,13 @@ export function OverviewTab() {
               </BarChart>
             </ChartContainer>
           )}
+          {!bva.loading &&
+            !bva.error &&
+            bva.data.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No budget data for this year
+              </p>
+            )}
         </CardContent>
       </Card>
     </div>

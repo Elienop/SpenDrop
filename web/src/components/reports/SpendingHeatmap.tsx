@@ -15,18 +15,18 @@ interface SpendingHeatmapProps {
 
 function generateYearDates(year: number): (string | null)[] {
   const cells: (string | null)[] = [];
-  const jan1 = new Date(year, 0, 1);
-  const startDow = (jan1.getDay() + 6) % 7; // Monday = 0
+  const jan1 = new Date(Date.UTC(year, 0, 1));
+  const startDow = (jan1.getUTCDay() + 6) % 7; // Monday = 0
 
   // Pad empty cells for days before Jan 1
   for (let i = 0; i < startDow; i++) cells.push(null);
 
-  // Fill all days of the year
-  const d = new Date(year, 0, 1);
-  while (d.getFullYear() === year) {
+  // Fill all days of the year (UTC to avoid timezone offset issues)
+  const d = new Date(Date.UTC(year, 0, 1));
+  while (d.getUTCFullYear() === year) {
     const iso = d.toISOString().slice(0, 10);
     cells.push(iso);
-    d.setDate(d.getDate() + 1);
+    d.setUTCDate(d.getUTCDate() + 1);
   }
 
   // Pad end to fill final column (total cells = multiple of 7)

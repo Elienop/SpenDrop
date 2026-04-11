@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from 'react';
+import { useId, useMemo, useState, useEffect } from 'react';
 import {
   RadialBarChart,
   RadialBar,
@@ -46,7 +46,7 @@ function buildYoYData(data: YoYResponse | null) {
   return currentYear.map((cur, i) => ({
     name: MONTH_NAMES[i],
     currentExpenses: cur.expenses,
-    previousExpenses: previousYear[i].expenses,
+    previousExpenses: previousYear[i]?.expenses ?? 0,
   }));
 }
 
@@ -54,6 +54,7 @@ export function SavingsTab() {
   const [year, setYear] = useState(new Date().getFullYear());
   const incExp = useIncomeExpenses(24);
   const yoy = useYearOverYear(year);
+  const gradientId = useId();
 
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
   const [goalsLoading, setGoalsLoading] = useState(true);
@@ -217,7 +218,7 @@ export function SavingsTab() {
                 <AreaChart data={savingsData}>
                   <defs>
                     <linearGradient
-                      id="fillSavings"
+                      id={`${gradientId}-savings`}
                       x1="0"
                       y1="0"
                       x2="0"
@@ -246,7 +247,7 @@ export function SavingsTab() {
                   <Area
                     type="monotone"
                     dataKey="savings"
-                    fill="url(#fillSavings)"
+                    fill={`url(#${gradientId}-savings)`}
                     stroke="var(--color-savings)"
                     strokeWidth={2}
                   />
@@ -301,7 +302,7 @@ export function SavingsTab() {
               <BarChart data={yoyData}>
                 <defs>
                   <linearGradient
-                    id="fillYoyCurrent"
+                    id={`${gradientId}-yoyCurrent`}
                     x1="0"
                     y1="0"
                     x2="0"
@@ -319,7 +320,7 @@ export function SavingsTab() {
                     />
                   </linearGradient>
                   <linearGradient
-                    id="fillYoyPrevious"
+                    id={`${gradientId}-yoyPrevious`}
                     x1="0"
                     y1="0"
                     x2="0"
@@ -350,14 +351,14 @@ export function SavingsTab() {
                 <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="currentExpenses"
-                  fill="url(#fillYoyCurrent)"
+                  fill={`url(#${gradientId}-yoyCurrent)`}
                   stroke="var(--color-currentExpenses)"
                   strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
                 <Bar
                   dataKey="previousExpenses"
-                  fill="url(#fillYoyPrevious)"
+                  fill={`url(#${gradientId}-yoyPrevious)`}
                   stroke="var(--color-previousExpenses)"
                   strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
