@@ -49,7 +49,7 @@ All colors use HSL space-separated format: `H S% L%`. Consumed via `hsl(var(--to
 - **YoY current year:** `hsl(var(--primary))`
 - **YoY previous year:** `hsl(var(--muted-foreground))`
 
-### Category Colors (chart-1 through chart-11)
+### Category Colors (chart-1 through chart-20)
 
 Reserved exclusively for category-specific visualizations (spending breakdown pie chart, category trend lines). Mapped via `getCategoryColorVar()` in `lib/chart-colors.ts`.
 
@@ -66,8 +66,17 @@ Reserved exclusively for category-specific visualizations (spending breakdown pi
 | `--chart-9` | `25 95% 53%` | Orange |
 | `--chart-10` | `346 77% 50%` | Rose |
 | `--chart-11` | `286 68% 55%` | Violet |
+| `--chart-12` | `6 75% 52%` | Red |
+| `--chart-13` | `37 88% 50%` | Amber |
+| `--chart-14` | `68 58% 43%` | Chartreuse |
+| `--chart-15` | `115 48% 40%` | Spring Green |
+| `--chart-16` | `157 60% 38%` | Jade |
+| `--chart-17` | `244 52% 52%` | Indigo |
+| `--chart-18` | `305 50% 48%` | Orchid |
+| `--chart-19` | `328 65% 50%` | Hot Pink |
+| `--chart-20` | `100 52% 44%` | Moss |
 
-**Rule:** `getCategoryColorVar({ id })` is the single source of truth for mapping category IDs to colors. Slot = `((id - 1) % 11) + 1`.
+**Rule:** `getCategoryColorVar({ id })` is the single source of truth for mapping category IDs to colors. Slot = `((id - 1) % 20) + 1`. All 19 seed categories get unique colors; wrapping only occurs beyond 20 categories.
 
 ### Semantic Colors in Transaction Lists
 

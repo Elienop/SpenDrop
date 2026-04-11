@@ -138,6 +138,9 @@ const LEGACY_KEYS = [
   '--muted', '--muted-foreground', '--accent', '--accent-foreground',
   '--destructive', '--destructive-foreground', '--border', '--input', '--ring',
   '--chart-1', '--chart-2', '--chart-3', '--chart-4', '--chart-5',
+  '--chart-6', '--chart-7', '--chart-8', '--chart-9', '--chart-10',
+  '--chart-11', '--chart-12', '--chart-13', '--chart-14', '--chart-15',
+  '--chart-16', '--chart-17', '--chart-18', '--chart-19', '--chart-20',
 ];
 
 /** Apply an accent theme's CSS variables to the document root. */
