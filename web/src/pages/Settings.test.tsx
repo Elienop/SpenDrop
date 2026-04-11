@@ -179,7 +179,7 @@ describe('Settings', () => {
       });
     });
 
-    test('data tab has year input, toggle group, and export button', async () => {
+    test('data tab has year input, mode buttons, and export button', async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
@@ -187,8 +187,8 @@ describe('Settings', () => {
 
       await waitFor(() => {
         expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
-        expect(screen.getByRole('radio', { name: /monthly/i })).toBeInTheDocument();
-        expect(screen.getByRole('radio', { name: /yearly/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^monthly$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^yearly$/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /^export$/i })).toBeInTheDocument();
       });
     });
@@ -235,7 +235,7 @@ describe('Settings', () => {
       await user.type(yearInput, '2025');
 
       // Switch to yearly mode then click Export
-      await user.click(screen.getByRole('radio', { name: /yearly/i }));
+      await user.click(screen.getByRole('button', { name: /^yearly$/i }));
       await user.click(screen.getByRole('button', { name: /^export$/i }));
 
       expect(openSpy).toHaveBeenCalledTimes(1);

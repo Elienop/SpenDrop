@@ -33,10 +33,7 @@ import {
   TabsList,
   TabsTrigger,
 } from '@/components/ui/tabs';
-import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from '@/components/ui/toggle-group';
+import { ButtonGroup } from '@/components/ui/button-group';
 import {
   Select,
   SelectContent,
@@ -1339,17 +1336,22 @@ function DataSection() {
           <CardTitle className="text-base">Export</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <ToggleGroup
-            type="single"
-            value={exportMode}
-            onValueChange={(v) => {
-              if (v === 'monthly' || v === 'yearly') setExportMode(v);
-            }}
-            className="justify-start"
-          >
-            <ToggleGroupItem value="monthly">Monthly</ToggleGroupItem>
-            <ToggleGroupItem value="yearly">Yearly</ToggleGroupItem>
-          </ToggleGroup>
+          <ButtonGroup>
+            {([
+              { value: 'monthly', label: 'Monthly' },
+              { value: 'yearly', label: 'Yearly' },
+            ] as const).map((opt) => (
+              <Button
+                key={opt.value}
+                type="button"
+                variant={exportMode === opt.value ? 'secondary' : 'outline'}
+                size="sm"
+                onClick={() => setExportMode(opt.value)}
+              >
+                {opt.label}
+              </Button>
+            ))}
+          </ButtonGroup>
           <div className="flex max-w-md items-end gap-3">
             <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
