@@ -19,6 +19,7 @@ import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { SortColumn } from '../hooks/useTransactions';
 import { useSavedFilters } from '../hooks/useSavedFilters';
+import { useSuggestions } from '../hooks/useSuggestions';
 import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntryRow } from '../components/TransactionEntryRow';
@@ -338,6 +339,8 @@ export function Transactions() {
     refetch,
   } = useTransactions();
 
+  const [suggestionsKey, setSuggestionsKey] = useState(0);
+  const suggestions = useSuggestions(suggestionsKey);
   const [showFilters, setShowFilters] = useState(false);
   const [showEntry, setShowEntry] = useState(false);
   const [showReplace, setShowReplace] = useState(false);
@@ -639,8 +642,14 @@ export function Transactions() {
       <div className={showEntry ? undefined : 'hidden'}>
         <TransactionEntryRow
           categories={categories}
-          onSubmit={createTransaction}
+          onSubmit={async (v) => {
+            const tx = await createTransaction(v);
+            setSuggestionsKey((k) => k + 1);
+            return tx;
+          }}
           onDelete={deleteTransaction}
+          descriptionSuggestions={suggestions.descriptions}
+          tagSuggestions={suggestions.tags}
         />
       </div>
 

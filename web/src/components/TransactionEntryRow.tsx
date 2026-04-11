@@ -17,6 +17,7 @@ import {
   FormMessage,
 } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
+import { AutocompleteInput } from './AutocompleteInput';
 import { Button } from '@/components/ui/button';
 import {
   Popover,
@@ -74,12 +75,16 @@ export interface TransactionEntryRowProps {
   categories: Category[];
   onSubmit: (input: EntryFormValues) => Promise<Transaction>;
   onDelete: (id: number) => Promise<void>;
+  descriptionSuggestions?: string[];
+  tagSuggestions?: string[];
 }
 
 export function TransactionEntryRow({
   categories,
   onSubmit,
   onDelete,
+  descriptionSuggestions = [],
+  tagSuggestions = [],
 }: TransactionEntryRowProps) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const amountRef = useRef<HTMLInputElement | null>(null);
@@ -283,7 +288,12 @@ export function TransactionEntryRow({
               <FormItem className="flex-1 min-w-[12rem]">
                 <FormLabel>Description</FormLabel>
                 <FormControl>
-                  <Input data-entry-field="description" {...field} />
+                  <AutocompleteInput
+                    data-entry-field="description"
+                    suggestions={descriptionSuggestions}
+                    onAccept={(v) => field.onChange(v)}
+                    {...field}
+                  />
                 </FormControl>
                 <FormMessage />
               </FormItem>
@@ -351,6 +361,7 @@ export function TransactionEntryRow({
                     value={field.value}
                     onChange={field.onChange}
                     placeholder="Add tags..."
+                    suggestions={tagSuggestions}
                   />
                 </label>
                 <FormMessage />

@@ -191,3 +191,8 @@ export interface TagBreakdownEntry {
   total: number;
   count: number;
 }
+
+export interface TransactionSuggestions {
+  descriptions: string[];
+  tags: string[];
+}
