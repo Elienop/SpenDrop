@@ -3,6 +3,7 @@ import {
   BarChart,
   Bar,
   Cell,
+  LabelList,
   LineChart,
   Line,
   XAxis,
@@ -271,10 +272,13 @@ export function SpendingTab() {
                     width={100}
                     className="text-xs"
                   />
-                  <ChartTooltip
-                    content={<ChartTooltipContent nameKey="configKey" />}
-                  />
                   <Bar dataKey="total" radius={4}>
+                    <LabelList
+                      dataKey="total"
+                      position="right"
+                      className="fill-muted-foreground text-xs"
+                      formatter={(value: number) => formatCurrency(value)}
+                    />
                     {breakdownSorted.map((entry) => (
                       <Cell
                         key={entry.id}
@@ -445,6 +449,8 @@ export function SpendingTab() {
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="day"
+                  type="number"
+                  domain={[1, 'dataMax']}
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
