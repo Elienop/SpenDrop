@@ -323,6 +323,13 @@ describe('Settings', () => {
       await user.click(screen.getByRole('tab', { name: /savings/i }));
 
       await waitFor(() => {
+        expect(screen.getByRole('button', { name: /add goal/i })).toBeInTheDocument();
+      });
+
+      // Open the Add Goal dialog
+      await user.click(screen.getByRole('button', { name: /add goal/i }));
+
+      await waitFor(() => {
         expect(screen.getByLabelText(/target amount/i)).toBeInTheDocument();
       });
 
@@ -333,7 +340,7 @@ describe('Settings', () => {
       const amountInput = screen.getByLabelText(/target amount/i);
       await user.type(amountInput, '10000');
 
-      await user.click(screen.getByRole('button', { name: /add goal/i }));
+      await user.click(screen.getByRole('button', { name: /^add goal$/i }));
 
       await waitFor(() => {
         expect(mockedApi.put).toHaveBeenCalledWith(

@@ -470,6 +470,7 @@ type GoalValues = z.infer<typeof goalSchema>;
 
 function SavingsSection() {
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   const form = useForm<GoalValues>({
     resolver: zodResolver(goalSchema),
@@ -504,6 +505,7 @@ function SavingsSection() {
         target_amount: values.target_amount,
       });
       form.reset();
+      setAddOpen(false);
       toast.success('Savings goal added');
       refreshGoals();
     } catch (err) {
@@ -525,16 +527,97 @@ function SavingsSection() {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Savings Goals</CardTitle>
+        <Dialog open={addOpen} onOpenChange={(open) => {
+          setAddOpen(open);
+          if (!open) form.reset();
+        }}>
+          <DialogTrigger asChild>
+            <Button size="sm">Add Goal</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add Savings Goal</DialogTitle>
+              <DialogDescription>
+                Set a yearly savings target.
+              </DialogDescription>
+            </DialogHeader>
+            <Form {...form}>
+              <form
+                onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
+                className="grid gap-4"
+                noValidate
+              >
+                <FormField
+                  control={form.control}
+                  name="year"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Year</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          name={field.name}
+                          onBlur={field.onBlur}
+                          ref={field.ref}
+                          value={field.value ?? ''}
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value === ''
+                                ? 0
+                                : Number(e.target.value),
+                            )
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="target_amount"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Target Amount</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          placeholder="0.00"
+                          name={field.name}
+                          onBlur={field.onBlur}
+                          ref={field.ref}
+                          value={field.value ?? ''}
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value === ''
+                                ? 0
+                                : Number(e.target.value),
+                            )
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="submit">Add Goal</Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
+      <CardContent>
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Year</TableHead>
               <TableHead>Target Amount</TableHead>
-              <TableHead>Actions</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -547,7 +630,7 @@ function SavingsSection() {
                     currency: 'USD',
                   })}
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   <Button
                     type="button"
                     variant="destructive"
@@ -562,76 +645,6 @@ function SavingsSection() {
             ))}
           </TableBody>
         </Table>
-
-        <Separator />
-        <div className="flex flex-col gap-4">
-          <h3 className="text-sm font-semibold">Add Goal</h3>
-          <Form {...form}>
-            <form
-              onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
-              className="grid max-w-md gap-4 sm:grid-cols-2"
-              noValidate
-            >
-              <FormField
-                control={form.control}
-                name="year"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Year</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        name={field.name}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
-                        value={field.value ?? ''}
-                        onChange={(e) =>
-                          field.onChange(
-                            e.target.value === ''
-                              ? 0
-                              : Number(e.target.value),
-                          )
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="target_amount"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Target Amount</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        step="0.01"
-                        placeholder="0.00"
-                        name={field.name}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
-                        value={field.value ?? ''}
-                        onChange={(e) =>
-                          field.onChange(
-                            e.target.value === ''
-                              ? 0
-                              : Number(e.target.value),
-                          )
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="sm:col-span-2">
-                <Button type="submit">Add Goal</Button>
-              </div>
-            </form>
-          </Form>
-        </div>
       </CardContent>
     </Card>
   );
@@ -824,7 +837,7 @@ function UsersSection() {
               <TableHead>Username</TableHead>
               <TableHead>Display Name</TableHead>
               <TableHead>Role</TableHead>
-              <TableHead>Actions</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -854,7 +867,7 @@ function UsersSection() {
                     </SelectContent>
                   </Select>
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   <Button
                     type="button"
                     variant="destructive"
