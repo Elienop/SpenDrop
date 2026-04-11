@@ -346,7 +346,7 @@ export function TransactionEntryRow({
                       {categoryNameById(field.value) ?? 'Select category'}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="p-0" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
+                  <PopoverContent className="p-0" align="start">
                     <Command>
                       <CommandInput placeholder="Search category..." />
                       <CommandList>
