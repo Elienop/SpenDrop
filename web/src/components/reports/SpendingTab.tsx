@@ -1,12 +1,13 @@
 import { useMemo, useState } from 'react';
 import {
+  BarChart,
+  Bar,
+  Cell,
   LineChart,
   Line,
-  PieChart,
-  Pie,
   XAxis,
+  YAxis,
   CartesianGrid,
-  Label,
 } from 'recharts';
 import {
   ChartContainer,
@@ -16,7 +17,7 @@ import {
   ChartLegendContent,
   type ChartConfig,
 } from '@/components/ui/chart';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import {
   Select,
   SelectContent,
@@ -102,7 +103,7 @@ export function SpendingTab() {
 
   const years = yearOptions();
 
-  // Category breakdown donut data
+  // Category breakdown bar chart data
   const breakdownTotal = useMemo(
     () => catBreakdown.data.reduce((s, c) => s + c.total, 0),
     [catBreakdown.data],
@@ -116,6 +117,13 @@ export function SpendingTab() {
         };
         return acc;
       }, {}),
+    [catBreakdown.data],
+  );
+  const breakdownSorted = useMemo(
+    () =>
+      [...catBreakdown.data]
+        .sort((a, b) => b.total - a.total)
+        .map((c) => ({ ...c, configKey: `cat-${c.id}` })),
     [catBreakdown.data],
   );
 
@@ -175,16 +183,19 @@ export function SpendingTab() {
   const velocityData = useMemo(() => buildVelocityData(velocity.data), [velocity.data]);
 
   return (
-    <div className="grid items-start gap-6 md:grid-cols-2">
-      {/* Category Breakdown (donut) */}
-      <Card aria-labelledby="category-breakdown-heading" className="flex flex-col">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-0">
-          <CardTitle
-            id="category-breakdown-heading"
-            className="text-base font-semibold"
-          >
-            Category Breakdown
-          </CardTitle>
+    <div className="grid gap-6 md:grid-cols-2">
+      {/* Category Breakdown (bar chart) */}
+      <Card aria-labelledby="category-breakdown-heading">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <div>
+            <CardTitle
+              id="category-breakdown-heading"
+              className="text-base font-semibold"
+            >
+              Category Breakdown
+            </CardTitle>
+            <CardDescription>{formatCurrency(breakdownTotal)} total</CardDescription>
+          </div>
           <div className="flex gap-2">
             <Select
               value={String(month)}
@@ -224,7 +235,7 @@ export function SpendingTab() {
             </Select>
           </div>
         </CardHeader>
-        <CardContent className="flex-1 pb-0">
+        <CardContent>
           {catBreakdown.loading && <Skeleton className="h-[300px] w-full" />}
           {catBreakdown.error && (
             <Alert variant="destructive">
@@ -238,63 +249,40 @@ export function SpendingTab() {
               <ChartContainer
                 config={breakdownConfig}
                 className={cn(
-                  'mx-auto aspect-square max-h-[300px] transition-opacity duration-200',
+                  'h-[300px] w-full transition-opacity duration-200',
                   catBreakdown.fetching &&
                     !catBreakdown.loading &&
                     'opacity-60',
                 )}
               >
-                <PieChart>
-                  <ChartTooltip
-                    cursor={false}
-                    content={<ChartTooltipContent hideLabel />}
+                <BarChart
+                  accessibilityLayer
+                  data={breakdownSorted}
+                  layout="vertical"
+                  margin={{ left: 0 }}
+                >
+                  <CartesianGrid horizontal={false} />
+                  <XAxis type="number" tickLine={false} axisLine={false} hide />
+                  <YAxis
+                    dataKey="name"
+                    type="category"
+                    tickLine={false}
+                    axisLine={false}
+                    width={100}
+                    className="text-xs"
                   />
-                  <Pie
-                    data={catBreakdown.data.map((c) => ({
-                      ...c,
-                      configKey: `cat-${c.id}`,
-                      fill: `var(--color-cat-${c.id})`,
-                    }))}
-                    dataKey="total"
-                    nameKey="configKey"
-                    innerRadius={60}
-                    strokeWidth={5}
-                  >
-                    <Label
-                      content={({ viewBox }) => {
-                        if (
-                          viewBox &&
-                          'cx' in viewBox &&
-                          'cy' in viewBox
-                        ) {
-                          return (
-                            <text
-                              x={viewBox.cx}
-                              y={viewBox.cy}
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                            >
-                              <tspan
-                                x={viewBox.cx}
-                                y={viewBox.cy}
-                                className="fill-foreground text-3xl font-bold"
-                              >
-                                {formatCurrency(breakdownTotal)}
-                              </tspan>
-                              <tspan
-                                x={viewBox.cx}
-                                y={(viewBox.cy ?? 0) + 24}
-                                className="fill-muted-foreground"
-                              >
-                                Total
-                              </tspan>
-                            </text>
-                          );
-                        }
-                      }}
-                    />
-                  </Pie>
-                </PieChart>
+                  <ChartTooltip
+                    content={<ChartTooltipContent nameKey="configKey" />}
+                  />
+                  <Bar dataKey="total" radius={4}>
+                    {breakdownSorted.map((entry) => (
+                      <Cell
+                        key={entry.id}
+                        fill={`var(--color-cat-${entry.id})`}
+                      />
+                    ))}
+                  </Bar>
+                </BarChart>
               </ChartContainer>
             )}
           {!catBreakdown.loading &&
@@ -427,7 +415,7 @@ export function SpendingTab() {
       </Card>
 
       {/* Expense Velocity */}
-      <Card aria-labelledby="expense-velocity-heading">
+      <Card aria-labelledby="expense-velocity-heading" className="flex flex-col">
         <CardHeader className="pb-2">
           <CardTitle
             id="expense-velocity-heading"
@@ -435,9 +423,10 @@ export function SpendingTab() {
           >
             Expense Velocity
           </CardTitle>
+          <CardDescription>Current vs previous month cumulative spending</CardDescription>
         </CardHeader>
-        <CardContent>
-          {velocity.loading && <Skeleton className="h-[300px] w-full" />}
+        <CardContent className="flex flex-1 flex-col">
+          {velocity.loading && <Skeleton className="min-h-[250px] w-full flex-1" />}
           {velocity.error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -448,7 +437,7 @@ export function SpendingTab() {
             <ChartContainer
               config={VELOCITY_CONFIG}
               className={cn(
-                'h-[300px] w-full transition-opacity duration-200',
+                'aspect-auto min-h-[250px] w-full flex-1 transition-opacity duration-200',
                 velocity.fetching && !velocity.loading && 'opacity-60',
               )}
             >
@@ -461,7 +450,6 @@ export function SpendingTab() {
                   tickMargin={10}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <ChartLegend content={<ChartLegendContent />} />
                 <Line
                   type="monotone"
                   dataKey="current"

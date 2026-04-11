@@ -4,11 +4,9 @@ import {
   ChartContainer,
   ChartTooltip,
   ChartTooltipContent,
-  ChartLegend,
-  ChartLegendContent,
   type ChartConfig,
 } from '@/components/ui/chart';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import {
   Select,
   SelectContent,
@@ -79,12 +77,15 @@ export function OverviewTab() {
       {/* Income vs Expenses */}
       <Card aria-labelledby="income-expenses-heading">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle
-            id="income-expenses-heading"
-            className="text-base font-semibold"
-          >
-            Income vs Expenses
-          </CardTitle>
+          <div>
+            <CardTitle
+              id="income-expenses-heading"
+              className="text-base font-semibold"
+            >
+              Income vs Expenses
+            </CardTitle>
+            <CardDescription>Monthly income and spending comparison</CardDescription>
+          </div>
           <Select
             value={String(months)}
             onValueChange={(v) => setMonths(Number(v))}
@@ -162,9 +163,8 @@ export function OverviewTab() {
                   tickMargin={10}
                 />
                 <ChartTooltip
-                  content={<ChartTooltipContent hideIndicator />}
+                  content={<ChartTooltipContent />}
                 />
-                <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="income"
                   fill={`url(#${gradientId}-income)`}
@@ -194,6 +194,7 @@ export function OverviewTab() {
           >
             Net Cash Flow
           </CardTitle>
+          <CardDescription>Cumulative net balance over time</CardDescription>
         </CardHeader>
         <CardContent>
           {incExp.loading && <Skeleton className="h-[300px] w-full" />}
@@ -256,12 +257,15 @@ export function OverviewTab() {
       {/* Budget vs Actual — full width */}
       <Card aria-labelledby="budget-vs-actual-heading" className="md:col-span-2">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <CardTitle
-            id="budget-vs-actual-heading"
-            className="text-base font-semibold"
-          >
-            Budget vs Actual
-          </CardTitle>
+          <div>
+            <CardTitle
+              id="budget-vs-actual-heading"
+              className="text-base font-semibold"
+            >
+              Budget vs Actual
+            </CardTitle>
+            <CardDescription>Monthly budget targets vs actual spending</CardDescription>
+          </div>
           <Select
             value={String(bvaYear)}
             onValueChange={(v) => setBvaYear(Number(v))}
@@ -295,6 +299,44 @@ export function OverviewTab() {
               )}
             >
               <BarChart accessibilityLayer data={bvaData}>
+                <defs>
+                  <linearGradient
+                    id={`${gradientId}-budget`}
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="1"
+                  >
+                    <stop
+                      offset="5%"
+                      stopColor="var(--color-budget)"
+                      stopOpacity={0.8}
+                    />
+                    <stop
+                      offset="95%"
+                      stopColor="var(--color-budget)"
+                      stopOpacity={0.1}
+                    />
+                  </linearGradient>
+                  <linearGradient
+                    id={`${gradientId}-actual`}
+                    x1="0"
+                    y1="0"
+                    x2="0"
+                    y2="1"
+                  >
+                    <stop
+                      offset="5%"
+                      stopColor="var(--color-actual)"
+                      stopOpacity={0.8}
+                    />
+                    <stop
+                      offset="95%"
+                      stopColor="var(--color-actual)"
+                      stopOpacity={0.1}
+                    />
+                  </linearGradient>
+                </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="name"
@@ -303,15 +345,18 @@ export function OverviewTab() {
                   tickMargin={10}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <ChartLegend content={<ChartLegendContent />} />
                 <Bar
                   dataKey="budget"
-                  fill="var(--color-budget)"
+                  fill={`url(#${gradientId}-budget)`}
+                  stroke="var(--color-budget)"
+                  strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
                 <Bar
                   dataKey="actual"
-                  fill="var(--color-actual)"
+                  fill={`url(#${gradientId}-actual)`}
+                  stroke="var(--color-actual)"
+                  strokeOpacity={0.3}
                   radius={[4, 4, 0, 0]}
                 />
               </BarChart>
