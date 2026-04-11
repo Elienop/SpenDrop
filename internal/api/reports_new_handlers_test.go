@@ -252,3 +252,77 @@ func TestHandleDismissRecurring(t *testing.T) {
 		t.Errorf("expected 0 after dismiss, got %d", len(data))
 	}
 }
+
+func TestHandleTagBreakdown_GroupsByTag(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Food", "expense")
+
+	// Two transactions sharing tag "groceries", one with "eating-out"
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-10", 100, "Store A", "groceries,weekly")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-15", 50, "Restaurant", "eating-out")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-20", 80, "Store B", "groceries")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/tag-breakdown?year=2026&month=3", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleTagBreakdown(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 3 { // groceries, weekly, eating-out
+		t.Fatalf("expected 3 tags, got %d", len(data))
+	}
+
+	// Find groceries — should be 180 (100 + 80)
+	for _, item := range data {
+		tag := item.(map[string]any)
+		if tag["tag"] == "groceries" {
+			if tag["total"].(float64) != 180 {
+				t.Errorf("groceries total: expected 180, got %v", tag["total"])
+			}
+			if tag["count"].(float64) != 2 {
+				t.Errorf("groceries count: expected 2, got %v", tag["count"])
+			}
+		}
+	}
+}
+
+func TestHandleTagBreakdown_YTD(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Food", "expense")
+
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-01-10", 100, "Jan", "groceries")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-06-10", 200, "Jun", "groceries")
+
+	// month=0 means YTD
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/tag-breakdown?year=2026&month=0", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleTagBreakdown(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(data))
+	}
+	tag := data[0].(map[string]any)
+	if tag["total"].(float64) != 300 {
+		t.Errorf("expected YTD total 300, got %v", tag["total"])
+	}
+}

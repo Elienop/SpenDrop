@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/elienop/spendrop/internal/auth"
@@ -329,4 +331,96 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- Tag Breakdown ---
+
+type tagEntry struct {
+	Tag   string  `json:"tag"`
+	Total float64 `json:"total"`
+	Count int     `json:"count"`
+}
+
+func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	year := time.Now().Year()
+	if ys := r.URL.Query().Get("year"); ys != "" {
+		parsed, err := strconv.Atoi(ys)
+		if err != nil || parsed < 2000 || parsed > 2100 {
+			writeError(w, http.StatusBadRequest, "invalid year")
+			return
+		}
+		year = parsed
+	}
+
+	month := 0 // 0 = YTD
+	if ms := r.URL.Query().Get("month"); ms != "" {
+		parsed, err := strconv.Atoi(ms)
+		if err != nil || parsed < 0 || parsed > 12 {
+			writeError(w, http.StatusBadRequest, "invalid month")
+			return
+		}
+		month = parsed
+	}
+
+	// Build date range
+	var dateFrom, dateTo string
+	if month == 0 {
+		dateFrom = fmt.Sprintf("%d-01-01", year)
+		dateTo = fmt.Sprintf("%d-12-31", year)
+	} else {
+		dateFrom = fmt.Sprintf("%d-%02d-01", year, month)
+		dateTo = time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	}
+
+	rows, err := h.queries.TransactionAmountsAndTags(r.Context(), database.TransactionAmountsAndTagsParams{
+		DateFrom: dateFrom,
+		DateTo:   dateTo,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query tags")
+		return
+	}
+
+	// Go-side aggregation: split CSV tags, accumulate per tag
+	type tagAgg struct {
+		total float64
+		count int
+	}
+	agg := make(map[string]*tagAgg)
+	for _, row := range rows {
+		if !row.Tags.Valid || row.Tags.String == "" {
+			continue
+		}
+		for _, raw := range strings.Split(row.Tags.String, ",") {
+			tag := strings.TrimSpace(raw)
+			if tag == "" {
+				continue
+			}
+			if _, ok := agg[tag]; !ok {
+				agg[tag] = &tagAgg{}
+			}
+			agg[tag].total += row.Amount
+			agg[tag].count++
+		}
+	}
+
+	// Sort by total descending
+	data := make([]tagEntry, 0, len(agg))
+	for tag, a := range agg {
+		data = append(data, tagEntry{
+			Tag:   tag,
+			Total: math.Round(a.total*100) / 100,
+			Count: a.count,
+		})
+	}
+	sort.Slice(data, func(i, j int) bool {
+		return data[i].Total > data[j].Total
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
 }
