@@ -175,3 +175,40 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 		"previous":      previous,
 	})
 }
+
+// --- Spending Heatmap ---
+
+type heatmapEntry struct {
+	Date  string  `json:"date"`
+	Total float64 `json:"total"`
+}
+
+func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	year := time.Now().Year()
+	if ys := r.URL.Query().Get("year"); ys != "" {
+		parsed, err := strconv.Atoi(ys)
+		if err != nil || parsed < 2000 || parsed > 2100 {
+			writeError(w, http.StatusBadRequest, "invalid year")
+			return
+		}
+		year = parsed
+	}
+
+	rows, err := h.queries.SumExpensesByDay(r.Context(), fmt.Sprintf("%d", year))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query heatmap data")
+		return
+	}
+
+	data := make([]heatmapEntry, len(rows))
+	for i, row := range rows {
+		data[i] = heatmapEntry{Date: row.Date.Format("2006-01-02"), Total: row.Total}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}

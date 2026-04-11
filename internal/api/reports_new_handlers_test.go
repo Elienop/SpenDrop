@@ -142,3 +142,34 @@ func TestHandleExpenseVelocity_Unauthorized(t *testing.T) {
 		t.Errorf("expected 401, got %d", rec.Code)
 	}
 }
+
+func TestHandleSpendingHeatmap_Default(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Food", "expense")
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 50, "lunch")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 30, "coffee")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/spending-heatmap?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleSpendingHeatmap(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 day with spending, got %d", len(data))
+	}
+	day := data[0].(map[string]any)
+	if day["total"].(float64) != 80 {
+		t.Errorf("expected total 80, got %v", day["total"])
+	}
+}
