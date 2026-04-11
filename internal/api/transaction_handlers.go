@@ -697,6 +697,8 @@ func toNullString(s string) sql.NullString {
 func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	// Suggestions are shared across all household users — same visibility as
+	// handleListTransactions. No per-user scoping needed.
 	descRows, err := h.db.QueryContext(ctx,
 		`SELECT DISTINCT description FROM transactions ORDER BY description LIMIT 500`)
 	if err != nil {
@@ -750,6 +752,7 @@ func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Re
 	}
 	sort.Strings(tags)
 
+	w.Header().Set("Cache-Control", "private, max-age=60")
 	writeJSON(w, http.StatusOK, struct {
 		Descriptions []string `json:"descriptions"`
 		Tags         []string `json:"tags"`

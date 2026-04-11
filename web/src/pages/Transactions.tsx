@@ -553,7 +553,7 @@ export function Transactions() {
                 value={replaceText}
                 onChange={(e) => setReplaceText(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleReplaceAll();
+                  if (e.key === 'Enter') void handleReplaceAll();
                 }}
                 placeholder="New description..."
                 className="h-8 max-w-xs text-xs"

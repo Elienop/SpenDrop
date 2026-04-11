@@ -9,12 +9,18 @@ export function useSuggestions(refreshKey = 0) {
   });
 
   useEffect(() => {
+    let ignore = false;
     api
       .get<TransactionSuggestions>('transactions/suggestions')
-      .then(setData)
+      .then((res) => {
+        if (!ignore) setData(res);
+      })
       .catch(() => {
         // Suggestions are non-critical — fail silently
       });
+    return () => {
+      ignore = true;
+    };
   }, [refreshKey]);
 
   return data;
