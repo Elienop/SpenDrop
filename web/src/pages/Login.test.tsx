@@ -37,7 +37,7 @@ describe('Login', () => {
   test('renders login heading', () => {
     renderLogin();
     expect(
-      screen.getByRole('heading', { level: 1, name: /login/i }),
+      screen.getByRole('heading', { level: 1, name: /spendrop/i }),
     ).toBeInTheDocument();
   });
 

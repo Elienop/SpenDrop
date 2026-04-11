@@ -37,7 +37,7 @@ describe('Register', () => {
   test('renders register heading', () => {
     renderRegister();
     expect(
-      screen.getByRole('heading', { level: 1, name: /register/i }),
+      screen.getByRole('heading', { level: 1, name: /spendrop/i }),
     ).toBeInTheDocument();
   });
 

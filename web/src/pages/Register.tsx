@@ -5,6 +5,7 @@ import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { Logo } from '@/components/Logo';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -54,10 +55,13 @@ export function Register() {
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <Card className="w-full max-w-sm">
         <CardHeader>
-          <h1 className="text-2xl font-semibold leading-none tracking-tight">
-            Register
-          </h1>
-          <CardDescription>Create your SpenDrop account</CardDescription>
+          <div className="flex items-center gap-2">
+            <Logo className="size-7" />
+            <h1 className="text-2xl font-semibold leading-none tracking-tight">
+              SpenDrop
+            </h1>
+          </div>
+          <CardDescription>Create your account</CardDescription>
         </CardHeader>
         <CardContent>
           <Form {...form}>
