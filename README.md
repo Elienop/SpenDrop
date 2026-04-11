@@ -2,7 +2,7 @@
 
 A self-hosted household expense tracker built for families who want full control over their financial data. Track transactions, set budgets, monitor spending trends, and manage multiple users -- all from a single Docker container running on your own hardware.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/screenshots/01-dashboard.png)
 
 ## Why SpenDrop?
 
@@ -20,13 +20,13 @@ Most budgeting apps require cloud accounts, charge subscriptions, or mine your f
 
 Real-time financial overview with KPI cards (total balance, income, expenses, savings rate), a 6/12-month cash flow chart, spending breakdown by category, and recent transactions -- all filterable by month and year.
 
-![Dashboard](docs/screenshots/dashboard.png)
+![Dashboard](docs/screenshots/01-dashboard.png)
 
 ### Transaction Management
 
 Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
 
-![Transactions](docs/screenshots/transactions.png)
+![Transactions](docs/screenshots/02-transactions.png)
 
 ### Reports
 
@@ -37,14 +37,16 @@ Four report tabs covering different angles of your finances:
 - **Savings** -- Savings goals and progress tracking
 - **Patterns** -- Expense velocity and spending pattern analysis
 
-![Reports Overview](docs/screenshots/reports.png)
-![Reports Spending](docs/screenshots/reports-spending.png)
+![Reports Overview](docs/screenshots/03-reports-overview.png)
+![Reports Spending](docs/screenshots/04-reports-spending.png)
+![Reports Savings](docs/screenshots/05-reports-savings.png)
+![Reports Patterns](docs/screenshots/06-reports-patterns.png)
 
 ### Categories
 
 Manage expense and income categories with color-coded badges, type labels (Expense/Income), and per-row action menus (edit, deactivate, delete). Deactivated categories stay attached to past transactions but no longer appear in the entry dropdown.
 
-![Categories](docs/screenshots/categories.png)
+![Categories](docs/screenshots/07-categories.png)
 
 ### Settings
 
@@ -56,13 +58,14 @@ Tabbed settings page with five sections:
 - **Users** -- Admin user management (create, edit roles, delete)
 - **Import / Export** -- Upload Excel files, preview rows, confirm import; export transactions or monthly/yearly reports
 
-![Settings](docs/screenshots/settings.png)
+![Settings](docs/screenshots/08-settings.png)
 
 ### Authentication
 
 Simple username/password auth with bcrypt hashing and HTTP-only session cookies. The first registered user automatically becomes admin. Supports admin and member roles.
 
-![Login](docs/screenshots/login.png)
+![Login](docs/screenshots/09-login.png)
+![Register](docs/screenshots/10-register.png)
 
 ### Additional Features
 
@@ -246,6 +249,12 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | GET | `/api/reports/category-trends` | Category spending trends |
 | GET | `/api/reports/income-expenses` | Income vs expenses report |
 | GET | `/api/reports/top-merchants` | Top merchants by spend |
+| GET | `/api/reports/budget-vs-actual` | Budget vs actual spending |
+| GET | `/api/reports/expense-velocity` | Cumulative spending pace |
+| GET | `/api/reports/spending-heatmap` | Daily spending heatmap |
+| GET | `/api/reports/recurring` | Detected recurring expenses |
+| POST | `/api/reports/recurring/dismiss` | Dismiss a recurring expense |
+| GET | `/api/reports/tag-breakdown` | Spending breakdown by tag |
 
 ### Export
 | Method | Endpoint | Description |

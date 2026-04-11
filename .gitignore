@@ -39,6 +39,7 @@ Thumbs.db
 .mcp.json
 .agents/
 skills-lock.json
+.playwright-mcp/
 
 # Superpowers (local-only)
 docs/superpowers/
