@@ -1,5 +1,5 @@
 import { useId, useMemo, useState } from 'react';
-import { BarChart, Bar, AreaChart, Area, XAxis, CartesianGrid, Cell } from 'recharts';
+import { BarChart, Bar, AreaChart, Area, XAxis, CartesianGrid } from 'recharts';
 import {
   ChartContainer,
   ChartTooltip,
@@ -28,8 +28,8 @@ const NET_FLOW_CONFIG = {
 } satisfies ChartConfig;
 
 const BVA_CONFIG = {
-  budget: { label: 'Budget', color: 'hsl(var(--chart-1))' },
-  actual: { label: 'Actual', color: 'hsl(var(--chart-8))' },
+  budget: { label: 'Budget', color: 'hsl(var(--primary) / 0.35)' },
+  actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
 export function OverviewTab() {
@@ -309,18 +309,11 @@ export function OverviewTab() {
                   fill="var(--color-budget)"
                   radius={[4, 4, 0, 0]}
                 />
-                <Bar dataKey="actual" radius={[4, 4, 0, 0]}>
-                  {bvaData.map((entry, i) => (
-                    <Cell
-                      key={i}
-                      fill={
-                        entry.actual <= entry.budget
-                          ? 'hsl(var(--chart-8))'
-                          : 'hsl(var(--chart-10))'
-                      }
-                    />
-                  ))}
-                </Bar>
+                <Bar
+                  dataKey="actual"
+                  fill="var(--color-actual)"
+                  radius={[4, 4, 0, 0]}
+                />
               </BarChart>
             </ChartContainer>
           )}

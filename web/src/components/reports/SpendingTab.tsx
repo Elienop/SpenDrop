@@ -25,6 +25,14 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
@@ -382,35 +390,47 @@ export function SpendingTab() {
           {!merchants.loading &&
             !merchants.error &&
             merchants.data.length > 0 && (
-              <ul
+              <div
                 className={cn(
-                  'divide-border divide-y transition-opacity duration-200',
+                  'transition-opacity duration-200',
                   merchants.fetching && !merchants.loading && 'opacity-60',
                 )}
               >
-                {merchants.data.map((m, i) => (
-                  <li key={m.description} className="flex items-center gap-3 py-2">
-                    <span className="w-6 text-sm font-mono tabular-nums text-muted-foreground">
-                      {i + 1}
-                    </span>
-                    <span className="flex-1 truncate text-sm">
-                      {m.description}
-                    </span>
-                    <span className="text-xs text-muted-foreground">
-                      {m.tx_count} transaction{m.tx_count !== 1 ? 's' : ''}
-                    </span>
-                    <span className="font-mono text-sm tabular-nums">
-                      {formatCurrency(m.total)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">#</TableHead>
+                      <TableHead>Description</TableHead>
+                      <TableHead className="text-right">Count</TableHead>
+                      <TableHead className="text-right">Amount</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {merchants.data.map((m, i) => (
+                      <TableRow key={m.description}>
+                        <TableCell className="font-mono tabular-nums text-muted-foreground">
+                          {i + 1}
+                        </TableCell>
+                        <TableCell className="font-medium">
+                          {m.description}
+                        </TableCell>
+                        <TableCell className="text-right text-muted-foreground">
+                          {m.tx_count}
+                        </TableCell>
+                        <TableCell className="text-right font-mono tabular-nums">
+                          {formatCurrency(m.total)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             )}
         </CardContent>
       </Card>
 
       {/* Expense Velocity */}
-      <Card aria-labelledby="expense-velocity-heading">
+      <Card aria-labelledby="expense-velocity-heading" className="flex flex-col">
         <CardHeader className="pb-2">
           <CardTitle
             id="expense-velocity-heading"
@@ -419,8 +439,8 @@ export function SpendingTab() {
             Expense Velocity
           </CardTitle>
         </CardHeader>
-        <CardContent>
-          {velocity.loading && <Skeleton className="h-[300px] w-full" />}
+        <CardContent className="flex-1">
+          {velocity.loading && <Skeleton className="min-h-[300px] w-full" />}
           {velocity.error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -431,7 +451,7 @@ export function SpendingTab() {
             <ChartContainer
               config={VELOCITY_CONFIG}
               className={cn(
-                'h-[300px] w-full transition-opacity duration-200',
+                'min-h-[300px] w-full transition-opacity duration-200',
                 velocity.fetching && !velocity.loading && 'opacity-60',
               )}
             >
