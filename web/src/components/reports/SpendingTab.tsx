@@ -300,7 +300,7 @@ export function SpendingTab() {
       </Card>
 
       {/* Category Trends */}
-      <Card aria-labelledby="category-trends-heading">
+      <Card aria-labelledby="category-trends-heading" className="flex flex-col">
         <CardHeader className="pb-2">
           <CardTitle
             id="category-trends-heading"
@@ -309,8 +309,8 @@ export function SpendingTab() {
             Category Trends
           </CardTitle>
         </CardHeader>
-        <CardContent>
-          {catTrends.loading && <Skeleton className="h-[300px] w-full" />}
+        <CardContent className="flex flex-1 flex-col">
+          {catTrends.loading && <Skeleton className="min-h-[300px] w-full flex-1" />}
           {catTrends.error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -321,7 +321,7 @@ export function SpendingTab() {
             <ChartContainer
               config={catTrendConfig}
               className={cn(
-                'h-[300px] w-full transition-opacity duration-200',
+                'aspect-auto min-h-[300px] w-full flex-1 transition-opacity duration-200',
                 catTrends.fetching && !catTrends.loading && 'opacity-60',
               )}
             >
