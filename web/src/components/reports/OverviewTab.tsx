@@ -115,7 +115,7 @@ export function OverviewTab() {
                 incExp.fetching && !incExp.loading && 'opacity-60',
               )}
             >
-              <BarChart data={incExpData}>
+              <BarChart accessibilityLayer data={incExpData}>
                 <defs>
                   <linearGradient
                     id={`${gradientId}-income`}
@@ -211,7 +211,7 @@ export function OverviewTab() {
                 incExp.fetching && !incExp.loading && 'opacity-60',
               )}
             >
-              <AreaChart data={cashFlowData}>
+              <AreaChart accessibilityLayer data={cashFlowData}>
                 <defs>
                   <linearGradient
                     id={`${gradientId}-cashflow`}
@@ -294,7 +294,7 @@ export function OverviewTab() {
                 bva.fetching && !bva.loading && 'opacity-60',
               )}
             >
-              <BarChart data={bvaData}>
+              <BarChart accessibilityLayer data={bvaData}>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="name"

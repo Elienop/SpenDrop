@@ -4,7 +4,6 @@ import {
   Line,
   PieChart,
   Pie,
-  Cell,
   XAxis,
   CartesianGrid,
   Label,
@@ -176,10 +175,10 @@ export function SpendingTab() {
   const velocityData = useMemo(() => buildVelocityData(velocity.data), [velocity.data]);
 
   return (
-    <div className="grid gap-6 md:grid-cols-2">
+    <div className="grid items-start gap-6 md:grid-cols-2">
       {/* Category Breakdown (donut) */}
-      <Card aria-labelledby="category-breakdown-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+      <Card aria-labelledby="category-breakdown-heading" className="flex flex-col">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-0">
           <CardTitle
             id="category-breakdown-heading"
             className="text-base font-semibold"
@@ -225,7 +224,7 @@ export function SpendingTab() {
             </Select>
           </div>
         </CardHeader>
-        <CardContent>
+        <CardContent className="flex-1 pb-0">
           {catBreakdown.loading && <Skeleton className="h-[300px] w-full" />}
           {catBreakdown.error && (
             <Alert variant="destructive">
@@ -239,30 +238,28 @@ export function SpendingTab() {
               <ChartContainer
                 config={breakdownConfig}
                 className={cn(
-                  'h-[300px] w-full transition-opacity duration-200',
+                  'mx-auto aspect-square max-h-[300px] transition-opacity duration-200',
                   catBreakdown.fetching &&
                     !catBreakdown.loading &&
                     'opacity-60',
                 )}
               >
                 <PieChart>
-                  <ChartTooltip content={<ChartTooltipContent />} />
+                  <ChartTooltip
+                    cursor={false}
+                    content={<ChartTooltipContent hideLabel />}
+                  />
                   <Pie
                     data={catBreakdown.data.map((c) => ({
                       ...c,
                       configKey: `cat-${c.id}`,
+                      fill: `var(--color-cat-${c.id})`,
                     }))}
                     dataKey="total"
                     nameKey="configKey"
                     innerRadius={60}
-                    outerRadius={80}
+                    strokeWidth={5}
                   >
-                    {catBreakdown.data.map((entry) => (
-                      <Cell
-                        key={entry.id}
-                        fill={getCategoryColorVar({ id: entry.id })}
-                      />
-                    ))}
                     <Label
                       content={({ viewBox }) => {
                         if (
@@ -280,14 +277,14 @@ export function SpendingTab() {
                               <tspan
                                 x={viewBox.cx}
                                 y={viewBox.cy}
-                                className="fill-foreground text-xl font-bold"
+                                className="fill-foreground text-3xl font-bold"
                               >
                                 {formatCurrency(breakdownTotal)}
                               </tspan>
                               <tspan
                                 x={viewBox.cx}
-                                y={(viewBox.cy ?? 0) + 20}
-                                className="fill-muted-foreground text-xs"
+                                y={(viewBox.cy ?? 0) + 24}
+                                className="fill-muted-foreground"
                               >
                                 Total
                               </tspan>
@@ -336,7 +333,7 @@ export function SpendingTab() {
                 catTrends.fetching && !catTrends.loading && 'opacity-60',
               )}
             >
-              <LineChart data={catTrendData}>
+              <LineChart accessibilityLayer data={catTrendData}>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="name"
@@ -430,7 +427,7 @@ export function SpendingTab() {
       </Card>
 
       {/* Expense Velocity */}
-      <Card aria-labelledby="expense-velocity-heading" className="flex flex-col">
+      <Card aria-labelledby="expense-velocity-heading">
         <CardHeader className="pb-2">
           <CardTitle
             id="expense-velocity-heading"
@@ -439,8 +436,8 @@ export function SpendingTab() {
             Expense Velocity
           </CardTitle>
         </CardHeader>
-        <CardContent className="flex-1">
-          {velocity.loading && <Skeleton className="min-h-[300px] w-full" />}
+        <CardContent>
+          {velocity.loading && <Skeleton className="h-[300px] w-full" />}
           {velocity.error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -451,11 +448,11 @@ export function SpendingTab() {
             <ChartContainer
               config={VELOCITY_CONFIG}
               className={cn(
-                'min-h-[300px] w-full transition-opacity duration-200',
+                'h-[300px] w-full transition-opacity duration-200',
                 velocity.fetching && !velocity.loading && 'opacity-60',
               )}
             >
-              <LineChart data={velocityData}>
+              <LineChart accessibilityLayer data={velocityData}>
                 <CartesianGrid vertical={false} />
                 <XAxis
                   dataKey="day"

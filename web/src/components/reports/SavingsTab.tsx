@@ -215,7 +215,7 @@ export function SavingsTab() {
                 config={SAVINGS_CONFIG}
                 className="mt-4 h-[200px] w-full"
               >
-                <AreaChart data={savingsData}>
+                <AreaChart accessibilityLayer data={savingsData}>
                   <defs>
                     <linearGradient
                       id={`${gradientId}-savings`}
@@ -299,7 +299,7 @@ export function SavingsTab() {
                 yoy.fetching && !yoy.loading && 'opacity-60',
               )}
             >
-              <BarChart data={yoyData}>
+              <BarChart accessibilityLayer data={yoyData}>
                 <defs>
                   <linearGradient
                     id={`${gradientId}-yoyCurrent`}

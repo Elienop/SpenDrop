@@ -160,6 +160,7 @@ export function PatternsTab() {
                           <Button
                             variant="ghost"
                             size="icon"
+                            aria-label="Dismiss recurring expense"
                             onClick={async () => {
                               try {
                                 await dismissRecurring(
@@ -249,7 +250,7 @@ export function PatternsTab() {
                 tags.fetching && !tags.loading && 'opacity-60',
               )}
             >
-              <BarChart data={tags.data} layout="vertical">
+              <BarChart accessibilityLayer data={tags.data} layout="vertical">
                 <CartesianGrid horizontal={false} />
                 <XAxis type="number" tickLine={false} axisLine={false} />
                 <YAxis
