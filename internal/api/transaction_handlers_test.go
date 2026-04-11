@@ -1682,8 +1682,8 @@ func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
 	txn := seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown")
 	origUpdatedAt := txn.UpdatedAt
 
-	// Small delay to ensure timestamp differs
-	time.Sleep(10 * time.Millisecond)
+	// SQLite CURRENT_TIMESTAMP has second-level precision
+	time.Sleep(1100 * time.Millisecond)
 
 	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)

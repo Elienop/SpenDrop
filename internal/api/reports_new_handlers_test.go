@@ -22,7 +22,7 @@ func TestHandleBudgetVsActual_Default(t *testing.T) {
 	})
 
 	// Seed an expense transaction in Jan 2026
-	cat := seedTestCategory(t, q, "Food", "expense")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
 	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-15", 1200, "Groceries")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/reports/budget-vs-actual?year=2026", nil)
@@ -96,7 +96,7 @@ func TestHandleExpenseVelocity_Default(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	cat := seedTestCategory(t, q, "Food", "expense")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
 
 	// Seed transactions in Jan 2026
 	for _, day := range []string{"2026-01-05", "2026-01-10", "2026-01-15"} {
@@ -149,7 +149,7 @@ func TestHandleSpendingHeatmap_Default(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	cat := seedTestCategory(t, q, "Food", "expense")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
 
 	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 50, "lunch")
 	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 30, "coffee")
@@ -257,7 +257,7 @@ func TestHandleTagBreakdown_GroupsByTag(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	cat := seedTestCategory(t, q, "Food", "expense")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
 
 	// Two transactions sharing tag "groceries", one with "eating-out"
 	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-10", 100, "Store A", "groceries,weekly")
@@ -299,7 +299,7 @@ func TestHandleTagBreakdown_YTD(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	cat := seedTestCategory(t, q, "Food", "expense")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
 
 	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-01-10", 100, "Jan", "groceries")
 	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-06-10", 200, "Jun", "groceries")
