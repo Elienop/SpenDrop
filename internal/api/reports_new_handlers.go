@@ -2,8 +2,10 @@ package api
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"time"
@@ -211,4 +213,120 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// --- Recurring Expenses ---
+
+type recurringEntry struct {
+	Description string  `json:"description"`
+	MonthlyAvg  float64 `json:"monthly_avg"`
+	MonthCount  int64   `json:"month_count"`
+	AnnualTotal float64 `json:"annual_total"`
+}
+
+func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	year := time.Now().Year()
+	if ys := r.URL.Query().Get("year"); ys != "" {
+		parsed, err := strconv.Atoi(ys)
+		if err != nil || parsed < 2000 || parsed > 2100 {
+			writeError(w, http.StatusBadRequest, "invalid year")
+			return
+		}
+		year = parsed
+	}
+
+	ctx := r.Context()
+	rows, err := h.queries.RecurringDescriptions(ctx, fmt.Sprintf("%d", year))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query recurring")
+		return
+	}
+
+	// Load dismissed list from app_settings
+	dismissed := make(map[string]bool)
+	key := fmt.Sprintf("dismissed_recurring_%d", year)
+	setting, err := h.queries.GetSetting(ctx, key)
+	if err == nil && setting.Value != "" {
+		var list []string
+		if json.Unmarshal([]byte(setting.Value), &list) == nil {
+			for _, d := range list {
+				dismissed[d] = true
+			}
+		}
+	}
+
+	data := make([]recurringEntry, 0, len(rows))
+	for _, row := range rows {
+		if dismissed[row.Description] {
+			continue
+		}
+		data = append(data, recurringEntry{
+			Description: row.Description,
+			MonthlyAvg:  math.Round(row.AnnualTotal/float64(row.MonthCount)*100) / 100,
+			MonthCount:  row.MonthCount,
+			AnnualTotal: row.AnnualTotal,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+type dismissRequest struct {
+	Year        int    `json:"year"`
+	Description string `json:"description"`
+}
+
+func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req dismissRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Year < 2000 || req.Year > 2100 || req.Description == "" {
+		writeError(w, http.StatusBadRequest, "year and description required")
+		return
+	}
+
+	ctx := r.Context()
+	key := fmt.Sprintf("dismissed_recurring_%d", req.Year)
+
+	// Load existing dismissed list
+	var list []string
+	setting, err := h.queries.GetSetting(ctx, key)
+	if err == nil && setting.Value != "" {
+		json.Unmarshal([]byte(setting.Value), &list)
+	}
+
+	// Check idempotency
+	for _, d := range list {
+		if d == req.Description {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+	}
+
+	list = append(list, req.Description)
+	encoded, err := json.Marshal(list)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to encode dismissed list")
+		return
+	}
+	if err := h.queries.UpsertSetting(ctx, database.UpsertSettingParams{
+		Key: key, Value: string(encoded),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to save dismissed list")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

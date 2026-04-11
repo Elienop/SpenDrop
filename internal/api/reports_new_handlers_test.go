@@ -2,8 +2,10 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -171,5 +173,82 @@ func TestHandleSpendingHeatmap_Default(t *testing.T) {
 	day := data[0].(map[string]any)
 	if day["total"].(float64) != 80 {
 		t.Errorf("expected total 80, got %v", day["total"])
+	}
+}
+
+func TestHandleRecurring_DetectsRecurring(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Subscriptions", "expense")
+
+	// Netflix appears in 4 months — should be detected
+	for _, m := range []string{"01", "02", "03", "04"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-15", m), 15, "Netflix")
+	}
+	// Random expense appears in 2 months — should NOT be detected
+	for _, m := range []string{"01", "03"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-10", m), 50, "Random Store")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/recurring?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleRecurring(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 recurring entry (Netflix), got %d", len(data))
+	}
+	entry := data[0].(map[string]any)
+	if entry["description"] != "Netflix" {
+		t.Errorf("expected Netflix, got %v", entry["description"])
+	}
+	if entry["month_count"].(float64) != 4 {
+		t.Errorf("expected 4 months, got %v", entry["month_count"])
+	}
+}
+
+func TestHandleDismissRecurring(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Subscriptions", "expense")
+
+	// Seed Netflix in 3 months
+	for _, m := range []string{"01", "02", "03"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-15", m), 15, "Netflix")
+	}
+
+	// Dismiss it
+	body := strings.NewReader(`{"year":2026,"description":"Netflix"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/reports/recurring/dismiss", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleDismissRecurring(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// GET recurring should now return empty
+	req2 := httptest.NewRequest(http.MethodGet, "/api/reports/recurring?year=2026", nil)
+	req2 = withUser(req2, user)
+	rec2 := httptest.NewRecorder()
+
+	h.handleRecurring(rec2, req2)
+	var resp map[string]any
+	decodeResponse(t, rec2, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 0 {
+		t.Errorf("expected 0 after dismiss, got %d", len(data))
 	}
 }
