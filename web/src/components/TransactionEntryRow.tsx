@@ -64,9 +64,9 @@ function saveLastCategory(id: number) {
 
 const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
-  amount: z.number().positive('Amount must be > 0'),
-  description: z.string().min(1, 'Description required').max(200),
-  category_id: z.number().int().positive('Category required'),
+  amount: z.number().positive('Must be > 0'),
+  description: z.string().min(1, 'Required').max(200),
+  category_id: z.number().int().positive('Required'),
   tags: z.string(),
 });
 export type EntryFormValues = z.infer<typeof entrySchema>;
