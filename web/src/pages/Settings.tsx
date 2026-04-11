@@ -34,6 +34,10 @@ import {
   TabsTrigger,
 } from '@/components/ui/tabs';
 import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from '@/components/ui/toggle-group';
+import {
   Select,
   SelectContent,
   SelectGroup,
@@ -1084,6 +1088,7 @@ function DataSection() {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
+  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
 
   // Import wizard state
   const [importStep, setImportStep] = useState<ImportStep>('upload');
@@ -1334,7 +1339,18 @@ function DataSection() {
           <CardTitle className="text-base">Export</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <div className="grid max-w-md gap-4 sm:grid-cols-2">
+          <ToggleGroup
+            type="single"
+            value={exportMode}
+            onValueChange={(v) => {
+              if (v === 'monthly' || v === 'yearly') setExportMode(v);
+            }}
+            className="justify-start"
+          >
+            <ToggleGroupItem value="monthly">Monthly</ToggleGroupItem>
+            <ToggleGroupItem value="yearly">Yearly</ToggleGroupItem>
+          </ToggleGroup>
+          <div className="flex max-w-md items-end gap-3">
             <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
               <Input
@@ -1344,35 +1360,36 @@ function DataSection() {
                 onChange={(e) => setYear(Number(e.target.value))}
                 min={2000}
                 max={2099}
+                className="w-28"
               />
             </div>
-            <div className="flex flex-col gap-2">
-              <Label>Month</Label>
-              <Select
-                value={String(month)}
-                onValueChange={(v) => setMonth(Number(v))}
-              >
-                <SelectTrigger aria-label="Export Month">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {MONTH_NAMES.map((m, i) => (
-                      <SelectItem key={m} value={String(i + 1)}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={handleExportMonthly}>
-              Export Monthly
-            </Button>
-            <Button type="button" variant="outline" onClick={handleExportYearly}>
-              Export Yearly
+            {exportMode === 'monthly' && (
+              <div className="flex flex-col gap-2">
+                <Label>Month</Label>
+                <Select
+                  value={String(month)}
+                  onValueChange={(v) => setMonth(Number(v))}
+                >
+                  <SelectTrigger aria-label="Export Month" className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {MONTH_NAMES.map((m, i) => (
+                        <SelectItem key={m} value={String(i + 1)}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <Button
+              type="button"
+              onClick={exportMode === 'monthly' ? handleExportMonthly : handleExportYearly}
+            >
+              Export
             </Button>
           </div>
         </CardContent>

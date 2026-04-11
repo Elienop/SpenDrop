@@ -175,12 +175,11 @@ describe('Settings', () => {
       await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
 
       await waitFor(() => {
-        // CardTitle renders as a <div>, not a heading element
-        expect(screen.getByText(/^export$/i)).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^export$/i })).toBeInTheDocument();
       });
     });
 
-    test('data tab has year input, month select, and export buttons', async () => {
+    test('data tab has year input, toggle group, and export button', async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
@@ -188,15 +187,9 @@ describe('Settings', () => {
 
       await waitFor(() => {
         expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
-        expect(
-          screen.getByRole('combobox', { name: /export month/i }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByRole('button', { name: /export monthly/i }),
-        ).toBeInTheDocument();
-        expect(
-          screen.getByRole('button', { name: /export yearly/i }),
-        ).toBeInTheDocument();
+        expect(screen.getByRole('radio', { name: /monthly/i })).toBeInTheDocument();
+        expect(screen.getByRole('radio', { name: /yearly/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^export$/i })).toBeInTheDocument();
       });
     });
 
@@ -211,13 +204,13 @@ describe('Settings', () => {
         expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
       });
 
-      // Set year and month
+      // Set year
       const yearInput = screen.getByLabelText(/year/i);
       await user.clear(yearInput);
       await user.type(yearInput, '2026');
 
-      // Month should default to current month, just click export
-      await user.click(screen.getByRole('button', { name: /export monthly/i }));
+      // Monthly is the default mode, click Export
+      await user.click(screen.getByRole('button', { name: /^export$/i }));
 
       expect(openSpy).toHaveBeenCalledTimes(1);
       const url = openSpy.mock.calls[0][0] as string;
@@ -241,7 +234,9 @@ describe('Settings', () => {
       await user.clear(yearInput);
       await user.type(yearInput, '2025');
 
-      await user.click(screen.getByRole('button', { name: /export yearly/i }));
+      // Switch to yearly mode then click Export
+      await user.click(screen.getByRole('radio', { name: /yearly/i }));
+      await user.click(screen.getByRole('button', { name: /^export$/i }));
 
       expect(openSpy).toHaveBeenCalledTimes(1);
       const url = openSpy.mock.calls[0][0] as string;
