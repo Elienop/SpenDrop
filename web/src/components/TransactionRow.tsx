@@ -177,7 +177,7 @@ export function TransactionRow({
       </TableCell>
       <TableCell
         className={cn(
-          'text-right font-mono tabular-nums',
+          'whitespace-nowrap text-right font-mono tabular-nums',
           transaction.category_type === 'expense'
             ? 'text-foreground'
             : 'text-[var(--color-income)]',

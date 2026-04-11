@@ -537,15 +537,15 @@ export function Transactions() {
             onPerPageChange={setPerPage}
           />
 
-          <Table className="table-fixed">
+          <Table>
             <TableHeader>
               <TableRow>
-                <SortableHeader label="Date" column="date" onSort={setSort} className="w-[120px]" />
+                <SortableHeader label="Date" column="date" onSort={setSort} />
                 <SortableHeader label="Description" column="description" onSort={setSort} />
-                <SortableHeader label="Category" column="category" onSort={setSort} className="w-[180px]" />
-                <SortableHeader label="Tags" column="tags" onSort={setSort} className="w-[140px]" />
-                <SortableHeader label="Amount" column="amount" onSort={setSort} align="right" className="w-[140px]" />
-                <TableHead className="w-12 text-right">Actions</TableHead>
+                <SortableHeader label="Category" column="category" onSort={setSort} />
+                <SortableHeader label="Tags" column="tags" onSort={setSort} />
+                <SortableHeader label="Amount" column="amount" onSort={setSort} align="right" />
+                <TableHead className="text-right">Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
