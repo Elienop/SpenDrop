@@ -242,6 +242,8 @@ export function SavingsTab() {
                     tickLine={false}
                     axisLine={false}
                     tickMargin={10}
+                    interval={0}
+                    padding={{ left: 20, right: 20 }}
                   />
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <Area
