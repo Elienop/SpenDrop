@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type KeyboardEvent,
 } from 'react';
 import { useForm } from 'react-hook-form';
@@ -107,6 +108,7 @@ export function TransactionEntryRow({
 }: TransactionEntryRowProps) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const amountRef = useRef<HTMLInputElement | null>(null);
+  const [catOpen, setCatOpen] = useState(false);
   const undoBufferRef = useRef<{
     saved: Transaction;
     values: EntryFormValues;
@@ -191,6 +193,9 @@ export function TransactionEntryRow({
     el.focus();
     if (el instanceof HTMLInputElement) {
       el.select();
+    }
+    if (name === 'category_id') {
+      setCatOpen(true);
     }
   };
 
@@ -330,7 +335,7 @@ export function TransactionEntryRow({
             render={({ field }) => (
               <FormItem className="w-48">
                 <EntryLabel>Category</EntryLabel>
-                <Popover>
+                <Popover open={catOpen} onOpenChange={setCatOpen}>
                   <PopoverTrigger asChild>
                     <Button
                       type="button"
@@ -341,7 +346,7 @@ export function TransactionEntryRow({
                       {categoryNameById(field.value) ?? 'Select category'}
                     </Button>
                   </PopoverTrigger>
-                  <PopoverContent className="p-0" align="start">
+                  <PopoverContent className="p-0" align="start" onOpenAutoFocus={(e) => e.preventDefault()}>
                     <Command>
                       <CommandInput placeholder="Search category..." />
                       <CommandList>
@@ -350,7 +355,11 @@ export function TransactionEntryRow({
                           <CommandItem
                             key={cat.id}
                             value={cat.name}
-                            onSelect={() => field.onChange(cat.id)}
+                            onSelect={() => {
+                              field.onChange(cat.id);
+                              setCatOpen(false);
+                              focusFieldByName('tags');
+                            }}
                           >
                             <CategoryBadge category={cat} />
                             <span className="ml-2">{cat.name}</span>
