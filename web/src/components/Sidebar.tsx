@@ -7,10 +7,11 @@ import {
   Tag,
   Settings as SettingsIcon,
   ChevronLeft,
-  ChevronRight,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { Logo } from '@/components/Logo';
+import { LogoWordmark } from '@/components/LogoWordmark';
 import {
   Tooltip,
   TooltipContent,
@@ -68,23 +69,30 @@ export function Sidebar() {
           )}
         >
           {expanded ? (
-            <span className="font-semibold tracking-tight">SpenDrop</span>
+            <>
+              <LogoWordmark className="h-6" />
+              <button
+                type="button"
+                aria-label="Toggle sidebar"
+                aria-expanded={expanded}
+                onClick={() => setExpanded((v) => !v)}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+              >
+                <ChevronLeft className="h-4 w-4" />
+              </button>
+            </>
           ) : (
-            <span className="sr-only">SpenDrop</span>
+            <button
+              type="button"
+              aria-label="Toggle sidebar"
+              aria-expanded={expanded}
+              onClick={() => setExpanded((v) => !v)}
+              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+            >
+              <Logo className="size-5" />
+              <span className="sr-only">SpenDrop</span>
+            </button>
           )}
-          <button
-            type="button"
-            aria-label="Toggle sidebar"
-            aria-expanded={expanded}
-            onClick={() => setExpanded((v) => !v)}
-            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
-          >
-            {expanded ? (
-              <ChevronLeft className="h-4 w-4" />
-            ) : (
-              <ChevronRight className="h-4 w-4" />
-            )}
-          </button>
         </div>
 
         {/* Content — matches SidebarContent: gap-2, overflow-hidden when collapsed */}

@@ -150,24 +150,24 @@ describe('App', () => {
     test('renders login page on /login without sidebar', () => {
       renderApp('/login');
       expect(
-        screen.getByRole('heading', { level: 1, name: 'Login' }),
+        screen.getByRole('heading', { level: 1, name: /spendrop/i }),
       ).toBeInTheDocument();
-      expect(screen.queryByText('SpenDrop')).not.toBeInTheDocument();
+      expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
     });
 
     test('renders register page on /register without sidebar', () => {
       renderApp('/register');
       expect(
-        screen.getByRole('heading', { level: 1, name: 'Register' }),
+        screen.getByRole('heading', { level: 1, name: /spendrop/i }),
       ).toBeInTheDocument();
-      expect(screen.queryByText('SpenDrop')).not.toBeInTheDocument();
+      expect(screen.queryByRole('complementary')).not.toBeInTheDocument();
     });
 
     test('redirects to login for protected routes', async () => {
       renderApp('/');
       await waitFor(() => {
         expect(
-          screen.getByRole('heading', { level: 1, name: 'Login' }),
+          screen.getByRole('heading', { level: 1, name: /spendrop/i }),
         ).toBeInTheDocument();
       });
     });
