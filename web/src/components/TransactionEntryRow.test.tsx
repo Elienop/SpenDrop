@@ -556,8 +556,8 @@ describe('TransactionEntryRow', () => {
 
     await user.click(screen.getByRole('button', { name: /add/i }));
 
-    expect(await screen.findByText('Must be > 0')).toBeInTheDocument();
-    const requiredErrors = await screen.findAllByText('Required');
+    expect(await screen.findByText('> 0')).toBeInTheDocument();
+    const requiredErrors = await screen.findAllByText('required');
     expect(requiredErrors.length).toBeGreaterThanOrEqual(2);
     expect(onSubmit).not.toHaveBeenCalled();
   });

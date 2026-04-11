@@ -13,9 +13,9 @@ import {
   FormControl,
   FormField,
   FormItem,
-  FormLabel,
-  FormMessage,
+  useFormField,
 } from '@/components/ui/form';
+import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { AutocompleteInput } from './AutocompleteInput';
 import { Button } from '@/components/ui/button';
@@ -62,11 +62,28 @@ function saveLastCategory(id: number) {
   localStorage.setItem(LAST_CATEGORY_KEY, String(id));
 }
 
+function EntryLabel({ children }: { children: string }) {
+  const { error, formItemId } = useFormField();
+  return (
+    <Label
+      htmlFor={formItemId}
+      className={error ? 'text-destructive' : undefined}
+    >
+      {children}
+      {error && (
+        <span className="ml-1 font-normal">
+          {String(error.message ?? '')}
+        </span>
+      )}
+    </Label>
+  );
+}
+
 const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
-  amount: z.number().positive('Must be > 0'),
-  description: z.string().min(1, 'Required').max(200),
-  category_id: z.number().int().positive('Required'),
+  amount: z.number().positive('> 0'),
+  description: z.string().min(1, 'required').max(200),
+  category_id: z.number().int().positive('required'),
   tags: z.string(),
 });
 export type EntryFormValues = z.infer<typeof entrySchema>;
@@ -243,7 +260,7 @@ export function TransactionEntryRow({
             name="date"
             render={({ field }) => (
               <FormItem className="w-36">
-                <FormLabel>Date</FormLabel>
+                <EntryLabel>Date</EntryLabel>
                 <FormControl>
                   <Input
                     type="date"
@@ -251,7 +268,6 @@ export function TransactionEntryRow({
                     {...field}
                   />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -261,7 +277,7 @@ export function TransactionEntryRow({
             name="amount"
             render={({ field }) => (
               <FormItem className="w-32">
-                <FormLabel>Amount</FormLabel>
+                <EntryLabel>Amount</EntryLabel>
                 <FormControl>
                   <Input
                     type="number"
@@ -286,7 +302,6 @@ export function TransactionEntryRow({
                     }}
                   />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -296,7 +311,7 @@ export function TransactionEntryRow({
             name="description"
             render={({ field }) => (
               <FormItem className="flex-1 min-w-[12rem]">
-                <FormLabel>Description</FormLabel>
+                <EntryLabel>Description</EntryLabel>
                 <FormControl>
                   <AutocompleteInput
                     data-entry-field="description"
@@ -305,7 +320,6 @@ export function TransactionEntryRow({
                     {...field}
                   />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -315,7 +329,7 @@ export function TransactionEntryRow({
             name="category_id"
             render={({ field }) => (
               <FormItem className="w-48">
-                <FormLabel>Category</FormLabel>
+                <EntryLabel>Category</EntryLabel>
                 <Popover>
                   <PopoverTrigger asChild>
                     <Button
@@ -346,7 +360,6 @@ export function TransactionEntryRow({
                     </Command>
                   </PopoverContent>
                 </Popover>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -374,7 +387,6 @@ export function TransactionEntryRow({
                     suggestions={tagSuggestions}
                   />
                 </label>
-                <FormMessage />
               </FormItem>
             )}
           />
