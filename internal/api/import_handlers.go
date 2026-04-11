@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -203,10 +204,14 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	for _, row := range rows[headerIdx+1:] {
 		for _, sec := range sections {
 			ir := importRow{}
+			hasAnyValue := false
 			for colIdx, field := range sec.colIndexToField {
 				val := ""
 				if colIdx < len(row) {
 					val = strings.TrimSpace(row[colIdx])
+				}
+				if val != "" {
+					hasAnyValue = true
 				}
 				switch field {
 				case "date":
@@ -237,8 +242,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 					ir.OriginalCurrency = val
 				}
 			}
-			// Skip completely empty rows
-			if ir.Date == "" && ir.Description == "" && ir.Amount == 0 {
+			// Skip rows where no mapped cell had any value
+			if !hasAnyValue {
 				continue
 			}
 			parsedRows = append(parsedRows, ir)
@@ -289,12 +294,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	// Start background cleanup (idempotent via sync.Once)
 	startImportCleanup()
 
-	// Build preview (first 10 rows)
-	previewCount := min(10, len(parsedRows))
-	preview := parsedRows[:previewCount]
-
-	// Collect unique category names from ALL rows so the frontend can
-	// display the full mapping UI, not just categories from the preview.
+	// Collect unique category names from all rows for the mapping UI.
 	seen := make(map[string]struct{})
 	uniqueCategories := make([]string, 0)
 	for _, row := range parsedRows {
@@ -309,7 +309,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"import_id":         importID,
 		"row_count":         len(parsedRows),
-		"preview":           preview,
+		"rows":              parsedRows,
 		"columns":           detectedColumns,
 		"unique_categories": uniqueCategories,
 	})
@@ -395,8 +395,12 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		// Validate required fields
-		if row.Description == "" || row.Amount <= 0 {
+		// Validate required fields. Use absolute value for amount because the
+		// system stores amounts as positive numbers (category type determines
+		// expense vs income). Negative values in spreadsheets (refunds/credits)
+		// are converted to positive so they are not silently dropped.
+		amount := math.Abs(row.Amount)
+		if row.Description == "" || amount == 0 {
 			skipped++
 			continue
 		}
@@ -414,7 +418,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		params := database.CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        date,
-			Amount:      row.Amount,
+			Amount:      amount,
 			Description: row.Description,
 			CategoryID:  categoryID,
 			Tags:        toNullString(row.Tags),
@@ -423,7 +427,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 		// Handle original amount/currency if present
 		if row.OriginalAmount != 0 {
-			params.OriginalAmount = sql.NullFloat64{Float64: row.OriginalAmount, Valid: true}
+			params.OriginalAmount = sql.NullFloat64{Float64: math.Abs(row.OriginalAmount), Valid: true}
 		}
 		if row.OriginalCurrency != "" {
 			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
@@ -453,12 +457,50 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleImportCancel removes a pending import entry from memory so the
+// per-user slot is freed immediately (instead of waiting for TTL expiry).
+func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	importID := r.PathValue("id")
+	if len(importID) != 32 {
+		writeError(w, http.StatusBadRequest, "invalid import_id")
+		return
+	}
+
+	val, found := importStore.Load(importID)
+	if !found {
+		// Already gone — treat as success
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	entry := val.(*importEntry)
+	if entry.UserID != user.ID {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	importStore.Delete(importID)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
-// whitespace so the string can be parsed as a float.
+// whitespace so the string can be parsed as a float. It also converts
+// accounting-format negatives like (42.50) to -42.50.
 func stripCurrencyFormat(s string) string {
 	s = strings.TrimSpace(s)
 	s = strings.NewReplacer("$", "", "€", "", "£", "", ",", "").Replace(s)
-	return strings.TrimSpace(s)
+	s = strings.TrimSpace(s)
+	// Convert accounting-format negatives: (42.50) → -42.50
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		s = "-" + s[1:len(s)-1]
+	}
+	return s
 }
 
 // parseImportDate tries multiple date formats and returns the first successful

@@ -121,12 +121,12 @@ func TestHandleImportUpload_ValidFile_ReturnsPreview(t *testing.T) {
 	if int(resp["row_count"].(float64)) != 3 {
 		t.Errorf("expected row_count 3, got %v", resp["row_count"])
 	}
-	preview, ok := resp["preview"].([]any)
+	rows, ok := resp["rows"].([]any)
 	if !ok {
-		t.Fatal("expected preview to be an array")
+		t.Fatal("expected rows to be an array")
 	}
-	if len(preview) != 3 {
-		t.Errorf("expected 3 preview rows, got %d", len(preview))
+	if len(rows) != 3 {
+		t.Errorf("expected 3 rows, got %d", len(rows))
 	}
 	columns, ok := resp["columns"].([]any)
 	if !ok {
@@ -240,9 +240,9 @@ func TestHandleImportUpload_PreviewCappedAt10(t *testing.T) {
 
 	var resp map[string]any
 	decodeResponse(t, rec, &resp)
-	preview := resp["preview"].([]any)
-	if len(preview) != 10 {
-		t.Errorf("expected preview capped at 10, got %d", len(preview))
+	respRows := resp["rows"].([]any)
+	if len(respRows) != 15 {
+		t.Errorf("expected all 15 rows, got %d", len(respRows))
 	}
 	if int(resp["row_count"].(float64)) != 15 {
 		t.Errorf("expected row_count 15, got %v", resp["row_count"])
@@ -533,6 +533,193 @@ func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
 	decodeResponse(t, confirmRec, &resp)
 	if int(resp["imported"].(float64)) != 1 {
 		t.Errorf("expected 1 imported, got %v", resp["imported"])
+	}
+}
+
+func TestHandleImportConfirm_NegativeAmounts_ConvertedToAbsolute(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "refundimporter", "member")
+
+	// Negative amounts in spreadsheets (refunds/credits) should be converted
+	// to absolute values during import, not silently skipped. The system uses
+	// category type to distinguish expense vs income, not amount sign.
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+		{"2026-01-16", "Refund from store", "-15.00", "Food"},
+		{"2026-01-17", "Credit adjustment", "-5.75", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	if int(uploadResp["row_count"].(float64)) != 3 {
+		t.Errorf("expected row_count 3 (including negatives), got %v", uploadResp["row_count"])
+	}
+
+	cats, _ := q.ListAllCategories(context.Background())
+	defaultCatID := cats[0].ID
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultCatID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	// All 3 rows should be imported — negatives are converted to absolute values
+	if int(resp["imported"].(float64)) != 3 {
+		t.Errorf("expected 3 imported (negatives converted to abs), got %v; skipped=%v", resp["imported"], resp["skipped"])
+	}
+	if int(resp["skipped"].(float64)) != 0 {
+		t.Errorf("expected 0 skipped, got %v", resp["skipped"])
+	}
+}
+
+func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"$42.50", "42.50"},
+		{"-$15.00", "-15.00"},
+		{"($42.50)", "-42.50"},
+		{"(€1,234.56)", "-1234.56"},
+		{"(£100.00)", "-100.00"},
+		{"$ (42.50)", "-42.50"},
+		{"1,234.56", "1234.56"},
+		{" $42.50 ", "42.50"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			got := stripCurrencyFormat(tc.input)
+			if got != tc.expected {
+				t.Errorf("stripCurrencyFormat(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+func TestHandleImportUpload_AccountingNegatives_ParsedCorrectly(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "acctformat", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Normal purchase", "$42.50"},
+		{"2026-01-16", "Refund (parens)", "($15.00)"},
+		{"2026-01-17", "Negative sign", "-$5.75"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, uploadRec, &resp)
+
+	// All 3 rows should be parsed — the accounting format (parens) must not
+	// result in Amount=0 which would still pass the upload skip filter but
+	// silently lose the amount value.
+	if int(resp["row_count"].(float64)) != 3 {
+		t.Errorf("expected row_count 3, got %v", resp["row_count"])
+	}
+
+	rows, ok := resp["rows"].([]any)
+	if !ok || len(rows) < 3 {
+		t.Fatalf("expected 3 rows, got %d", len(rows))
+	}
+
+	// Verify the accounting-format row parsed the amount correctly
+	row2 := rows[1].(map[string]any)
+	if row2["amount"].(float64) != -15.00 {
+		t.Errorf("expected accounting-negative amount -15.00, got %v", row2["amount"])
+	}
+
+	row3 := rows[2].(map[string]any)
+	if row3["amount"].(float64) != -5.75 {
+		t.Errorf("expected negative amount -5.75, got %v", row3["amount"])
+	}
+}
+
+func TestHandleImportConfirm_ZeroAmount_Skipped(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "zeroimporter", "member")
+
+	// Zero-amount rows should be skipped (they have no financial meaning)
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Real purchase", "42.50"},
+		{"2026-01-16", "Zero row", "0"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, _ := q.ListAllCategories(context.Background())
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	// Only the real purchase should be imported; the zero-amount row skipped
+	if int(resp["imported"].(float64)) != 1 {
+		t.Errorf("expected 1 imported, got %v", resp["imported"])
+	}
+	if int(resp["skipped"].(float64)) != 1 {
+		t.Errorf("expected 1 skipped (zero amount), got %v", resp["skipped"])
 	}
 }
 

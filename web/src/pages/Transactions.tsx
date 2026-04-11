@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { format } from 'date-fns';
+import { toast } from 'sonner';
 import {
   AlertCircle,
   ArrowUpDown,
@@ -7,8 +8,11 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Replace,
+  Trash2,
   X,
 } from 'lucide-react';
+import { Input } from '@/components/ui/input';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
@@ -23,6 +27,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
   SelectContent,
@@ -330,10 +335,16 @@ export function Transactions() {
     createTransaction,
     updateTransaction,
     deleteTransaction,
+    refetch,
   } = useTransactions();
 
   const [showFilters, setShowFilters] = useState(false);
   const [showEntry, setShowEntry] = useState(false);
+  const [showReplace, setShowReplace] = useState(false);
+  const [replaceText, setReplaceText] = useState('');
+  const [replacing, setReplacing] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  const [deleting, setDeleting] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
 
   const handlePageChange = useCallback(
@@ -364,6 +375,62 @@ export function Transactions() {
     window.open(url, '_blank');
   }, [filters]);
 
+  const handleReplaceAll = useCallback(async () => {
+    if (!replaceText.trim() || !filters.search.trim()) return;
+    setReplacing(true);
+    try {
+      const res = await api.put<{ updated: number }>('transactions/bulk-rename', {
+        search: filters.search,
+        new_description: replaceText.trim(),
+      });
+      toast.success(`Renamed ${res.updated} transaction${res.updated !== 1 ? 's' : ''}`);
+      setShowReplace(false);
+      setReplaceText('');
+      refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Rename failed');
+    } finally {
+      setReplacing(false);
+    }
+  }, [replaceText, filters.search, refetch]);
+
+  const handleSelect = useCallback((id: number, checked: boolean) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const handleSelectAll = useCallback(
+    (checked: boolean) => {
+      if (checked) {
+        setSelectedIds(new Set(transactions.map((tx) => tx.id)));
+      } else {
+        setSelectedIds(new Set());
+      }
+    },
+    [transactions],
+  );
+
+  const handleBulkDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return;
+    setDeleting(true);
+    try {
+      const res = await api.post<{ deleted: number }>('transactions/batch-delete', {
+        ids: Array.from(selectedIds),
+      });
+      toast.success(`Deleted ${res.deleted} transaction${res.deleted !== 1 ? 's' : ''}`);
+      setSelectedIds(new Set());
+      refetch();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setDeleting(false);
+    }
+  }, [selectedIds, refetch]);
+
   const {
     savedFilters,
     saveFilter,
@@ -380,6 +447,11 @@ export function Transactions() {
         console.warn('Failed to load categories', err);
       });
   }, []);
+
+  // Clear selection when page or data changes
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [page, filters, perPage]);
 
   const handleSaveFilter = useCallback(
     (name: string) => {
@@ -451,6 +523,61 @@ export function Transactions() {
         showEntry={showEntry}
         onToggleEntry={() => setShowEntry((p) => !p)}
       />
+
+      {filters.search && total > 0 && (
+        <div className="flex items-center gap-2 rounded-lg border bg-card p-2">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-8 gap-1.5 text-xs"
+            onClick={() => {
+              setShowReplace((p) => !p);
+              if (showReplace) setReplaceText('');
+            }}
+          >
+            <Replace className="size-3.5" />
+            Replace
+          </Button>
+          {showReplace && (
+            <>
+              <div className="hidden h-6 w-px bg-border sm:block" aria-hidden="true" />
+              <Input
+                type="text"
+                value={replaceText}
+                onChange={(e) => setReplaceText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleReplaceAll();
+                }}
+                placeholder="New description..."
+                className="h-8 max-w-xs text-xs"
+                disabled={replacing}
+              />
+              <Button
+                type="button"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={handleReplaceAll}
+                disabled={replacing || !replaceText.trim()}
+              >
+                {replacing ? 'Replacing...' : `Replace All (${total})`}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-8"
+                onClick={() => {
+                  setShowReplace(false);
+                  setReplaceText('');
+                }}
+              >
+                <X className="size-3.5" />
+              </Button>
+            </>
+          )}
+        </div>
+      )}
 
       {activeChips.length > 0 && (
         <div className="flex flex-wrap gap-1.5">
@@ -537,9 +664,47 @@ export function Transactions() {
             onPerPageChange={setPerPage}
           />
 
+          {selectedIds.size > 0 && (
+            <div className="flex items-center gap-3 rounded-lg border bg-muted/50 px-4 py-2">
+              <span className="text-sm font-medium">
+                {selectedIds.size} selected
+              </span>
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                onClick={() => void handleBulkDelete()}
+                disabled={deleting}
+              >
+                <Trash2 className="size-3.5" />
+                {deleting ? 'Deleting...' : 'Delete'}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => setSelectedIds(new Set())}
+              >
+                Clear selection
+              </Button>
+            </div>
+          )}
+
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-10">
+                  <Checkbox
+                    checked={
+                      transactions.length > 0 &&
+                      transactions.every((tx) => selectedIds.has(tx.id))
+                    }
+                    onCheckedChange={(v) => handleSelectAll(v === true)}
+                    aria-label="Select all"
+                  />
+                </TableHead>
                 <SortableHeader label="Date" column="date" onSort={setSort} />
                 <SortableHeader label="Description" column="description" onSort={setSort} />
                 <SortableHeader label="Category" column="category" onSort={setSort} />
@@ -554,6 +719,8 @@ export function Transactions() {
                   key={tx.id}
                   transaction={tx}
                   categories={categories}
+                  selected={selectedIds.has(tx.id)}
+                  onSelect={handleSelect}
                   onUpdate={updateTransaction}
                   onDelete={deleteTransaction}
                 />

@@ -102,7 +102,7 @@ export interface PaginatedResponse<T> {
 export interface ImportPreview {
   import_id: string;
   row_count: number;
-  preview: ImportRow[];
+  rows: ImportRow[];
   columns: string[];
   unique_categories: string[];
 }
@@ -157,4 +157,37 @@ export interface TopMerchantEntry {
   description: string;
   tx_count: number;
   total: number;
+}
+
+// --- New Report Types ---
+
+export interface BudgetVsActualEntry {
+  month: number;       // 1-indexed, map via MONTH_NAMES[month - 1]
+  budget: number;
+  actual: number;
+}
+
+export interface ExpenseVelocityData {
+  days_in_month: number;
+  budget: number;      // 0 if no budget set
+  current: { day: number; daily_total: number }[];
+  previous: { day: number; daily_total: number }[];
+}
+
+export interface HeatmapEntry {
+  date: string;        // ISO date "YYYY-MM-DD"
+  total: number;
+}
+
+export interface RecurringEntry {
+  description: string;
+  monthly_avg: number;
+  month_count: number;
+  annual_total: number;
+}
+
+export interface TagBreakdownEntry {
+  tag: string;
+  total: number;
+  count: number;
 }

@@ -175,9 +175,8 @@ describe('Settings', () => {
       await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
 
       await waitFor(() => {
-        expect(
-          screen.getByRole('heading', { name: /export/i }),
-        ).toBeInTheDocument();
+        // CardTitle renders as a <div>, not a heading element
+        expect(screen.getByText(/^export$/i)).toBeInTheDocument();
       });
     });
 
@@ -434,7 +433,7 @@ describe('Settings', () => {
     const mockPreview: ImportPreview = {
       import_id: 'abc-123',
       row_count: 5,
-      preview: [
+      rows: [
         { date: '2026-01-15', description: 'Grocery Store', amount: 45.50, category: 'Food' },
         { date: '2026-01-16', description: 'Bus Ticket', amount: 2.50, category: 'Transport' },
         { date: '2026-01-17', description: 'Coffee Shop', amount: 5.00, category: 'Unknown' },
@@ -481,7 +480,8 @@ describe('Settings', () => {
     test('shows import section with file input when data tab is active', async () => {
       await goToDataTab();
 
-      expect(screen.getByRole('heading', { name: /import/i })).toBeInTheDocument();
+      // CardTitle renders as a <div>, not a heading element
+      expect(screen.getByText(/^import$/i)).toBeInTheDocument();
       expect(screen.getByLabelText(/excel file/i)).toBeInTheDocument();
     });
 
@@ -509,7 +509,7 @@ describe('Settings', () => {
       });
 
       await waitFor(() => {
-        expect(screen.getByText(/5 rows/i)).toBeInTheDocument();
+        expect(screen.getByText(/found 5 rows/i)).toBeInTheDocument();
       });
     });
 
@@ -559,7 +559,7 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
       });
     });
@@ -580,10 +580,10 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
 
       // Confirmation dialog should appear
       await waitFor(() => {
@@ -617,9 +617,9 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole('button', { name: /^import$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
 
       // Confirmation dialog should appear
       await waitFor(() => {
@@ -638,6 +638,7 @@ describe('Settings', () => {
 
     test('resets to upload step when cancel is clicked', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
+      mockedApi.del.mockResolvedValue(undefined);
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -690,10 +691,10 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
 
       // Confirmation dialog should appear
       await waitFor(() => {
@@ -728,9 +729,9 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole('button', { name: /^import$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
 
       // Confirmation dialog should appear
       await waitFor(() => {
@@ -784,10 +785,10 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
 
       // Confirmation dialog should appear
       await waitFor(() => {

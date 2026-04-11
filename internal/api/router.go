@@ -48,6 +48,8 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		r.Get("/transactions", h.handleListTransactions)
 		r.Post("/transactions", h.handleCreateTransaction)
 		r.Post("/transactions/batch", h.handleBatchCreateTransactions)
+		r.Put("/transactions/bulk-rename", h.handleBulkRename)
+		r.Post("/transactions/batch-delete", h.handleBatchDeleteTransactions)
 		r.Put("/transactions/{id}", h.handleUpdateTransaction)
 		r.Delete("/transactions/{id}", h.handleDeleteTransaction)
 

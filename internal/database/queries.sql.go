@@ -668,6 +668,50 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const recurringDescriptions = `-- name: RecurringDescriptions :many
+
+SELECT t.description,
+       COUNT(DISTINCT strftime('%Y-%m', t.date)) AS month_count,
+       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS annual_total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
+GROUP BY t.description
+HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
+ORDER BY annual_total DESC
+`
+
+type RecurringDescriptionsRow struct {
+	Description string  `json:"description"`
+	MonthCount  int64   `json:"month_count"`
+	AnnualTotal float64 `json:"annual_total"`
+}
+
+// Recurring Expenses
+func (q *Queries) RecurringDescriptions(ctx context.Context, year string) ([]RecurringDescriptionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, recurringDescriptions, year)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []RecurringDescriptionsRow{}
+	for rows.Next() {
+		var i RecurringDescriptionsRow
+		if err := rows.Scan(&i.Description, &i.MonthCount, &i.AnnualTotal); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sumByCategoryForMonth = `-- name: SumByCategoryForMonth :many
 SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
@@ -827,6 +871,93 @@ func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams
 	return items, nil
 }
 
+const sumExpensesByDay = `-- name: SumExpensesByDay :many
+
+SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
+GROUP BY t.date
+ORDER BY t.date
+`
+
+type SumExpensesByDayRow struct {
+	Date  time.Time `json:"date"`
+	Total float64   `json:"total"`
+}
+
+// Spending Heatmap
+func (q *Queries) SumExpensesByDay(ctx context.Context, year string) ([]SumExpensesByDayRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumExpensesByDay, year)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumExpensesByDayRow{}
+	for rows.Next() {
+		var i SumExpensesByDayRow
+		if err := rows.Scan(&i.Date, &i.Total); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const sumExpensesByDayInMonth = `-- name: SumExpensesByDayInMonth :many
+
+SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
+       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS daily_total
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
+    AND strftime('%m', t.date) = CAST(?2 AS TEXT)
+GROUP BY day
+ORDER BY day
+`
+
+type SumExpensesByDayInMonthParams struct {
+	Year  string `json:"year"`
+	Month string `json:"month"`
+}
+
+type SumExpensesByDayInMonthRow struct {
+	Day        int64   `json:"day"`
+	DailyTotal float64 `json:"daily_total"`
+}
+
+// Expense Velocity
+func (q *Queries) SumExpensesByDayInMonth(ctx context.Context, arg SumExpensesByDayInMonthParams) ([]SumExpensesByDayInMonthRow, error) {
+	rows, err := q.db.QueryContext(ctx, sumExpensesByDayInMonth, arg.Year, arg.Month)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []SumExpensesByDayInMonthRow{}
+	for rows.Next() {
+		var i SumExpensesByDayInMonthRow
+		if err := rows.Scan(&i.Day, &i.DailyTotal); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const sumExpensesByMonth = `-- name: SumExpensesByMonth :one
 
 SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
@@ -914,6 +1045,51 @@ func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams
 			&i.TxCount,
 			&i.Total,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const transactionAmountsAndTags = `-- name: TransactionAmountsAndTags :many
+
+SELECT t.amount, t.tags
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND t.tags IS NOT NULL AND t.tags != ''
+    AND t.date >= CAST(?1 AS TEXT)
+    AND t.date <= CAST(?2 AS TEXT)
+`
+
+type TransactionAmountsAndTagsParams struct {
+	DateFrom string `json:"date_from"`
+	DateTo   string `json:"date_to"`
+}
+
+type TransactionAmountsAndTagsRow struct {
+	Amount float64        `json:"amount"`
+	Tags   sql.NullString `json:"tags"`
+}
+
+// Tag Breakdown (raw data for Go-side aggregation)
+func (q *Queries) TransactionAmountsAndTags(ctx context.Context, arg TransactionAmountsAndTagsParams) ([]TransactionAmountsAndTagsRow, error) {
+	rows, err := q.db.QueryContext(ctx, transactionAmountsAndTags, arg.DateFrom, arg.DateTo)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TransactionAmountsAndTagsRow{}
+	for rows.Next() {
+		var i TransactionAmountsAndTagsRow
+		if err := rows.Scan(&i.Amount, &i.Tags); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

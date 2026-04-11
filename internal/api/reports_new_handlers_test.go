@@ -1,0 +1,328 @@
+package api
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/elienop/spendrop/internal/database"
+)
+
+func TestHandleBudgetVsActual_Default(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Seed a budget for Jan 2026
+	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
+		Year: 2026, Month: 1, Amount: 3000,
+	})
+
+	// Seed an expense transaction in Jan 2026
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-15", 1200, "Groceries")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/budget-vs-actual?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBudgetVsActual(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data, ok := resp["data"].([]any)
+	if !ok || len(data) != 12 {
+		t.Fatalf("expected 12 months, got %v", resp["data"])
+	}
+	jan := data[0].(map[string]any)
+	if jan["budget"].(float64) != 3000 {
+		t.Errorf("expected budget 3000, got %v", jan["budget"])
+	}
+	if jan["actual"].(float64) != 1200 {
+		t.Errorf("expected actual 1200, got %v", jan["actual"])
+	}
+}
+
+func TestHandleBudgetVsActual_DefaultBudgetFallback(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Set default_budget in app_settings (no explicit monthly budget)
+	q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key: "default_budget", Value: "2500",
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/budget-vs-actual?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleBudgetVsActual(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	jan := data[0].(map[string]any)
+	if jan["budget"].(float64) != 2500 {
+		t.Errorf("expected default budget 2500, got %v", jan["budget"])
+	}
+}
+
+func TestHandleBudgetVsActual_Unauthorized(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/budget-vs-actual", nil)
+	rec := httptest.NewRecorder()
+	h.handleBudgetVsActual(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleExpenseVelocity_Default(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	// Seed transactions in Jan 2026
+	for _, day := range []string{"2026-01-05", "2026-01-10", "2026-01-15"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, day, 100, "test")
+	}
+
+	// Seed a budget
+	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
+		Year: 2026, Month: 1, Amount: 3000,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleExpenseVelocity(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["days_in_month"].(float64) != 31 {
+		t.Errorf("expected 31 days in Jan, got %v", resp["days_in_month"])
+	}
+	if resp["budget"].(float64) != 3000 {
+		t.Errorf("expected budget 3000, got %v", resp["budget"])
+	}
+	current := resp["current"].([]any)
+	if len(current) != 3 {
+		t.Errorf("expected 3 daily entries, got %d", len(current))
+	}
+}
+
+func TestHandleExpenseVelocity_Unauthorized(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
+	rec := httptest.NewRecorder()
+	h.handleExpenseVelocity(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+func TestHandleSpendingHeatmap_Default(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 50, "lunch")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 30, "coffee")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/spending-heatmap?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleSpendingHeatmap(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 day with spending, got %d", len(data))
+	}
+	day := data[0].(map[string]any)
+	if day["total"].(float64) != 80 {
+		t.Errorf("expected total 80, got %v", day["total"])
+	}
+}
+
+func TestHandleRecurring_DetectsRecurring(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Subscriptions", "expense")
+
+	// Netflix appears in 4 months — should be detected
+	for _, m := range []string{"01", "02", "03", "04"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-15", m), 15, "Netflix")
+	}
+	// Random expense appears in 2 months — should NOT be detected
+	for _, m := range []string{"01", "03"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-10", m), 50, "Random Store")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/recurring?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleRecurring(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 recurring entry (Netflix), got %d", len(data))
+	}
+	entry := data[0].(map[string]any)
+	if entry["description"] != "Netflix" {
+		t.Errorf("expected Netflix, got %v", entry["description"])
+	}
+	if entry["month_count"].(float64) != 4 {
+		t.Errorf("expected 4 months, got %v", entry["month_count"])
+	}
+}
+
+func TestHandleDismissRecurring(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Subscriptions", "expense")
+
+	// Seed Netflix in 3 months
+	for _, m := range []string{"01", "02", "03"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, fmt.Sprintf("2026-%s-15", m), 15, "Netflix")
+	}
+
+	// Dismiss it
+	body := strings.NewReader(`{"year":2026,"description":"Netflix"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/reports/recurring/dismiss", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleDismissRecurring(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dismiss: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// GET recurring should now return empty
+	req2 := httptest.NewRequest(http.MethodGet, "/api/reports/recurring?year=2026", nil)
+	req2 = withUser(req2, user)
+	rec2 := httptest.NewRecorder()
+
+	h.handleRecurring(rec2, req2)
+	var resp map[string]any
+	decodeResponse(t, rec2, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 0 {
+		t.Errorf("expected 0 after dismiss, got %d", len(data))
+	}
+}
+
+func TestHandleTagBreakdown_GroupsByTag(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	// Two transactions sharing tag "groceries", one with "eating-out"
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-10", 100, "Store A", "groceries,weekly")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-15", 50, "Restaurant", "eating-out")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-20", 80, "Store B", "groceries")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/tag-breakdown?year=2026&month=3", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleTagBreakdown(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 3 { // groceries, weekly, eating-out
+		t.Fatalf("expected 3 tags, got %d", len(data))
+	}
+
+	// Find groceries — should be 180 (100 + 80)
+	for _, item := range data {
+		tag := item.(map[string]any)
+		if tag["tag"] == "groceries" {
+			if tag["total"].(float64) != 180 {
+				t.Errorf("groceries total: expected 180, got %v", tag["total"])
+			}
+			if tag["count"].(float64) != 2 {
+				t.Errorf("groceries count: expected 2, got %v", tag["count"])
+			}
+		}
+	}
+}
+
+func TestHandleTagBreakdown_YTD(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-01-10", 100, "Jan", "groceries")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-06-10", 200, "Jun", "groceries")
+
+	// month=0 means YTD
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/tag-breakdown?year=2026&month=0", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleTagBreakdown(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 tag, got %d", len(data))
+	}
+	tag := data[0].(map[string]any)
+	if tag["total"].(float64) != 300 {
+		t.Errorf("expected YTD total 300, got %v", tag["total"])
+	}
+}

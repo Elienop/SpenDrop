@@ -15,6 +15,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
 import { TableCell, TableRow } from '@/components/ui/table';
 import {
   DropdownMenu,
@@ -35,6 +36,8 @@ function formatCurrency(amount: number): string {
 export interface TransactionRowProps {
   transaction: Transaction;
   categories: Category[];
+  selected?: boolean;
+  onSelect?: (id: number, checked: boolean) => void;
   onUpdate: (input: {
     id: number;
     date: string;
@@ -49,6 +52,8 @@ export interface TransactionRowProps {
 export function TransactionRow({
   transaction,
   categories,
+  selected,
+  onSelect,
   onUpdate,
   onDelete,
 }: TransactionRowProps) {
@@ -90,6 +95,13 @@ export function TransactionRow({
   if (editing) {
     return (
       <TableRow>
+        <TableCell className="w-10">
+          <Checkbox
+            checked={selected}
+            onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
+            aria-label={`Select ${transaction.description}`}
+          />
+        </TableCell>
         <TableCell>
           <Input
             type="date"
@@ -153,8 +165,15 @@ export function TransactionRow({
   }
 
   return (
-    <TableRow className="hover:bg-muted/50">
-      <TableCell className="whitespace-nowrap text-muted-foreground">
+    <TableRow className={cn('hover:bg-muted/50', selected && 'bg-muted/50')}>
+      <TableCell className="w-10">
+        <Checkbox
+          checked={selected}
+          onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
+          aria-label={`Select ${transaction.description}`}
+        />
+      </TableCell>
+      <TableCell className="whitespace-nowrap">
         {format(new Date(transaction.date), 'MMM d, yyyy')}
       </TableCell>
       <TableCell className="font-medium">{transaction.description}</TableCell>
