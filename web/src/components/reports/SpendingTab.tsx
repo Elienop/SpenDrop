@@ -451,11 +451,13 @@ export function SpendingTab() {
                   dataKey="day"
                   type="number"
                   domain={[1, 'dataMax']}
+                  ticks={[1, 5, 10, 15, 20, 25, 30]}
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
+                <ChartLegend content={<ChartLegendContent />} />
                 <Line
                   type="monotone"
                   dataKey="current"
