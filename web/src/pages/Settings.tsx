@@ -48,6 +48,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   Form,
@@ -648,6 +649,7 @@ type NewUserValues = z.infer<typeof newUserSchema>;
 
 function UsersSection() {
   const [users, setUsers] = useState<User[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   const form = useForm<NewUserValues>({
     resolver: zodResolver(newUserSchema),
@@ -687,6 +689,7 @@ function UsersSection() {
         role: values.role,
       });
       form.reset();
+      setAddOpen(false);
       toast.success('User added');
       refreshUsers();
     } catch (err) {
@@ -716,10 +719,105 @@ function UsersSection() {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Users</CardTitle>
+        <Dialog open={addOpen} onOpenChange={(open) => {
+          setAddOpen(open);
+          if (!open) form.reset();
+        }}>
+          <DialogTrigger asChild>
+            <Button size="sm">Add User</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add User</DialogTitle>
+              <DialogDescription>
+                Create a new household member account.
+              </DialogDescription>
+            </DialogHeader>
+            <Form {...form}>
+              <form
+                onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
+                className="grid gap-4"
+                noValidate
+              >
+                <FormField
+                  control={form.control}
+                  name="username"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Username</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="password"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Password</FormLabel>
+                      <FormControl>
+                        <Input type="password" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="display_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Display Name</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="role"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Role</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(v) => {
+                          if (v !== 'admin' && v !== 'member') return;
+                          field.onChange(v);
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger aria-label="New user role">
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="admin">Admin</SelectItem>
+                            <SelectItem value="member">Member</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="submit">Add User</Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
+      <CardContent>
         <Table>
           <TableHeader>
             <TableRow>
@@ -738,9 +836,6 @@ function UsersSection() {
                   <Select
                     value={u.role}
                     onValueChange={(v) => {
-                      // Narrow at runtime — Radix types onValueChange as
-                      // (v: string) => void so any future SelectItem added
-                      // by mistake would silently flow through an `as` cast.
                       if (v !== 'admin' && v !== 'member') return;
                       void handleRoleChange(u.id, v);
                     }}
@@ -774,91 +869,6 @@ function UsersSection() {
             ))}
           </TableBody>
         </Table>
-
-        <Separator />
-        <div className="flex flex-col gap-4">
-          <h3 className="text-sm font-semibold">Add User</h3>
-          <Form {...form}>
-            <form
-              onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
-              className="grid max-w-2xl gap-4 sm:grid-cols-2"
-              noValidate
-            >
-              <FormField
-                control={form.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Username</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password</FormLabel>
-                    <FormControl>
-                      <Input type="password" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="display_name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Display Name</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="role"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Role</FormLabel>
-                    <Select
-                      value={field.value}
-                      onValueChange={(v) => {
-                        // Runtime narrow — see Role for ${user} above.
-                        if (v !== 'admin' && v !== 'member') return;
-                        field.onChange(v);
-                      }}
-                    >
-                      <FormControl>
-                        <SelectTrigger aria-label="New user role">
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="member">Member</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="sm:col-span-2">
-                <Button type="submit">Add User</Button>
-              </div>
-            </form>
-          </Form>
-        </div>
       </CardContent>
     </Card>
   );
