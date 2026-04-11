@@ -1,41 +1,121 @@
 # SpenDrop
 
-Self-hosted household expense tracker. Track monthly and yearly expenses with budgets, currency conversion, charts, and multi-user support.
+A self-hosted household expense tracker built for families who want full control over their financial data. Track transactions, set budgets, monitor spending trends, and manage multiple users -- all from a single Docker container running on your own hardware.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+## Why SpenDrop?
+
+Most budgeting apps require cloud accounts, charge subscriptions, or mine your financial data. SpenDrop is different:
+
+- **Self-hosted** -- your data stays on your server, always
+- **No subscriptions** -- deploy once, use forever
+- **Household-ready** -- admin and member roles for shared family tracking
+- **Excel-native workflow** -- import your existing spreadsheets, export back to Excel anytime
+- **Fast data entry** -- spreadsheet-like keyboard flow (Enter to save, auto-focus next row)
 
 ## Features
 
-- Rapid transaction entry with spreadsheet-like speed
-- Currency conversion (LBP, EUR to USD base)
-- Monthly budgets with default fallback
-- Yearly savings goals with progress tracking
-- Dashboard with KPI cards, spending trends, and category breakdowns
-- Category management with drag-and-drop reorder
-- Multi-user household access (admin + member roles)
-- Dark and light theme with system preference support
-- Sidebar with toggle pin (click to expand/collapse), state persisted in localStorage
-- Max-width 1400px centered layout for wide-screen readability
-- Dark-themed charts (Recharts) with a custom `ChartTooltip` and `useChartTheme()` hook
-- Token-driven design system with stylelint enforcement
+### Dashboard
+
+Real-time financial overview with KPI cards (total balance, income, expenses, savings rate), a 6/12-month cash flow chart, spending breakdown by category, and recent transactions -- all filterable by month and year.
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+### Transaction Management
+
+Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
+
+![Transactions](docs/screenshots/transactions.png)
+
+### Reports
+
+Four report tabs covering different angles of your finances:
+
+- **Overview** -- Income vs Expenses bar chart, Net Cash Flow line chart, Budget vs Actual comparison
+- **Spending** -- Category breakdown (horizontal bars), category trends over time (multi-line), top merchants table
+- **Savings** -- Savings goals and progress tracking
+- **Patterns** -- Expense velocity and spending pattern analysis
+
+![Reports Overview](docs/screenshots/reports.png)
+![Reports Spending](docs/screenshots/reports-spending.png)
+
+### Categories
+
+Manage expense and income categories with color-coded badges, type labels (Expense/Income), and per-row action menus (edit, deactivate, delete). Deactivated categories stay attached to past transactions but no longer appear in the entry dropdown.
+
+![Categories](docs/screenshots/categories.png)
+
+### Settings
+
+Tabbed settings page with five sections:
+
+- **General** -- Monthly budget target
+- **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
+- **Savings** -- Yearly savings goals
+- **Users** -- Admin user management (create, edit roles, delete)
+- **Import / Export** -- Upload Excel files, preview rows, confirm import; export transactions or monthly/yearly reports
+
+![Settings](docs/screenshots/settings.png)
+
+### Authentication
+
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. The first registered user automatically becomes admin. Supports admin and member roles.
+
+![Login](docs/screenshots/login.png)
+
+### Additional Features
+
+- **Dark and light themes** with system preference detection, toggle in sidebar
+- **Collapsible sidebar** with pin toggle, state persisted in localStorage
+- **Responsive layout** with max-width 1400px for wide-screen readability
+- **Saved filters** -- save and recall transaction filter presets
+- **Bulk operations** -- select multiple transactions with checkboxes for batch delete
+- **Find and replace** -- search transactions and replace descriptions in bulk
+- **Excel export** -- export all transactions, or by month/year, as `.xlsx` files
 
 ## Tech Stack
 
-- **Backend:** Go (chi router, sqlc)
-- **Frontend:** React 19 + TypeScript (Vite)
-- **Database:** SQLite (WAL mode)
-- **Charts:** Recharts
-- **Styling:** CSS Modules + CSS custom properties (design tokens)
-- **Typography:** Inter Variable (self-hosted)
-- **Icons:** Lucide React
-- **Linting:** stylelint (enforces token-only colors)
-- **Deploy:** Docker
+| Layer | Technology |
+|-------|-----------|
+| Backend | Go 1.26 (chi router, sqlc) |
+| Frontend | React 19 + TypeScript (Vite) |
+| Database | SQLite (WAL mode) |
+| UI Components | shadcn/ui + Tailwind CSS |
+| Charts | Recharts |
+| Icons | Lucide React |
+| Auth | bcrypt + HTTP-only cookies |
+| Deploy | Docker (multi-stage build) |
 
-## Development
+## Quick Start with Docker
+
+The fastest way to run SpenDrop:
+
+```bash
+# Clone the repo
+git clone https://github.com/elienop/spendrop.git
+cd spendrop
+
+# Start the container
+docker compose up -d
+```
+
+SpenDrop is now running at **http://localhost:3535**. Data is persisted in a Docker volume (`spendrop-data`).
+
+### First Login
+
+1. Open http://localhost:3535
+2. Click **Register** to create your account
+3. The first user automatically becomes **admin** with full access
+4. Additional users can be created from Settings > Users as members
+
+## Development Setup
 
 ### Prerequisites
 
 - Go 1.26+
 - Node.js 20+
-- GCC (required for go-sqlite3 CGO)
+- GCC (required for go-sqlite3 CGO compilation)
 
 ### Backend
 
@@ -43,7 +123,7 @@ Self-hosted household expense tracker. Track monthly and yearly expenses with bu
 go run ./cmd/spendrop
 ```
 
-The server starts on `http://localhost:8080`. On first run, it creates `spendrop.db` and applies migrations automatically.
+The server starts on `http://localhost:8080`. On first run it creates `spendrop.db` and applies all migrations automatically.
 
 ### Frontend
 
@@ -55,67 +135,165 @@ npm run dev
 
 The Vite dev server starts on `http://localhost:5173` and proxies `/api` requests to the Go backend.
 
-### First Run
+### Running Tests
 
-1. Start the backend and frontend dev servers
-2. Open `http://localhost:5173`
-3. Register a new account — the first user automatically becomes admin
-4. Start adding transactions
+```bash
+# Backend tests
+go test ./...
+
+# Frontend tests
+cd web
+npm test
+```
 
 ### Linting
 
 ```bash
 cd web
-npm run lint:css    # stylelint only
-npm run lint        # TypeScript + stylelint
+npm run lint        # TypeScript + ESLint
 ```
-
-Stylelint enforces that all CSS files use design tokens (`var(--token-name)`) instead of raw color values. Only `tokens.css` is allowed to contain hex values.
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8080` | Server port |
+| `PORT` | `8080` | Server listen port |
 | `DB_PATH` | `spendrop.db` | SQLite database file path |
+| `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (set to your domain in production) |
 
-## Docker
+## Docker Configuration
 
-```bash
-docker compose up -d
+The Docker setup uses a multi-stage build (Go builder, Node builder, Alpine runtime) for a minimal final image.
+
+```yaml
+# docker-compose.yml
+services:
+  spendrop:
+    build: .
+    container_name: spendrop
+    ports:
+      - "3535:8080"     # Change 3535 to your preferred port
+    volumes:
+      - spendrop-data:/app/data
+    environment:
+      - PORT=8080
+      - DB_PATH=/app/data/spendrop.db
+    restart: unless-stopped
+
+volumes:
+  spendrop-data:        # Persistent storage for SQLite database
 ```
 
-Access at `http://localhost:8080`. Data is persisted in a Docker volume (`spendrop-data`).
+### Backup
 
-## Design System
+Your database lives in the `spendrop-data` Docker volume. To back it up:
 
-SpenDrop uses a token-driven design system with the Graphite Indigo palette. See [docs/DESIGN_GUIDE.md](docs/DESIGN_GUIDE.md) for the full reference.
+```bash
+# Find the volume path
+docker volume inspect spendrop-data
 
-**Quick rules:**
-- Never use raw hex/rgb/hsl in `.module.css` files — use `var(--token-name)`
-- Only `tokens.css` may define color values
-- Use semantic tokens (`--surface-raised`) not primitives (`--gray-900`)
-- Three theme modes: dark (default), light, system
-- Cards use a border-only pattern: `transparent` background + `1px solid var(--border-muted)` border (not surface-raised + shadow)
-- Use the shared `<Tabs>` component for tab navigation and `useChartTheme()` for Recharts theming
+# Or copy it out directly
+docker cp spendrop:/app/data/spendrop.db ./backup-spendrop.db
+```
+
+## API Reference
+
+SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) require authentication via session cookie.
+
+### Auth
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/register` | Register a new user |
+| POST | `/api/auth/login` | Log in |
+| POST | `/api/auth/logout` | Log out |
+| GET | `/api/auth/me` | Get current user info |
+
+### Transactions
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/transactions` | List transactions (supports search, pagination, sorting, date/category filters) |
+| POST | `/api/transactions` | Create a transaction |
+| POST | `/api/transactions/batch` | Batch create transactions |
+| POST | `/api/transactions/batch-delete` | Batch delete transactions |
+| PUT | `/api/transactions/{id}` | Update a transaction |
+| DELETE | `/api/transactions/{id}` | Delete a transaction |
+
+### Categories
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/categories` | List all categories |
+| POST | `/api/categories` | Create a category |
+| PUT | `/api/categories/{id}` | Update a category |
+| PATCH | `/api/categories/{id}` | Partially update (e.g., deactivate) |
+| DELETE | `/api/categories/{id}` | Delete a category |
+| POST | `/api/categories/reorder` | Reorder categories |
+
+### Budgets & Savings
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/budgets` | Get budgets |
+| PUT | `/api/budgets/{year}/{month}` | Set monthly budget |
+| GET | `/api/savings-goals` | Get savings goals |
+| PUT | `/api/savings-goals/{year}` | Set yearly savings goal |
+
+### Dashboard & Reports
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/dashboard/summary` | KPI summary for a month |
+| GET | `/api/dashboard/trend` | Cash flow trend data |
+| GET | `/api/dashboard/categories` | Category spending breakdown |
+| GET | `/api/reports/year-over-year` | Year-over-year comparison |
+| GET | `/api/reports/category-trends` | Category spending trends |
+| GET | `/api/reports/income-expenses` | Income vs expenses report |
+| GET | `/api/reports/top-merchants` | Top merchants by spend |
+
+### Export
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/export/transactions` | Export all transactions as Excel |
+| GET | `/api/export/monthly/{year}/{month}` | Export monthly report |
+| GET | `/api/export/yearly/{year}` | Export yearly report |
+
+### Import
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/import/upload` | Upload Excel file for preview |
+| POST | `/api/import/confirm` | Confirm and import previewed rows |
 
 ## Project Structure
 
 ```
-cmd/spendrop/         Go entrypoint
+cmd/spendrop/              Go entrypoint (main.go)
 internal/
-  api/                HTTP handlers and router
-  auth/               Password hashing and session middleware
-  database/           SQLite migrations, sqlc queries, generated code
+  api/                     HTTP handlers, router, middleware
+  auth/                    Password hashing, session management, middleware
+  database/
+    migrations/            SQL migration files (auto-applied on startup)
+    queries/               sqlc SQL query definitions
+    *.go                   Generated sqlc code + migration runner
 web/
   src/
-    api/              API client and TypeScript types
-    components/       Reusable UI components
-    hooks/            React hooks (auth, transactions, dashboard, theme)
-    pages/            Page components (Dashboard, Transactions, etc.)
-    styles/
-      tokens.css      Design tokens (primitives + semantics + light overrides)
-      global.css      CSS reset and base element styles
-      *.module.css    Component/page scoped styles
-  .stylelintrc.json   Stylelint config (token enforcement)
+    api/                   API client (fetch wrapper) and TypeScript types
+    components/            Reusable UI components (CategoryBadge, TagInput, etc.)
+    components/ui/         shadcn/ui primitives (Button, Input, Table, etc.)
+    hooks/                 React hooks (useAuth, useTransactions, useDashboard, useTheme)
+    lib/                   Utility functions
+    pages/                 Page components (Dashboard, Transactions, Reports, etc.)
+docker-compose.yml         Docker Compose configuration
+Dockerfile                 Multi-stage Docker build
 ```
+
+## Roadmap
+
+- [ ] Recurring transactions (auto-generate monthly bills)
+- [ ] Multi-currency dashboard (show totals in multiple currencies)
+- [ ] Receipt photo attachments
+- [ ] Mobile-optimized responsive views
+- [ ] Spending alerts and notifications
+- [ ] Data visualization improvements (pie charts, heatmaps)
+- [ ] Shared household budgets (per-category budgets)
+- [ ] API key authentication for external integrations
+
+## License
+
+Private project. All rights reserved.
