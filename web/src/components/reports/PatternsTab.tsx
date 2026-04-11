@@ -56,7 +56,7 @@ export function PatternsTab() {
     <div className="flex flex-col gap-6">
       {/* Spending Heatmap */}
       <Card aria-labelledby="spending-heatmap-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle
             id="spending-heatmap-heading"
             className="text-base font-semibold"
@@ -102,7 +102,7 @@ export function PatternsTab() {
 
       {/* Recurring Expenses */}
       <Card aria-labelledby="recurring-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle id="recurring-heading" className="text-base font-semibold">
             Recurring Expenses
           </CardTitle>
@@ -187,7 +187,7 @@ export function PatternsTab() {
 
       {/* Tag Analysis */}
       <Card aria-labelledby="tag-analysis-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle
             id="tag-analysis-heading"
             className="text-base font-semibold"

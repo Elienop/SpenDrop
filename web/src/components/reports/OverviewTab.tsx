@@ -76,15 +76,15 @@ export function OverviewTab() {
     <div className="grid gap-6 md:grid-cols-2">
       {/* Income vs Expenses */}
       <Card aria-labelledby="income-expenses-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <div>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+          <div className="flex flex-col gap-0.5">
             <CardTitle
               id="income-expenses-heading"
               className="text-base font-semibold"
             >
               Income vs Expenses
             </CardTitle>
-            <CardDescription>Monthly income and spending comparison</CardDescription>
+            <CardDescription className="text-xs">Monthly income and spending comparison</CardDescription>
           </div>
           <Select
             value={String(months)}
@@ -187,14 +187,14 @@ export function OverviewTab() {
 
       {/* Net Cash Flow */}
       <Card aria-labelledby="net-cash-flow-heading">
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-4">
           <CardTitle
             id="net-cash-flow-heading"
             className="text-base font-semibold"
           >
             Net Cash Flow
           </CardTitle>
-          <CardDescription>Cumulative net balance over time</CardDescription>
+          <CardDescription className="text-xs">Cumulative net balance over time</CardDescription>
         </CardHeader>
         <CardContent>
           {incExp.loading && <Skeleton className="h-[300px] w-full" />}
@@ -256,15 +256,15 @@ export function OverviewTab() {
 
       {/* Budget vs Actual — full width */}
       <Card aria-labelledby="budget-vs-actual-heading" className="md:col-span-2">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <div>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+          <div className="flex flex-col gap-0.5">
             <CardTitle
               id="budget-vs-actual-heading"
               className="text-base font-semibold"
             >
               Budget vs Actual
             </CardTitle>
-            <CardDescription>Monthly budget targets vs actual spending</CardDescription>
+            <CardDescription className="text-xs">Monthly budget targets vs actual spending</CardDescription>
           </div>
           <Select
             value={String(bvaYear)}

@@ -187,15 +187,15 @@ export function SpendingTab() {
     <div className="grid gap-6 md:grid-cols-2">
       {/* Category Breakdown (bar chart) */}
       <Card aria-labelledby="category-breakdown-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-          <div>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+          <div className="flex flex-col gap-0.5">
             <CardTitle
               id="category-breakdown-heading"
               className="text-base font-semibold"
             >
               Category Breakdown
             </CardTitle>
-            <CardDescription>{formatCurrency(breakdownTotal)} total</CardDescription>
+            <CardDescription className="text-xs">{formatCurrency(breakdownTotal)} total</CardDescription>
           </div>
           <div className="flex gap-2">
             <Select
@@ -260,7 +260,7 @@ export function SpendingTab() {
                   accessibilityLayer
                   data={breakdownSorted}
                   layout="vertical"
-                  margin={{ left: 0 }}
+                  margin={{ left: 0, right: 80 }}
                 >
                   <CartesianGrid horizontal={false} />
                   <XAxis type="number" tickLine={false} axisLine={false} hide />
@@ -301,7 +301,7 @@ export function SpendingTab() {
 
       {/* Category Trends */}
       <Card aria-labelledby="category-trends-heading" className="flex flex-col">
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-4">
           <CardTitle
             id="category-trends-heading"
             className="text-base font-semibold"
@@ -353,7 +353,7 @@ export function SpendingTab() {
 
       {/* Top Merchants */}
       <Card aria-labelledby="top-merchants-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle
             id="top-merchants-heading"
             className="text-base font-semibold"
@@ -420,14 +420,14 @@ export function SpendingTab() {
 
       {/* Expense Velocity */}
       <Card aria-labelledby="expense-velocity-heading" className="flex flex-col">
-        <CardHeader className="pb-2">
+        <CardHeader className="pb-4">
           <CardTitle
             id="expense-velocity-heading"
             className="text-base font-semibold"
           >
             Expense Velocity
           </CardTitle>
-          <CardDescription>Current vs previous month cumulative spending</CardDescription>
+          <CardDescription className="text-xs">Current vs previous month cumulative spending</CardDescription>
         </CardHeader>
         <CardContent className="flex flex-1 flex-col">
           {velocity.loading && <Skeleton className="min-h-[250px] w-full flex-1" />}
