@@ -75,6 +75,7 @@ export interface TransactionEntryRowProps {
   categories: Category[];
   onSubmit: (input: EntryFormValues) => Promise<Transaction>;
   onDelete: (id: number) => Promise<void>;
+  onClose?: () => void;
   descriptionSuggestions?: string[];
   tagSuggestions?: string[];
 }
@@ -83,6 +84,7 @@ export function TransactionEntryRow({
   categories,
   onSubmit,
   onDelete,
+  onClose,
   descriptionSuggestions = [],
   tagSuggestions = [],
 }: TransactionEntryRowProps) {
@@ -168,7 +170,11 @@ export function TransactionEntryRow({
     const el = formRef.current?.querySelector<HTMLElement>(
       `[data-entry-field="${name}"]`,
     );
-    el?.focus();
+    if (!el) return;
+    el.focus();
+    if (el instanceof HTMLInputElement) {
+      el.select();
+    }
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLFormElement>) => {
@@ -181,6 +187,7 @@ export function TransactionEntryRow({
     if (e.key === 'Escape') {
       e.preventDefault();
       form.reset();
+      onClose?.();
       return;
     }
     if (e.key === 'Enter') {
@@ -263,8 +270,11 @@ export function TransactionEntryRow({
                     data-entry-field="amount"
                     className="font-mono tabular-nums"
                     name={field.name}
-                    onBlur={field.onBlur}
-                    value={field.value ?? 0}
+                    onBlur={(e) => {
+                      if (e.target.value === '') field.onChange(0);
+                      field.onBlur();
+                    }}
+                    value={field.value || ''}
                     onChange={(e) =>
                       field.onChange(
                         e.target.value === '' ? 0 : Number(e.target.value),

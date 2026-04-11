@@ -648,6 +648,7 @@ export function Transactions() {
             return tx;
           }}
           onDelete={deleteTransaction}
+          onClose={() => setShowEntry(false)}
           descriptionSuggestions={suggestions.descriptions}
           tagSuggestions={suggestions.tags}
         />

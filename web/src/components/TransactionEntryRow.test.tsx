@@ -298,7 +298,7 @@ describe('TransactionEntryRow', () => {
     description.focus();
     await user.keyboard('{Escape}');
 
-    expect(amount.value).toBe('0');
+    expect(amount.value).toBe('');
     expect(description.value).toBe('');
   });
 
@@ -335,7 +335,7 @@ describe('TransactionEntryRow', () => {
 
     expect(
       (screen.getByLabelText(/amount/i) as HTMLInputElement).value,
-    ).toBe('0');
+    ).toBe('');
     expect(
       (screen.getByLabelText(/description/i) as HTMLInputElement).value,
     ).toBe('');
