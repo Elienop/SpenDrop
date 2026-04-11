@@ -1,26 +1,28 @@
 import { cn } from '@/lib/utils';
 
-interface LogoProps {
+interface LogoWordmarkProps {
   className?: string;
 }
 
 /**
- * SpenDrop logo mark — the "S" icon with layered accent bars.
- *
- * Colors adapt to the active color theme:
- * - S letter outline uses the current foreground color
- * - Front bars use --primary (the theme accent)
- * - Back bars use --primary at reduced opacity (tint effect)
+ * Full SpenDrop wordmark — S icon + "Spen" text + "Drop" badge.
+ * All colors adapt to the active color theme via CSS variables.
  */
-export function Logo({ className }: LogoProps) {
+export function LogoWordmark({ className }: LogoWordmarkProps) {
   return (
     <svg
-      viewBox="0 0 70 90"
+      viewBox="0 0 415.3 102"
       fill="none"
       xmlns="http://www.w3.org/2000/svg"
       className={cn('shrink-0', className)}
       aria-hidden="true"
     >
+      {/* "Drop" background badge — very light primary tint */}
+      <polyline
+        fill="hsl(var(--primary) / 0.4)"
+        points="413.3 0 223.7 0 223.7 91.8 413.3 91.8 413.3 0"
+      />
+
       {/* Back bars — lighter tint of primary */}
       <g fill="color-mix(in oklch, hsl(var(--primary)), white 45%)">
         <path d="M26.2,66c-1.5-.5-2.8-1.2-3.9-2v12.9c1.2.3,2.5.6,3.9.8v-11.6Z" />
@@ -41,6 +43,7 @@ export function Logo({ className }: LogoProps) {
         <path d="M49.8,41.7c-.3-.2-.6-.3-.9-.4-.9-.4-1.9-.8-2.9-1.2v35.9c1.4-.5,2.7-1.1,3.9-1.8v-32.6Z" />
         <path d="M46,11.4v18.2h3.9v-15.6c-1.2-1-2.4-1.8-3.9-2.6Z" />
       </g>
+
       {/* Front bars — slight tint of primary */}
       <g fill="color-mix(in oklch, hsl(var(--primary)), white 15%)">
         <path d="M38,54.7c1.3.3,2.6.6,4,.9v-12.4c-1.3-.3-2.7-.7-4-1v12.4Z" />
@@ -61,11 +64,32 @@ export function Logo({ className }: LogoProps) {
         <path d="M14.4,70c.9,2.6,2.2,4.8,4,6.7v-14.1h-4v7.3Z" />
         <path d="M34.2,72.5c-1.5-.5-2.9-1.3-4-2.2v13c1.3.3,2.6.6,4,.8v-11.7Z" />
       </g>
-      {/* S letter outline — foreground color */}
-      <path
-        fill="currentColor"
-        d="M48,32.4c-.7-6.7-4.8-10-13.1-10s-11.8,2.8-11.8,7.7,2.9,6.5,10.2,8.3c7.4,1.8,14.6,3.6,19.5,5.7,5.7,2.6,10.3,6.6,10.3,15.9,0,14.4-10.9,20.9-26.2,20.9s-27.5-7.2-27.8-21.9h13.3c.2,6.7,5.8,10.9,14.6,10.9s12.8-3.5,12.8-9.3-2-6.5-10.2-8.3c-8.1-1.8-13.4-3-18-5-7-3.2-11-7.9-11-16.2,0-11.8,8-20.2,24-20.2s25.9,9,26.4,21.5h-13.1Z"
-      />
+
+      {/* S outline + "Spen" text — foreground color */}
+      <g fill="currentColor">
+        {/* S */}
+        <path d="M48,32.4c-.7-6.7-4.8-10-13.1-10s-11.8,2.8-11.8,7.7,2.9,6.5,10.2,8.3c7.4,1.8,14.6,3.6,19.5,5.7,5.7,2.6,10.3,6.6,10.3,15.9,0,14.4-10.9,20.9-26.2,20.9s-27.5-7.2-27.8-21.9h13.3c.2,6.7,5.8,10.9,14.6,10.9s12.8-3.5,12.8-9.3-2-6.5-10.2-8.3c-8.1-1.8-13.4-3-18-5-7-3.2-11-7.9-11-16.2,0-11.8,8-20.2,24-20.2s25.9,9,26.4,21.5h-13.1Z" />
+        {/* p */}
+        <path d="M72.7,101.7V30.1h12.4v5.9c3.2-4.9,7.7-7.2,13.7-7.2,12.3,0,21.1,9.7,21.1,26.1s-7.4,25.1-20,25.1-10.8-2.5-14.4-7.6v29.3h-12.7ZM106.7,54c0-8.7-4.6-14.7-11-14.7s-10.9,5.7-10.9,13.9,3.7,15.8,10.8,15.8,11.1-5,11.1-15Z" />
+        {/* e */}
+        <path d="M136.2,57.7c.4,7.3,4.6,12.1,10.9,12.1s7.8-2.1,8.7-5.4h13.3c-3,10-11,15.6-21.4,15.6-16.2,0-24.3-8.9-24.3-26.5s8.6-24.7,23.6-24.7,22.9,9.7,22.9,29h-33.5ZM156.5,49.6c-.2-7.2-4.9-10.7-10-10.7s-9.4,4-9.9,10.7h19.9Z" />
+        {/* n */}
+        <path d="M205.4,78.7v-29.4c0-7.5-2.2-9.6-8.3-9.6s-10,3.8-10,11.2v27.9h-12.9V30.1h12.3v7.1c3-5.4,7.9-8.4,15.7-8.4s16.1,5.6,16.1,16.2v33.7h-13Z" />
+      </g>
+
+      {/* "Drop" text — foreground on the badge */}
+      <g fill="currentColor">
+        {/* D */}
+        <path d="M223.7,78.8V13.1h25.4c17.8,0,30.5,12.2,30.5,32.2s-11.4,33.5-28.4,33.5h-27.5ZM248.4,67.6c12,0,17.1-7.5,17.1-22.4s-5.1-20.8-18.3-20.8h-10.2v43.1h11.4Z" />
+        {/* r */}
+        <path d="M284.1,78.8V30.1h12.1v5.8c4.2-6.5,9.2-7.1,14.5-7.1h1.7v13.2c-1.2-.2-2.4-.3-3.6-.3-7.9,0-11.8,4-11.8,11.8v25.3h-12.9Z" />
+        {/* o */}
+        <path d="M311.8,54.4c0-15.4,9.6-25.6,25-25.6s24.7,10.1,24.7,25.6-9.6,25.6-24.7,25.6-25-10.5-25-25.6ZM348.6,54.4c0-9.9-4-14.7-11.8-14.7s-11.8,4.8-11.8,14.7,4,14.8,11.8,14.8,11.8-4.9,11.8-14.8Z" />
+        {/* p */}
+        <path d="M366.2,97.5V30.1h12.4v5.9c3.2-5,7.7-7.2,13.7-7.2,12.3,0,21.1,9.7,21.1,26.1s-7.4,25.1-20,25.1-10.8-2.5-14.5-7.6v25.1h-12.7,0ZM400.2,54c0-8.7-4.5-14.7-11-14.7s-10.9,5.7-10.9,14,3.7,15.8,10.8,15.8,11.1-5.1,11.1-15h0Z" />
+        {/* Divider line */}
+        <rect x="413.3" y="0" width="2" height="91.8" />
+      </g>
     </svg>
   );
 }

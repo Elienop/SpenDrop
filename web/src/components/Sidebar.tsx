@@ -7,11 +7,11 @@ import {
   Tag,
   Settings as SettingsIcon,
   ChevronLeft,
-  ChevronRight,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { Logo } from '@/components/Logo';
+import { LogoWordmark } from '@/components/LogoWordmark';
 import {
   Tooltip,
   TooltipContent,
@@ -70,10 +70,7 @@ export function Sidebar() {
         >
           {expanded ? (
             <>
-              <span className="flex items-center gap-2">
-                <Logo className="size-6" />
-                <span className="font-semibold tracking-tight">SpenDrop</span>
-              </span>
+              <LogoWordmark className="h-6" />
               <button
                 type="button"
                 aria-label="Toggle sidebar"

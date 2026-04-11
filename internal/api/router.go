@@ -84,6 +84,12 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 		r.Get("/reports/category-trends", h.handleReportCategoryTrends)
 		r.Get("/reports/income-expenses", h.handleReportIncomeExpenses)
 		r.Get("/reports/top-merchants", h.handleReportTopMerchants)
+		r.Get("/reports/budget-vs-actual", h.handleBudgetVsActual)
+		r.Get("/reports/expense-velocity", h.handleExpenseVelocity)
+		r.Get("/reports/spending-heatmap", h.handleSpendingHeatmap)
+		r.Get("/reports/recurring", h.handleRecurring)
+		r.Post("/reports/recurring/dismiss", h.handleDismissRecurring)
+		r.Get("/reports/tag-breakdown", h.handleTagBreakdown)
 
 		// Users (admin only)
 		r.Route("/users", func(r chi.Router) {
