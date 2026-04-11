@@ -1,6 +1,8 @@
 package api
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -88,4 +90,88 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
+}
+
+// --- Expense Velocity ---
+
+type dailyEntry struct {
+	Day        int     `json:"day"`
+	DailyTotal float64 `json:"daily_total"`
+}
+
+func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	year, month, err := parseYearMonth(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+	yearStr := fmt.Sprintf("%d", year)
+	monthStr := fmt.Sprintf("%02d", month)
+
+	// Current month daily totals
+	currentRows, err := h.queries.SumExpensesByDayInMonth(ctx, database.SumExpensesByDayInMonthParams{
+		Year:  yearStr,
+		Month: monthStr,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query current month")
+		return
+	}
+	current := make([]dailyEntry, len(currentRows))
+	for i, row := range currentRows {
+		current[i] = dailyEntry{Day: int(row.Day), DailyTotal: row.DailyTotal}
+	}
+
+	// Previous month daily totals
+	prevTime := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC).AddDate(0, -1, 0)
+	prevYearStr := fmt.Sprintf("%d", prevTime.Year())
+	prevMonthStr := fmt.Sprintf("%02d", prevTime.Month())
+	prevRows, err := h.queries.SumExpensesByDayInMonth(ctx, database.SumExpensesByDayInMonthParams{
+		Year:  prevYearStr,
+		Month: prevMonthStr,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query previous month")
+		return
+	}
+	previous := make([]dailyEntry, len(prevRows))
+	for i, row := range prevRows {
+		previous[i] = dailyEntry{Day: int(row.Day), DailyTotal: row.DailyTotal}
+	}
+
+	// Budget resolution (same fallback as budget-vs-actual)
+	var budget float64
+	b, err := h.queries.GetBudget(ctx, database.GetBudgetParams{
+		Year: int64(year), Month: int64(month),
+	})
+	if err == nil {
+		budget = b.Amount
+	} else if errors.Is(err, sql.ErrNoRows) {
+		setting, settingErr := h.queries.GetSetting(ctx, "default_budget")
+		if settingErr == nil {
+			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
+			if parseErr == nil {
+				budget = parsed
+			}
+		}
+	} else {
+		writeError(w, http.StatusInternalServerError, "failed to get budget")
+		return
+	}
+
+	daysInMonth := time.Date(year, time.Month(month+1), 0, 0, 0, 0, 0, time.UTC).Day()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"days_in_month": daysInMonth,
+		"budget":        budget,
+		"current":       current,
+		"previous":      previous,
+	})
 }

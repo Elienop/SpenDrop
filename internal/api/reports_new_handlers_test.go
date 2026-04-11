@@ -89,3 +89,56 @@ func TestHandleBudgetVsActual_Unauthorized(t *testing.T) {
 		t.Errorf("expected 401, got %d", rec.Code)
 	}
 }
+
+func TestHandleExpenseVelocity_Default(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Food", "expense")
+
+	// Seed transactions in Jan 2026
+	for _, day := range []string{"2026-01-05", "2026-01-10", "2026-01-15"} {
+		seedTestTransaction(t, q, user.ID, cat.ID, day, 100, "test")
+	}
+
+	// Seed a budget
+	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
+		Year: 2026, Month: 1, Amount: 3000,
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleExpenseVelocity(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	if resp["days_in_month"].(float64) != 31 {
+		t.Errorf("expected 31 days in Jan, got %v", resp["days_in_month"])
+	}
+	if resp["budget"].(float64) != 3000 {
+		t.Errorf("expected budget 3000, got %v", resp["budget"])
+	}
+	current := resp["current"].([]any)
+	if len(current) != 3 {
+		t.Errorf("expected 3 daily entries, got %d", len(current))
+	}
+}
+
+func TestHandleExpenseVelocity_Unauthorized(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
+	rec := httptest.NewRecorder()
+	h.handleExpenseVelocity(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
