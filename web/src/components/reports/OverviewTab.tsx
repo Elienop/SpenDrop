@@ -1,5 +1,16 @@
 import { useId, useMemo, useState } from 'react';
-import { BarChart, Bar, AreaChart, Area, XAxis, CartesianGrid } from 'recharts';
+import {
+  BarChart,
+  Bar,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  ReferenceLine,
+} from 'recharts';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import {
   ChartContainer,
   ChartTooltip,
@@ -37,6 +48,8 @@ export function OverviewTab() {
   const incExp = useIncomeExpenses(months);
   const bva = useBudgetVsActual(bvaYear);
   const gradientId = useId();
+  const baseCurrency = useBaseCurrency();
+  const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
   const incExpData = useMemo(
     () =>
@@ -241,6 +254,14 @@ export function OverviewTab() {
                   axisLine={false}
                   tickMargin={10}
                 />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  width={80}
+                  tickFormatter={(v: number) => fmt(v)}
+                />
+                <ReferenceLine y={0} stroke="hsl(var(--border))" />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <Area
                   type="monotone"

@@ -148,6 +148,26 @@ describe('Dashboard', () => {
     });
   });
 
+  test('renders negative Total Balance with minus sign when expenses exceed income', async () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      summary: {
+        ...defaultDashboardData.summary,
+        total_income: 2000,
+        total_spent: 3598.9,
+        remaining: -1598.9,
+      },
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      // Regression guard for the "Total Balance" KPI: when expenses exceed
+      // income, the card must surface the sign. Previous code called
+      // `Math.abs()` in `splitCurrency`, which silently stripped the sign
+      // and rendered `$1,598.90` — identical to a positive balance.
+      expect(screen.getByText('-$1,598.90')).toBeInTheDocument();
+    });
+  });
+
   test('renders Cash Flow section', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {

@@ -7,7 +7,9 @@ import {
   BarChart,
   Bar,
   XAxis,
+  YAxis,
   CartesianGrid,
+  ReferenceLine,
 } from 'recharts';
 import {
   ChartContainer,
@@ -40,16 +42,22 @@ const SAVINGS_CONFIG = {
   savings: { label: 'Cumulative Savings', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
-/** Extract YoY chart data outside the component to avoid React Compiler .current ref issue */
+/** Extract YoY chart data outside the component to avoid React Compiler .current ref issue.
+ *  Plots monthly *net* savings (income - expenses) so deficit months render
+ *  as negative bars beneath the zero line — the whole point of the Savings
+ *  tab is showing whether you saved or overspent, not raw outflow. */
 function buildYoYData(data: YoYResponse | null) {
   if (!data) return [];
   const currentYear = data.current;
   const previousYear = data.previous;
-  return currentYear.map((cur, i) => ({
-    name: MONTH_NAMES_SHORT[i],
-    currentExpenses: cur.expenses,
-    previousExpenses: previousYear[i]?.expenses ?? 0,
-  }));
+  return currentYear.map((cur, i) => {
+    const prev = previousYear[i];
+    return {
+      name: MONTH_NAMES_SHORT[i],
+      currentNet: cur.income - cur.expenses,
+      previousNet: prev ? prev.income - prev.expenses : 0,
+    };
+  });
 }
 
 export function SavingsTab() {
@@ -79,6 +87,11 @@ export function SavingsTab() {
   const goal = goals.find((g) => g.year === year);
 
   const savingsData = useMemo(() => {
+    // Cumulative running total of monthly net (income - expenses). We no
+    // longer clamp to zero: a losing month must pull the curve down, so
+    // the year-end figure reflects reality (e.g. Excel shows $17,216 when
+    // two earlier months were in the red — clamping would have inflated
+    // the total to $25,528 by silently dropping the losses).
     const result: { name: string; savings: number }[] = [];
     incExp.data
       .filter((e) => e.year === year)
@@ -86,7 +99,7 @@ export function SavingsTab() {
         const total = acc + e.net;
         result.push({
           name: MONTH_NAMES_SHORT[e.month - 1],
-          savings: Math.max(0, total),
+          savings: total,
         });
         return total;
       }, 0);
@@ -94,11 +107,19 @@ export function SavingsTab() {
   }, [incExp.data, year]);
 
   const currentSavings = savingsData.at(-1)?.savings ?? 0;
-  const progress = goal
-    ? Math.max(0, Math.round((currentSavings / goal.target_amount) * 100))
-    : 0;
+  // Progress is shown two ways: the label text uses the raw signed value
+  // (so an overspent year correctly reads "-12%"), while the radial arc
+  // clamps to [0, 100] — the ring geometry has no meaningful way to
+  // render negative or >100% arcs. Guard against `target_amount <= 0`:
+  // the backend only rejects negative targets, so a soft-deleted goal can
+  // persist with `target_amount === 0`, which would divide to Infinity.
+  const rawProgress =
+    goal && goal.target_amount > 0
+      ? Math.round((currentSavings / goal.target_amount) * 100)
+      : 0;
+  const ringProgress = Math.max(0, Math.min(100, rawProgress));
 
-  const radialData = [{ progress, fill: 'hsl(var(--primary))' }];
+  const radialData = [{ progress: ringProgress, fill: 'hsl(var(--primary))' }];
 
   // YoY chart data
   const yoyData = useMemo(() => buildYoYData(yoy.data), [yoy.data]);
@@ -106,12 +127,12 @@ export function SavingsTab() {
   const yoyConfig = useMemo<ChartConfig>(() => {
     if (!yoy.data) return {} as ChartConfig;
     return {
-      currentExpenses: {
-        label: `${yoy.data.current_year}`,
+      currentNet: {
+        label: `${yoy.data.current_year} net`,
         color: 'hsl(var(--primary))',
       },
-      previousExpenses: {
-        label: `${yoy.data.previous_year}`,
+      previousNet: {
+        label: `${yoy.data.previous_year} net`,
         color: 'hsl(var(--primary) / 0.35)',
       },
     };
@@ -174,7 +195,7 @@ export function SavingsTab() {
                       outerRadius={90}
                       data={radialData}
                       startAngle={90}
-                      endAngle={90 - (progress / 100) * 360}
+                      endAngle={90 - (ringProgress / 100) * 360}
                     >
                       <RadialBar
                         dataKey="progress"
@@ -192,7 +213,7 @@ export function SavingsTab() {
                           dy="-8"
                           className="fill-foreground text-2xl font-semibold"
                         >
-                          {progress}%
+                          {rawProgress}%
                         </tspan>
                         <tspan
                           x="50%"
@@ -209,9 +230,7 @@ export function SavingsTab() {
                     <p>Saved: {fmt(currentSavings)}</p>
                     <p>
                       Remaining:{' '}
-                      {fmt(
-                        Math.max(0, goal.target_amount - currentSavings),
-                      )}
+                      {fmt(goal.target_amount - currentSavings)}
                     </p>
                   </div>
                 </div>
@@ -255,6 +274,14 @@ export function SavingsTab() {
                     interval={0}
                     padding={{ left: 20, right: 20 }}
                   />
+                  <YAxis
+                    tickLine={false}
+                    axisLine={false}
+                    tickMargin={8}
+                    width={80}
+                    tickFormatter={(v: number) => fmt(v)}
+                  />
+                  <ReferenceLine y={0} stroke="hsl(var(--border))" />
                   <ChartTooltip content={<ChartTooltipContent />} />
                   <Area
                     type="monotone"
@@ -274,7 +301,7 @@ export function SavingsTab() {
       <Card aria-labelledby="yoy-heading">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle id="yoy-heading" className="text-base font-semibold">
-            Year-over-Year Comparison
+            Year-over-Year Net Savings
           </CardTitle>
           <Select
             value={String(year)}
@@ -322,12 +349,12 @@ export function SavingsTab() {
                   >
                     <stop
                       offset="5%"
-                      stopColor="var(--color-currentExpenses)"
+                      stopColor="var(--color-currentNet)"
                       stopOpacity={0.8}
                     />
                     <stop
                       offset="95%"
-                      stopColor="var(--color-currentExpenses)"
+                      stopColor="var(--color-currentNet)"
                       stopOpacity={0.1}
                     />
                   </linearGradient>
@@ -340,12 +367,12 @@ export function SavingsTab() {
                   >
                     <stop
                       offset="5%"
-                      stopColor="var(--color-previousExpenses)"
+                      stopColor="var(--color-previousNet)"
                       stopOpacity={0.8}
                     />
                     <stop
                       offset="95%"
-                      stopColor="var(--color-previousExpenses)"
+                      stopColor="var(--color-previousNet)"
                       stopOpacity={0.1}
                     />
                   </linearGradient>
@@ -357,23 +384,35 @@ export function SavingsTab() {
                   axisLine={false}
                   tickMargin={10}
                 />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  width={80}
+                  tickFormatter={(v: number) => fmt(v)}
+                />
+                <ReferenceLine y={0} stroke="hsl(var(--border))" />
                 <ChartTooltip
                   content={<ChartTooltipContent hideIndicator />}
                 />
                 <ChartLegend content={<ChartLegendContent />} />
+                {/* Symmetric radius (not [4, 4, 0, 0]) so negative-net bars,
+                    which grow downward from the zero line, still render with
+                    rounded outer corners — the array form rounds only the
+                    visual top and leaves negative bars glued to the axis. */}
                 <Bar
-                  dataKey="currentExpenses"
+                  dataKey="currentNet"
                   fill={`url(#${gradientId}-yoyCurrent)`}
-                  stroke="var(--color-currentExpenses)"
+                  stroke="var(--color-currentNet)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
                 <Bar
-                  dataKey="previousExpenses"
+                  dataKey="previousNet"
                   fill={`url(#${gradientId}-yoyPrevious)`}
-                  stroke="var(--color-previousExpenses)"
+                  stroke="var(--color-previousNet)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
               </BarChart>
             </ChartContainer>
