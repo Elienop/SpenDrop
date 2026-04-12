@@ -18,8 +18,8 @@ RUN npm run build
 
 # Final image
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates sqlite-libs su-exec \
-    && addgroup -S spendrop && adduser -S spendrop -G spendrop
+RUN apk add --no-cache ca-certificates sqlite-libs su-exec shadow \
+    && addgroup -g 911 spendrop && adduser -u 911 -G spendrop -D spendrop
 WORKDIR /app
 COPY --from=go-builder /app/spendrop .
 COPY --from=web-builder /app/web/dist ./web/dist

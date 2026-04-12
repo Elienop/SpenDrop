@@ -7,6 +7,8 @@ services:
     volumes:
       - spendrop-data:/app/data
     environment:
+      - PUID=1000
+      - PGID=1000
       - PORT=8080
       - DB_PATH=/app/data/spendrop.db
     restart: unless-stopped
