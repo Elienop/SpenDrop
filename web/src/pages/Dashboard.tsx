@@ -40,7 +40,12 @@ import { ButtonGroup } from '@/components/ui/button-group';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 import { formatCurrency, DEFAULT_LOCALE } from '@/lib/format';
-import { MONTH_NAMES_SHORT, MONTH_NAMES_FULL } from '@/lib/dates';
+import {
+  MONTH_NAMES_SHORT,
+  MONTH_NAMES_FULL,
+  formatMonthTick,
+  formatMonthLabel,
+} from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import {
   DASHBOARD_RECENT_TX_LIMIT,
@@ -173,11 +178,16 @@ export function Dashboard() {
   // backwards from the anchor with `AddDate(0, -i, 0)`), so reverse to
   // ascending order before slicing — the bar chart renders left-to-right
   // chronologically with the most recent month on the right edge.
+  //
+  // Date is stored as an ISO-8601 `"YYYY-MM-01"` string so `formatMonthTick`
+  // / `formatMonthLabel` from `lib/dates` can parse it. Bare month
+  // abbreviations like `"Jan"` collapsed same-month buckets from different
+  // years into one category on 12M views that crossed a year boundary.
   const chartData = useMemo(() => {
     const sorted = [...trend].reverse();
     const sliced = cashFlowView === '6m' ? sorted.slice(-6) : sorted;
     return sliced.map((item) => ({
-      name: MONTH_NAMES_SHORT[item.month - 1],
+      date: `${item.year}-${String(item.month).padStart(2, '0')}-01`,
       income: item.total_income,
       expense: item.total_spent,
     }));
@@ -388,12 +398,24 @@ export function Dashboard() {
             </defs>
             <CartesianGrid vertical={false} />
             <XAxis
-              dataKey="name"
+              dataKey="date"
               tickLine={false}
               axisLine={false}
-              tickMargin={10}
+              tickMargin={8}
+              interval={0}
+              angle={-30}
+              textAnchor="end"
+              height={48}
+              tickFormatter={formatMonthTick}
             />
-            <ChartTooltip content={<ChartTooltipContent hideIndicator />} />
+            <ChartTooltip
+              content={
+                <ChartTooltipContent
+                  hideIndicator
+                  labelFormatter={formatMonthLabel}
+                />
+              }
+            />
             <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
             <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
           </BarChart>
