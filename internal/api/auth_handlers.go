@@ -105,8 +105,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if len(req.Username) < 3 || len(req.Username) > 32 {
-		writeError(w, http.StatusBadRequest, "username must be between 3 and 32 characters")
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if !isValidUsername(req.Username) {
@@ -135,8 +135,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Default display name to username if not provided
 	displayName := req.DisplayName
-	if len(displayName) > 64 {
-		writeError(w, http.StatusBadRequest, "display name must be 64 characters or less")
+	if len(displayName) > MaxDisplayNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
 	if displayName == "" {
@@ -155,17 +155,17 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	qtx := h.queries.WithTx(tx)
 
 	// First user gets admin role
-	role := "member"
+	role := RoleMember
 	users, err := qtx.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing users")
 		return
 	}
 	if len(users) == 0 {
-		role = "admin"
+		role = RoleAdmin
 	} else {
 		// Check if registration is enabled via app setting
-		setting, err := qtx.GetSetting(r.Context(), "registration_enabled")
+		setting, err := qtx.GetSetting(r.Context(), SettingRegistrationEnabled)
 		if err != nil || setting.Value != "true" {
 			writeError(w, http.StatusForbidden, "registration is disabled")
 			return

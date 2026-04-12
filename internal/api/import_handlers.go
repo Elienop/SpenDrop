@@ -257,9 +257,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxImportRows = 10000
-	if len(parsedRows) > maxImportRows {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many rows (max %d)", maxImportRows))
+	if len(parsedRows) > MaxImportRows {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many rows (max %d)", MaxImportRows))
 		return
 	}
 

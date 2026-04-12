@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -39,8 +40,8 @@ func (h *Handler) handleGetBudgets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
-		if parsed < 2000 || parsed > 2100 {
-			writeError(w, http.StatusBadRequest, "year must be between 2000 and 2100")
+		if parsed < MinYear || parsed > MaxYear {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
 			return
 		}
 		year = parsed
@@ -62,7 +63,7 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -75,8 +76,8 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
-	if year < 2000 || year > 2100 {
-		writeError(w, http.StatusBadRequest, "year must be between 2000 and 2100")
+	if year < MinYear || year > MaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
 		return
 	}
 
@@ -100,7 +101,7 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "amount must be positive")
 		return
 	}
-	if req.Amount > 1_000_000_000 {
+	if req.Amount > MaxTransactionAmount {
 		writeError(w, http.StatusBadRequest, "amount exceeds maximum allowed value")
 		return
 	}
@@ -126,14 +127,14 @@ func (h *Handler) handleDefaultBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if r.Method == http.MethodPut && user.Role != "admin" {
+	if r.Method == http.MethodPut && user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet:
-		setting, err := h.queries.GetSetting(r.Context(), "default_budget")
+		setting, err := h.queries.GetSetting(r.Context(), SettingDefaultBudget)
 		if err != nil {
 			if err == sql.ErrNoRows {
 				writeJSON(w, http.StatusOK, map[string]any{"amount": 0})
@@ -159,12 +160,12 @@ func (h *Handler) handleDefaultBudget(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "amount must be positive")
 			return
 		}
-		if req.Amount > 1_000_000_000 {
+		if req.Amount > MaxTransactionAmount {
 			writeError(w, http.StatusBadRequest, "amount exceeds maximum allowed value")
 			return
 		}
 		err := h.queries.UpsertSetting(r.Context(), database.UpsertSettingParams{
-			Key:   "default_budget",
+			Key:   SettingDefaultBudget,
 			Value: strconv.FormatFloat(req.Amount, 'f', -1, 64),
 		})
 		if err != nil {

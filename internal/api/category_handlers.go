@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -81,11 +82,11 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > 100 {
-		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
+	if len(req.Name) > MaxCategoryNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCategoryNameLength))
 		return
 	}
-	if req.Type != "expense" && req.Type != "income" {
+	if req.Type != CategoryTypeExpense && req.Type != CategoryTypeIncome {
 		writeError(w, http.StatusBadRequest, "type must be 'expense' or 'income'")
 		return
 	}
@@ -111,7 +112,7 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -133,12 +134,12 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > 100 {
-		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
+	if len(req.Name) > MaxCategoryNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCategoryNameLength))
 		return
 	}
-	if len(req.Icon) > 100 {
-		writeError(w, http.StatusBadRequest, "icon must be 100 characters or less")
+	if len(req.Icon) > MaxIconNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("icon must be %d characters or less", MaxIconNameLength))
 		return
 	}
 
@@ -168,7 +169,7 @@ func (h *Handler) handlePatchCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -216,7 +217,7 @@ func (h *Handler) handleDeleteCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -254,7 +255,7 @@ func (h *Handler) handleReorderCategories(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -269,8 +270,8 @@ func (h *Handler) handleReorderCategories(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "at least one item is required")
 		return
 	}
-	if len(items) > 200 {
-		writeError(w, http.StatusBadRequest, "too many items (max 200)")
+	if len(items) > MaxCategoryReorder {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many items (max %d)", MaxCategoryReorder))
 		return
 	}
 

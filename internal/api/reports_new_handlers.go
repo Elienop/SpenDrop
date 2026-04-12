@@ -34,7 +34,7 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 	year := time.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < 2000 || parsed > 2100 {
+		if err != nil || parsed < MinYear || parsed > MaxYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -56,7 +56,7 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 
 	// Fallback: default_budget setting
 	var defaultBudget float64
-	setting, err := h.queries.GetSetting(ctx, "default_budget")
+	setting, err := h.queries.GetSetting(ctx, SettingDefaultBudget)
 	if err == nil {
 		parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 		if parseErr == nil {
@@ -159,7 +159,7 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 	if err == nil {
 		budget = b.Amount
 	} else if errors.Is(err, sql.ErrNoRows) {
-		setting, settingErr := h.queries.GetSetting(ctx, "default_budget")
+		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
 			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 			if parseErr == nil {
@@ -197,7 +197,7 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 	year := time.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < 2000 || parsed > 2100 {
+		if err != nil || parsed < MinYear || parsed > MaxYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -236,7 +236,7 @@ func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
 	year := time.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < 2000 || parsed > 2100 {
+		if err != nil || parsed < MinYear || parsed > MaxYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -252,7 +252,7 @@ func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
 
 	// Load dismissed list from app_settings
 	dismissed := make(map[string]bool)
-	key := fmt.Sprintf("dismissed_recurring_%d", year)
+	key := dismissedRecurringKey(year)
 	setting, err := h.queries.GetSetting(ctx, key)
 	if err == nil && setting.Value != "" {
 		var list []string
@@ -295,17 +295,17 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Year < 2000 || req.Year > 2100 || req.Description == "" {
+	if req.Year < MinYear || req.Year > MaxYear || req.Description == "" {
 		writeError(w, http.StatusBadRequest, "year and description required")
 		return
 	}
-	if len(req.Description) > 500 {
+	if len(req.Description) > MaxDescriptionLength {
 		writeError(w, http.StatusBadRequest, "description too long")
 		return
 	}
 
 	ctx := r.Context()
-	key := fmt.Sprintf("dismissed_recurring_%d", req.Year)
+	key := dismissedRecurringKey(req.Year)
 
 	// Use a serializable transaction to prevent TOCTOU race on the dismissed list
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -372,7 +372,7 @@ func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
 	year := time.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < 2000 || parsed > 2100 {
+		if err != nil || parsed < MinYear || parsed > MaxYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}

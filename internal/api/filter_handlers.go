@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -45,8 +46,8 @@ func (h *Handler) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to check existing filters")
 		return
 	}
-	if len(existingFilters) >= 50 {
-		writeError(w, http.StatusTooManyRequests, "too many saved filters (max 50)")
+	if len(existingFilters) >= MaxSavedFilters {
+		writeError(w, http.StatusTooManyRequests, fmt.Sprintf("too many saved filters (max %d)", MaxSavedFilters))
 		return
 	}
 
@@ -60,16 +61,16 @@ func (h *Handler) handleCreateSavedFilter(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > 100 {
-		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
+	if len(req.Name) > MaxFilterNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxFilterNameLength))
 		return
 	}
 	if req.FilterJSON == "" {
 		writeError(w, http.StatusBadRequest, "filter_json is required")
 		return
 	}
-	if len(req.FilterJSON) > 10000 {
-		writeError(w, http.StatusBadRequest, "filter_json must be 10000 characters or less")
+	if len(req.FilterJSON) > MaxFilterJSONLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("filter_json must be %d characters or less", MaxFilterJSONLength))
 		return
 	}
 	if !json.Valid([]byte(req.FilterJSON)) {
@@ -113,16 +114,16 @@ func (h *Handler) handleUpdateSavedFilter(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > 100 {
-		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
+	if len(req.Name) > MaxFilterNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxFilterNameLength))
 		return
 	}
 	if req.FilterJSON == "" {
 		writeError(w, http.StatusBadRequest, "filter_json is required")
 		return
 	}
-	if len(req.FilterJSON) > 10000 {
-		writeError(w, http.StatusBadRequest, "filter_json must be 10000 characters or less")
+	if len(req.FilterJSON) > MaxFilterJSONLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("filter_json must be %d characters or less", MaxFilterJSONLength))
 		return
 	}
 	if !json.Valid([]byte(req.FilterJSON)) {

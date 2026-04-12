@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"regexp"
 
@@ -49,7 +50,7 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -72,16 +73,16 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > 100 {
-		writeError(w, http.StatusBadRequest, "name must be 100 characters or less")
+	if len(req.Name) > MaxCurrencyNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCurrencyNameLength))
 		return
 	}
 	if req.Symbol == "" {
 		writeError(w, http.StatusBadRequest, "symbol is required")
 		return
 	}
-	if len(req.Symbol) > 10 {
-		writeError(w, http.StatusBadRequest, "symbol must be 10 characters or less")
+	if len(req.Symbol) > MaxCurrencySymbolLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("symbol must be %d characters or less", MaxCurrencySymbolLength))
 		return
 	}
 	if req.RateToBase <= 0 {
@@ -125,7 +126,7 @@ func (h *Handler) handleUpdateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
