@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/xuri/excelize/v2"
 )
@@ -55,6 +56,65 @@ func createTestXLSX(t *testing.T, sheetName string, headers []string, rows [][]s
 	for rowIdx, row := range rows {
 		for col, val := range row {
 			cell, _ := excelize.CoordinatesToCellName(col+1, rowIdx+2)
+			f.SetCellValue(sheetName, cell, val)
+		}
+	}
+
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		t.Fatalf("write xlsx to buffer: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// nativeDateRow describes one row for createTestXLSXWithNativeDateCells.
+// Date is stored as a real Excel date cell (numeric serial + date style),
+// the remaining string columns are written as plain text.
+type nativeDateRow struct {
+	Date time.Time
+	Rest []string
+}
+
+// createTestXLSXWithNativeDateCells builds an xlsx where column A of each
+// data row is a native Excel date cell styled with dateNumFmt (e.g.
+// "mm-dd-yy" or "d-mmm-yyyy"). This reproduces how real-world budget files
+// store dates, so we can exercise the RawCellValue:true serial date path in
+// the importer — which used to silently drop rows when the display format
+// was anything other than the five hardcoded text layouts.
+func createTestXLSXWithNativeDateCells(t *testing.T, sheetName string, headers []string, dateNumFmt string, rows []nativeDateRow) []byte {
+	t.Helper()
+	f := excelize.NewFile()
+
+	defaultSheet := f.GetSheetName(0)
+	if defaultSheet != sheetName {
+		idx, err := f.NewSheet(sheetName)
+		if err != nil {
+			t.Fatalf("new sheet: %v", err)
+		}
+		f.SetActiveSheet(idx)
+		f.DeleteSheet(defaultSheet)
+	}
+
+	for col, h := range headers {
+		cell, _ := excelize.CoordinatesToCellName(col+1, 1)
+		f.SetCellValue(sheetName, cell, h)
+	}
+
+	styleID, err := f.NewStyle(&excelize.Style{CustomNumFmt: &dateNumFmt})
+	if err != nil {
+		t.Fatalf("new style: %v", err)
+	}
+
+	for rowIdx, row := range rows {
+		dateCell, _ := excelize.CoordinatesToCellName(1, rowIdx+2)
+		if err := f.SetCellValue(sheetName, dateCell, row.Date); err != nil {
+			t.Fatalf("set date cell: %v", err)
+		}
+		if err := f.SetCellStyle(sheetName, dateCell, dateCell, styleID); err != nil {
+			t.Fatalf("set cell style: %v", err)
+		}
+		for col, val := range row.Rest {
+			cell, _ := excelize.CoordinatesToCellName(col+2, rowIdx+2)
 			f.SetCellValue(sheetName, cell, val)
 		}
 	}
@@ -488,6 +548,134 @@ func TestHandleImportConfirm_SkipsUnparseableDate(t *testing.T) {
 	}
 }
 
+// TestHandleImportConfirm_NativeDateCells_mmddyyFormat is the regression test
+// for the silent-drop bug where July/August 2025 budget files imported only
+// 24/29 of their 62/99 rows. The files used native Excel date cells with
+// number format "mm-dd-yy", which GetRows() rendered as "07-21-25" — a
+// string that matched none of the fallback text layouts in parseImportDate.
+// With the RawCellValue:true fix, date cells return their underlying serial
+// number regardless of display format, and parseImportDate handles them via
+// excelize.ExcelDateToTime.
+func TestHandleImportConfirm_NativeDateCells_mmddyyFormat(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "mmddyyimporter", "member")
+
+	xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
+		[]string{"Date", "Description", "Amount"},
+		"mm-dd-yy",
+		[]nativeDateRow{
+			{Date: time.Date(2025, 7, 21, 0, 0, 0, 0, time.UTC), Rest: []string{"transfer to ado", "180.30"}},
+			{Date: time.Date(2025, 7, 27, 0, 0, 0, 0, time.UTC), Rest: []string{"supermarket", "45.00"}},
+			{Date: time.Date(2025, 8, 15, 0, 0, 0, 0, time.UTC), Rest: []string{"fuel", "60.00"}},
+		})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, _ := q.ListAllCategories(context.Background())
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	if int(resp["imported"].(float64)) != 3 {
+		t.Errorf("expected 3 imported (all mm-dd-yy rows), got %v (skipped=%v)",
+			resp["imported"], resp["skipped"])
+	}
+	if int(resp["skipped"].(float64)) != 0 {
+		t.Errorf("expected 0 skipped, got %v", resp["skipped"])
+	}
+}
+
+// TestHandleImportConfirm_NativeDateCells_FormatAgnostic confirms the fix is
+// format-agnostic: the same three native date cells styled with different
+// display formats all parse to the same underlying dates. This guards
+// against regressions that would add format-specific handling back in.
+func TestHandleImportConfirm_NativeDateCells_FormatAgnostic(t *testing.T) {
+	formats := []string{
+		"mm-dd-yy",
+		"m/d/yyyy",
+		"d-mmm-yyyy",
+		"yyyy-mm-dd",
+	}
+	for _, fmtStr := range formats {
+		t.Run(fmtStr, func(t *testing.T) {
+			clearImportStore()
+			q, db := setupTestDB(t)
+			h := NewHandler(q, db)
+			user := seedTestUser(t, q, "fmtimporter_"+fmtStr, "member")
+
+			xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
+				[]string{"Date", "Description", "Amount"},
+				fmtStr,
+				[]nativeDateRow{
+					{Date: time.Date(2025, 7, 21, 0, 0, 0, 0, time.UTC), Rest: []string{"row one", "10.00"}},
+					{Date: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC), Rest: []string{"row two", "20.00"}},
+				})
+
+			uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+			uploadReq = withUser(uploadReq, user)
+			uploadRec := httptest.NewRecorder()
+			h.handleImportUpload(uploadRec, uploadReq)
+
+			if uploadRec.Code != http.StatusOK {
+				t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+			}
+
+			var uploadResp map[string]any
+			decodeResponse(t, uploadRec, &uploadResp)
+			importID := uploadResp["import_id"].(string)
+
+			cats, _ := q.ListAllCategories(context.Background())
+
+			confirmBody, _ := json.Marshal(map[string]any{
+				"import_id":           importID,
+				"default_category_id": cats[0].ID,
+			})
+			confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+			confirmReq = withUser(confirmReq, user)
+			confirmRec := httptest.NewRecorder()
+
+			h.handleImportConfirm(confirmRec, confirmReq)
+
+			if confirmRec.Code != http.StatusOK {
+				t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+			}
+
+			var resp map[string]any
+			decodeResponse(t, confirmRec, &resp)
+			if int(resp["imported"].(float64)) != 2 {
+				t.Errorf("format %q: expected 2 imported, got %v (skipped=%v)",
+					fmtStr, resp["imported"], resp["skipped"])
+			}
+		})
+	}
+}
+
 func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
@@ -618,6 +806,72 @@ func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
 			got := stripCurrencyFormat(tc.input)
 			if got != tc.expected {
 				t.Errorf("stripCurrencyFormat(%q) = %q, want %q", tc.input, got, tc.expected)
+			}
+		})
+	}
+}
+
+// TestParseImportDate pins the semantics of parseImportDate so future changes
+// don't silently alter how the importer interprets Date cells. Covers:
+//   - whitespace and empty input
+//   - Excel serial date range boundaries [1, 2958465]
+//   - fractional serials (date + time-of-day)
+//   - all five text date formats
+//   - obviously-bad inputs
+//
+// Note: the "stray small integer" case ("1234" → 1903-05-18) is a known
+// quirk of the serial-first order. Any integer in [1, 2958465] is treated
+// as a valid serial, which means a non-date column misplaced into the date
+// position may parse as a very early Excel date. In practice the user would
+// notice the resulting transaction landing in the year 1903, and the
+// alternative (text-first) would break the July/August 2025 mm-dd-yy fix.
+func TestParseImportDate(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+		wantStr string // "2006-01-02" format; ignored if wantErr
+	}{
+		// Serial date boundaries
+		{"serial 1 (1899-12-31 or 1900-01-01 quirk)", "1", false, "1899-12-31"},
+		{"serial 45859 (2025-07-21)", "45859", false, "2025-07-21"},
+		{"serial max 2958465 (9999-12-31)", "2958465", false, "9999-12-31"},
+		{"serial above max falls through to text and fails", "2958466", true, ""},
+		{"serial 0 below range falls through and fails", "0", true, ""},
+		{"negative number falls through and fails", "-5", true, ""},
+		{"fractional serial with time component", "45859.5", false, "2025-07-21"},
+
+		// Text formats
+		{"iso yyyy-mm-dd", "2025-07-21", false, "2025-07-21"},
+		{"us padded mm/dd/yyyy", "07/21/2025", false, "2025-07-21"},
+		{"us short m/d/yyyy", "7/5/2025", false, "2025-07-05"},
+		{"day-mon-year", "21-Jul-2025", false, "2025-07-21"},
+		{"slash yyyy/mm/dd", "2025/07/21", false, "2025-07-21"},
+
+		// Empty / whitespace / invalid
+		{"empty string", "", true, ""},
+		{"whitespace only", "   ", true, ""},
+		{"whitespace around serial", " 45859 ", false, "2025-07-21"},
+		{"whitespace around text date", "  2025-07-21  ", false, "2025-07-21"},
+		{"obviously not a date", "not-a-date", true, ""},
+		{"mm-dd-yy text format not in allowlist", "07-21-25", true, ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseImportDate(tc.input)
+			if tc.wantErr {
+				if err == nil {
+					t.Errorf("parseImportDate(%q) = %v, want error", tc.input, got.Format("2006-01-02"))
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("parseImportDate(%q) unexpected error: %v", tc.input, err)
+				return
+			}
+			if gotStr := got.Format("2006-01-02"); gotStr != tc.wantStr {
+				t.Errorf("parseImportDate(%q) = %q, want %q", tc.input, gotStr, tc.wantStr)
 			}
 		})
 	}

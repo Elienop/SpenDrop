@@ -113,7 +113,14 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	f, err := excelize.OpenReader(file)
+	// RawCellValue:true tells excelize to skip number-format rendering when
+	// returning cell values. Without it, a date cell with number format
+	// "mm-dd-yy" renders as "07-21-25", which matches none of the fallback
+	// text formats in parseImportDate and silently drops the row. With
+	// RawCellValue:true, date cells return their underlying Excel serial
+	// number (e.g. "45859"), which parseImportDate converts via
+	// excelize.ExcelDateToTime — format-agnostic.
+	f, err := excelize.OpenReader(file, excelize.Options{RawCellValue: true})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse xlsx file")
 		return
@@ -504,10 +511,41 @@ func stripCurrencyFormat(s string) string {
 	return s
 }
 
-// parseImportDate tries multiple date formats and returns the first successful
-// parse. Returns an error if none match.
+// parseImportDate converts a string from an imported xlsx Date cell into a
+// time.Time. It tries two strategies in order:
+//
+//  1. Excel serial date number. When the upload path opens the file with
+//     RawCellValue:true, any date-typed cell returns its underlying serial
+//     number (e.g. "45859" = 2025-07-21). excelize.ExcelDateToTime handles
+//     the conversion and works regardless of the cell's number format — so
+//     "mm-dd-yy", "yyyy-mm-dd", "d-mmm-yyyy" etc. all land correctly.
+//  2. Text date formats. Covers files where the Date column was typed as
+//     plain text rather than a date-formatted cell.
+//
+// An unparseable date returns an error; the caller counts it as skipped.
+//
+// Note: the serial-date path assumes the 1900 date system (the default in
+// modern Excel on every platform). Legacy Mac Excel files that set the 1904
+// date system flag are not detected here — their dates will be off by ~4
+// years. In practice this is a non-issue for SpenDrop because modern Excel
+// and Google Sheets both write 1900-based workbooks.
 func parseImportDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}, fmt.Errorf("empty date")
+	}
+	// Strategy 1: Excel serial date. Excel's epoch is 1900-01-01 (serial 1),
+	// so any valid date lands in [1, 2958465] (2958465 = 9999-12-31). Clamp
+	// to that range to avoid mistaking a random stray number (e.g. an amount
+	// in the date column) for a date.
+	if serial, err := strconv.ParseFloat(s, 64); err == nil {
+		if serial >= 1 && serial <= 2958465 {
+			if t, err := excelize.ExcelDateToTime(serial, false); err == nil {
+				return t, nil
+			}
+		}
+	}
+	// Strategy 2: text formats.
 	for _, layout := range dateFormats {
 		if t, err := time.Parse(layout, s); err == nil {
 			return t, nil
