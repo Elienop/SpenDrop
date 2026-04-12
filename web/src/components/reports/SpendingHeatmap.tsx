@@ -40,16 +40,23 @@ function generateYearDates(year: number): (string | null)[] {
   return cells;
 }
 
+/**
+ * Percentile → opacity stops for the primary color. Shared by
+ * `getOpacity` (cell rendering) and `HeatmapLegend` (scale swatches)
+ * so the rendered scale can never drift.
+ */
+const OPACITY_STOPS = [0.3, 0.5, 0.75, 1] as const;
+
 function getOpacity(
   total: number,
   p25: number,
   p50: number,
   p75: number,
 ): number {
-  if (total <= p25) return 0.3;
-  if (total <= p50) return 0.5;
-  if (total <= p75) return 0.75;
-  return 1;
+  if (total <= p25) return OPACITY_STOPS[0];
+  if (total <= p50) return OPACITY_STOPS[1];
+  if (total <= p75) return OPACITY_STOPS[2];
+  return OPACITY_STOPS[3];
 }
 
 export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
@@ -64,30 +71,33 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
 
   return (
     <TooltipProvider>
-      {/* 53 columns x 7 rows, column-first flow: Mon-Sun top-to-bottom, weeks left-to-right like GitHub */}
-      <div
-        className="grid gap-[3px]"
-        style={{
-          gridTemplateColumns: 'repeat(53, 1fr)',
-          gridTemplateRows: 'repeat(7, 1fr)',
-          gridAutoFlow: 'column',
-        }}
-      >
-        {cells.map((dateStr, i) =>
-          dateStr === null ? (
-            <div key={`pad-${i}`} />
-          ) : (
-            <HeatmapCell
-              key={dateStr}
-              dateStr={dateStr}
-              total={lookup.get(dateStr) ?? 0}
-              p25={p25}
-              p50={p50}
-              p75={p75}
-              format={format}
-            />
-          ),
-        )}
+      <div className="flex flex-col gap-3">
+        {/* 53 columns x 7 rows, column-first flow: Mon-Sun top-to-bottom, weeks left-to-right like GitHub */}
+        <div
+          className="grid gap-[3px]"
+          style={{
+            gridTemplateColumns: 'repeat(53, 1fr)',
+            gridTemplateRows: 'repeat(7, 1fr)',
+            gridAutoFlow: 'column',
+          }}
+        >
+          {cells.map((dateStr, i) =>
+            dateStr === null ? (
+              <div key={`pad-${i}`} />
+            ) : (
+              <HeatmapCell
+                key={dateStr}
+                dateStr={dateStr}
+                total={lookup.get(dateStr) ?? 0}
+                p25={p25}
+                p50={p50}
+                p75={p75}
+                format={format}
+              />
+            ),
+          )}
+        </div>
+        <HeatmapLegend />
       </div>
     </TooltipProvider>
   );
@@ -129,5 +139,37 @@ function HeatmapCell({
         </p>
       </TooltipContent>
     </Tooltip>
+  );
+}
+
+function HeatmapLegend() {
+  return (
+    <div
+      role="group"
+      aria-label="Spending intensity legend"
+      className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs text-muted-foreground"
+    >
+      <div className="flex items-center gap-1.5">
+        <div className="h-3 w-3 rounded-sm bg-muted" aria-hidden />
+        <span>No spend</span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span>Less</span>
+        <div className="flex items-center gap-[3px]">
+          {OPACITY_STOPS.map((opacity, i) => (
+            <div
+              key={i}
+              className="h-3 w-3 rounded-sm"
+              style={{
+                backgroundColor: 'hsl(var(--primary))',
+                opacity,
+              }}
+              aria-hidden
+            />
+          ))}
+        </div>
+        <span>More</span>
+      </div>
+    </div>
   );
 }

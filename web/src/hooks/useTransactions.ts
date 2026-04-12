@@ -57,6 +57,14 @@ interface UseTransactionsResult {
   createTransaction: (input: CreateTransactionInput) => Promise<Transaction>;
   updateTransaction: (input: UpdateTransactionInput) => Promise<void>;
   deleteTransaction: (id: number) => Promise<void>;
+  /**
+   * Deletes every transaction matching the current filters (ignoring
+   * pagination). Returns the count of rows actually deleted. Used by
+   * the "Select all X across pages" UI path — the ID-based batch delete
+   * tops out at 500 rows server-side, which is too small for the
+   * "delete all and re-import" workflow.
+   */
+  deleteByFilter: () => Promise<number>;
 }
 
 const defaultFilters: TransactionFilters = {
@@ -97,12 +105,12 @@ export function useTransactions(): UseTransactionsResult {
   const [initialLoad, setInitialLoad] = useState(true);
   const [error, setError] = useState('');
 
-  const buildQuery = useCallback(() => {
+  // Filter-only query string (no pagination/sort). Shared by buildQuery
+  // (list endpoint) and deleteByFilter (destructive endpoint) so both
+  // paths serialize filters identically — otherwise the "delete all
+  // visible rows" action could diverge from what the user sees.
+  const buildFilterQuery = useCallback(() => {
     const params = new URLSearchParams();
-    params.set('page', String(page));
-    params.set('per_page', String(perPage));
-    params.set('sort_by', sortBy);
-    params.set('sort_dir', sortDir);
     if (filters.dateFrom) params.set('date_from', filters.dateFrom);
     if (filters.dateTo) params.set('date_to', filters.dateTo);
     if (filters.categoryIds) {
@@ -116,7 +124,16 @@ export function useTransactions(): UseTransactionsResult {
     if (filters.type) params.set('type', filters.type);
     if (filters.search) params.set('search', filters.search);
     return params.toString();
-  }, [page, perPage, sortBy, sortDir, filters]);
+  }, [filters]);
+
+  const buildQuery = useCallback(() => {
+    const params = new URLSearchParams(buildFilterQuery());
+    params.set('page', String(page));
+    params.set('per_page', String(perPage));
+    params.set('sort_by', sortBy);
+    params.set('sort_dir', sortDir);
+    return params.toString();
+  }, [buildFilterQuery, page, perPage, sortBy, sortDir]);
 
   const fetchTransactions = useCallback(() => {
     setError('');
@@ -213,6 +230,20 @@ export function useTransactions(): UseTransactionsResult {
     [fetchTransactions],
   );
 
+  const deleteByFilter = useCallback(async (): Promise<number> => {
+    const qs = buildFilterQuery();
+    const path = qs
+      ? `transactions/delete-by-filter?${qs}`
+      : 'transactions/delete-by-filter';
+    // Empty body — filters live in the query string to reuse the same
+    // serialization as GET /transactions. api.post sends Content-Type:
+    // application/json automatically, which is required by the
+    // requireJSONContentType middleware on all mutating API routes.
+    const result = await api.post<{ deleted: number }>(path, {});
+    fetchTransactions();
+    return result.deleted;
+  }, [buildFilterQuery, fetchTransactions]);
+
   return {
     transactions,
     total,
@@ -233,5 +264,6 @@ export function useTransactions(): UseTransactionsResult {
     createTransaction,
     updateTransaction,
     deleteTransaction,
+    deleteByFilter,
   };
 }

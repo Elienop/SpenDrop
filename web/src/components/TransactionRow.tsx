@@ -99,6 +99,7 @@ export function TransactionRow({
         <TableCell className="w-10">
           <Checkbox
             checked={selected}
+            disabled={!onSelect}
             onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
             aria-label={`Select ${transaction.description}`}
           />
@@ -170,6 +171,7 @@ export function TransactionRow({
       <TableCell className="w-10">
         <Checkbox
           checked={selected}
+          disabled={!onSelect}
           onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
           aria-label={`Select ${transaction.description}`}
         />

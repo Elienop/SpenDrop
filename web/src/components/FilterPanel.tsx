@@ -11,6 +11,7 @@ import type { TransactionFilters } from '../hooks/useTransactions';
 import type { Category, SavedFilter } from '../api/types';
 import { getCategoryColorVar } from '../lib/chart-colors';
 import { FORMAT_ISO_DATE } from '@/lib/dates';
+import { selectAllOnFocus } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -194,6 +195,7 @@ export function FilterPanel({
               placeholder="Min $"
               value={filters.amountMin}
               onChange={(e) => setFilter('amountMin', e.target.value)}
+              onFocus={selectAllOnFocus}
               step="0.01"
               min="0"
               aria-label="Minimum amount"
@@ -204,6 +206,7 @@ export function FilterPanel({
               placeholder="Max $"
               value={filters.amountMax}
               onChange={(e) => setFilter('amountMax', e.target.value)}
+              onFocus={selectAllOnFocus}
               step="0.01"
               min="0"
               aria-label="Maximum amount"

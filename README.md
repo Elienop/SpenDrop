@@ -52,7 +52,7 @@ Manage expense and income categories with color-coded badges, type labels (Expen
 
 Tabbed settings page with five sections:
 
-- **General** -- Monthly budget target
+- **General** -- Editable table of monthly budgets for any year (one row per month)
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
@@ -73,7 +73,7 @@ Simple username/password auth with bcrypt hashing and HTTP-only session cookies.
 - **Collapsible sidebar** with pin toggle, state persisted in localStorage
 - **Responsive layout** with max-width 1400px for wide-screen readability
 - **Saved filters** -- save and recall transaction filter presets
-- **Bulk operations** -- select multiple transactions with checkboxes for batch delete
+- **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete
 - **Find and replace** -- search transactions and replace descriptions in bulk
 - **Excel export** -- export all transactions, or by month/year, as `.xlsx` files
 
@@ -361,7 +361,8 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | GET | `/api/transactions` | List transactions (supports search, pagination, sorting, date/category filters) |
 | POST | `/api/transactions` | Create a transaction |
 | POST | `/api/transactions/batch` | Batch create transactions |
-| POST | `/api/transactions/batch-delete` | Batch delete transactions |
+| POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
+| POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
 | PUT | `/api/transactions/{id}` | Update a transaction |
 | DELETE | `/api/transactions/{id}` | Delete a transaction |
 
