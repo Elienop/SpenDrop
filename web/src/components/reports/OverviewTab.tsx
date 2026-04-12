@@ -42,6 +42,30 @@ const BVA_CONFIG = {
   actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
+/** Axis tick formatter for month-timeseries dataKeys of the form "YYYY-MM".
+ *  Returns "Jan '26" on January and on the leading tick (to anchor the year),
+ *  and just "Jan", "Feb", ... on other months. Pairs with `interval={0}` so
+ *  no tick ever gets decimated — the user saw the leftmost label disappear
+ *  at 12- and 24-month ranges because Recharts' default `preserveEnd`
+ *  strategy drops left-edge ticks when labels collide. */
+function formatMonthTick(value: string, index: number): string {
+  const [yearStr, monthStr] = value.split('-');
+  const year = Number(yearStr);
+  const month = Number(monthStr);
+  const showYear = month === 1 || index === 0;
+  return showYear
+    ? `${MONTH_NAMES_SHORT[month - 1]} '${String(year).slice(2)}`
+    : MONTH_NAMES_SHORT[month - 1];
+}
+
+/** Tooltip label formatter: "2026-01" → "Jan 2026". Full four-digit year
+ *  on hover keeps the axis compact while detail lives in the tooltip. */
+function formatMonthLabel(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  const [yearStr, monthStr] = value.split('-');
+  return `${MONTH_NAMES_SHORT[Number(monthStr) - 1]} ${yearStr}`;
+}
+
 export function OverviewTab() {
   const [months, setMonths] = useState(12);
   const [bvaYear, setBvaYear] = useState(new Date().getFullYear());
@@ -51,10 +75,13 @@ export function OverviewTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
+  // Store a stable "YYYY-MM" key as the XAxis dataKey so the formatter can
+  // derive month/year without a closure, and so 24-month ranges don't
+  // collapse two same-month buckets into one category.
   const incExpData = useMemo(
     () =>
       incExp.data.map((entry) => ({
-        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
+        key: `${entry.year}-${String(entry.month).padStart(2, '0')}`,
         income: entry.income,
         expenses: entry.expenses,
       })),
@@ -62,11 +89,11 @@ export function OverviewTab() {
   );
 
   const cashFlowData = useMemo(() => {
-    const result: { name: string; cumulative: number }[] = [];
+    const result: { key: string; cumulative: number }[] = [];
     incExp.data.reduce((acc, entry) => {
       const total = acc + entry.net;
       result.push({
-        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
+        key: `${entry.year}-${String(entry.month).padStart(2, '0')}`,
         cumulative: total,
       });
       return total;
@@ -171,13 +198,18 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="name"
+                  dataKey="key"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
+                  interval={0}
+                  minTickGap={-1}
+                  padding={{ left: 20, right: 20 }}
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={formatMonthTick}
                 />
                 <ChartTooltip
-                  content={<ChartTooltipContent />}
+                  content={<ChartTooltipContent labelFormatter={formatMonthLabel} />}
                 />
                 <Bar
                   dataKey="income"
@@ -249,10 +281,15 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="name"
+                  dataKey="key"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
+                  interval={0}
+                  minTickGap={-1}
+                  padding={{ left: 20, right: 20 }}
+                  tick={{ fontSize: 11 }}
+                  tickFormatter={formatMonthTick}
                 />
                 <YAxis
                   tickLine={false}
@@ -262,7 +299,7 @@ export function OverviewTab() {
                   tickFormatter={(v: number) => fmt(v)}
                 />
                 <ReferenceLine y={0} stroke="hsl(var(--border))" />
-                <ChartTooltip content={<ChartTooltipContent />} />
+                <ChartTooltip content={<ChartTooltipContent labelFormatter={formatMonthLabel} />} />
                 <Area
                   type="monotone"
                   dataKey="cumulative"
