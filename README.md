@@ -162,6 +162,7 @@ npm run lint        # TypeScript + ESLint
 |----------|---------|-------------|
 | `PUID` | `911` | User ID for file ownership |
 | `PGID` | `911` | Group ID for file ownership |
+| `TZ` | `UTC` | Container timezone (e.g. `Asia/Beirut`, `Europe/Berlin`) |
 | `PORT` | `8080` | Server listen port |
 | `DB_PATH` | `spendrop.db` | SQLite database file path |
 | `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (set to your domain in production) |
@@ -183,6 +184,7 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
+      - TZ=UTC              # e.g. Asia/Beirut, Europe/Berlin
       - PORT=8080
       - DB_PATH=/app/data/spendrop.db
     restart: unless-stopped
