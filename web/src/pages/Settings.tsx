@@ -113,97 +113,186 @@ function autoMapCategories(
 
 /* ---------- General Tab ---------- */
 
-const budgetSchema = z.object({
-  amount: z.number().min(0, 'Must be at least 0'),
-});
-type BudgetValues = z.infer<typeof budgetSchema>;
-
 function GeneralSection() {
-  // Lazy init so year/month are captured once at mount and remain stable as
-  // effect deps — also matches the Reports page precedent.
-  const [ym] = useState(() => {
-    const d = new Date();
-    return { year: d.getFullYear(), month: d.getMonth() + 1 };
-  });
-  const { year, month } = ym;
+  const baseCurrency = useBaseCurrency();
+  // Dual state for the year input: `yearInput` is the raw string the user
+  // is typing (keeps the input controlled even during mid-edit invalid
+  // states), `year` is the committed numeric value used to fetch. We
+  // commit on every keystroke that's in range, so the table tracks typing
+  // in real time, but `Number('') === 0` or an out-of-range value never
+  // slips through to the fetch (which would 400).
+  const [yearInput, setYearInput] = useState(() =>
+    String(new Date().getFullYear()),
+  );
+  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [budgets, setBudgets] = useState<Budget[]>([]);
+  // Per-month input strings, keyed by 1-12. Strings (not numbers) so a
+  // cleared field stays empty rather than collapsing to "0", which the
+  // backend would reject and which is ambiguous with "not yet set".
+  const [editAmounts, setEditAmounts] = useState<Record<number, string>>({});
+  const [saving, setSaving] = useState(false);
 
-  const form = useForm<BudgetValues>({
-    resolver: zodResolver(budgetSchema),
-    defaultValues: { amount: 0 },
-  });
+  const fetchBudgets = useCallback(async () => {
+    const data = await api.get<Budget[]>(`budgets?year=${year}`);
+    setBudgets(data);
+    const amounts: Record<number, string> = {};
+    for (const b of data) amounts[b.month] = String(b.amount);
+    setEditAmounts(amounts);
+  }, [year]);
 
   useEffect(() => {
-    api
-      .get<Budget[]>(`budgets?year=${year}`)
-      .then((data) => {
-        const match = data.find((b) => b.month === month);
-        if (match) form.reset({ amount: match.amount });
-      })
-      .catch(() => {
-        /* non-critical */
-      });
-    // form.reset is stable across renders and intentionally not a dep —
-    // including it would re-fetch on every render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month]);
+    fetchBudgets().catch(() => {
+      /* non-critical; table will show empty inputs */
+    });
+  }, [fetchBudgets]);
 
-  async function onSubmit(values: BudgetValues) {
+  function handleYearChange(e: ChangeEvent<HTMLInputElement>) {
+    const v = e.target.value;
+    setYearInput(v);
+    if (v === '') return;
+    const n = Number(v);
+    if (Number.isFinite(n) && n >= MIN_YEAR && n <= MAX_YEAR) {
+      setYear(n);
+    }
+  }
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+
+    // Bucket the 12 rows into pending (save), invalid (block), unchanged
+    // (skip). O(1) lookups via Map since the inner loop runs 12 times per
+    // submit — negligible now but avoids a trap if the editor ever grows.
+    const byMonth = new Map(budgets.map((b) => [b.month, b.amount]));
+    const pending: { month: number; amount: number }[] = [];
+    const invalidMonths: number[] = [];
+    for (let m = 1; m <= 12; m++) {
+      const raw = editAmounts[m] ?? '';
+      if (raw === '') continue;
+      const n = Number(raw);
+      // Backend rejects amount <= 0; surface it client-side with a
+      // concrete per-row error instead of silently dropping.
+      if (!Number.isFinite(n) || n <= 0) {
+        invalidMonths.push(m);
+        continue;
+      }
+      const existing = byMonth.get(m) ?? 0;
+      if (n === existing) continue;
+      pending.push({ month: m, amount: n });
+    }
+
+    if (invalidMonths.length > 0) {
+      const names = invalidMonths
+        .map((m) => MONTH_NAMES_FULL[m - 1])
+        .join(', ');
+      toast.error(`Amount must be greater than 0: ${names}`);
+      return;
+    }
+    if (pending.length === 0) {
+      toast.info('No changes to save');
+      return;
+    }
+
+    setSaving(true);
     try {
-      await api.put(`budgets/${year}/${month}`, { amount: values.amount });
-      toast.success('Budget saved successfully');
+      for (const { month, amount } of pending) {
+        await api.put(`budgets/${year}/${month}`, { amount });
+      }
+      toast.success(
+        `Saved ${pending.length} budget${pending.length === 1 ? '' : 's'}`,
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      // Await the refetch so `saving` stays true (and inputs stay
+      // disabled) until local state is consistent with server truth.
+      // Without this await, a user edit between `setSaving(false)` and
+      // the fetch completing would be clobbered by the refetch.
+      try {
+        await fetchBudgets();
+      } catch (err) {
+        toast.error(
+          'Refresh failed: ' +
+            (err instanceof Error ? err.message : 'unknown'),
+        );
+      }
+      setSaving(false);
     }
   }
 
   return (
     <Card>
-      <CardHeader>
-        <CardTitle className="text-base">General Settings</CardTitle>
+      <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+        <CardTitle className="text-base">Monthly Budgets</CardTitle>
+        <div className="flex items-center gap-2">
+          <Label
+            htmlFor="budget-year"
+            className="text-sm text-muted-foreground"
+          >
+            Year
+          </Label>
+          <Input
+            id="budget-year"
+            type="number"
+            value={yearInput}
+            onChange={handleYearChange}
+            onFocus={selectAllOnFocus}
+            min={MIN_YEAR}
+            max={MAX_YEAR}
+            disabled={saving}
+            className="w-24"
+            aria-label="Budget year"
+          />
+        </div>
       </CardHeader>
       <CardContent>
-        <Form {...form}>
-          <form
-            onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
-            className="flex max-w-sm flex-col gap-4"
-            noValidate
-          >
-            <FormField
-              control={form.control}
-              name="amount"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Monthly Budget</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="number"
-                      step="0.01"
-                      min="0"
-                      placeholder="0.00"
-                      name={field.name}
-                      onBlur={field.onBlur}
-                      ref={field.ref}
-                      value={field.value ?? ''}
-                      onChange={(e) =>
-                        field.onChange(
-                          e.target.value === '' ? 0 : Number(e.target.value),
-                        )
-                      }
-                      onFocus={selectAllOnFocus}
-                    />
-                  </FormControl>
-                  <p className="text-xs text-muted-foreground">
-                    Budget for {year}-{String(month).padStart(2, '0')}
-                  </p>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <Button type="submit" className="w-fit" disabled={form.formState.isSubmitting}>
-              {form.formState.isSubmitting ? 'Saving...' : 'Save Budget'}
-            </Button>
-          </form>
-        </Form>
+        <form
+          onSubmit={(e) => void handleSave(e)}
+          className="flex flex-col gap-4"
+          noValidate
+        >
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Month</TableHead>
+                <TableHead className="text-right">
+                  Amount ({baseCurrency})
+                </TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {MONTH_NAMES_FULL.map((name, idx) => {
+                const month = idx + 1;
+                return (
+                  <TableRow key={month}>
+                    <TableCell>{name}</TableCell>
+                    <TableCell className="text-right">
+                      <Input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        placeholder="0.00"
+                        value={editAmounts[month] ?? ''}
+                        onChange={(e) =>
+                          setEditAmounts((prev) => ({
+                            ...prev,
+                            [month]: e.target.value,
+                          }))
+                        }
+                        onFocus={selectAllOnFocus}
+                        disabled={saving}
+                        aria-label={`Budget for ${name} ${year} in ${baseCurrency}`}
+                        className="ml-auto max-w-[160px] text-right"
+                      />
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+          <Button type="submit" className="w-fit" disabled={saving}>
+            {saving ? 'Saving...' : 'Save Budgets'}
+          </Button>
+        </form>
       </CardContent>
     </Card>
   );

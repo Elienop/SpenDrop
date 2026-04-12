@@ -22,6 +22,7 @@ vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    info: vi.fn(),
   },
 }));
 
@@ -123,7 +124,7 @@ describe('Settings', () => {
     test('shows general settings by default', async () => {
       renderSettings();
       await waitFor(() => {
-        expect(screen.getByLabelText(/monthly budget/i)).toBeInTheDocument();
+        expect(screen.getByText(/monthly budgets/i)).toBeInTheDocument();
       });
     });
 
@@ -255,29 +256,39 @@ describe('Settings', () => {
     });
 
     test('saves budget via PUT to budgets/{year}/{month}', async () => {
-      mockedApi.put.mockResolvedValue({});
-      const user = userEvent.setup({ pointerEventsCheck: 0 });
-      renderSettings();
+      // Freeze `Date` to April 2026 so `new Date()` in the component lines
+      // up with the mocked budget row (year=2026, month=4). Without this,
+      // the test passes only by coincidence on days when today's month+year
+      // matches the hardcoded mock data. `toFake: ['Date']` leaves
+      // setTimeout/setInterval alone so testing-library's waitFor and
+      // userEvent's internal timers still work.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        mockedApi.put.mockResolvedValue({});
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
 
-      await waitFor(() => {
-        expect(screen.getByLabelText(/monthly budget/i)).toBeInTheDocument();
-      });
+        const label = /Budget for April 2026/i;
+        await waitFor(() => {
+          expect(screen.getByLabelText(label)).toBeInTheDocument();
+        });
 
-      const input = screen.getByLabelText(/monthly budget/i);
-      await user.clear(input);
-      await user.type(input, '5000');
+        const input = screen.getByLabelText(label);
+        await user.clear(input);
+        await user.type(input, '5000');
 
-      await user.click(screen.getByRole('button', { name: /save budget/i }));
+        await user.click(screen.getByRole('button', { name: /save budgets/i }));
 
-      await waitFor(() => {
-        const now = new Date();
-        const year = now.getFullYear();
-        const month = now.getMonth() + 1;
-        expect(mockedApi.put).toHaveBeenCalledWith(
-          `budgets/${year}/${month}`,
-          { amount: 5000 },
-        );
-      });
+        await waitFor(() => {
+          expect(mockedApi.put).toHaveBeenCalledWith(
+            'budgets/2026/4',
+            { amount: 5000 },
+          );
+        });
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     test('saves currency rates via PUT with full currency object', async () => {

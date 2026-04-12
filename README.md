@@ -52,7 +52,7 @@ Manage expense and income categories with color-coded badges, type labels (Expen
 
 Tabbed settings page with five sections:
 
-- **General** -- Monthly budget target
+- **General** -- Editable table of monthly budgets for any year (one row per month)
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
