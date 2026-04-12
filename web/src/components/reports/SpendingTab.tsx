@@ -44,7 +44,12 @@ import {
   useExpenseVelocity,
 } from '@/hooks/useReports';
 import { getCategoryColorVar } from '@/lib/chart-colors';
-import { MONTH_NAMES_SHORT, MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
+import {
+  MONTH_NAMES_FULL,
+  yearOptions,
+  formatMonthTick,
+  formatMonthLabel,
+} from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
@@ -148,6 +153,11 @@ export function SpendingTab() {
     [catTrends.data],
   );
 
+  // Category Trends shares the ISO-8601 `"YYYY-MM-01"` X-axis convention
+  // with OverviewTab and Dashboard so `formatMonthTick` / `formatMonthLabel`
+  // from `lib/dates` can parse it. Previously we pre-baked `"Jun '25"` into
+  // the `name` field, which worked but duplicated the formatter logic and
+  // couldn't share tooltip rendering with other charts.
   const catTrendData = useMemo<Record<string, string | number>[]>(() => {
     if (expenseCategories.length === 0) return [];
     const monthSet = new Set<string>();
@@ -155,20 +165,17 @@ export function SpendingTab() {
     for (const cat of expenseCategories) {
       const inner = new Map<string, number>();
       for (const d of cat.data) {
-        const key = `${d.year}-${String(d.month).padStart(2, '0')}`;
+        const key = `${d.year}-${String(d.month).padStart(2, '0')}-01`;
         inner.set(key, d.total);
         monthSet.add(key);
       }
       byCat.set(cat.id, inner);
     }
     const sortedMonths = Array.from(monthSet).sort();
-    return sortedMonths.map((ym) => {
-      const [y, m] = ym.split('-').map(Number);
-      const point: Record<string, string | number> = {
-        name: `${MONTH_NAMES_SHORT[m - 1]} '${String(y).slice(2)}`,
-      };
+    return sortedMonths.map((date) => {
+      const point: Record<string, string | number> = { date };
       for (const cat of expenseCategories) {
-        point[`cat-${cat.id}`] = byCat.get(cat.id)?.get(ym) ?? 0;
+        point[`cat-${cat.id}`] = byCat.get(cat.id)?.get(date) ?? 0;
       }
       return point;
     });
@@ -334,14 +341,22 @@ export function SpendingTab() {
               <LineChart accessibilityLayer data={catTrendData}>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="name"
+                  dataKey="date"
                   tickLine={false}
                   axisLine={false}
-                  tickMargin={10}
+                  tickMargin={8}
                   interval={0}
+                  angle={-30}
+                  textAnchor="end"
+                  height={48}
                   padding={{ left: 20, right: 20 }}
+                  tickFormatter={formatMonthTick}
                 />
-                <ChartTooltip content={<ChartTooltipContent />} />
+                <ChartTooltip
+                  content={
+                    <ChartTooltipContent labelFormatter={formatMonthLabel} />
+                  }
+                />
                 <ChartLegend content={<ChartLegendContent />} />
                 {expenseCategories.map((cat) => (
                   <Line

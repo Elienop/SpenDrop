@@ -29,7 +29,12 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { useIncomeExpenses, useBudgetVsActual } from '@/hooks/useReports';
-import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
+import {
+  MONTH_NAMES_SHORT,
+  yearOptions,
+  formatMonthTick,
+  formatMonthLabel,
+} from '@/lib/dates';
 import { INCEXP_CONFIG } from './utils';
 import { cn } from '@/lib/utils';
 
@@ -41,39 +46,6 @@ const BVA_CONFIG = {
   budget: { label: 'Budget', color: 'hsl(var(--primary) / 0.35)' },
   actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
-
-/** Month-name part of the tick formatter — Intl handles locale/ICU
- *  detail so we don't hardcode a `["Jan", "Feb", ...]` array. We avoid
- *  the `{ year: '2-digit' }` option because in `en-US` it renders as
- *  `"Jan 26"` (plain space), which is ambiguous with a day-of-month
- *  reading (`Jan 26` = January 26th). We compose the `'YY` suffix
- *  ourselves. `timeZone: 'UTC'` pins parsing so a user in a negative
- *  UTC offset doesn't see `"Dec '25"` for a January bucket. */
-const MONTH_SHORT_FMT = new Intl.DateTimeFormat('en-US', {
-  month: 'short',
-  timeZone: 'UTC',
-});
-
-/** Tooltip label formatter: full month + full year on hover keeps the
- *  compact axis readable while giving unambiguous detail on interaction. */
-const MONTH_LONG_FMT = new Intl.DateTimeFormat('en-US', {
-  month: 'long',
-  year: 'numeric',
-  timeZone: 'UTC',
-});
-
-/** `"2026-01-01"` → `"Jan'26"`. Compact, unambiguous, one token wide. */
-function formatMonthTick(value: string): string {
-  const d = new Date(value);
-  const year2 = String(d.getUTCFullYear()).slice(-2);
-  return `${MONTH_SHORT_FMT.format(d)}'${year2}`;
-}
-
-/** `"2026-01-01"` → `"January 2026"` for tooltip headers. */
-function formatMonthLabel(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  return MONTH_LONG_FMT.format(new Date(value));
-}
 
 export function OverviewTab() {
   const [months, setMonths] = useState(12);

@@ -39,6 +39,49 @@ export const FORMAT_DATE_SHORT = 'MMM d';
 /** Full human-readable date like "January 3, 2026". */
 export const FORMAT_DATE_LONG = 'PPP';
 
+// --- Chart month-axis formatters ---
+//
+// Shared between every Recharts time-series chart so all of them render
+// an unambiguous `Jun'25`-style X-axis without local copies of the Intl
+// plumbing. Consumers are expected to store an ISO-8601 "YYYY-MM-01"
+// date in their chart data — matches shadcn's `chart-bar-interactive`
+// convention so `new Date(value)` parses reliably.
+
+/** Month-name part of the tick formatter — Intl handles locale/ICU
+ *  detail so we don't hardcode a `["Jan", "Feb", ...]` array. We avoid
+ *  the `{ year: '2-digit' }` option because in `en-US` it renders as
+ *  `"Jan 26"` (plain space), which is ambiguous with a day-of-month
+ *  reading (`Jan 26` = January 26th). We compose the `'YY` suffix
+ *  ourselves. `timeZone: 'UTC'` pins parsing so a user in a negative
+ *  UTC offset doesn't see `"Dec '25"` for a January bucket. */
+const MONTH_SHORT_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  timeZone: 'UTC',
+});
+
+/** Full month + year for tooltip headers. `"2026-01-01"` → `"January 2026"`. */
+const MONTH_LONG_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/** `"2026-01-01"` → `"Jan'26"`. Compact, unambiguous, one token wide. */
+export function formatMonthTick(value: string): string {
+  const d = new Date(value);
+  const year2 = String(d.getUTCFullYear()).slice(-2);
+  return `${MONTH_SHORT_FMT.format(d)}'${year2}`;
+}
+
+/** `"2026-01-01"` → `"January 2026"` for tooltip headers. Typed as
+ *  `unknown` because Recharts' `labelFormatter` passes in whatever the
+ *  dataKey resolves to, and TS has no runtime guarantee that it's a
+ *  string. */
+export function formatMonthLabel(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return MONTH_LONG_FMT.format(new Date(value));
+}
+
 // --- Helpers ---
 
 /**
