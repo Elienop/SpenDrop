@@ -9,8 +9,14 @@ services:
     environment:
       - PUID=1000
       - PGID=1000
-      - PORT=8080
-      - DB_PATH=/app/data/spendrop.db
+      - TZ=UTC
+      # Cookie security mode. Default "auto" detects from the request scheme.
+      # Set to "true" when behind an HTTPS reverse proxy (with TRUST_PROXY=true).
+      # Set to "false" for plain-HTTP LAN deployments.
+      # - COOKIE_SECURE=auto
+      # - TRUST_PROXY=true
+      # CORS origin for split-origin deployments. Leave unset for same-origin.
+      # - CORS_ORIGIN=https://spendrop.example.com
     restart: unless-stopped
 
 volumes:

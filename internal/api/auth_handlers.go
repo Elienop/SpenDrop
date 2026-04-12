@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -69,7 +68,7 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userI
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("SPENDROP_INSECURE") != "true",
+		Secure:   shouldMarkCookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   sessionCookieMaxAge,
 	})
@@ -295,7 +294,7 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("SPENDROP_INSECURE") != "true",
+		Secure:   shouldMarkCookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})

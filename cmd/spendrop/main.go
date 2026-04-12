@@ -27,6 +27,15 @@ func main() {
 		dbPath = "spendrop.db"
 	}
 
+	// Warn operators who have not chosen a cookie-security mode. Auto-detect is
+	// safe but we want the decision to be deliberate: in production, set
+	// COOKIE_SECURE=true and TRUST_PROXY=true behind a TLS terminator.
+	if os.Getenv("COOKIE_SECURE") == "" && os.Getenv("SPENDROP_INSECURE") == "" {
+		log.Println("NOTICE: COOKIE_SECURE not set — session cookies will auto-detect from the request scheme. " +
+			"For production behind an HTTPS reverse proxy, set COOKIE_SECURE=true and TRUST_PROXY=true. " +
+			"For plain-HTTP LAN deployments, set COOKIE_SECURE=false.")
+	}
+
 	// Open SQLite with WAL mode
 	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
 	sqlDB, err := sql.Open("sqlite3", dsn)

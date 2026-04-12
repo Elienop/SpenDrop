@@ -164,8 +164,11 @@ npm run lint        # TypeScript + ESLint
 | `PGID` | `911` | Group ID for file ownership |
 | `TZ` | `UTC` | Container timezone (e.g. `Asia/Beirut`, `Europe/Berlin`) |
 | `PORT` | `8080` | Server listen port |
-| `DB_PATH` | `spendrop.db` | SQLite database file path |
-| `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (set to your domain in production) |
+| `DB_PATH` | `spendrop.db` | SQLite database file path. The Docker image overrides this to `/app/data/spendrop.db` so the file lands in the mounted volume |
+| `COOKIE_SECURE` | `auto` | Session cookie `Secure` flag. `auto` detects from request scheme; set `true` when behind an HTTPS reverse proxy, `false` for plain-HTTP LAN deployments |
+| `TRUST_PROXY` | _(unset)_ | When `true`, honor `X-Forwarded-Proto` for HTTPS detection. Only enable behind a trusted reverse proxy (Caddy, nginx, Traefik) |
+| `CORS_ORIGIN` | _(unset)_ | Allowed CORS origin for split-origin deployments. Leave unset for same-origin (default). Example: `https://spendrop.example.com` |
+| `SPENDROP_INSECURE` | _(unset)_ | **Deprecated** — alias for `COOKIE_SECURE=false`. Use `COOKIE_SECURE=false` instead |
 
 ## Docker Configuration
 
@@ -185,13 +188,103 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=UTC              # e.g. Asia/Beirut, Europe/Berlin
-      - PORT=8080
-      - DB_PATH=/app/data/spendrop.db
+      # Cookie security mode. Default "auto" detects from the request scheme.
+      # Set to "true" when behind an HTTPS reverse proxy (with TRUST_PROXY=true).
+      # Set to "false" for plain-HTTP LAN deployments.
+      # - COOKIE_SECURE=auto
+      # - TRUST_PROXY=true
+      # CORS origin for split-origin deployments. Leave unset for same-origin.
+      # - CORS_ORIGIN=https://spendrop.example.com
     restart: unless-stopped
 
 volumes:
   spendrop-data:        # Persistent storage for SQLite database
 ```
+
+### Upgrading from an earlier version
+
+Before this release SpenDrop marked the session cookie `Secure` by default unless you set the old `SPENDROP_INSECURE=true`. The new default `COOKIE_SECURE=auto` detects the scheme from the incoming request instead.
+
+If you run behind an HTTPS reverse proxy, the backend sees plain HTTP on its internal port, so `auto` will emit a non-`Secure` cookie unless you tell it the proxy is trusted. To keep the old (stronger) behavior, add both:
+
+```yaml
+environment:
+  - COOKIE_SECURE=true
+  - TRUST_PROXY=true
+```
+
+Plain-HTTP LAN deployments that previously worked with `SPENDROP_INSECURE=true` will keep working — `SPENDROP_INSECURE` is now a deprecated alias for `COOKIE_SECURE=false`, but `COOKIE_SECURE=false` is preferred in new configs.
+
+### Deployment Scenarios
+
+**Plain HTTP on your LAN** (e.g. `http://192.168.1.10:3535`):
+
+```yaml
+environment:
+  - COOKIE_SECURE=false
+```
+
+Without this, browsers drop the session cookie because it would otherwise be marked `Secure` on a non-HTTPS origin, causing a 401 on every request after login.
+
+**Behind an HTTPS reverse proxy** (Caddy, nginx, Traefik):
+
+```yaml
+environment:
+  - COOKIE_SECURE=true
+  - TRUST_PROXY=true
+```
+
+`TRUST_PROXY=true` is required so the Go backend honors `X-Forwarded-Proto` from the upstream proxy. Only enable it when the container is not directly reachable from untrusted networks — a spoofed header would otherwise bypass the HTTPS check.
+
+### Caddy Reverse Proxy
+
+[Caddy](https://caddyserver.com) is the simplest way to put SpenDrop behind a real domain with automatic TLS from Let's Encrypt. Point an `A`/`AAAA` record at your server, then:
+
+```yaml
+# docker-compose.yml
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  spendrop:
+    image: ghcr.io/elienop/spendrop:latest
+    container_name: spendrop
+    # No host port needed — Caddy reaches it over the internal network
+    expose:
+      - "8080"
+    volumes:
+      - spendrop-data:/app/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - COOKIE_SECURE=true
+      - TRUST_PROXY=true
+    restart: unless-stopped
+
+volumes:
+  spendrop-data:
+  caddy-data:
+  caddy-config:
+```
+
+```caddy
+# Caddyfile
+spendrop.example.com {
+    reverse_proxy spendrop:8080
+}
+```
+
+Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start.
 
 ### Backup
 
