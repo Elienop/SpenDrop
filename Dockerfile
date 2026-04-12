@@ -18,7 +18,7 @@ RUN npm run build
 
 # Final image
 FROM alpine:3.20
-RUN apk add --no-cache ca-certificates sqlite-libs su-exec shadow \
+RUN apk add --no-cache ca-certificates sqlite-libs su-exec shadow tzdata \
     && addgroup -g 911 spendrop && adduser -u 911 -G spendrop -D spendrop
 WORKDIR /app
 COPY --from=go-builder /app/spendrop .
