@@ -13,40 +13,180 @@ import (
 )
 
 // --- Cookie Secure flag ---
+//
+// The Secure flag is controlled by COOKIE_SECURE with three modes:
+//   - "true"  → always Secure
+//   - "false" → never Secure (plain-HTTP deployments)
+//   - "auto"  → follow the request scheme (default)
+// Deprecated alias: SPENDROP_INSECURE=true == COOKIE_SECURE=false.
 
-func TestSetSessionCookie_SecureFlagDefaultsTrue(t *testing.T) {
+// resetCookieSecureEnv clears every env var that shouldMarkCookieSecure or
+// insecureModeEnabled reads, so each test starts from a hermetic baseline
+// even when the CI runner has one of them exported globally. Call it at the
+// top of any test that exercises cookie security or HSTS.
+func resetCookieSecureEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("COOKIE_SECURE", "")
+	t.Setenv("SPENDROP_INSECURE", "")
+	t.Setenv("TRUST_PROXY", "")
+}
+
+func sessionCookieFromRegister(t *testing.T, h *Handler) *http.Cookie {
+	t.Helper()
+	body := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", body)
+	rec := httptest.NewRecorder()
+	h.handleRegister(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "session" {
+			return c
+		}
+	}
+	t.Fatal("expected session cookie to be set")
+	return nil
+}
+
+func TestSetSessionCookie_CookieSecureTrue_AlwaysSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("COOKIE_SECURE", "true")
+
+	h := setupHandler(t)
+	c := sessionCookieFromRegister(t, h)
+	if !c.Secure {
+		t.Error("session cookie should have Secure flag when COOKIE_SECURE=true")
+	}
+}
+
+func TestSetSessionCookie_CookieSecureFalse_NeverSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("COOKIE_SECURE", "false")
+
+	h := setupHandler(t)
+	c := sessionCookieFromRegister(t, h)
+	if c.Secure {
+		t.Error("session cookie should NOT have Secure flag when COOKIE_SECURE=false")
+	}
+}
+
+func TestSetSessionCookie_AutoMode_PlainHTTPRequestNotSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+
+	h := setupHandler(t)
+	c := sessionCookieFromRegister(t, h)
+	if c.Secure {
+		t.Error("auto mode on plain HTTP should not set Secure (browsers drop it otherwise)")
+	}
+}
+
+func TestSetSessionCookie_AutoMode_TrustedProxyXFPHttps_IsSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("TRUST_PROXY", "true")
+
 	h := setupHandler(t)
 
 	body := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", body)
+	req.Header.Set("X-Forwarded-Proto", "https")
 	rec := httptest.NewRecorder()
-
 	h.handleRegister(rec, req)
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 
-	cookies := rec.Result().Cookies()
-	var sessionCookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == "session" {
-			sessionCookie = c
+	var c *http.Cookie
+	for _, cc := range rec.Result().Cookies() {
+		if cc.Name == "session" {
+			c = cc
 			break
 		}
 	}
-	if sessionCookie == nil {
-		t.Fatal("expected session cookie to be set")
+	if c == nil {
+		t.Fatal("expected session cookie")
 	}
-	if !sessionCookie.Secure {
-		t.Error("session cookie should have Secure flag set by default")
+	if !c.Secure {
+		t.Error("TRUST_PROXY=true with X-Forwarded-Proto=https should mark cookie Secure")
 	}
 }
 
-func TestLogoutCookie_SecureFlagDefaultsTrue(t *testing.T) {
+func TestIsSecureRequest_MultiValueXFP(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("TRUST_PROXY", "true")
+
+	cases := []struct {
+		xfp      string
+		expected bool
+		note     string
+	}{
+		{"https", true, "single value https"},
+		{"https, http", true, "client https, later hop http — leftmost wins"},
+		{"http, https", false, "client http, later hop https — leftmost wins"},
+		{"  https  ", true, "whitespace tolerance"},
+		{"HTTPS", true, "case insensitive"},
+		{"", false, "empty header"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.note, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			if tc.xfp != "" {
+				req.Header.Set("X-Forwarded-Proto", tc.xfp)
+			}
+			got := isSecureRequest(req)
+			if got != tc.expected {
+				t.Errorf("XFP=%q: expected %v, got %v", tc.xfp, tc.expected, got)
+			}
+		})
+	}
+}
+
+func TestSetSessionCookie_AutoMode_UntrustedProxyXFP_NotSecure(t *testing.T) {
+	resetCookieSecureEnv(t) // TRUST_PROXY unset — XFP must NOT be trusted
+
 	h := setupHandler(t)
 
-	// Register to get session
+	body := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", body)
+	req.Header.Set("X-Forwarded-Proto", "https") // attacker-controllable
+	rec := httptest.NewRecorder()
+	h.handleRegister(rec, req)
+
+	var c *http.Cookie
+	for _, cc := range rec.Result().Cookies() {
+		if cc.Name == "session" {
+			c = cc
+			break
+		}
+	}
+	if c == nil {
+		t.Fatal("expected session cookie")
+	}
+	if c.Secure {
+		t.Error("X-Forwarded-Proto must not be trusted without TRUST_PROXY=true")
+	}
+}
+
+func TestSetSessionCookie_DeprecatedSpendropInsecure_NotSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("SPENDROP_INSECURE", "true")
+
+	h := setupHandler(t)
+	c := sessionCookieFromRegister(t, h)
+	if c.Secure {
+		t.Error("deprecated SPENDROP_INSECURE=true should disable Secure flag")
+	}
+}
+
+func TestLogoutCookie_RespectsCookieSecure(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("COOKIE_SECURE", "true")
+
+	h := setupHandler(t)
+
+	// Register to get a session
 	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
 	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
 	regRec := httptest.NewRecorder()
@@ -60,26 +200,24 @@ func TestLogoutCookie_SecureFlagDefaultsTrue(t *testing.T) {
 		}
 	}
 
-	// Logout
 	logoutReq := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	logoutReq.Header.Set("Content-Type", "application/json")
 	logoutReq.AddCookie(&http.Cookie{Name: "session", Value: sessionToken})
 	logoutRec := httptest.NewRecorder()
 	h.handleLogout(logoutRec, logoutReq)
 
-	cookies := logoutRec.Result().Cookies()
-	var sessionCookie *http.Cookie
-	for _, c := range cookies {
-		if c.Name == "session" {
-			sessionCookie = c
+	var c *http.Cookie
+	for _, cc := range logoutRec.Result().Cookies() {
+		if cc.Name == "session" {
+			c = cc
 			break
 		}
 	}
-	if sessionCookie == nil {
-		t.Fatal("expected session cookie in response")
+	if c == nil {
+		t.Fatal("expected session cookie in logout response")
 	}
-	if !sessionCookie.Secure {
-		t.Error("logout cookie should have Secure flag set by default")
+	if !c.Secure {
+		t.Error("logout cookie should respect COOKIE_SECURE=true")
 	}
 }
 
@@ -526,8 +664,8 @@ func TestSecurityHeaders_CSPContentsCorrect(t *testing.T) {
 }
 
 func TestSecurityHeaders_HSTSSetByDefault(t *testing.T) {
-	// HSTS should be set when SPENDROP_INSECURE is not "true"
-	t.Setenv("SPENDROP_INSECURE", "")
+	// HSTS should be set when no insecure mode is active.
+	resetCookieSecureEnv(t)
 
 	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -546,7 +684,8 @@ func TestSecurityHeaders_HSTSSetByDefault(t *testing.T) {
 	}
 }
 
-func TestSecurityHeaders_HSTSSkippedWhenInsecure(t *testing.T) {
+func TestSecurityHeaders_HSTSSkippedWhenSpendropInsecure(t *testing.T) {
+	resetCookieSecureEnv(t)
 	t.Setenv("SPENDROP_INSECURE", "true")
 
 	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -563,9 +702,29 @@ func TestSecurityHeaders_HSTSSkippedWhenInsecure(t *testing.T) {
 	}
 }
 
+func TestSecurityHeaders_HSTSSkippedWhenCookieSecureFalse(t *testing.T) {
+	resetCookieSecureEnv(t)
+	t.Setenv("COOKIE_SECURE", "false")
+
+	handler := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	hsts := rec.Header().Get("Strict-Transport-Security")
+	if hsts != "" {
+		t.Errorf("expected no HSTS header when COOKIE_SECURE=false, got %q", hsts)
+	}
+}
+
 // --- CORS origin from env ---
 
-func TestCorsMiddleware_SetsVaryHeader(t *testing.T) {
+func TestCorsMiddleware_SetsVaryHeaderAlways(t *testing.T) {
+	t.Setenv("CORS_ORIGIN", "")
+
 	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -575,7 +734,66 @@ func TestCorsMiddleware_SetsVaryHeader(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	if v := rec.Header().Get("Vary"); v != "Origin" {
-		t.Errorf("expected Vary 'Origin', got %q", v)
+		t.Errorf("expected Vary 'Origin' on all responses, got %q", v)
+	}
+}
+
+func TestCorsMiddleware_UnsetOrigin_NoCORSHeaders(t *testing.T) {
+	// Fail-closed: when CORS_ORIGIN is not set, we do not silently whitelist
+	// a dev origin. Same-origin deployments (the default) need no CORS.
+	t.Setenv("CORS_ORIGIN", "")
+
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if v := rec.Header().Get("Access-Control-Allow-Origin"); v != "" {
+		t.Errorf("expected no Access-Control-Allow-Origin when CORS_ORIGIN unset, got %q", v)
+	}
+	if v := rec.Header().Get("Access-Control-Allow-Credentials"); v != "" {
+		t.Errorf("expected no Access-Control-Allow-Credentials when CORS_ORIGIN unset, got %q", v)
+	}
+}
+
+func TestCorsMiddleware_SetOrigin_EmitsCORSHeaders(t *testing.T) {
+	t.Setenv("CORS_ORIGIN", "https://spendrop.example.com")
+
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if v := rec.Header().Get("Access-Control-Allow-Origin"); v != "https://spendrop.example.com" {
+		t.Errorf("expected Access-Control-Allow-Origin from env, got %q", v)
+	}
+	if v := rec.Header().Get("Access-Control-Allow-Credentials"); v != "true" {
+		t.Errorf("expected Access-Control-Allow-Credentials true, got %q", v)
+	}
+	if v := rec.Header().Get("Access-Control-Allow-Methods"); v == "" {
+		t.Error("expected Access-Control-Allow-Methods header to be set")
+	}
+}
+
+func TestCorsMiddleware_OptionsPreflight_ReturnsNoContent(t *testing.T) {
+	t.Setenv("CORS_ORIGIN", "https://spendrop.example.com")
+
+	handler := corsMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("OPTIONS should short-circuit before next handler")
+	}))
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("expected 204, got %d", rec.Code)
 	}
 }
 

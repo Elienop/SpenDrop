@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api/client';
+import { TOP_MERCHANTS_DEFAULT_LIMIT } from '@/lib/constants';
 import type {
   BudgetVsActualEntry,
   CategoryBreakdownItem,
@@ -70,7 +71,11 @@ export function useIncomeExpenses(months: number) {
   return { data, loading, fetching, error };
 }
 
-export function useTopMerchants(year: number, month: number, limit = 10) {
+export function useTopMerchants(
+  year: number,
+  month: number,
+  limit: number = TOP_MERCHANTS_DEFAULT_LIMIT,
+) {
   const [data, setData] = useState<TopMerchantEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);

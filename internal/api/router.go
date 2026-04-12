@@ -10,11 +10,23 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/elienop/spendrop/internal/auth"
+	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
 )
 
-// NewRouter creates the main chi router with all API routes registered.
-func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
+// NewRouter creates the main chi router with all API routes registered. cfg
+// controls all runtime-tunable limits (rate limits, body size caps, session
+// TTL) — pass config.Defaults() if you don't care. A nil cfg also falls back
+// to defaults so tests and callers that don't need custom limits can stay
+// terse.
+func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Router {
+	if cfg == nil {
+		d := config.Defaults()
+		cfg = &d
+	}
+	ApplyConfig(cfg)
+	startRateLimitReset()
+
 	h := NewHandler(queries, db)
 	r := chi.NewRouter()
 
@@ -131,33 +143,47 @@ func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
 	return r
 }
 
-// securityHeaders adds standard security headers to every response.
+// securityHeaders adds standard security headers to every response. HSTS is
+// suppressed when the deployment has explicitly opted out of HTTPS (via
+// COOKIE_SECURE=false or the deprecated SPENDROP_INSECURE=true) so that
+// browsers don't pin a broken TLS upgrade.
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
-		if os.Getenv("SPENDROP_INSECURE") != "true" {
+		if !insecureModeEnabled() {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-// corsMiddleware adds CORS headers. The allowed origin defaults to the Vite dev
-// server but can be overridden via the CORS_ORIGIN environment variable.
+// corsMiddleware adds CORS headers for cross-origin deployments. Same-origin
+// deployments (the default: Go binary serves the React bundle) do not need
+// any CORS headers, so the middleware is fail-closed — headers are only
+// emitted when CORS_ORIGIN is explicitly set. This prevents the previous
+// behavior of silently whitelisting the Vite dev server in production.
+//
+// The Vary: Origin header is always emitted so that shared caches don't
+// serve cross-origin responses from a different origin's cache entry.
+//
+// CORS_ORIGIN is captured at router construction time — changing the env
+// var after startup has no effect.
 func corsMiddleware(next http.Handler) http.Handler {
 	origin := os.Getenv("CORS_ORIGIN")
-	if origin == "" {
-		origin = "http://localhost:5173"
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", origin)
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Vary", "Origin")
+		// Use Add rather than Set so a future handler that wants to vary on
+		// additional headers (Cookie, Accept-Encoding) is not clobbered.
+		w.Header().Add("Vary", "Origin")
+
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
 
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

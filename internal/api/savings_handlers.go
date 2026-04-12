@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -38,7 +39,7 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if user.Role != "admin" {
+	if user.Role != RoleAdmin {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -49,8 +50,8 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
-	if year < 2000 || year > 2100 {
-		writeError(w, http.StatusBadRequest, "year must be between 2000 and 2100")
+	if year < MinYear || year > MaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
 		return
 	}
 
@@ -64,7 +65,7 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "target_amount must not be negative")
 		return
 	}
-	if req.TargetAmount > 1_000_000_000 {
+	if req.TargetAmount > MaxTransactionAmount {
 		writeError(w, http.StatusBadRequest, "target_amount exceeds maximum allowed value")
 		return
 	}

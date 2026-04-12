@@ -39,7 +39,7 @@ jobs:
 
       - name: Push the Docker image to GitHub Container Registry
         run: |
-          echo ${{ secrets.CLASSIC_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           docker push ghcr.io/elienop/spendrop:${{ steps.tag.outputs.new_tag }}
           docker push ghcr.io/elienop/spendrop:latest
 

@@ -2,9 +2,9 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -22,8 +22,6 @@ func extractIP(remoteAddr string) string {
 	}
 	return host
 }
-
-const sessionCookieMaxAge = 30 * 24 * 3600 // 30 days in seconds
 
 // userResponse is the JSON representation of a user, excluding password_hash.
 type userResponse struct {
@@ -47,14 +45,16 @@ func toUserResponse(u database.User) userResponse {
 }
 
 // setSessionCookie creates a new session in the database and sets the session
-// cookie on the response.
+// cookie on the response. The cookie lifetime is read from the runtime config
+// via getSessionTTL so operators can tune SESSION_TTL without a code change.
 func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userID int64) error {
 	token, err := auth.GenerateSessionToken()
 	if err != nil {
 		return err
 	}
 
-	expiresAt := time.Now().Add(time.Duration(sessionCookieMaxAge) * time.Second)
+	ttl := getSessionTTL()
+	expiresAt := time.Now().Add(ttl)
 	err = h.queries.CreateSession(r.Context(), database.CreateSessionParams{
 		Token:     token,
 		UserID:    userID,
@@ -69,9 +69,9 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userI
 		Value:    token,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("SPENDROP_INSECURE") != "true",
+		Secure:   shouldMarkCookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
-		MaxAge:   sessionCookieMaxAge,
+		MaxAge:   int(ttl.Seconds()),
 	})
 	return nil
 }
@@ -83,7 +83,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	rateLimitMu.Lock()
 	attempts := registerAttempts[clientIP]
 	rateLimitMu.Unlock()
-	if attempts >= 10 {
+	if attempts >= getRateLimitMax() {
 		writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
 		return
 	}
@@ -105,8 +105,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if len(req.Username) < 3 || len(req.Username) > 32 {
-		writeError(w, http.StatusBadRequest, "username must be between 3 and 32 characters")
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if !isValidUsername(req.Username) {
@@ -117,12 +117,13 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	minLen, maxLen := getPasswordBounds()
+	if len(req.Password) < minLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
 		return
 	}
-	if len(req.Password) > 72 {
-		writeError(w, http.StatusBadRequest, "password must be 72 characters or less")
+	if len(req.Password) > maxLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
 		return
 	}
 
@@ -134,8 +135,8 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Default display name to username if not provided
 	displayName := req.DisplayName
-	if len(displayName) > 64 {
-		writeError(w, http.StatusBadRequest, "display name must be 64 characters or less")
+	if len(displayName) > MaxDisplayNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
 	if displayName == "" {
@@ -154,17 +155,17 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	qtx := h.queries.WithTx(tx)
 
 	// First user gets admin role
-	role := "member"
+	role := RoleMember
 	users, err := qtx.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to check existing users")
 		return
 	}
 	if len(users) == 0 {
-		role = "admin"
+		role = RoleAdmin
 	} else {
 		// Check if registration is enabled via app setting
-		setting, err := qtx.GetSetting(r.Context(), "registration_enabled")
+		setting, err := qtx.GetSetting(r.Context(), SettingRegistrationEnabled)
 		if err != nil || setting.Value != "true" {
 			writeError(w, http.StatusForbidden, "registration is disabled")
 			return
@@ -204,24 +205,36 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	loginAttempts      = make(map[string]int)
-	registerAttempts   = make(map[string]int)
-	rateLimitMu        sync.Mutex
-	rateLimitWindow    = time.Minute
+	loginAttempts    = make(map[string]int)
+	registerAttempts = make(map[string]int)
+	rateLimitMu      sync.Mutex
+
+	// rateLimitTickerOnce makes startRateLimitReset idempotent so multiple
+	// NewRouter calls (e.g. from test setups that spin up several routers in
+	// a single process) don't leak background goroutines.
+	rateLimitTickerOnce sync.Once
 )
 
-func init() {
-	// Reset rate limit counters every minute
-	go func() {
-		ticker := time.NewTicker(rateLimitWindow)
-		defer ticker.Stop()
-		for range ticker.C {
-			rateLimitMu.Lock()
-			loginAttempts = make(map[string]int)
-			registerAttempts = make(map[string]int)
-			rateLimitMu.Unlock()
-		}
-	}()
+// startRateLimitReset launches the background goroutine that clears the
+// rate-limit attempt counters every rateLimitTickerWindow. Called exactly
+// once from NewRouter after ApplyConfig has set the window. Safe to call
+// multiple times — subsequent calls are no-ops.
+func startRateLimitReset() {
+	rateLimitTickerOnce.Do(func() {
+		go func() {
+			runtimeMu.RLock()
+			window := rateLimitTickerWindow
+			runtimeMu.RUnlock()
+			ticker := time.NewTicker(window)
+			defer ticker.Stop()
+			for range ticker.C {
+				rateLimitMu.Lock()
+				loginAttempts = make(map[string]int)
+				registerAttempts = make(map[string]int)
+				rateLimitMu.Unlock()
+			}
+		}()
+	})
 }
 
 // handleLogin authenticates a user by username and password.
@@ -230,7 +243,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	rateLimitMu.Lock()
 	attempts := loginAttempts[clientIP]
 	rateLimitMu.Unlock()
-	if attempts >= 10 {
+	if attempts >= getRateLimitMax() {
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -295,7 +308,7 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   os.Getenv("SPENDROP_INSECURE") != "true",
+		Secure:   shouldMarkCookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   -1,
 	})

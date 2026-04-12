@@ -184,17 +184,17 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 			page = p
 		}
 	}
-	if page > 1000000 {
-		page = 1000000
+	if page > MaxPage {
+		page = MaxPage
 	}
-	perPage := 25
+	perPage := DefaultPerPage
 	if v := q.Get("per_page"); v != "" {
 		if pp, err := strconv.Atoi(v); err == nil && pp > 0 {
 			perPage = pp
 		}
 	}
-	if perPage > 100 {
-		perPage = 100
+	if perPage > MaxPerPage {
+		perPage = MaxPerPage
 	}
 
 	whereClause, args := buildTransactionWhereClause(q)
@@ -357,7 +357,7 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	// Ownership check: members can only edit their own
-	if user.Role != "admin" && existing.UserID != user.ID {
+	if user.Role != RoleAdmin && existing.UserID != user.ID {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -425,7 +425,7 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if user.Role != "admin" && existing.UserID != user.ID {
+	if user.Role != RoleAdmin && existing.UserID != user.ID {
 		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
@@ -457,8 +457,8 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "at least one transaction is required")
 		return
 	}
-	if len(reqs) > 500 {
-		writeError(w, http.StatusBadRequest, "batch size cannot exceed 500")
+	if len(reqs) > MaxBatchTransactions {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("batch size cannot exceed %d", MaxBatchTransactions))
 		return
 	}
 
@@ -527,14 +527,14 @@ func validateTransactionRequest(req transactionRequest) error {
 	if req.Description == "" {
 		return fmt.Errorf("description is required")
 	}
-	if len(req.Description) > 500 {
-		return fmt.Errorf("description must be 500 characters or less")
+	if len(req.Description) > MaxDescriptionLength {
+		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
-	if len(req.Tags) > 500 {
-		return fmt.Errorf("tags must be 500 characters or less")
+	if len(req.Tags) > MaxTagsLength {
+		return fmt.Errorf("tags must be %d characters or less", MaxTagsLength)
 	}
-	if len(req.Notes) > 2000 {
-		return fmt.Errorf("notes must be 2000 characters or less")
+	if len(req.Notes) > MaxNotesLength {
+		return fmt.Errorf("notes must be %d characters or less", MaxNotesLength)
 	}
 	if req.CategoryID <= 0 {
 		return fmt.Errorf("category_id is required")
@@ -544,10 +544,10 @@ func validateTransactionRequest(req transactionRequest) error {
 	if req.OriginalCurrency == "" && req.Amount <= 0 {
 		return fmt.Errorf("amount must be positive")
 	}
-	if math.IsInf(req.Amount, 0) || math.IsNaN(req.Amount) || req.Amount > 1_000_000_000 {
+	if math.IsInf(req.Amount, 0) || math.IsNaN(req.Amount) || req.Amount > MaxTransactionAmount {
 		return fmt.Errorf("amount exceeds maximum allowed value")
 	}
-	if req.OriginalAmount != nil && (math.IsInf(*req.OriginalAmount, 0) || math.IsNaN(*req.OriginalAmount) || *req.OriginalAmount > 1_000_000_000) {
+	if req.OriginalAmount != nil && (math.IsInf(*req.OriginalAmount, 0) || math.IsNaN(*req.OriginalAmount) || *req.OriginalAmount > MaxTransactionAmount) {
 		return fmt.Errorf("original_amount exceeds maximum allowed value")
 	}
 	return nil
@@ -586,8 +586,8 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "new_description is required")
 		return
 	}
-	if len(req.NewDescription) > 500 {
-		writeError(w, http.StatusBadRequest, "new_description must be 500 characters or less")
+	if len(req.NewDescription) > MaxDescriptionLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("new_description must be %d characters or less", MaxDescriptionLength))
 		return
 	}
 
@@ -596,7 +596,7 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 
 	var result sql.Result
 	var err error
-	if user.Role == "admin" {
+	if user.Role == RoleAdmin {
 		result, err = h.db.ExecContext(r.Context(),
 			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
 			req.NewDescription, "%"+escaped+"%",
@@ -646,8 +646,8 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusBadRequest, "at least one id is required")
 		return
 	}
-	if len(req.IDs) > 500 {
-		writeError(w, http.StatusBadRequest, "batch size cannot exceed 500")
+	if len(req.IDs) > MaxBatchDeleteIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("batch size cannot exceed %d", MaxBatchDeleteIDs))
 		return
 	}
 
@@ -667,7 +667,7 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			continue
 		}
 
-		if user.Role != "admin" && existing.UserID != user.ID {
+		if user.Role != RoleAdmin && existing.UserID != user.ID {
 			continue
 		}
 
@@ -700,7 +700,8 @@ func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Re
 	// Suggestions are shared across all household users — same visibility as
 	// handleListTransactions. No per-user scoping needed.
 	descRows, err := h.db.QueryContext(ctx,
-		`SELECT DISTINCT description FROM transactions ORDER BY description LIMIT 500`)
+		`SELECT DISTINCT description FROM transactions ORDER BY description LIMIT ?`,
+		DescriptionSuggestionLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query descriptions")
 		return
@@ -720,7 +721,8 @@ func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Re
 	}
 
 	tagRows, err := h.db.QueryContext(ctx,
-		`SELECT DISTINCT tags FROM transactions WHERE tags != '' AND tags IS NOT NULL LIMIT 1000`)
+		`SELECT DISTINCT tags FROM transactions WHERE tags != '' AND tags IS NOT NULL LIMIT ?`,
+		TagSuggestionLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query tags")
 		return

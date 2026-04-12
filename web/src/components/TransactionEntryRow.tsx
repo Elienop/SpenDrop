@@ -36,31 +36,32 @@ import { Card } from '@/components/ui/card';
 import { TagInput } from './TagInput';
 import { CategoryBadge } from './CategoryBadge';
 import type { Category, Transaction } from '../api/types';
-
-const LAST_CATEGORY_KEY = 'spendrop-last-category';
-const LAST_DATE_KEY = 'spendrop-last-date';
+import { formatYYYYMMDD } from '@/lib/dates';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return formatYYYYMMDD(new Date());
 }
 
 function getLastDate(): string {
-  return localStorage.getItem(LAST_DATE_KEY) ?? todayIso();
+  return (
+    localStorage.getItem(STORAGE_KEYS.lastTransactionDate) ?? todayIso()
+  );
 }
 
 function saveLastDate(value: string) {
-  localStorage.setItem(LAST_DATE_KEY, value);
+  localStorage.setItem(STORAGE_KEYS.lastTransactionDate, value);
 }
 
 function getLastCategoryId(): number {
-  const raw = localStorage.getItem(LAST_CATEGORY_KEY);
+  const raw = localStorage.getItem(STORAGE_KEYS.lastTransactionCategory);
   if (!raw) return 0;
   const parsed = Number.parseInt(raw, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
 }
 
 function saveLastCategory(id: number) {
-  localStorage.setItem(LAST_CATEGORY_KEY, String(id));
+  localStorage.setItem(STORAGE_KEYS.lastTransactionCategory, String(id));
 }
 
 function EntryLabel({ children }: { children: string }) {

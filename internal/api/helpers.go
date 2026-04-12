@@ -23,10 +23,11 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 
-// decodeJSON decodes a JSON request body into v. The body is limited to 1MB
-// to prevent oversized payloads from consuming excessive memory.
+// decodeJSON decodes a JSON request body into v. The body is limited to
+// MAX_JSON_BYTES (default 1 MiB, read from the runtime config) to prevent
+// oversized payloads from consuming excessive memory.
 func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
+	r.Body = http.MaxBytesReader(w, r.Body, getMaxJSONBytes())
 	defer r.Body.Close()
 	return json.NewDecoder(r.Body).Decode(v)
 }

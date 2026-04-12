@@ -7,11 +7,16 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip';
 import { cn } from '@/lib/utils';
-import { formatCurrency } from './utils';
 
 interface SpendingHeatmapProps {
   data: HeatmapEntry[];
   year: number;
+  /**
+   * Currency formatter bound to the household's base currency. Injected
+   * by the parent (PatternsTab) so the heatmap stays agnostic about
+   * which currency the household uses.
+   */
+  format: (amount: number) => string;
 }
 
 function generateYearDates(year: number): (string | null)[] {
@@ -47,7 +52,7 @@ function getOpacity(
   return 1;
 }
 
-export function SpendingHeatmap({ data, year }: SpendingHeatmapProps) {
+export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
   const cells = useMemo(() => generateYearDates(year), [year]);
 
   const { lookup, p25, p50, p75 } = useMemo(() => {
@@ -79,6 +84,7 @@ export function SpendingHeatmap({ data, year }: SpendingHeatmapProps) {
               p25={p25}
               p50={p50}
               p75={p75}
+              format={format}
             />
           ),
         )}
@@ -93,12 +99,14 @@ function HeatmapCell({
   p25,
   p50,
   p75,
+  format,
 }: {
   dateStr: string;
   total: number;
   p25: number;
   p50: number;
   p75: number;
+  format: (amount: number) => string;
 }) {
   return (
     <Tooltip>
@@ -117,7 +125,7 @@ function HeatmapCell({
       </TooltipTrigger>
       <TooltipContent>
         <p>
-          {dateStr}: {formatCurrency(total)}
+          {dateStr}: {format(total)}
         </p>
       </TooltipContent>
     </Tooltip>

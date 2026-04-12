@@ -34,7 +34,9 @@ import {
   dismissRecurring,
 } from '@/hooks/useReports';
 import { SpendingHeatmap } from './SpendingHeatmap';
-import { MONTH_FULL_NAMES, formatCurrency, yearOptions } from './utils';
+import { MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { cn } from '@/lib/utils';
 
 const TAG_CONFIG = {
@@ -49,6 +51,9 @@ export function PatternsTab() {
   const heatmap = useSpendingHeatmap(year);
   const recurring = useRecurring(year);
   const tags = useTagBreakdown(tagYear, tagMonth);
+
+  const baseCurrency = useBaseCurrency();
+  const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
   const tagYears = yearOptions();
 
@@ -94,7 +99,11 @@ export function PatternsTab() {
                 heatmap.fetching && !heatmap.loading && 'opacity-60',
               )}
             >
-              <SpendingHeatmap data={heatmap.data} year={year} />
+              <SpendingHeatmap
+                data={heatmap.data}
+                year={year}
+                format={fmt}
+              />
             </div>
           )}
         </CardContent>
@@ -148,13 +157,13 @@ export function PatternsTab() {
                       <TableRow key={entry.description}>
                         <TableCell>{entry.description}</TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
-                          {formatCurrency(entry.monthly_avg)}
+                          {fmt(entry.monthly_avg)}
                         </TableCell>
                         <TableCell className="text-right">
                           {entry.month_count}/12 months
                         </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
-                          {formatCurrency(entry.annual_total)}
+                          {fmt(entry.annual_total)}
                         </TableCell>
                         <TableCell>
                           <Button
@@ -204,7 +213,7 @@ export function PatternsTab() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="0">Year to Date</SelectItem>
-                {MONTH_FULL_NAMES.map((m, i) => (
+                {MONTH_NAMES_FULL.map((m, i) => (
                   <SelectItem key={m} value={String(i + 1)}>
                     {m}
                   </SelectItem>

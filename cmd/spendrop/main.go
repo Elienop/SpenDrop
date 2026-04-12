@@ -14,22 +14,32 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/elienop/spendrop/internal/api"
+	"github.com/elienop/spendrop/internal/auth"
+	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
 )
 
 func main() {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	dbPath := os.Getenv("DB_PATH")
-	if dbPath == "" {
-		dbPath = "spendrop.db"
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("load config: %v", err)
 	}
 
-	// Open SQLite with WAL mode
-	dsn := fmt.Sprintf("%s?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on", dbPath)
-	sqlDB, err := sql.Open("sqlite3", dsn)
+	// Push password/session tunables into the auth package before any
+	// hashing or token generation happens.
+	auth.Configure(cfg.Password.BcryptCost, cfg.Session.TokenBytes)
+
+	// Warn operators who have not chosen a cookie-security mode. Auto-detect is
+	// safe but we want the decision to be deliberate: in production, set
+	// COOKIE_SECURE=true and TRUST_PROXY=true behind a TLS terminator.
+	if os.Getenv("COOKIE_SECURE") == "" && os.Getenv("SPENDROP_INSECURE") == "" {
+		log.Println("NOTICE: COOKIE_SECURE not set — session cookies will auto-detect from the request scheme. " +
+			"For production behind an HTTPS reverse proxy, set COOKIE_SECURE=true and TRUST_PROXY=true. " +
+			"For plain-HTTP LAN deployments, set COOKIE_SECURE=false.")
+	}
+
+	// Open SQLite with WAL mode via the DSN derived from config.
+	sqlDB, err := sql.Open("sqlite3", cfg.SQLiteDSN())
 	if err != nil {
 		log.Fatalf("open database: %v", err)
 	}
@@ -48,10 +58,10 @@ func main() {
 		log.Printf("startup session cleanup error: %v", err)
 	}
 
-	// Clean expired sessions every hour, stopping on shutdown.
+	// Clean expired sessions at the configured cadence, stopping on shutdown.
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	go func() {
-		ticker := time.NewTicker(1 * time.Hour)
+		ticker := time.NewTicker(cfg.Session.CleanupInterval)
 		defer ticker.Stop()
 		for {
 			select {
@@ -65,16 +75,16 @@ func main() {
 		}
 	}()
 
-	router := api.NewRouter(queries, sqlDB)
+	router := api.NewRouter(queries, sqlDB, cfg)
 
-	addr := fmt.Sprintf(":%s", port)
+	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           router,
-		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		ReadHeaderTimeout: cfg.HTTP.ReadHeaderTimeout,
+		ReadTimeout:       cfg.HTTP.ReadTimeout,
+		WriteTimeout:      cfg.HTTP.WriteTimeout,
+		IdleTimeout:       cfg.HTTP.IdleTimeout,
 	}
 
 	// Graceful shutdown
@@ -92,7 +102,7 @@ func main() {
 	log.Println("Shutting down server...")
 	cleanupCancel() // stop background goroutines before closing DB
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {

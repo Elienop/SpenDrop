@@ -34,7 +34,7 @@ func (h *Handler) handleReportYoY(w http.ResponseWriter, r *http.Request) {
 	year := time.Now().Year()
 	if v := r.URL.Query().Get("year"); v != "" {
 		parsed, err := strconv.Atoi(v)
-		if err != nil || parsed < 2000 || parsed > 2100 {
+		if err != nil || parsed < MinYear || parsed > MaxYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -119,8 +119,8 @@ func (h *Handler) handleReportCategoryTrends(w http.ResponseWriter, r *http.Requ
 		if parsed < 1 {
 			parsed = 1
 		}
-		if parsed > 60 {
-			parsed = 60
+		if parsed > MaxCategoryTrendMonths {
+			parsed = MaxCategoryTrendMonths
 		}
 		months = parsed
 	}
@@ -188,8 +188,8 @@ func (h *Handler) handleReportIncomeExpenses(w http.ResponseWriter, r *http.Requ
 		if parsed < 1 {
 			parsed = 1
 		}
-		if parsed > 120 {
-			parsed = 120
+		if parsed > MaxTrendMonths {
+			parsed = MaxTrendMonths
 		}
 		months = parsed
 	}
@@ -249,15 +249,15 @@ func (h *Handler) handleReportTopMerchants(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	limit := int64(10)
+	limit := int64(DefaultTopMerchantsLimit)
 	if v := r.URL.Query().Get("limit"); v != "" {
 		parsed, parseErr := strconv.ParseInt(v, 10, 64)
 		if parseErr != nil || parsed < 1 {
 			writeError(w, http.StatusBadRequest, "invalid limit")
 			return
 		}
-		if parsed > 50 {
-			parsed = 50
+		if parsed > MaxTopMerchantsLimit {
+			parsed = MaxTopMerchantsLimit
 		}
 		limit = parsed
 	}

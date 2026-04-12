@@ -15,15 +15,15 @@ import (
 
 // dashboardSummaryResponse is the JSON response for GET /api/dashboard/summary.
 type dashboardSummaryResponse struct {
-	Year               int     `json:"year"`
-	Month              int     `json:"month"`
-	Budget             float64 `json:"budget"`
-	TotalSpent         float64 `json:"total_spent"`
-	TotalIncome        float64 `json:"total_income"`
-	Remaining          float64 `json:"remaining"`
-	SavingsThisMonth   float64 `json:"savings_this_month"`
-	SavingsGoal        float64 `json:"savings_goal"`
-	SavingsYTD         float64 `json:"savings_ytd"`
+	Year                int     `json:"year"`
+	Month               int     `json:"month"`
+	Budget              float64 `json:"budget"`
+	TotalSpent          float64 `json:"total_spent"`
+	TotalIncome         float64 `json:"total_income"`
+	Remaining           float64 `json:"remaining"`
+	SavingsThisMonth    float64 `json:"savings_this_month"`
+	SavingsGoal         float64 `json:"savings_goal"`
+	SavingsYTD          float64 `json:"savings_ytd"`
 	SavingsGoalProgress float64 `json:"savings_goal_progress"`
 }
 
@@ -66,8 +66,8 @@ func parseYearMonth(r *http.Request) (int, int, error) {
 		month = parsed
 	}
 
-	if year < 2000 || year > 2100 {
-		return 0, 0, fmt.Errorf("year must be between 2000 and 2100")
+	if year < MinYear || year > MaxYear {
+		return 0, 0, fmt.Errorf("year must be between %d and %d", MinYear, MaxYear)
 	}
 	if month < 1 || month > 12 {
 		return 0, 0, fmt.Errorf("month must be between 1 and 12")
@@ -102,7 +102,7 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	if err == nil {
 		budget = b.Amount
 	} else if errors.Is(err, sql.ErrNoRows) {
-		setting, settingErr := h.queries.GetSetting(ctx, "default_budget")
+		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
 			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 			if parseErr == nil {
@@ -171,15 +171,15 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	}
 
 	writeJSON(w, http.StatusOK, dashboardSummaryResponse{
-		Year:               year,
-		Month:              month,
-		Budget:             budget,
-		TotalSpent:         totalSpent,
-		TotalIncome:        totalIncome,
-		Remaining:          remaining,
-		SavingsThisMonth:   savingsThisMonth,
-		SavingsGoal:        savingsGoal,
-		SavingsYTD:         savingsYTD,
+		Year:                year,
+		Month:               month,
+		Budget:              budget,
+		TotalSpent:          totalSpent,
+		TotalIncome:         totalIncome,
+		Remaining:           remaining,
+		SavingsThisMonth:    savingsThisMonth,
+		SavingsGoal:         savingsGoal,
+		SavingsYTD:          savingsYTD,
 		SavingsGoalProgress: savingsGoalProgress,
 	})
 }
@@ -204,8 +204,8 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 	if months < 1 {
 		months = 1
 	}
-	if months > 120 {
-		months = 120
+	if months > MaxTrendMonths {
+		months = MaxTrendMonths
 	}
 
 	ctx := r.Context()
@@ -216,14 +216,14 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 		if m := r.URL.Query().Get("month"); m != "" {
 			py, errY := strconv.Atoi(y)
 			pm, errM := strconv.Atoi(m)
-			if errY == nil && errM == nil && py >= 2000 && py <= 2100 && pm >= 1 && pm <= 12 {
+			if errY == nil && errM == nil && py >= MinYear && py <= MaxYear && pm >= 1 && pm <= 12 {
 				anchor = time.Date(py, time.Month(pm), 1, 0, 0, 0, 0, time.UTC)
 			}
 		}
 	}
 
 	// Calculate date range: from (months-1) months ago to the anchor month
-	earliest := anchor.AddDate(0, -(months-1), 0)
+	earliest := anchor.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
 	dateTo := time.Date(anchor.Year(), anchor.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 

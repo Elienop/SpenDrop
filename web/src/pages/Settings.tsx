@@ -70,6 +70,10 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
+import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { ROLE_ADMIN, ROLE_MEMBER, isAdmin, type Role } from '@/lib/roles';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -81,21 +85,6 @@ const VALID_TABS = [
   'data',
 ] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
-
-const MONTH_NAMES = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December',
-] as const;
 
 /* ---------- Pure helpers ---------- */
 
@@ -464,12 +453,13 @@ function CurrenciesSection() {
 /* ---------- Savings Tab ---------- */
 
 const goalSchema = z.object({
-  year: z.number().int().min(2000).max(2099),
+  year: z.number().int().min(MIN_YEAR).max(MAX_YEAR),
   target_amount: z.number().min(0),
 });
 type GoalValues = z.infer<typeof goalSchema>;
 
 function SavingsSection() {
+  const baseCurrency = useBaseCurrency();
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
   const [addOpen, setAddOpen] = useState(false);
 
@@ -626,10 +616,7 @@ function SavingsSection() {
               <TableRow key={g.id}>
                 <TableCell>{g.year}</TableCell>
                 <TableCell className="font-mono tabular-nums">
-                  {g.target_amount.toLocaleString('en-US', {
-                    style: 'currency',
-                    currency: 'USD',
-                  })}
+                  {formatCurrency(g.target_amount, baseCurrency)}
                 </TableCell>
                 <TableCell className="text-right">
                   <Button
@@ -657,7 +644,7 @@ const newUserSchema = z.object({
   username: z.string().min(1, 'Username required'),
   password: z.string().min(1, 'Password required'),
   display_name: z.string().min(1, 'Display name required'),
-  role: z.enum(['admin', 'member']),
+  role: z.enum([ROLE_ADMIN, ROLE_MEMBER] as const),
 });
 type NewUserValues = z.infer<typeof newUserSchema>;
 
@@ -671,7 +658,7 @@ function UsersSection() {
       username: '',
       password: '',
       display_name: '',
-      role: 'member',
+      role: ROLE_MEMBER,
     },
   });
 
@@ -711,7 +698,7 @@ function UsersSection() {
     }
   }
 
-  async function handleRoleChange(userId: number, role: 'admin' | 'member') {
+  async function handleRoleChange(userId: number, role: Role) {
     try {
       await api.put(`users/${userId}`, { role });
       toast.success('Role updated');
@@ -803,7 +790,7 @@ function UsersSection() {
                       <Select
                         value={field.value}
                         onValueChange={(v) => {
-                          if (v !== 'admin' && v !== 'member') return;
+                          if (v !== ROLE_ADMIN && v !== ROLE_MEMBER) return;
                           field.onChange(v);
                         }}
                       >
@@ -814,8 +801,8 @@ function UsersSection() {
                         </FormControl>
                         <SelectContent>
                           <SelectGroup>
-                            <SelectItem value="admin">Admin</SelectItem>
-                            <SelectItem value="member">Member</SelectItem>
+                            <SelectItem value={ROLE_ADMIN}>Admin</SelectItem>
+                            <SelectItem value={ROLE_MEMBER}>Member</SelectItem>
                           </SelectGroup>
                         </SelectContent>
                       </Select>
@@ -850,7 +837,7 @@ function UsersSection() {
                   <Select
                     value={u.role}
                     onValueChange={(v) => {
-                      if (v !== 'admin' && v !== 'member') return;
+                      if (v !== ROLE_ADMIN && v !== ROLE_MEMBER) return;
                       void handleRoleChange(u.id, v);
                     }}
                   >
@@ -862,8 +849,8 @@ function UsersSection() {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
-                        <SelectItem value="admin">Admin</SelectItem>
-                        <SelectItem value="member">Member</SelectItem>
+                        <SelectItem value={ROLE_ADMIN}>Admin</SelectItem>
+                        <SelectItem value={ROLE_MEMBER}>Member</SelectItem>
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -1363,8 +1350,8 @@ function DataSection() {
                 type="number"
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
-                min={2000}
-                max={2099}
+                min={MIN_YEAR}
+                max={MAX_YEAR}
                 className="w-28"
               />
             </div>
@@ -1380,7 +1367,7 @@ function DataSection() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      {MONTH_NAMES.map((m, i) => (
+                      {MONTH_NAMES_FULL.map((m, i) => (
                         <SelectItem key={m} value={String(i + 1)}>
                           {m}
                         </SelectItem>
@@ -1407,7 +1394,7 @@ function DataSection() {
 
 export function Settings() {
   const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
+  const admin = isAdmin(user);
   const [searchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const initialTab = isValidTab(tabParam) ? tabParam : 'general';
@@ -1432,7 +1419,7 @@ export function Settings() {
           <TabsTrigger value="general">General</TabsTrigger>
           <TabsTrigger value="currencies">Currencies</TabsTrigger>
           <TabsTrigger value="savings">Savings</TabsTrigger>
-          {isAdmin && <TabsTrigger value="users">Users</TabsTrigger>}
+          {admin && <TabsTrigger value="users">Users</TabsTrigger>}
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="general" className="mt-6">
@@ -1444,7 +1431,7 @@ export function Settings() {
         <TabsContent value="savings" className="mt-6">
           <SavingsSection />
         </TabsContent>
-        {isAdmin && (
+        {admin && (
           <TabsContent value="users" className="mt-6">
             <UsersSection />
           </TabsContent>

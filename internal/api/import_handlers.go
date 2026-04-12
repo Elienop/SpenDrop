@@ -103,8 +103,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Limit upload to 10MB
-	r.Body = http.MaxBytesReader(w, r.Body, 10<<20)
+	// Limit upload size via MAX_UPLOAD_BYTES (default 10 MiB).
+	r.Body = http.MaxBytesReader(w, r.Body, getMaxUploadBytes())
 
 	file, _, err := r.FormFile("file")
 	if err != nil {
@@ -257,9 +257,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	const maxImportRows = 10000
-	if len(parsedRows) > maxImportRows {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many rows (max %d)", maxImportRows))
+	if len(parsedRows) > MaxImportRows {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("too many rows (max %d)", MaxImportRows))
 		return
 	}
 
@@ -539,4 +538,3 @@ func resolveCategoryID(categoryName string, categoryMap map[string]int64, catNam
 	// 3. Fall back to default
 	return defaultID
 }
-

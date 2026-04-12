@@ -43,7 +43,7 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 		}
 	}
 	if v := q.Get("type"); v != "" {
-		if v == "expense" || v == "income" {
+		if v == CategoryTypeExpense || v == CategoryTypeIncome {
 			conditions = append(conditions, "c.type = ?")
 			args = append(args, v)
 		}
@@ -68,11 +68,11 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 		}
 	}
 
-	// Multi-category: comma-separated IDs like "1,3,5" (max 100)
+	// Multi-category: comma-separated IDs like "1,3,5", capped at MaxMultiCategoryFilter
 	if v := q.Get("category_ids"); v != "" {
 		idStrs := strings.Split(v, ",")
-		if len(idStrs) > 100 {
-			idStrs = idStrs[:100]
+		if len(idStrs) > MaxMultiCategoryFilter {
+			idStrs = idStrs[:MaxMultiCategoryFilter]
 		}
 		var placeholders []string
 		for _, s := range idStrs {
@@ -114,7 +114,8 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	query := `SELECT t.date, t.description, c.name AS category_name, c.type AS category_type,
 		t.amount, t.original_amount, t.original_currency, t.tags, t.notes
 		FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + whereClause + ` ORDER BY t.date DESC, t.id DESC LIMIT 50000`
+		JOIN categories c ON t.category_id = c.id` + whereClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
+	args = append(args, MaxExportRows)
 
 	rows, err := h.db.QueryContext(r.Context(), query, args...)
 	if err != nil {
@@ -129,7 +130,8 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	sheet := "Transactions"
 	f.SetSheetName("Sheet1", sheet)
 
-	headers := []string{"Date", "Description", "Category", "Type", "Amount (USD)", "Original Amount", "Original Currency", "Tags", "Notes"}
+	baseCurrency := h.getBaseCurrency(r.Context())
+	headers := []string{"Date", "Description", "Category", "Type", fmt.Sprintf("Amount (%s)", baseCurrency), "Original Amount", "Original Currency", "Tags", "Notes"}
 	for i, h := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue(sheet, cell, h)
@@ -200,7 +202,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	monthStr := chi.URLParam(r, "month")
 
 	year, err := strconv.Atoi(yearStr)
-	if err != nil || year < 2000 || year > 2100 {
+	if err != nil || year < MinYear || year > MaxYear {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
@@ -263,7 +265,8 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	txnSheet := "Transactions"
 	f.NewSheet(txnSheet)
 
-	txnHeaders := []string{"Date", "Description", "Category", "Type", "Amount (USD)", "Original Amount", "Original Currency", "Tags", "Notes"}
+	baseCurrency := h.getBaseCurrency(ctx)
+	txnHeaders := []string{"Date", "Description", "Category", "Type", fmt.Sprintf("Amount (%s)", baseCurrency), "Original Amount", "Original Currency", "Tags", "Notes"}
 	for i, h := range txnHeaders {
 		f.SetCellValue(txnSheet, cellAt(i+1, 1), h)
 	}
@@ -273,9 +276,9 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		WHERE t.date >= ? AND t.date <= ?
-		ORDER BY t.date DESC, t.id DESC LIMIT 50000`
+		ORDER BY t.date DESC, t.id DESC LIMIT ?`
 
-	txnRows, err := h.db.QueryContext(ctx, txnQuery, dateFrom, dateTo)
+	txnRows, err := h.db.QueryContext(ctx, txnQuery, dateFrom, dateTo, MaxExportRows)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query transactions")
 		return
@@ -343,7 +346,7 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 
 	yearStr := chi.URLParam(r, "year")
 	year, err := strconv.Atoi(yearStr)
-	if err != nil || year < 2000 || year > 2100 {
+	if err != nil || year < MinYear || year > MaxYear {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}

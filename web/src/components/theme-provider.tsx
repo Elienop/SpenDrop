@@ -5,11 +5,10 @@ import {
   applyColorTheme,
   clearColorThemeOverrides,
 } from '@/lib/color-themes';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 import { ThemeProviderContext } from '@/hooks/useTheme';
 
 type Theme = 'dark' | 'light' | 'system';
-
-const COLOR_THEME_KEY = 'spendrop-color-theme';
 
 interface ThemeProviderProps {
   children: React.ReactNode;
@@ -20,7 +19,7 @@ interface ThemeProviderProps {
 export function ThemeProvider({
   children,
   defaultTheme = 'system',
-  storageKey = 'spendrop-theme',
+  storageKey = STORAGE_KEYS.theme,
   ...props
 }: ThemeProviderProps) {
   const [theme, setTheme] = useState<Theme>(
@@ -28,7 +27,9 @@ export function ThemeProvider({
   );
 
   const [colorTheme, setColorThemeState] = useState<ColorThemeId | null>(
-    () => (localStorage.getItem(COLOR_THEME_KEY) as ColorThemeId) || null,
+    () =>
+      (localStorage.getItem(STORAGE_KEYS.colorTheme) as ColorThemeId) ||
+      null,
   );
 
   // Apply dark/light class
@@ -59,9 +60,9 @@ export function ThemeProvider({
 
   const setColorTheme = (id: ColorThemeId | null) => {
     if (id) {
-      localStorage.setItem(COLOR_THEME_KEY, id);
+      localStorage.setItem(STORAGE_KEYS.colorTheme, id);
     } else {
-      localStorage.removeItem(COLOR_THEME_KEY);
+      localStorage.removeItem(STORAGE_KEYS.colorTheme);
     }
     setColorThemeState(id);
   };

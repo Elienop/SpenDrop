@@ -1,8 +1,11 @@
+import type { Role } from '@/lib/roles';
+import type { TransactionType } from '@/lib/transaction-types';
+
 export interface User {
   id: number;
   username: string;
   display_name: string;
-  role: 'admin' | 'member';
+  role: Role;
   created_at: string;
 }
 
@@ -16,7 +19,7 @@ export interface Transaction {
   description: string;
   category_id: number;
   category_name: string;
-  category_type: 'expense' | 'income';
+  category_type: TransactionType;
   tags: string | null;
   notes: string | null;
   created_at: string;
@@ -26,7 +29,7 @@ export interface Transaction {
 export interface Category {
   id: number;
   name: string;
-  type: 'expense' | 'income';
+  type: TransactionType;
   icon: string | null;
   sort_order: number;
   is_active: boolean;
@@ -141,7 +144,7 @@ export interface YoYResponse {
 export interface CategoryTrendEntry {
   id: number;
   name: string;
-  type: 'expense' | 'income';
+  type: TransactionType;
   data: { year: number; month: number; total: number }[];
 }
 
@@ -162,7 +165,7 @@ export interface TopMerchantEntry {
 // --- New Report Types ---
 
 export interface BudgetVsActualEntry {
-  month: number;       // 1-indexed, map via MONTH_NAMES[month - 1]
+  month: number;       // 1-indexed, map via MONTH_NAMES_SHORT[month - 1]
   budget: number;
   actual: number;
 }

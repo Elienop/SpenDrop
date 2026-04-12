@@ -18,7 +18,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { useIncomeExpenses, useBudgetVsActual } from '@/hooks/useReports';
-import { MONTH_NAMES, INCEXP_CONFIG, yearOptions } from './utils';
+import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
+import { INCEXP_CONFIG } from './utils';
 import { cn } from '@/lib/utils';
 
 const NET_FLOW_CONFIG = {
@@ -40,7 +41,7 @@ export function OverviewTab() {
   const incExpData = useMemo(
     () =>
       incExp.data.map((entry) => ({
-        name: `${MONTH_NAMES[entry.month - 1]} ${entry.year}`,
+        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
         income: entry.income,
         expenses: entry.expenses,
       })),
@@ -52,7 +53,7 @@ export function OverviewTab() {
     incExp.data.reduce((acc, entry) => {
       const total = acc + entry.net;
       result.push({
-        name: `${MONTH_NAMES[entry.month - 1]} ${entry.year}`,
+        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
         cumulative: total,
       });
       return total;
@@ -63,7 +64,7 @@ export function OverviewTab() {
   const bvaData = useMemo(
     () =>
       bva.data.map((e) => ({
-        name: MONTH_NAMES[e.month - 1],
+        name: MONTH_NAMES_SHORT[e.month - 1],
         budget: e.budget,
         actual: e.actual,
       })),

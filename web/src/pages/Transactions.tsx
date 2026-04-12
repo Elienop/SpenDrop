@@ -53,6 +53,10 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { cn } from '@/lib/utils';
+import { FORMAT_DATE_SHORT } from '@/lib/dates';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { TRANSACTION_PAGE_SIZES } from '@/lib/constants';
 
 // TODO(post-migration): Bulk select + bulk categorize (Checkbox column + Dialog)
 // are deferred. They require a new `useTransactions` hook method and a new
@@ -69,17 +73,18 @@ function buildActiveChips(
   filters: TransactionFilters,
   categories: Category[],
   setFilter: (key: keyof TransactionFilters, value: string) => void,
+  baseCurrency: string,
 ): ActiveChip[] {
   const chips: ActiveChip[] = [];
 
   if (filters.dateFrom || filters.dateTo) {
     let label: string;
     if (filters.dateFrom && filters.dateTo) {
-      label = `${format(new Date(filters.dateFrom), 'MMM d')} - ${format(new Date(filters.dateTo), 'MMM d')}`;
+      label = `${format(new Date(filters.dateFrom), FORMAT_DATE_SHORT)} - ${format(new Date(filters.dateTo), FORMAT_DATE_SHORT)}`;
     } else if (filters.dateFrom) {
-      label = `From ${format(new Date(filters.dateFrom), 'MMM d')}`;
+      label = `From ${format(new Date(filters.dateFrom), FORMAT_DATE_SHORT)}`;
     } else {
-      label = `Until ${format(new Date(filters.dateTo), 'MMM d')}`;
+      label = `Until ${format(new Date(filters.dateTo), FORMAT_DATE_SHORT)}`;
     }
     chips.push({
       key: 'date',
@@ -111,11 +116,11 @@ function buildActiveChips(
   if (filters.amountMin || filters.amountMax) {
     let label: string;
     if (filters.amountMin && filters.amountMax) {
-      label = `$${filters.amountMin} - $${filters.amountMax}`;
+      label = `${formatCurrency(parseFloat(filters.amountMin), baseCurrency)} - ${formatCurrency(parseFloat(filters.amountMax), baseCurrency)}`;
     } else if (filters.amountMin) {
-      label = `Min $${filters.amountMin}`;
+      label = `Min ${formatCurrency(parseFloat(filters.amountMin), baseCurrency)}`;
     } else {
-      label = `Max $${filters.amountMax}`;
+      label = `Max ${formatCurrency(parseFloat(filters.amountMax), baseCurrency)}`;
     }
     chips.push({
       key: 'amount',
@@ -137,8 +142,6 @@ function buildActiveChips(
 
   return chips;
 }
-
-const PER_PAGE_OPTIONS = [10, 20, 50, 100] as const;
 
 interface PaginationBarProps {
   page: number;
@@ -196,7 +199,7 @@ function PaginationBar({
           </SelectTrigger>
           <SelectContent side="top">
             <SelectGroup>
-              {PER_PAGE_OPTIONS.map((opt) => (
+              {TRANSACTION_PAGE_SIZES.map((opt) => (
                 <SelectItem key={opt} value={String(opt)}>
                   {opt}
                 </SelectItem>
@@ -319,6 +322,7 @@ function TableSkeleton() {
 }
 
 export function Transactions() {
+  const baseCurrency = useBaseCurrency();
   const {
     transactions,
     total,
@@ -503,8 +507,11 @@ export function Transactions() {
   }, [filters]);
 
   const activeChips = useMemo(
-    () => (showFilters ? [] : buildActiveChips(filters, categories, setFilter)),
-    [filters, showFilters, categories, setFilter],
+    () =>
+      showFilters
+        ? []
+        : buildActiveChips(filters, categories, setFilter, baseCurrency),
+    [filters, showFilters, categories, setFilter, baseCurrency],
   );
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -57,8 +58,8 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if len(req.Username) < 3 || len(req.Username) > 32 {
-		writeError(w, http.StatusBadRequest, "username must be between 3 and 32 characters")
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if !isValidUsername(req.Username) {
@@ -69,21 +70,22 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	minLen, maxLen := getPasswordBounds()
+	if len(req.Password) < minLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
 		return
 	}
-	if len(req.Password) > 72 {
-		writeError(w, http.StatusBadRequest, "password must be 72 characters or less")
+	if len(req.Password) > maxLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
 		return
 	}
-	if req.Role != "member" && req.Role != "admin" {
+	if req.Role != RoleMember && req.Role != RoleAdmin {
 		writeError(w, http.StatusBadRequest, "role must be 'member' or 'admin'")
 		return
 	}
 
-	if len(req.DisplayName) > 64 {
-		writeError(w, http.StatusBadRequest, "display name must be 64 characters or less")
+	if len(req.DisplayName) > MaxDisplayNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
 	if req.DisplayName == "" {
@@ -144,18 +146,18 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DisplayName != "" && len(req.DisplayName) > 64 {
-		writeError(w, http.StatusBadRequest, "display name must be 64 characters or less")
+	if req.DisplayName != "" && len(req.DisplayName) > MaxDisplayNameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
 
-	if req.Role != "" && req.Role != "member" && req.Role != "admin" {
+	if req.Role != "" && req.Role != RoleMember && req.Role != RoleAdmin {
 		writeError(w, http.StatusBadRequest, "role must be 'member' or 'admin'")
 		return
 	}
 
 	// Prevent admin from demoting themselves (could lock out all admins)
-	if req.Role == "member" && id == currentUser.ID {
+	if req.Role == RoleMember && id == currentUser.ID {
 		writeError(w, http.StatusBadRequest, "cannot demote yourself")
 		return
 	}

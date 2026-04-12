@@ -158,14 +158,62 @@ npm run lint        # TypeScript + ESLint
 
 ### Environment Variables
 
+Most deployments only need the first handful of variables. Everything below is a runtime knob that defaults to a sensible production value — set them only when you have a specific reason.
+
+#### Container / host
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PUID` | `911` | User ID for file ownership |
 | `PGID` | `911` | Group ID for file ownership |
 | `TZ` | `UTC` | Container timezone (e.g. `Asia/Beirut`, `Europe/Berlin`) |
 | `PORT` | `8080` | Server listen port |
-| `DB_PATH` | `spendrop.db` | SQLite database file path |
-| `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin (set to your domain in production) |
+| `DB_PATH` | `spendrop.db` | SQLite database file path. The Docker image overrides this to `/app/data/spendrop.db` so the file lands in the mounted volume |
+
+#### Cookies, proxies, and CORS
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COOKIE_SECURE` | `auto` | Session cookie `Secure` flag. `auto` detects from request scheme; set `true` when behind an HTTPS reverse proxy, `false` for plain-HTTP LAN deployments |
+| `TRUST_PROXY` | _(unset)_ | When `true`, honor `X-Forwarded-Proto` for HTTPS detection. Only enable behind a trusted reverse proxy (Caddy, nginx, Traefik) |
+| `CORS_ORIGIN` | _(unset)_ | Allowed CORS origin for split-origin deployments. Leave unset for same-origin (default). Example: `https://spendrop.example.com` |
+| `SPENDROP_INSECURE` | _(unset)_ | **Deprecated** — alias for `COOKIE_SECURE=false`. Use `COOKIE_SECURE=false` instead |
+
+#### HTTP server tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HTTP_READ_HEADER_TIMEOUT` | `5s` | Max time allowed to read request headers. Accepts any Go `time.Duration` (e.g. `500ms`, `2s`) |
+| `HTTP_READ_TIMEOUT` | `15s` | Max time to read the entire request |
+| `HTTP_WRITE_TIMEOUT` | `60s` | Max time to write the response. Raise this if you return large exports |
+| `HTTP_IDLE_TIMEOUT` | `120s` | Max keep-alive idle time |
+| `SHUTDOWN_GRACE` | `10s` | How long the server waits for in-flight requests during graceful shutdown |
+
+#### Sessions and passwords
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SESSION_TTL` | `720h` (30 days) | Session cookie lifetime |
+| `SESSION_CLEANUP_INTERVAL` | `1h` | How often the background job purges expired sessions |
+| `SESSION_TOKEN_BYTES` | `32` | Bytes of entropy per session token (must be ≥ 16) |
+| `BCRYPT_COST` | `12` | bcrypt work factor (4-31). Higher is slower but harder to brute force |
+| `PASSWORD_MIN_LENGTH` | `8` | Minimum password length |
+| `PASSWORD_MAX_LENGTH` | `72` | Maximum password length. Must be ≤ 72 (bcrypt's input limit) |
+
+#### Rate limiting
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
+| `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
+
+#### Uploads and database
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_JSON_BYTES` | `1048576` (1 MiB) | Maximum size of a JSON request body |
+| `MAX_UPLOAD_BYTES` | `10485760` (10 MiB) | Maximum size of a multipart file upload (xlsx import) |
+| `SQLITE_BUSY_TIMEOUT` | `5s` | SQLite busy timeout. Raise this if you see `database is locked` errors under heavy concurrent writes |
 
 ## Docker Configuration
 
@@ -185,13 +233,103 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=UTC              # e.g. Asia/Beirut, Europe/Berlin
-      - PORT=8080
-      - DB_PATH=/app/data/spendrop.db
+      # Cookie security mode. Default "auto" detects from the request scheme.
+      # Set to "true" when behind an HTTPS reverse proxy (with TRUST_PROXY=true).
+      # Set to "false" for plain-HTTP LAN deployments.
+      # - COOKIE_SECURE=auto
+      # - TRUST_PROXY=true
+      # CORS origin for split-origin deployments. Leave unset for same-origin.
+      # - CORS_ORIGIN=https://spendrop.example.com
     restart: unless-stopped
 
 volumes:
   spendrop-data:        # Persistent storage for SQLite database
 ```
+
+### Upgrading from an earlier version
+
+Before this release SpenDrop marked the session cookie `Secure` by default unless you set the old `SPENDROP_INSECURE=true`. The new default `COOKIE_SECURE=auto` detects the scheme from the incoming request instead.
+
+If you run behind an HTTPS reverse proxy, the backend sees plain HTTP on its internal port, so `auto` will emit a non-`Secure` cookie unless you tell it the proxy is trusted. To keep the old (stronger) behavior, add both:
+
+```yaml
+environment:
+  - COOKIE_SECURE=true
+  - TRUST_PROXY=true
+```
+
+Plain-HTTP LAN deployments that previously worked with `SPENDROP_INSECURE=true` will keep working — `SPENDROP_INSECURE` is now a deprecated alias for `COOKIE_SECURE=false`, but `COOKIE_SECURE=false` is preferred in new configs.
+
+### Deployment Scenarios
+
+**Plain HTTP on your LAN** (e.g. `http://192.168.1.10:3535`):
+
+```yaml
+environment:
+  - COOKIE_SECURE=false
+```
+
+Without this, browsers drop the session cookie because it would otherwise be marked `Secure` on a non-HTTPS origin, causing a 401 on every request after login.
+
+**Behind an HTTPS reverse proxy** (Caddy, nginx, Traefik):
+
+```yaml
+environment:
+  - COOKIE_SECURE=true
+  - TRUST_PROXY=true
+```
+
+`TRUST_PROXY=true` is required so the Go backend honors `X-Forwarded-Proto` from the upstream proxy. Only enable it when the container is not directly reachable from untrusted networks — a spoofed header would otherwise bypass the HTTPS check.
+
+### Caddy Reverse Proxy
+
+[Caddy](https://caddyserver.com) is the simplest way to put SpenDrop behind a real domain with automatic TLS from Let's Encrypt. Point an `A`/`AAAA` record at your server, then:
+
+```yaml
+# docker-compose.yml
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    restart: unless-stopped
+
+  spendrop:
+    image: ghcr.io/elienop/spendrop:latest
+    container_name: spendrop
+    # No host port needed — Caddy reaches it over the internal network
+    expose:
+      - "8080"
+    volumes:
+      - spendrop-data:/app/data
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=UTC
+      - COOKIE_SECURE=true
+      - TRUST_PROXY=true
+    restart: unless-stopped
+
+volumes:
+  spendrop-data:
+  caddy-data:
+  caddy-config:
+```
+
+```caddy
+# Caddyfile
+spendrop.example.com {
+    reverse_proxy spendrop:8080
+}
+```
+
+Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start.
 
 ### Backup
 
