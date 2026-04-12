@@ -38,6 +38,7 @@ import { CategoryBadge } from './CategoryBadge';
 import type { Category, Transaction } from '../api/types';
 import { formatYYYYMMDD } from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import { selectAllOnFocus } from '@/lib/utils';
 
 function todayIso(): string {
   return formatYYYYMMDD(new Date());
@@ -302,6 +303,7 @@ export function TransactionEntryRow({
                         e.target.value === '' ? 0 : Number(e.target.value),
                       )
                     }
+                    onFocus={selectAllOnFocus}
                     ref={(el) => {
                       field.ref(el);
                       amountRef.current = el;

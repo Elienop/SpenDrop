@@ -20,7 +20,7 @@ import type {
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { cn } from '@/lib/utils';
+import { cn, selectAllOnFocus } from '@/lib/utils';
 import {
   Card,
   CardContent,
@@ -189,6 +189,7 @@ function GeneralSection() {
                           e.target.value === '' ? 0 : Number(e.target.value),
                         )
                       }
+                      onFocus={selectAllOnFocus}
                     />
                   </FormControl>
                   <p className="text-xs text-muted-foreground">
@@ -342,6 +343,7 @@ function CurrenciesSection() {
                             [c.code]: e.target.value,
                           }))
                         }
+                        onFocus={selectAllOnFocus}
                         aria-label={`Rate for ${c.code}`}
                         className="max-w-[160px]"
                       />
@@ -433,6 +435,7 @@ function CurrenciesSection() {
                               : Number(e.target.value),
                           )
                         }
+                        onFocus={selectAllOnFocus}
                       />
                     </FormControl>
                     <FormMessage />
@@ -560,6 +563,7 @@ function SavingsSection() {
                                 : Number(e.target.value),
                             )
                           }
+                          onFocus={selectAllOnFocus}
                         />
                       </FormControl>
                       <FormMessage />
@@ -588,6 +592,7 @@ function SavingsSection() {
                                 : Number(e.target.value),
                             )
                           }
+                          onFocus={selectAllOnFocus}
                         />
                       </FormControl>
                       <FormMessage />
@@ -1350,6 +1355,7 @@ function DataSection() {
                 type="number"
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
+                onFocus={selectAllOnFocus}
                 min={MIN_YEAR}
                 max={MAX_YEAR}
                 className="w-28"
