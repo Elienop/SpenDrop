@@ -298,7 +298,7 @@ describe('TransactionEntryRow', () => {
     description.focus();
     await user.keyboard('{Escape}');
 
-    expect(amount.value).toBe('0');
+    expect(amount.value).toBe('');
     expect(description.value).toBe('');
   });
 
@@ -335,7 +335,7 @@ describe('TransactionEntryRow', () => {
 
     expect(
       (screen.getByLabelText(/amount/i) as HTMLInputElement).value,
-    ).toBe('0');
+    ).toBe('');
     expect(
       (screen.getByLabelText(/description/i) as HTMLInputElement).value,
     ).toBe('');
@@ -556,13 +556,9 @@ describe('TransactionEntryRow', () => {
 
     await user.click(screen.getByRole('button', { name: /add/i }));
 
-    expect(await screen.findByText(/amount must be > 0/i)).toBeInTheDocument();
-    expect(
-      await screen.findByText(/description required/i),
-    ).toBeInTheDocument();
-    expect(
-      await screen.findByText(/category required/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText('> 0')).toBeInTheDocument();
+    const requiredErrors = await screen.findAllByText('required');
+    expect(requiredErrors.length).toBeGreaterThanOrEqual(2);
     expect(onSubmit).not.toHaveBeenCalled();
   });
 

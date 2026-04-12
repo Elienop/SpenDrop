@@ -108,7 +108,7 @@ function HeatmapCell({
           style={
             total > 0
               ? {
-                  backgroundColor: 'hsl(var(--chart-5))',
+                  backgroundColor: 'hsl(var(--primary))',
                   opacity: getOpacity(total, p25, p50, p75),
                 }
               : undefined

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useState,
   type KeyboardEvent,
 } from 'react';
 import { useForm } from 'react-hook-form';
@@ -13,10 +14,11 @@ import {
   FormControl,
   FormField,
   FormItem,
-  FormLabel,
-  FormMessage,
+  useFormField,
 } from '@/components/ui/form';
+import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
+import { AutocompleteInput } from './AutocompleteInput';
 import { Button } from '@/components/ui/button';
 import {
   Popover,
@@ -61,11 +63,28 @@ function saveLastCategory(id: number) {
   localStorage.setItem(LAST_CATEGORY_KEY, String(id));
 }
 
+function EntryLabel({ children }: { children: string }) {
+  const { error, formItemId } = useFormField();
+  return (
+    <Label
+      htmlFor={formItemId}
+      className={error ? 'text-destructive' : undefined}
+    >
+      {children}
+      {error && (
+        <span className="ml-1 font-normal">
+          {String(error.message ?? '')}
+        </span>
+      )}
+    </Label>
+  );
+}
+
 const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
-  amount: z.number().positive('Amount must be > 0'),
-  description: z.string().min(1, 'Description required').max(200),
-  category_id: z.number().int().positive('Category required'),
+  amount: z.number().positive('> 0'),
+  description: z.string().min(1, 'required').max(200),
+  category_id: z.number().int().positive('required'),
   tags: z.string(),
 });
 export type EntryFormValues = z.infer<typeof entrySchema>;
@@ -74,15 +93,22 @@ export interface TransactionEntryRowProps {
   categories: Category[];
   onSubmit: (input: EntryFormValues) => Promise<Transaction>;
   onDelete: (id: number) => Promise<void>;
+  onClose?: () => void;
+  descriptionSuggestions?: string[];
+  tagSuggestions?: string[];
 }
 
 export function TransactionEntryRow({
   categories,
   onSubmit,
   onDelete,
+  onClose,
+  descriptionSuggestions = [],
+  tagSuggestions = [],
 }: TransactionEntryRowProps) {
   const formRef = useRef<HTMLFormElement | null>(null);
   const amountRef = useRef<HTMLInputElement | null>(null);
+  const [catOpen, setCatOpen] = useState(false);
   const undoBufferRef = useRef<{
     saved: Transaction;
     values: EntryFormValues;
@@ -163,7 +189,14 @@ export function TransactionEntryRow({
     const el = formRef.current?.querySelector<HTMLElement>(
       `[data-entry-field="${name}"]`,
     );
-    el?.focus();
+    if (!el) return;
+    el.focus();
+    if (el instanceof HTMLInputElement) {
+      el.select();
+    }
+    if (name === 'category_id') {
+      setCatOpen(true);
+    }
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLFormElement>) => {
@@ -176,6 +209,7 @@ export function TransactionEntryRow({
     if (e.key === 'Escape') {
       e.preventDefault();
       form.reset();
+      onClose?.();
       return;
     }
     if (e.key === 'Enter') {
@@ -231,7 +265,7 @@ export function TransactionEntryRow({
             name="date"
             render={({ field }) => (
               <FormItem className="w-36">
-                <FormLabel>Date</FormLabel>
+                <EntryLabel>Date</EntryLabel>
                 <FormControl>
                   <Input
                     type="date"
@@ -239,7 +273,6 @@ export function TransactionEntryRow({
                     {...field}
                   />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -249,7 +282,7 @@ export function TransactionEntryRow({
             name="amount"
             render={({ field }) => (
               <FormItem className="w-32">
-                <FormLabel>Amount</FormLabel>
+                <EntryLabel>Amount</EntryLabel>
                 <FormControl>
                   <Input
                     type="number"
@@ -258,8 +291,11 @@ export function TransactionEntryRow({
                     data-entry-field="amount"
                     className="font-mono tabular-nums"
                     name={field.name}
-                    onBlur={field.onBlur}
-                    value={field.value ?? 0}
+                    onBlur={(e) => {
+                      if (e.target.value === '') field.onChange(0);
+                      field.onBlur();
+                    }}
+                    value={field.value || ''}
                     onChange={(e) =>
                       field.onChange(
                         e.target.value === '' ? 0 : Number(e.target.value),
@@ -271,7 +307,6 @@ export function TransactionEntryRow({
                     }}
                   />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -281,11 +316,15 @@ export function TransactionEntryRow({
             name="description"
             render={({ field }) => (
               <FormItem className="flex-1 min-w-[12rem]">
-                <FormLabel>Description</FormLabel>
+                <EntryLabel>Description</EntryLabel>
                 <FormControl>
-                  <Input data-entry-field="description" {...field} />
+                  <AutocompleteInput
+                    data-entry-field="description"
+                    suggestions={descriptionSuggestions}
+                    onAccept={(v) => field.onChange(v)}
+                    {...field}
+                  />
                 </FormControl>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -295,8 +334,8 @@ export function TransactionEntryRow({
             name="category_id"
             render={({ field }) => (
               <FormItem className="w-48">
-                <FormLabel>Category</FormLabel>
-                <Popover>
+                <EntryLabel>Category</EntryLabel>
+                <Popover open={catOpen} onOpenChange={setCatOpen}>
                   <PopoverTrigger asChild>
                     <Button
                       type="button"
@@ -316,7 +355,11 @@ export function TransactionEntryRow({
                           <CommandItem
                             key={cat.id}
                             value={cat.name}
-                            onSelect={() => field.onChange(cat.id)}
+                            onSelect={() => {
+                              field.onChange(cat.id);
+                              setCatOpen(false);
+                              focusFieldByName('tags');
+                            }}
                           >
                             <CategoryBadge category={cat} />
                             <span className="ml-2">{cat.name}</span>
@@ -326,7 +369,6 @@ export function TransactionEntryRow({
                     </Command>
                   </PopoverContent>
                 </Popover>
-                <FormMessage />
               </FormItem>
             )}
           />
@@ -351,9 +393,9 @@ export function TransactionEntryRow({
                     value={field.value}
                     onChange={field.onChange}
                     placeholder="Add tags..."
+                    suggestions={tagSuggestions}
                   />
                 </label>
-                <FormMessage />
               </FormItem>
             )}
           />

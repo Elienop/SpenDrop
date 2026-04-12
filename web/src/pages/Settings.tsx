@@ -33,6 +33,7 @@ import {
   TabsList,
   TabsTrigger,
 } from '@/components/ui/tabs';
+import { ButtonGroup } from '@/components/ui/button-group';
 import {
   Select,
   SelectContent,
@@ -48,6 +49,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   Form,
@@ -469,6 +471,7 @@ type GoalValues = z.infer<typeof goalSchema>;
 
 function SavingsSection() {
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   const form = useForm<GoalValues>({
     resolver: zodResolver(goalSchema),
@@ -503,6 +506,7 @@ function SavingsSection() {
         target_amount: values.target_amount,
       });
       form.reset();
+      setAddOpen(false);
       toast.success('Savings goal added');
       refreshGoals();
     } catch (err) {
@@ -524,16 +528,97 @@ function SavingsSection() {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Savings Goals</CardTitle>
+        <Dialog open={addOpen} onOpenChange={(open) => {
+          setAddOpen(open);
+          if (!open) form.reset();
+        }}>
+          <DialogTrigger asChild>
+            <Button size="sm">Add Goal</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add Savings Goal</DialogTitle>
+              <DialogDescription>
+                Set a yearly savings target.
+              </DialogDescription>
+            </DialogHeader>
+            <Form {...form}>
+              <form
+                onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
+                className="grid gap-4"
+                noValidate
+              >
+                <FormField
+                  control={form.control}
+                  name="year"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Year</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          name={field.name}
+                          onBlur={field.onBlur}
+                          ref={field.ref}
+                          value={field.value ?? ''}
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value === ''
+                                ? 0
+                                : Number(e.target.value),
+                            )
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="target_amount"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Target Amount</FormLabel>
+                      <FormControl>
+                        <Input
+                          type="number"
+                          step="0.01"
+                          placeholder="0.00"
+                          name={field.name}
+                          onBlur={field.onBlur}
+                          ref={field.ref}
+                          value={field.value ?? ''}
+                          onChange={(e) =>
+                            field.onChange(
+                              e.target.value === ''
+                                ? 0
+                                : Number(e.target.value),
+                            )
+                          }
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="submit">Add Goal</Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
+      <CardContent>
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Year</TableHead>
               <TableHead>Target Amount</TableHead>
-              <TableHead>Actions</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -546,7 +631,7 @@ function SavingsSection() {
                     currency: 'USD',
                   })}
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   <Button
                     type="button"
                     variant="destructive"
@@ -561,76 +646,6 @@ function SavingsSection() {
             ))}
           </TableBody>
         </Table>
-
-        <Separator />
-        <div className="flex flex-col gap-4">
-          <h3 className="text-sm font-semibold">Add Goal</h3>
-          <Form {...form}>
-            <form
-              onSubmit={(e) => void form.handleSubmit(onAdd)(e)}
-              className="grid max-w-md gap-4 sm:grid-cols-2"
-              noValidate
-            >
-              <FormField
-                control={form.control}
-                name="year"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Year</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        name={field.name}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
-                        value={field.value ?? ''}
-                        onChange={(e) =>
-                          field.onChange(
-                            e.target.value === ''
-                              ? 0
-                              : Number(e.target.value),
-                          )
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="target_amount"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Target Amount</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        step="0.01"
-                        placeholder="0.00"
-                        name={field.name}
-                        onBlur={field.onBlur}
-                        ref={field.ref}
-                        value={field.value ?? ''}
-                        onChange={(e) =>
-                          field.onChange(
-                            e.target.value === ''
-                              ? 0
-                              : Number(e.target.value),
-                          )
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="sm:col-span-2">
-                <Button type="submit">Add Goal</Button>
-              </div>
-            </form>
-          </Form>
-        </div>
       </CardContent>
     </Card>
   );
@@ -648,6 +663,7 @@ type NewUserValues = z.infer<typeof newUserSchema>;
 
 function UsersSection() {
   const [users, setUsers] = useState<User[]>([]);
+  const [addOpen, setAddOpen] = useState(false);
 
   const form = useForm<NewUserValues>({
     resolver: zodResolver(newUserSchema),
@@ -687,6 +703,7 @@ function UsersSection() {
         role: values.role,
       });
       form.reset();
+      setAddOpen(false);
       toast.success('User added');
       refreshUsers();
     } catch (err) {
@@ -716,17 +733,112 @@ function UsersSection() {
 
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Users</CardTitle>
+        <Dialog open={addOpen} onOpenChange={(open) => {
+          setAddOpen(open);
+          if (!open) form.reset();
+        }}>
+          <DialogTrigger asChild>
+            <Button size="sm">Add User</Button>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add User</DialogTitle>
+              <DialogDescription>
+                Create a new household member account.
+              </DialogDescription>
+            </DialogHeader>
+            <Form {...form}>
+              <form
+                onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
+                className="grid gap-4"
+                noValidate
+              >
+                <FormField
+                  control={form.control}
+                  name="username"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Username</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="password"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Password</FormLabel>
+                      <FormControl>
+                        <Input type="password" {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="display_name"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Display Name</FormLabel>
+                      <FormControl>
+                        <Input {...field} />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <FormField
+                  control={form.control}
+                  name="role"
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>Role</FormLabel>
+                      <Select
+                        value={field.value}
+                        onValueChange={(v) => {
+                          if (v !== 'admin' && v !== 'member') return;
+                          field.onChange(v);
+                        }}
+                      >
+                        <FormControl>
+                          <SelectTrigger aria-label="New user role">
+                            <SelectValue />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          <SelectGroup>
+                            <SelectItem value="admin">Admin</SelectItem>
+                            <SelectItem value="member">Member</SelectItem>
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+                <DialogFooter>
+                  <Button type="submit">Add User</Button>
+                </DialogFooter>
+              </form>
+            </Form>
+          </DialogContent>
+        </Dialog>
       </CardHeader>
-      <CardContent className="flex flex-col gap-6">
+      <CardContent>
         <Table>
           <TableHeader>
             <TableRow>
               <TableHead>Username</TableHead>
               <TableHead>Display Name</TableHead>
               <TableHead>Role</TableHead>
-              <TableHead>Actions</TableHead>
+              <TableHead className="text-right">Actions</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -738,9 +850,6 @@ function UsersSection() {
                   <Select
                     value={u.role}
                     onValueChange={(v) => {
-                      // Narrow at runtime — Radix types onValueChange as
-                      // (v: string) => void so any future SelectItem added
-                      // by mistake would silently flow through an `as` cast.
                       if (v !== 'admin' && v !== 'member') return;
                       void handleRoleChange(u.id, v);
                     }}
@@ -759,7 +868,7 @@ function UsersSection() {
                     </SelectContent>
                   </Select>
                 </TableCell>
-                <TableCell>
+                <TableCell className="text-right">
                   <Button
                     type="button"
                     variant="destructive"
@@ -774,91 +883,6 @@ function UsersSection() {
             ))}
           </TableBody>
         </Table>
-
-        <Separator />
-        <div className="flex flex-col gap-4">
-          <h3 className="text-sm font-semibold">Add User</h3>
-          <Form {...form}>
-            <form
-              onSubmit={(e) => void form.handleSubmit(onAddUser)(e)}
-              className="grid max-w-2xl gap-4 sm:grid-cols-2"
-              noValidate
-            >
-              <FormField
-                control={form.control}
-                name="username"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Username</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="password"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Password</FormLabel>
-                    <FormControl>
-                      <Input type="password" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="display_name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Display Name</FormLabel>
-                    <FormControl>
-                      <Input {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="role"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Role</FormLabel>
-                    <Select
-                      value={field.value}
-                      onValueChange={(v) => {
-                        // Runtime narrow — see Role for ${user} above.
-                        if (v !== 'admin' && v !== 'member') return;
-                        field.onChange(v);
-                      }}
-                    >
-                      <FormControl>
-                        <SelectTrigger aria-label="New user role">
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectItem value="admin">Admin</SelectItem>
-                          <SelectItem value="member">Member</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <div className="sm:col-span-2">
-                <Button type="submit">Add User</Button>
-              </div>
-            </form>
-          </Form>
-        </div>
       </CardContent>
     </Card>
   );
@@ -887,7 +911,10 @@ function ImportPreviewStep({
   onConfirm,
   onCancel,
 }: ImportPreviewStepProps) {
-  const uniqueImportCategories = preview.unique_categories ?? [];
+  const uniqueImportCategories = useMemo(
+    () => preview.unique_categories ?? [],
+    [preview.unique_categories],
+  );
 
   const { matched, unmatched } = useMemo(() => {
     const m: { name: string; target: string }[] = [];
@@ -1061,6 +1088,7 @@ function DataSection() {
   const now = new Date();
   const [year, setYear] = useState(now.getFullYear());
   const [month, setMonth] = useState(now.getMonth() + 1);
+  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
 
   // Import wizard state
   const [importStep, setImportStep] = useState<ImportStep>('upload');
@@ -1311,7 +1339,23 @@ function DataSection() {
           <CardTitle className="text-base">Export</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
-          <div className="grid max-w-md gap-4 sm:grid-cols-2">
+          <ButtonGroup>
+            {([
+              { value: 'monthly', label: 'Monthly' },
+              { value: 'yearly', label: 'Yearly' },
+            ] as const).map((opt) => (
+              <Button
+                key={opt.value}
+                type="button"
+                variant={exportMode === opt.value ? 'secondary' : 'outline'}
+                size="sm"
+                onClick={() => setExportMode(opt.value)}
+              >
+                {opt.label}
+              </Button>
+            ))}
+          </ButtonGroup>
+          <div className="flex max-w-md items-end gap-3">
             <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
               <Input
@@ -1321,35 +1365,36 @@ function DataSection() {
                 onChange={(e) => setYear(Number(e.target.value))}
                 min={2000}
                 max={2099}
+                className="w-28"
               />
             </div>
-            <div className="flex flex-col gap-2">
-              <Label>Month</Label>
-              <Select
-                value={String(month)}
-                onValueChange={(v) => setMonth(Number(v))}
-              >
-                <SelectTrigger aria-label="Export Month">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {MONTH_NAMES.map((m, i) => (
-                      <SelectItem key={m} value={String(i + 1)}>
-                        {m}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <Button type="button" variant="outline" onClick={handleExportMonthly}>
-              Export Monthly
-            </Button>
-            <Button type="button" variant="outline" onClick={handleExportYearly}>
-              Export Yearly
+            {exportMode === 'monthly' && (
+              <div className="flex flex-col gap-2">
+                <Label>Month</Label>
+                <Select
+                  value={String(month)}
+                  onValueChange={(v) => setMonth(Number(v))}
+                >
+                  <SelectTrigger aria-label="Export Month" className="w-36">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {MONTH_NAMES.map((m, i) => (
+                        <SelectItem key={m} value={String(i + 1)}>
+                          {m}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
+            <Button
+              type="button"
+              onClick={exportMode === 'monthly' ? handleExportMonthly : handleExportYearly}
+            >
+              Export
             </Button>
           </div>
         </CardContent>

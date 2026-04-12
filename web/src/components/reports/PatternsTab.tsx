@@ -265,7 +265,7 @@ export function PatternsTab() {
                   {tags.data.map((_, i) => (
                     <Cell
                       key={i}
-                      fill={`hsl(var(--chart-${(i % 11) + 1}))`}
+                      fill={`hsl(var(--chart-${(i % 20) + 1}))`}
                     />
                   ))}
                 </Bar>

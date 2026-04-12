@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -691,4 +692,72 @@ func toNullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	// Suggestions are shared across all household users — same visibility as
+	// handleListTransactions. No per-user scoping needed.
+	descRows, err := h.db.QueryContext(ctx,
+		`SELECT DISTINCT description FROM transactions ORDER BY description LIMIT 500`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query descriptions")
+		return
+	}
+	defer descRows.Close()
+
+	descriptions := []string{}
+	for descRows.Next() {
+		var d string
+		if err := descRows.Scan(&d); err == nil && d != "" {
+			descriptions = append(descriptions, d)
+		}
+	}
+	if err := descRows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read descriptions")
+		return
+	}
+
+	tagRows, err := h.db.QueryContext(ctx,
+		`SELECT DISTINCT tags FROM transactions WHERE tags != '' AND tags IS NOT NULL LIMIT 1000`)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query tags")
+		return
+	}
+	defer tagRows.Close()
+
+	seen := map[string]bool{}
+	for tagRows.Next() {
+		var raw string
+		if err := tagRows.Scan(&raw); err != nil {
+			continue
+		}
+		for _, t := range strings.Split(raw, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" && !seen[t] {
+				seen[t] = true
+			}
+		}
+	}
+
+	if err := tagRows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read tags")
+		return
+	}
+
+	tags := make([]string, 0, len(seen))
+	for t := range seen {
+		tags = append(tags, t)
+	}
+	sort.Strings(tags)
+
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	writeJSON(w, http.StatusOK, struct {
+		Descriptions []string `json:"descriptions"`
+		Tags         []string `json:"tags"`
+	}{
+		Descriptions: descriptions,
+		Tags:         tags,
+	})
 }
