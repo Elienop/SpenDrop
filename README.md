@@ -172,7 +172,7 @@ The Docker setup uses a multi-stage build (Go builder, Node builder, Alpine runt
 # docker-compose.yml
 services:
   spendrop:
-    build: .
+    image: ghcr.io/elienop/spendrop:latest
     container_name: spendrop
     ports:
       - "3535:8080"     # Change 3535 to your preferred port

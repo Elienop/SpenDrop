@@ -1,6 +1,6 @@
 services:
   spendrop:
-    build: .
+    image: ghcr.io/elienop/spendrop:latest
     container_name: spendrop
     ports:
       - "3535:8080"
