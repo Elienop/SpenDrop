@@ -115,34 +115,52 @@ function autoMapCategories(
 
 function GeneralSection() {
   const baseCurrency = useBaseCurrency();
+  // Hoisted so both `useState` initializers share the same read of the
+  // system clock — otherwise a sub-millisecond drift across a year
+  // boundary could desync `yearInput` from `year` on first render.
+  const initialYear = new Date().getFullYear();
   // Dual state for the year input: `yearInput` is the raw string the user
   // is typing (keeps the input controlled even during mid-edit invalid
-  // states), `year` is the committed numeric value used to fetch. We
-  // commit on every keystroke that's in range, so the table tracks typing
-  // in real time, but `Number('') === 0` or an out-of-range value never
-  // slips through to the fetch (which would 400).
-  const [yearInput, setYearInput] = useState(() =>
-    String(new Date().getFullYear()),
-  );
-  const [year, setYear] = useState(() => new Date().getFullYear());
-  const [budgets, setBudgets] = useState<Budget[]>([]);
+  // states), `year` is the committed integer value used to fetch. We
+  // commit on every keystroke that's a valid integer in range, so the
+  // table tracks typing in real time, but `Number('') === 0`, a fractional
+  // value like `2026.5`, or an out-of-range number never slips through to
+  // the fetch (which would 400).
+  const [yearInput, setYearInput] = useState(() => String(initialYear));
+  const [year, setYear] = useState(initialYear);
   // Per-month input strings, keyed by 1-12. Strings (not numbers) so a
   // cleared field stays empty rather than collapsing to "0", which the
   // backend would reject and which is ambiguous with "not yet set".
   const [editAmounts, setEditAmounts] = useState<Record<number, string>>({});
   const [saving, setSaving] = useState(false);
+  // Snapshot of `editAmounts` at the moment of the last successful fetch,
+  // keyed by month. We compare the user's current input against the
+  // *string* baseline, not the numeric one, because SQLite REAL round-trips
+  // can produce `3000.0999999999999` from an original `3000.10` — a direct
+  // float compare (`Number('3000.10') === 3000.0999999999999`) returns
+  // `true` and silently drops a genuine edit. Stored in a ref so updating
+  // it doesn't trigger a re-render.
+  const baselineRef = useRef<Record<number, string>>({});
 
   const fetchBudgets = useCallback(async () => {
     const data = await api.get<Budget[]>(`budgets?year=${year}`);
-    setBudgets(data);
     const amounts: Record<number, string> = {};
     for (const b of data) amounts[b.month] = String(b.amount);
+    baselineRef.current = { ...amounts };
     setEditAmounts(amounts);
   }, [year]);
 
   useEffect(() => {
-    fetchBudgets().catch(() => {
-      /* non-critical; table will show empty inputs */
+    fetchBudgets().catch((err) => {
+      // Surface rather than swallow: the previous silent catch would leave
+      // stale rows on screen after a failed year-change fetch, and any
+      // subsequent save would target the *last successfully loaded* year.
+      baselineRef.current = {};
+      setEditAmounts({});
+      toast.error(
+        'Failed to load budgets: ' +
+          (err instanceof Error ? err.message : 'unknown'),
+      );
     });
   }, [fetchBudgets]);
 
@@ -151,7 +169,8 @@ function GeneralSection() {
     setYearInput(v);
     if (v === '') return;
     const n = Number(v);
-    if (Number.isFinite(n) && n >= MIN_YEAR && n <= MAX_YEAR) {
+    // `Number.isInteger` (not `isFinite`) — rejects `2026.5`, `1e10`, NaN.
+    if (Number.isInteger(n) && n >= MIN_YEAR && n <= MAX_YEAR) {
       setYear(n);
     }
   }
@@ -160,9 +179,8 @@ function GeneralSection() {
     e.preventDefault();
 
     // Bucket the 12 rows into pending (save), invalid (block), unchanged
-    // (skip). O(1) lookups via Map since the inner loop runs 12 times per
-    // submit — negligible now but avoids a trap if the editor ever grows.
-    const byMonth = new Map(budgets.map((b) => [b.month, b.amount]));
+    // (skip). O(1) baseline lookups via the ref — comparison is on
+    // strings, see the `baselineRef` comment for rationale.
     const pending: { month: number; amount: number }[] = [];
     const invalidMonths: number[] = [];
     for (let m = 1; m <= 12; m++) {
@@ -175,8 +193,8 @@ function GeneralSection() {
         invalidMonths.push(m);
         continue;
       }
-      const existing = byMonth.get(m) ?? 0;
-      if (n === existing) continue;
+      const baseline = baselineRef.current[m] ?? '';
+      if (raw === baseline) continue;
       pending.push({ month: m, amount: n });
     }
 
@@ -193,15 +211,25 @@ function GeneralSection() {
     }
 
     setSaving(true);
+    // Track the month we're currently PUTting so a mid-loop failure can
+    // point the user at the row that broke, rather than a generic error.
+    let failedMonth: number | null = null;
     try {
       for (const { month, amount } of pending) {
+        failedMonth = month;
         await api.put(`budgets/${year}/${month}`, { amount });
       }
+      failedMonth = null;
       toast.success(
         `Saved ${pending.length} budget${pending.length === 1 ? '' : 's'}`,
       );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save');
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      if (failedMonth !== null) {
+        toast.error(`${MONTH_NAMES_FULL[failedMonth - 1]}: ${msg}`);
+      } else {
+        toast.error(msg);
+      }
     } finally {
       // Await the refetch so `saving` stays true (and inputs stay
       // disabled) until local state is consistent with server truth.
@@ -219,29 +247,43 @@ function GeneralSection() {
     }
   }
 
+  // True when the user is typing something the committed `year` state
+  // hasn't accepted (empty, fractional, out of range). Drives `aria-invalid`
+  // and a small hint below the input so the user knows the table isn't
+  // reflecting what they typed.
+  const yearDivergent = yearInput !== String(year);
+
   return (
     <Card>
       <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <CardTitle className="text-base">Monthly Budgets</CardTitle>
-        <div className="flex items-center gap-2">
-          <Label
-            htmlFor="budget-year"
-            className="text-sm text-muted-foreground"
-          >
-            Year
-          </Label>
-          <Input
-            id="budget-year"
-            type="number"
-            value={yearInput}
-            onChange={handleYearChange}
-            onFocus={selectAllOnFocus}
-            min={MIN_YEAR}
-            max={MAX_YEAR}
-            disabled={saving}
-            className="w-24"
-            aria-label="Budget year"
-          />
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-2">
+            <Label
+              htmlFor="budget-year"
+              className="text-sm text-muted-foreground"
+            >
+              Year
+            </Label>
+            <Input
+              id="budget-year"
+              type="number"
+              value={yearInput}
+              onChange={handleYearChange}
+              onFocus={selectAllOnFocus}
+              min={MIN_YEAR}
+              max={MAX_YEAR}
+              disabled={saving}
+              aria-invalid={yearDivergent}
+              className="w-24"
+              aria-label="Budget year"
+            />
+          </div>
+          {yearDivergent && (
+            <p className="text-xs text-muted-foreground">
+              Showing {year}
+            </p>
+          )}
         </div>
       </CardHeader>
       <CardContent>
