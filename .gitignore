@@ -41,6 +41,9 @@ Thumbs.db
 skills-lock.json
 .playwright-mcp/
 
+# Local-only dev compose override
+docker-compose.dev.yml
+
 # Superpowers (local-only)
 docs/superpowers/
 .superpowers/
