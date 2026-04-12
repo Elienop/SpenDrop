@@ -44,7 +44,10 @@ import {
   useExpenseVelocity,
 } from '@/hooks/useReports';
 import { getCategoryColorVar } from '@/lib/chart-colors';
-import { MONTH_NAMES, MONTH_FULL_NAMES, formatCurrency, yearOptions } from './utils';
+import { MONTH_NAMES_SHORT, MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { cn } from '@/lib/utils';
 import type { ExpenseVelocityData } from '@/api/types';
 
@@ -102,6 +105,9 @@ export function SpendingTab() {
   const merchants = useTopMerchants(year, month);
   const velocity = useExpenseVelocity(year, month);
 
+  const baseCurrency = useBaseCurrency();
+  const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
+
   const years = yearOptions();
 
   // Category breakdown bar chart data
@@ -132,7 +138,7 @@ export function SpendingTab() {
   const expenseCategories = useMemo(
     () =>
       catTrends.data
-        .filter((c) => c.type === 'expense')
+        .filter((c) => c.type === TYPE_EXPENSE)
         .map((c) => ({
           ...c,
           totalSum: c.data.reduce((sum, d) => sum + d.total, 0),
@@ -159,7 +165,7 @@ export function SpendingTab() {
     return sortedMonths.map((ym) => {
       const [y, m] = ym.split('-').map(Number);
       const point: Record<string, string | number> = {
-        name: `${MONTH_NAMES[m - 1]} '${String(y).slice(2)}`,
+        name: `${MONTH_NAMES_SHORT[m - 1]} '${String(y).slice(2)}`,
       };
       for (const cat of expenseCategories) {
         point[`cat-${cat.id}`] = byCat.get(cat.id)?.get(ym) ?? 0;
@@ -195,7 +201,7 @@ export function SpendingTab() {
             >
               Category Breakdown
             </CardTitle>
-            <CardDescription className="text-xs">{formatCurrency(breakdownTotal)} total</CardDescription>
+            <CardDescription className="text-xs">{fmt(breakdownTotal)} total</CardDescription>
           </div>
           <div className="flex gap-2">
             <Select
@@ -209,7 +215,7 @@ export function SpendingTab() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {MONTH_FULL_NAMES.map((m, i) => (
+                {MONTH_NAMES_FULL.map((m, i) => (
                   <SelectItem key={m} value={String(i + 1)}>
                     {m}
                   </SelectItem>
@@ -277,7 +283,7 @@ export function SpendingTab() {
                       dataKey="total"
                       position="right"
                       className="fill-muted-foreground text-xs"
-                      formatter={(value: number) => formatCurrency(value)}
+                      formatter={(value: number) => fmt(value)}
                     />
                     {breakdownSorted.map((entry) => (
                       <Cell
@@ -409,7 +415,7 @@ export function SpendingTab() {
                           {m.tx_count}
                         </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
-                          {formatCurrency(m.total)}
+                          {fmt(m.total)}
                         </TableCell>
                       </TableRow>
                     ))}

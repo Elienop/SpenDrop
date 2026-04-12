@@ -46,12 +46,16 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
-
-type CategoryType = 'expense' | 'income';
+import { isAdmin } from '@/lib/roles';
+import {
+  TYPE_EXPENSE,
+  TYPE_INCOME,
+  type TransactionType,
+} from '@/lib/transaction-types';
 
 interface CategoryFormData {
   name: string;
-  type: CategoryType;
+  type: TransactionType;
   icon: string;
 }
 
@@ -62,7 +66,7 @@ interface CategoryEditorState {
 
 export function Categories() {
   const { user } = useAuth();
-  const isAdmin = user?.role === 'admin';
+  const admin = isAdmin(user);
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -153,7 +157,7 @@ export function Categories() {
   const sortedCategories = useMemo(
     () =>
       [...categories].sort((a, b) => {
-        if (a.type !== b.type) return a.type === 'expense' ? -1 : 1;
+        if (a.type !== b.type) return a.type === TYPE_EXPENSE ? -1 : 1;
         return a.sort_order - b.sort_order;
       }),
     [categories],
@@ -163,7 +167,7 @@ export function Categories() {
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold tracking-tight">Categories</h1>
-        {isAdmin && (
+        {admin && (
           <Button
             onClick={() => setEditor({ mode: 'create' })}
             aria-label="Add category"
@@ -224,13 +228,13 @@ export function Categories() {
                     </TableCell>
                     <TableCell>
                       <Badge
-                        variant={cat.type === 'expense' ? 'outline' : 'secondary'}
+                        variant={cat.type === TYPE_EXPENSE ? 'outline' : 'secondary'}
                       >
-                        {cat.type === 'expense' ? 'Expense' : 'Income'}
+                        {cat.type === TYPE_EXPENSE ? 'Expense' : 'Income'}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-right">
-                      {isAdmin && (
+                      {admin && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild>
                             <Button
@@ -294,7 +298,7 @@ function CategoryEditorSheet({
   onSave: (data: CategoryFormData) => void;
 }) {
   const [name, setName] = useState('');
-  const [type, setType] = useState<CategoryType>('expense');
+  const [type, setType] = useState<TransactionType>(TYPE_EXPENSE);
   const [icon, setIcon] = useState('');
 
   const mode = state?.mode;
@@ -312,7 +316,7 @@ function CategoryEditorSheet({
       setIcon(state.category.icon ?? '');
     } else {
       setName('');
-      setType('expense');
+      setType(TYPE_EXPENSE);
       setIcon('');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -362,15 +366,15 @@ function CategoryEditorSheet({
               <Label htmlFor="category-type">Type</Label>
               <Select
                 value={type}
-                onValueChange={(v) => setType(v as CategoryType)}
+                onValueChange={(v) => setType(v as TransactionType)}
               >
                 <SelectTrigger id="category-type">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
                   <SelectGroup>
-                    <SelectItem value="expense">Expense</SelectItem>
-                    <SelectItem value="income">Income</SelectItem>
+                    <SelectItem value={TYPE_EXPENSE}>Expense</SelectItem>
+                    <SelectItem value={TYPE_INCOME}>Income</SelectItem>
                   </SelectGroup>
                 </SelectContent>
               </Select>

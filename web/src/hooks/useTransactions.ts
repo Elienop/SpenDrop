@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { Transaction, PaginatedResponse } from '../api/types';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
+import {
+  TRANSACTION_PAGE_SIZES,
+  DEFAULT_TRANSACTIONS_PER_PAGE,
+} from '@/lib/constants';
 
 export interface TransactionFilters {
   dateFrom: string;
@@ -68,15 +73,17 @@ const defaultFilters: TransactionFilters = {
 
 function getInitialPerPage(): number {
   try {
-    const stored = localStorage.getItem('spendrop-tx-per-page');
+    const stored = localStorage.getItem(STORAGE_KEYS.transactionsPerPage);
     if (stored) {
       const parsed = Number(stored);
-      if ([10, 20, 50, 100].includes(parsed)) return parsed;
+      if ((TRANSACTION_PAGE_SIZES as readonly number[]).includes(parsed)) {
+        return parsed;
+      }
     }
   } catch {
     // localStorage not available
   }
-  return 20;
+  return DEFAULT_TRANSACTIONS_PER_PAGE;
 }
 
 export function useTransactions(): UseTransactionsResult {
@@ -148,7 +155,7 @@ export function useTransactions(): UseTransactionsResult {
     setPerPageState(value);
     setPage(1);
     try {
-      localStorage.setItem('spendrop-tx-per-page', String(value));
+      localStorage.setItem(STORAGE_KEYS.transactionsPerPage, String(value));
     } catch {
       // localStorage not available
     }

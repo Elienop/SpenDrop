@@ -23,6 +23,7 @@ import { ModeToggle } from '@/components/ModeToggle';
 import { ColorThemePicker } from '@/components/ColorThemePicker';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 const menuItems = [
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
@@ -38,7 +39,7 @@ const generalItems = [
 export function Sidebar() {
   const { user, logout } = useAuth();
   const [expanded, setExpanded] = useState(
-    () => localStorage.getItem('spendrop-sidebar') === 'true',
+    () => localStorage.getItem(STORAGE_KEYS.sidebar) === 'true',
   );
 
   const didMountRef = useRef(false);
@@ -47,7 +48,7 @@ export function Sidebar() {
       didMountRef.current = true;
       return;
     }
-    localStorage.setItem('spendrop-sidebar', String(expanded));
+    localStorage.setItem(STORAGE_KEYS.sidebar, String(expanded));
     window.dispatchEvent(new Event('sidebar-toggle'));
   }, [expanded]);
 

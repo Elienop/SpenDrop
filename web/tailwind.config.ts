@@ -51,6 +51,10 @@ const config: Config = {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        // Chart palette mirrors the --chart-N CSS variables in
+        // globals.css. Keep this block in sync with globals.css: a
+        // missing slot here means the class `bg-chart-N` silently
+        // becomes a no-op even though the CSS variable exists.
         chart: {
           '1': 'hsl(var(--chart-1))',
           '2': 'hsl(var(--chart-2))',
@@ -63,6 +67,15 @@ const config: Config = {
           '9': 'hsl(var(--chart-9))',
           '10': 'hsl(var(--chart-10))',
           '11': 'hsl(var(--chart-11))',
+          '12': 'hsl(var(--chart-12))',
+          '13': 'hsl(var(--chart-13))',
+          '14': 'hsl(var(--chart-14))',
+          '15': 'hsl(var(--chart-15))',
+          '16': 'hsl(var(--chart-16))',
+          '17': 'hsl(var(--chart-17))',
+          '18': 'hsl(var(--chart-18))',
+          '19': 'hsl(var(--chart-19))',
+          '20': 'hsl(var(--chart-20))',
         },
       },
       borderRadius: {

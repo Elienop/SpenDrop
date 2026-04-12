@@ -7,15 +7,18 @@ import { Categories } from '../pages/Categories';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
 import { Toaster } from '@/components/ui/sonner';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 export function AppShell() {
   const [sidebarExpanded, setSidebarExpanded] = useState(
-    () => localStorage.getItem('spendrop-sidebar') === 'true',
+    () => localStorage.getItem(STORAGE_KEYS.sidebar) === 'true',
   );
 
   useEffect(() => {
     const handler = () => {
-      setSidebarExpanded(localStorage.getItem('spendrop-sidebar') === 'true');
+      setSidebarExpanded(
+        localStorage.getItem(STORAGE_KEYS.sidebar) === 'true',
+      );
     };
     window.addEventListener('sidebar-toggle', handler);
     return () => {

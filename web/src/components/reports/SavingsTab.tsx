@@ -29,7 +29,9 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { useYearOverYear, useIncomeExpenses } from '@/hooks/useReports';
-import { MONTH_NAMES, formatCurrency, yearOptions } from './utils';
+import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { cn } from '@/lib/utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
 import { api } from '@/api/client';
@@ -44,7 +46,7 @@ function buildYoYData(data: YoYResponse | null) {
   const currentYear = data.current;
   const previousYear = data.previous;
   return currentYear.map((cur, i) => ({
-    name: MONTH_NAMES[i],
+    name: MONTH_NAMES_SHORT[i],
     currentExpenses: cur.expenses,
     previousExpenses: previousYear[i]?.expenses ?? 0,
   }));
@@ -55,6 +57,9 @@ export function SavingsTab() {
   const incExp = useIncomeExpenses(24);
   const yoy = useYearOverYear(year);
   const gradientId = useId();
+
+  const baseCurrency = useBaseCurrency();
+  const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
   const [goals, setGoals] = useState<SavingsGoal[]>([]);
   const [goalsLoading, setGoalsLoading] = useState(true);
@@ -80,7 +85,7 @@ export function SavingsTab() {
       .reduce((acc, e) => {
         const total = acc + e.net;
         result.push({
-          name: MONTH_NAMES[e.month - 1],
+          name: MONTH_NAMES_SHORT[e.month - 1],
           savings: Math.max(0, total),
         });
         return total;
@@ -194,17 +199,17 @@ export function SavingsTab() {
                           dy="20"
                           className="fill-muted-foreground text-xs"
                         >
-                          {formatCurrency(currentSavings)}
+                          {fmt(currentSavings)}
                         </tspan>
                       </text>
                     </RadialBarChart>
                   </ChartContainer>
                   <div className="text-sm text-muted-foreground">
-                    <p>Goal: {formatCurrency(goal.target_amount)}</p>
-                    <p>Saved: {formatCurrency(currentSavings)}</p>
+                    <p>Goal: {fmt(goal.target_amount)}</p>
+                    <p>Saved: {fmt(currentSavings)}</p>
                     <p>
                       Remaining:{' '}
-                      {formatCurrency(
+                      {fmt(
                         Math.max(0, goal.target_amount - currentSavings),
                       )}
                     </p>

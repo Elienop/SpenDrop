@@ -25,13 +25,9 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-
-function formatCurrency(amount: number): string {
-  return amount.toLocaleString('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  });
-}
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { TYPE_EXPENSE } from '@/lib/transaction-types';
 
 export interface TransactionRowProps {
   transaction: Transaction;
@@ -59,6 +55,7 @@ export function TransactionRow({
   onDelete,
   onError,
 }: TransactionRowProps) {
+  const baseCurrency = useBaseCurrency();
   const [editing, setEditing] = useState(false);
   const [date, setDate] = useState(transaction.date);
   const [amount, setAmount] = useState(String(transaction.amount));
@@ -201,13 +198,13 @@ export function TransactionRow({
       <TableCell
         className={cn(
           'whitespace-nowrap text-right font-mono tabular-nums',
-          transaction.category_type === 'expense'
+          transaction.category_type === TYPE_EXPENSE
             ? 'text-foreground'
             : 'text-emerald-500',
         )}
       >
-        {transaction.category_type === 'expense' ? '-' : '+'}
-        {formatCurrency(transaction.amount)}
+        {transaction.category_type === TYPE_EXPENSE ? '-' : '+'}
+        {formatCurrency(transaction.amount, baseCurrency)}
       </TableCell>
       <TableCell className="text-right">
         <DropdownMenu>

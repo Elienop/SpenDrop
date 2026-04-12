@@ -201,7 +201,7 @@ describe('Transactions page', () => {
         }),
       );
       render(<Transactions />);
-      expect(screen.getByText('$50 - $200')).toBeInTheDocument();
+      expect(screen.getByText('$50.00 - $200.00')).toBeInTheDocument();
     });
 
     it('hides chips when filter Sheet is open', async () => {
@@ -212,10 +212,10 @@ describe('Transactions page', () => {
         }),
       );
       render(<Transactions />);
-      expect(screen.getByText('Min $50')).toBeInTheDocument();
+      expect(screen.getByText('Min $50.00')).toBeInTheDocument();
 
       await user.click(screen.getByRole('button', { name: /Filters/ }));
-      expect(screen.queryByText('Min $50')).not.toBeInTheDocument();
+      expect(screen.queryByText('Min $50.00')).not.toBeInTheDocument();
     });
 
     it('clicking chip x clears that specific filter group', async () => {

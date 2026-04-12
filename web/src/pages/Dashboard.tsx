@@ -39,25 +39,17 @@ import {
 import { ButtonGroup } from '@/components/ui/button-group';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
+import { formatCurrency, DEFAULT_LOCALE } from '@/lib/format';
+import { MONTH_NAMES_SHORT, MONTH_NAMES_FULL } from '@/lib/dates';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
+import {
+  DASHBOARD_RECENT_TX_LIMIT,
+  DASHBOARD_CATEGORY_COLLAPSED_LIMIT,
+} from '@/lib/constants';
+import { TYPE_INCOME } from '@/lib/transaction-types';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 
-/* ── Formatters ── */
-
-function splitCurrency(amount: number): { dollars: string; cents: string } {
-  const abs = Math.abs(amount);
-  const dollars = Math.floor(abs).toLocaleString('en-US');
-  const cents = (abs % 1).toFixed(2).slice(1); // ".52"
-  return { dollars: `$${dollars}`, cents };
-}
-
-// Intentionally unsigned: callers supply the sign glyph (+/-) from
-// category_type or from a dedicated delta. Do not rely on this formatter
-// to preserve negative amounts.
-function formatFull(amount: number): string {
-  return '$' + Math.abs(amount).toLocaleString('en-US', {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
-  });
-}
+/* ── Pure helpers ── */
 
 function pctChange(current: number, previous: number): number | null {
   if (previous === 0) return null;
@@ -72,18 +64,6 @@ function toDelta(value: number | null): KpiDelta | null {
   };
 }
 
-/* ── Constants ── */
-
-const MONTHS = [
-  'January', 'February', 'March', 'April', 'May', 'June',
-  'July', 'August', 'September', 'October', 'November', 'December',
-];
-
-const SHORT_MONTHS = [
-  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
-];
-
 type CashFlowView = '6m' | '12m';
 
 const cashFlowConfig: ChartConfig = {
@@ -91,24 +71,65 @@ const cashFlowConfig: ChartConfig = {
   expense: { label: 'Expense', color: 'hsl(var(--primary) / 0.35)' },
 };
 
-/** Number of categories shown in the collapsed "Spending by Category" card. */
-const CATEGORY_COLLAPSED_LIMIT = 6;
-
 /* ── Component ── */
 
 export function Dashboard() {
   const { user } = useAuth();
+  const baseCurrency = useBaseCurrency();
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(() => {
-    const stored = localStorage.getItem('spendrop-dash-year');
+    const stored = localStorage.getItem(STORAGE_KEYS.dashboardYear);
     return stored ? Number(stored) : now.getFullYear();
   });
   const [selectedMonth, setSelectedMonth] = useState(() => {
-    const stored = localStorage.getItem('spendrop-dash-month');
+    const stored = localStorage.getItem(STORAGE_KEYS.dashboardMonth);
     return stored ? Number(stored) : now.getMonth() + 1;
   });
-  useEffect(() => { localStorage.setItem('spendrop-dash-year', String(selectedYear)); }, [selectedYear]);
-  useEffect(() => { localStorage.setItem('spendrop-dash-month', String(selectedMonth)); }, [selectedMonth]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.dashboardYear, String(selectedYear));
+  }, [selectedYear]);
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.dashboardMonth, String(selectedMonth));
+  }, [selectedMonth]);
+
+  // Formatters bound to the household's base currency. `formatFull` returns
+  // the full currency-formatted string; `splitCurrency` splits it into
+  // integer and fractional parts (plus the currency symbol) for the KPI
+  // card's typography. `splitCurrency` intentionally renders the absolute
+  // value — sign is conveyed by the card's delta badge, and `KpiCard`
+  // displays `{dollars}{cents}` verbatim with no sign handling.
+  const formatFull = (amount: number): string =>
+    formatCurrency(amount, baseCurrency);
+  const splitCurrency = (
+    amount: number,
+  ): { dollars: string; cents: string } => {
+    const parts = new Intl.NumberFormat(DEFAULT_LOCALE, {
+      style: 'currency',
+      currency: baseCurrency,
+      minimumFractionDigits: 2,
+    }).formatToParts(Math.abs(amount));
+    let dollars = '';
+    let cents = '';
+    let seenDecimal = false;
+    for (const part of parts) {
+      if (part.type === 'decimal') {
+        seenDecimal = true;
+        cents += part.value;
+        continue;
+      }
+      if (part.type === 'fraction') {
+        cents += part.value;
+        continue;
+      }
+      if (seenDecimal) {
+        // Trailing symbols (e.g. some locales place currency after amount)
+        cents += part.value;
+      } else {
+        dollars += part.value;
+      }
+    }
+    return { dollars, cents };
+  };
 
   const [cashFlowView, setCashFlowView] = useState<CashFlowView>('6m');
   const { summary, trend, categories, loading, fetching, error } = useDashboard(
@@ -121,7 +142,7 @@ export function Dashboard() {
 
   useEffect(() => {
     let cancelled = false;
-    let url = 'transactions?per_page=6';
+    let url = `transactions?per_page=${DASHBOARD_RECENT_TX_LIMIT}`;
     if (!showLatest) {
       const mm = String(selectedMonth).padStart(2, '0');
       const lastDay = new Date(selectedYear, selectedMonth, 0).getDate();
@@ -156,7 +177,7 @@ export function Dashboard() {
     const sorted = [...trend].reverse();
     const sliced = cashFlowView === '6m' ? sorted.slice(-6) : sorted;
     return sliced.map((item) => ({
-      name: SHORT_MONTHS[item.month - 1],
+      name: MONTH_NAMES_SHORT[item.month - 1],
       income: item.total_income,
       expense: item.total_spent,
     }));
@@ -164,12 +185,13 @@ export function Dashboard() {
 
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
 
-  const hasMoreCategories = categories.length > CATEGORY_COLLAPSED_LIMIT;
+  const hasMoreCategories =
+    categories.length > DASHBOARD_CATEGORY_COLLAPSED_LIMIT;
 
   const gaugeData = useMemo(() => {
     const visibleCats = categoriesExpanded
       ? categories
-      : categories.slice(0, CATEGORY_COLLAPSED_LIMIT);
+      : categories.slice(0, DASHBOARD_CATEGORY_COLLAPSED_LIMIT);
     return visibleCats.map((cat) => ({
       id: cat.id,
       name: cat.name,
@@ -272,7 +294,7 @@ export function Dashboard() {
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
-                {MONTHS.map((m, i) => (
+                {MONTH_NAMES_FULL.map((m, i) => (
                   <SelectItem key={m} value={String(i + 1)}>{m}</SelectItem>
                 ))}
               </SelectGroup>
@@ -385,7 +407,7 @@ export function Dashboard() {
             <div>
               <CardTitle className="text-base font-semibold">Spending by Category</CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
-                {MONTHS[selectedMonth - 1]} {selectedYear}
+                {MONTH_NAMES_FULL[selectedMonth - 1]} {selectedYear}
               </CardDescription>
             </div>
             <span className="font-mono text-lg font-semibold tabular-nums">
@@ -449,7 +471,7 @@ export function Dashboard() {
                   className="h-8 px-3 text-xs"
                   onClick={() => setShowLatest(false)}
                 >
-                  {SHORT_MONTHS[selectedMonth - 1]}
+                  {MONTH_NAMES_SHORT[selectedMonth - 1]}
                 </Button>
                 <Button
                   variant={showLatest ? 'secondary' : 'outline'}
@@ -502,10 +524,11 @@ export function Dashboard() {
                           <span
                             className={cn(
                               'text-sm font-semibold tabular-nums',
-                              tx.category_type === 'income' && 'text-emerald-500',
+                              tx.category_type === TYPE_INCOME &&
+                                'text-emerald-500',
                             )}
                           >
-                            {tx.category_type === 'income' ? '+' : '-'}
+                            {tx.category_type === TYPE_INCOME ? '+' : '-'}
                             {formatFull(tx.amount)}
                           </span>
                         </TableCell>

@@ -10,6 +10,7 @@ import { X } from 'lucide-react';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { Category, SavedFilter } from '../api/types';
 import { getCategoryColorVar } from '../lib/chart-colors';
+import { FORMAT_ISO_DATE } from '@/lib/dates';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -57,8 +58,8 @@ export function FilterPanel({
         to = now;
         break;
     }
-    setFilter('dateFrom', format(from, 'yyyy-MM-dd'));
-    setFilter('dateTo', format(to, 'yyyy-MM-dd'));
+    setFilter('dateFrom', format(from, FORMAT_ISO_DATE));
+    setFilter('dateTo', format(to, FORMAT_ISO_DATE));
   }
 
   function handleSaveFilter() {
