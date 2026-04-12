@@ -13,7 +13,7 @@ import (
 
 func TestNewRouter_HealthEndpoint_Returns200(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	rec := httptest.NewRecorder()
@@ -34,7 +34,7 @@ func TestNewRouter_HealthEndpoint_Returns200(t *testing.T) {
 
 func TestNewRouter_AuthRegister_Returns201(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	body := strings.NewReader(`{"username":"alice","password":"longpassword","display_name":"Alice"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", body)
@@ -49,7 +49,7 @@ func TestNewRouter_AuthRegister_Returns201(t *testing.T) {
 
 func TestNewRouter_AuthLogin_Returns200(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	// Register first
 	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
@@ -75,7 +75,7 @@ func TestNewRouter_AuthLogin_Returns200(t *testing.T) {
 
 func TestNewRouter_AuthLogout_Returns200(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/logout", nil)
 	req.Header.Set("Content-Type", "application/json")
@@ -89,7 +89,7 @@ func TestNewRouter_AuthLogout_Returns200(t *testing.T) {
 
 func TestNewRouter_AuthMe_WithoutSession_Returns401(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/auth/me", nil)
 	rec := httptest.NewRecorder()
@@ -102,7 +102,7 @@ func TestNewRouter_AuthMe_WithoutSession_Returns401(t *testing.T) {
 
 func TestNewRouter_AuthMe_WithSession_Returns200(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	// Register to get session cookie
 	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
@@ -137,7 +137,7 @@ func TestNewRouter_AuthMe_WithSession_Returns200(t *testing.T) {
 
 func TestNewRouter_ProtectedRoute_WithoutAuth_Returns401(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	// Authenticated endpoints should require auth
 	endpoints := []struct {
@@ -167,7 +167,7 @@ func TestNewRouter_ProtectedRoute_WithoutAuth_Returns401(t *testing.T) {
 
 func TestNewRouter_AdminRoutes_WithoutAuth_Returns401(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/users", nil)
 	rec := httptest.NewRecorder()
@@ -180,7 +180,7 @@ func TestNewRouter_AdminRoutes_WithoutAuth_Returns401(t *testing.T) {
 
 func TestNewRouter_AdminRoutes_AsAdmin_Succeeds(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	// Register first user (admin)
 	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)
@@ -212,7 +212,7 @@ func TestNewRouter_AdminRoutes_AsAdmin_Succeeds(t *testing.T) {
 
 func TestNewRouter_AdminRoutes_AsMember_Returns403(t *testing.T) {
 	q, db := setupTestDB(t)
-	router := NewRouter(q, db)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
 
 	// Register first user (admin)
 	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)

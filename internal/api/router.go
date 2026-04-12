@@ -10,11 +10,23 @@ import (
 	chimw "github.com/go-chi/chi/v5/middleware"
 
 	"github.com/elienop/spendrop/internal/auth"
+	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
 )
 
-// NewRouter creates the main chi router with all API routes registered.
-func NewRouter(queries *database.Queries, db *sql.DB) chi.Router {
+// NewRouter creates the main chi router with all API routes registered. cfg
+// controls all runtime-tunable limits (rate limits, body size caps, session
+// TTL) — pass config.Defaults() if you don't care. A nil cfg also falls back
+// to defaults so tests and callers that don't need custom limits can stay
+// terse.
+func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Router {
+	if cfg == nil {
+		d := config.Defaults()
+		cfg = &d
+	}
+	ApplyConfig(cfg)
+	startRateLimitReset()
+
 	h := NewHandler(queries, db)
 	r := chi.NewRouter()
 

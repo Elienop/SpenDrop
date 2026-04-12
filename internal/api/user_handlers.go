@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -69,12 +70,13 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
-	if len(req.Password) < 8 {
-		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
+	minLen, maxLen := getPasswordBounds()
+	if len(req.Password) < minLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
 		return
 	}
-	if len(req.Password) > 72 {
-		writeError(w, http.StatusBadRequest, "password must be 72 characters or less")
+	if len(req.Password) > maxLen {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
 		return
 	}
 	if req.Role != "member" && req.Role != "admin" {
