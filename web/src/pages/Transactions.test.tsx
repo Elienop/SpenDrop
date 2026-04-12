@@ -94,6 +94,8 @@ function defaultHookReturn(overrides = {}) {
     createTransaction: vi.fn(),
     updateTransaction: vi.fn(),
     deleteTransaction: vi.fn(),
+    deleteByFilter: vi.fn().mockResolvedValue(0),
+    refetch: vi.fn(),
     ...overrides,
   };
 }
@@ -464,6 +466,202 @@ describe('Transactions page', () => {
       );
       render(<Transactions />);
       expect(screen.getByText(/no transactions found/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('selection state machine', () => {
+    // Builds a small set of transactions on "page 1" with more rows
+    // available beyond it, so the select-all-matching banner is reachable.
+    function makeRows(n: number) {
+      return Array.from({ length: n }, (_, i) => ({
+        ...defaultTransaction,
+        id: i + 1,
+        description: `Row ${i + 1}`,
+      }));
+    }
+
+    it('selecting one row shows "1 selected" action bar', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(3), total: 3 }),
+      );
+      render(<Transactions />);
+
+      const checkbox = screen.getByRole('checkbox', { name: /select row 1/i });
+      await user.click(checkbox);
+
+      expect(screen.getByText('1 selected')).toBeInTheDocument();
+      // No "Select all X matching" banner when total equals page count.
+      expect(
+        screen.queryByRole('button', { name: /select all .* matching/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('selecting every visible row surfaces the "Select all X matching" banner when more rows exist', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(2), total: 137 }),
+      );
+      render(<Transactions />);
+
+      // Click both row checkboxes.
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 1/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 2/i }),
+      );
+
+      expect(screen.getByText('2 selected')).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      ).toBeInTheDocument();
+    });
+
+    it('clicking "Select all X matching" switches to all-matching scope and locks row checkboxes', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(2), total: 137 }),
+      );
+      render(<Transactions />);
+
+      // Escalate to all-matching via header checkbox + banner.
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 1/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 2/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      );
+
+      expect(
+        screen.getByText('All 137 matching transactions selected'),
+      ).toBeInTheDocument();
+
+      // Individual row checkboxes must be disabled — the only way out
+      // of all-matching mode is the header checkbox or Clear selection.
+      const row1 = screen.getByRole('checkbox', { name: /select row 1/i });
+      expect(row1).toBeDisabled();
+    });
+
+    it('Delete in all-matching scope opens confirmation dialog instead of deleting immediately', async () => {
+      const user = userEvent.setup();
+      const deleteByFilter = vi.fn().mockResolvedValue(137);
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 137,
+          deleteByFilter,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 1/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 2/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      );
+
+      // Click Delete in the action bar.
+      const actionBar = screen
+        .getByText('All 137 matching transactions selected')
+        .closest('div')!.parentElement!;
+      await user.click(
+        within(actionBar).getByRole('button', { name: /^Delete$/ }),
+      );
+
+      // Confirmation modal appears; delete has NOT been called yet.
+      expect(
+        screen.getByRole('dialog', {
+          name: /delete all matching transactions/i,
+        }),
+      ).toBeInTheDocument();
+      expect(deleteByFilter).not.toHaveBeenCalled();
+    });
+
+    it('confirming in the dialog triggers the filter-based delete', async () => {
+      const user = userEvent.setup();
+      const deleteByFilter = vi.fn().mockResolvedValue(137);
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 137,
+          deleteByFilter,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 1/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 2/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      );
+      // Open the action bar's Delete — opens the dialog.
+      const actionBar = screen
+        .getByText('All 137 matching transactions selected')
+        .closest('div')!.parentElement!;
+      await user.click(
+        within(actionBar).getByRole('button', { name: /^Delete$/ }),
+      );
+
+      // Click the confirm button inside the dialog.
+      const dialog = screen.getByRole('dialog', {
+        name: /delete all matching transactions/i,
+      });
+      await user.click(
+        within(dialog).getByRole('button', { name: /delete 137/i }),
+      );
+
+      expect(deleteByFilter).toHaveBeenCalledTimes(1);
+    });
+
+    it('Cancel in the dialog does not call deleteByFilter and leaves selection intact', async () => {
+      const user = userEvent.setup();
+      const deleteByFilter = vi.fn();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 137,
+          deleteByFilter,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 1/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select row 2/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      );
+      const actionBar = screen
+        .getByText('All 137 matching transactions selected')
+        .closest('div')!.parentElement!;
+      await user.click(
+        within(actionBar).getByRole('button', { name: /^Delete$/ }),
+      );
+
+      const dialog = screen.getByRole('dialog', {
+        name: /delete all matching transactions/i,
+      });
+      await user.click(within(dialog).getByRole('button', { name: /cancel/i }));
+
+      expect(deleteByFilter).not.toHaveBeenCalled();
+      expect(
+        screen.getByText('All 137 matching transactions selected'),
+      ).toBeInTheDocument();
     });
   });
 });

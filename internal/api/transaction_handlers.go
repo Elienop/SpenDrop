@@ -686,6 +686,70 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
 }
 
+// handleDeleteTransactionsByFilter deletes every transaction matching the
+// same filter query parameters accepted by handleListTransactions. It exists
+// so the "Select all X across pages" UI action can delete tens of thousands
+// of rows in a single atomic operation — the ID-based batch-delete endpoint
+// would require chunking into MaxBatchDeleteIDs batches and expose the user
+// to partial-failure states.
+//
+// Ownership is enforced at the SQL level: non-admin users may only delete
+// rows where user_id matches their own. Admins may delete any. This mirrors
+// the per-row skip behavior of handleBatchDeleteTransactions but expressed
+// as a WHERE clause so the operation stays atomic.
+//
+// Race note: there's a deliberate TOCTOU window between when the UI reads
+// `total` from GET /transactions and when the DELETE runs. Rows inserted
+// into the filter window in that interval will also be deleted, so the
+// actual `deleted` count can exceed the number the user saw at confirm
+// time. That's acceptable for the "wipe-and-reimport" use case this
+// endpoint exists to serve — the alternative (snapshot-then-delete) would
+// require holding IDs client-side and defeats the whole point of the
+// filter-based endpoint. The response echoes the real count so callers
+// who care can compare.
+func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	whereClause, args := buildTransactionWhereClause(r.URL.Query())
+
+	// Non-admins: restrict to their own rows. Admins can delete anything
+	// matching the filter. We append to whereClause so the ownership check
+	// happens inside the same subquery used to select rows for deletion.
+	if user.Role != RoleAdmin {
+		if whereClause == "" {
+			whereClause = " WHERE t.user_id = ?"
+		} else {
+			whereClause += " AND t.user_id = ?"
+		}
+		args = append(args, user.ID)
+	}
+
+	// SQLite does not allow DELETE with a JOIN directly, so we select the
+	// IDs via a correlated subquery that joins categories — identical shape
+	// to handleListTransactions so filter semantics stay in lockstep.
+	query := `DELETE FROM transactions WHERE id IN (
+		SELECT t.id FROM transactions t
+		JOIN categories c ON t.category_id = c.id` + whereClause + `)`
+
+	result, err := h.db.ExecContext(r.Context(), query, args...)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete transactions")
+		return
+	}
+
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read delete result")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
+}
+
 // toNullString converts a string to sql.NullString, treating empty as NULL.
 func toNullString(s string) sql.NullString {
 	if s == "" {

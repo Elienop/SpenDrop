@@ -38,6 +38,14 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import {
   Sheet,
   SheetContent,
   SheetDescription,
@@ -340,6 +348,7 @@ export function Transactions() {
     createTransaction,
     updateTransaction,
     deleteTransaction,
+    deleteByFilter,
     refetch,
   } = useTransactions();
 
@@ -351,7 +360,19 @@ export function Transactions() {
   const [replaceText, setReplaceText] = useState('');
   const [replacing, setReplacing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Two selection modes:
+  //   'page'         — selectedIds holds explicit IDs from the current page.
+  //   'all-matching' — user clicked "Select all N matching", selectedIds is
+  //                    ignored, and the bulk-delete path uses the filter
+  //                    endpoint so the operation stays atomic for 10k+ rows.
+  const [selectionScope, setSelectionScope] = useState<'page' | 'all-matching'>(
+    'page',
+  );
   const [deleting, setDeleting] = useState(false);
+  // Confirmation modal for the destructive "delete all matching" path.
+  // Per-page batch delete is treated as low-risk (user clicked each row),
+  // but the filter-based path can wipe out 10k+ rows — always confirm.
+  const [confirmAllMatchingOpen, setConfirmAllMatchingOpen] = useState(false);
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -409,6 +430,9 @@ export function Transactions() {
       else next.delete(id);
       return next;
     });
+    // Any per-row toggle demotes out of 'all-matching' mode: the user is
+    // now curating a specific subset, not operating on the full match set.
+    setSelectionScope('page');
   }, []);
 
   const handleSelectAll = useCallback(
@@ -418,26 +442,69 @@ export function Transactions() {
       } else {
         setSelectedIds(new Set());
       }
+      setSelectionScope('page');
     },
     [transactions],
   );
 
-  const handleBulkDelete = useCallback(async () => {
-    if (selectedIds.size === 0) return;
+  const handleSelectAllMatching = useCallback(() => {
+    setSelectionScope('all-matching');
+  }, []);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    setSelectionScope('page');
+  }, []);
+
+  const selectionCount =
+    selectionScope === 'all-matching' ? total : selectedIds.size;
+
+  // executeBulkDelete performs the actual delete. Split out from
+  // requestBulkDelete so the confirmation modal can invoke it after the user
+  // confirms, without re-running the "open modal vs delete directly" logic.
+  const executeBulkDelete = useCallback(async () => {
+    if (selectionCount === 0) return;
     setDeleting(true);
     try {
-      const res = await api.post<{ deleted: number }>('transactions/batch-delete', {
-        ids: Array.from(selectedIds),
-      });
-      toast.success(`Deleted ${res.deleted} transaction${res.deleted !== 1 ? 's' : ''}`);
+      let deleted: number;
+      if (selectionScope === 'all-matching') {
+        // Atomic filter-based delete — avoids chunking into 500-row
+        // batches and avoids partial-failure states mid-operation.
+        deleted = await deleteByFilter();
+      } else {
+        const res = await api.post<{ deleted: number }>(
+          'transactions/batch-delete',
+          { ids: Array.from(selectedIds) },
+        );
+        deleted = res.deleted;
+        refetch();
+      }
+      toast.success(
+        `Deleted ${deleted} transaction${deleted !== 1 ? 's' : ''}`,
+      );
       setSelectedIds(new Set());
-      refetch();
+      setSelectionScope('page');
+      setConfirmAllMatchingOpen(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Delete failed');
     } finally {
       setDeleting(false);
     }
-  }, [selectedIds, refetch]);
+  }, [selectionCount, selectionScope, selectedIds, deleteByFilter, refetch]);
+
+  // requestBulkDelete is the click handler for the Delete button in the
+  // selection bar. For per-page selections we delete immediately (user picked
+  // each row explicitly). For 'all-matching' we open a confirmation modal
+  // because that path can destroy tens of thousands of rows atomically and
+  // the action bar alone is too subtle for an irreversible operation.
+  const requestBulkDelete = useCallback(() => {
+    if (selectionCount === 0) return;
+    if (selectionScope === 'all-matching') {
+      setConfirmAllMatchingOpen(true);
+      return;
+    }
+    void executeBulkDelete();
+  }, [selectionCount, selectionScope, executeBulkDelete]);
 
   const {
     savedFilters,
@@ -456,9 +523,12 @@ export function Transactions() {
       });
   }, []);
 
-  // Clear selection when page or data changes
+  // Clear selection when page or data changes. Also drops
+  // selectionScope back to 'page' so "all-matching" mode never
+  // silently survives a filter edit or page flip.
   useEffect(() => {
     setSelectedIds(new Set());
+    setSelectionScope('page');
   }, [page, filters, perPage]);
 
   const handleSaveFilter = useCallback(
@@ -684,31 +754,60 @@ export function Transactions() {
             onPerPageChange={setPerPage}
           />
 
-          {selectedIds.size > 0 && (
-            <div className="flex items-center gap-3 rounded-lg border bg-muted/50 px-4 py-2">
-              <span className="text-sm font-medium">
-                {selectedIds.size} selected
-              </span>
-              <Button
-                type="button"
-                variant="destructive"
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => void handleBulkDelete()}
-                disabled={deleting}
-              >
-                <Trash2 className="size-3.5" />
-                {deleting ? 'Deleting...' : 'Delete'}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={() => setSelectedIds(new Set())}
-              >
-                Clear selection
-              </Button>
+          {selectionCount > 0 && (
+            <div className="flex flex-col gap-2 rounded-lg border bg-muted/50 px-4 py-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="text-sm font-medium">
+                  {selectionScope === 'all-matching'
+                    ? `All ${total} matching transactions selected`
+                    : `${selectionCount} selected`}
+                </span>
+                <Button
+                  type="button"
+                  variant="destructive"
+                  size="sm"
+                  className="h-8 gap-1.5 text-xs"
+                  onClick={requestBulkDelete}
+                  disabled={deleting}
+                >
+                  <Trash2 className="size-3.5" />
+                  {deleting ? 'Deleting...' : 'Delete'}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-xs"
+                  onClick={handleClearSelection}
+                >
+                  Clear selection
+                </Button>
+              </div>
+              {/*
+                Banner prompt: appears only when the user has checked every
+                visible row AND there are more matching rows beyond the
+                current page. Clicking switches to the atomic filter-based
+                delete path. Hidden once scope is already 'all-matching'.
+              */}
+              {selectionScope === 'page' &&
+                transactions.length > 0 &&
+                transactions.every((tx) => selectedIds.has(tx.id)) &&
+                total > transactions.length && (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span>
+                      All {transactions.length} on this page selected.
+                    </span>
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto p-0 text-xs"
+                      onClick={handleSelectAllMatching}
+                    >
+                      Select all {total} matching
+                    </Button>
+                  </div>
+                )}
             </div>
           )}
 
@@ -718,8 +817,9 @@ export function Transactions() {
                 <TableHead className="w-10">
                   <Checkbox
                     checked={
-                      transactions.length > 0 &&
-                      transactions.every((tx) => selectedIds.has(tx.id))
+                      selectionScope === 'all-matching' ||
+                      (transactions.length > 0 &&
+                        transactions.every((tx) => selectedIds.has(tx.id)))
                     }
                     onCheckedChange={(v) => handleSelectAll(v === true)}
                     aria-label="Select all"
@@ -739,8 +839,18 @@ export function Transactions() {
                   key={tx.id}
                   transaction={tx}
                   categories={categories}
-                  selected={selectedIds.has(tx.id)}
-                  onSelect={handleSelect}
+                  selected={
+                    selectionScope === 'all-matching' ||
+                    selectedIds.has(tx.id)
+                  }
+                  // In all-matching mode, individual row checkboxes are locked.
+                  // Toggling a single row can't express "all rows except this
+                  // one" cleanly — and silently demoting to page scope would
+                  // appear to clear the selection when selectedIds is empty.
+                  // The header checkbox still clears the full selection.
+                  onSelect={
+                    selectionScope === 'all-matching' ? undefined : handleSelect
+                  }
                   onUpdate={updateTransaction}
                   onDelete={deleteTransaction}
                   onError={setRowError}
@@ -760,6 +870,49 @@ export function Transactions() {
           </div>
         </Card>
       )}
+
+      <Dialog
+        open={confirmAllMatchingOpen}
+        onOpenChange={(open) => {
+          // Block closing while the delete is in-flight so the user can't
+          // dismiss the spinner mid-request and lose track of state.
+          if (deleting) return;
+          setConfirmAllMatchingOpen(open);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete all matching transactions?</DialogTitle>
+            <DialogDescription>
+              This will permanently delete{' '}
+              <span className="font-semibold text-foreground">
+                {total.toLocaleString()}
+              </span>{' '}
+              transaction{total !== 1 ? 's' : ''} matching your current
+              filters, including rows you have not yet viewed. This cannot be
+              undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setConfirmAllMatchingOpen(false)}
+              disabled={deleting}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void executeBulkDelete()}
+              disabled={deleting}
+            >
+              {deleting ? 'Deleting...' : `Delete ${total.toLocaleString()}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

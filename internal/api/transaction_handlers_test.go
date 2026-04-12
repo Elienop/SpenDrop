@@ -1771,3 +1771,308 @@ func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
 		t.Errorf("expected updated_at to advance; before=%v, after=%v", origUpdatedAt, updated.UpdatedAt)
 	}
 }
+
+// --- handleDeleteTransactionsByFilter ---
+
+// countTransactions returns the total row count in the transactions table,
+// used by delete-by-filter tests to verify atomic bulk deletes.
+func countTransactions(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&n); err != nil {
+		t.Fatalf("count transactions: %v", err)
+	}
+	return n
+}
+
+func TestHandleDeleteTransactionsByFilter_NoFilter_DeletesAll(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	for i := 1; i <= 5; i++ {
+		seedTestTransaction(t, q, admin.ID, 1, fmt.Sprintf("2026-04-%02d", i), 10.0, fmt.Sprintf("Txn %d", i))
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/delete-by-filter", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 5 {
+		t.Errorf("expected deleted=5, got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 0 {
+		t.Errorf("expected 0 transactions remaining, got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_DateRange_DeletesMatchingOnly(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	seedTestTransaction(t, q, admin.ID, 1, "2026-01-15", 10.0, "Jan")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-02-10", 20.0, "Feb A")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-02-25", 30.0, "Feb B")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-03-05", 40.0, "Mar")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/transactions/delete-by-filter?date_from=2026-02-01&date_to=2026-02-28", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 2 {
+		t.Errorf("expected deleted=2 (Feb A + Feb B), got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 2 {
+		t.Errorf("expected 2 transactions remaining (Jan + Mar), got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_NonAdminOnlyDeletesOwn(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "Alice 1")
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-02", 20.0, "Alice 2")
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-03", 30.0, "Bob 1")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/delete-by-filter", nil)
+	req = withUser(req, alice)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 2 {
+		t.Errorf("expected alice to delete only her 2 rows, got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 1 {
+		t.Errorf("expected 1 transaction (Bob's) remaining, got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_AdminDeletesEveryonesMatching(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "Alice")
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-02", 20.0, "Bob")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/delete-by-filter", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 2 {
+		t.Errorf("expected admin to delete both rows, got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 0 {
+		t.Errorf("expected 0 transactions remaining, got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_CategoryFilter(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Seed categories from migration 001: id 1 = Food (expense),
+	// id 2 = Gifts (expense). The point of this test is only that
+	// category_id scopes the delete correctly — the specific names
+	// don't matter, but the comment used to claim id 2 was "Transport"
+	// which was wrong (Transportation is id 5).
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "Food 1")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "Food 2")
+	seedTestTransaction(t, q, admin.ID, 2, "2026-04-03", 30.0, "Gifts")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/transactions/delete-by-filter?category_id=1", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 2 {
+		t.Errorf("expected deleted=2 food rows, got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 1 {
+		t.Errorf("expected 1 gifts row remaining, got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_NoMatches_ReturnsZero(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "Txn")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/transactions/delete-by-filter?date_from=2099-01-01&date_to=2099-12-31", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 0 {
+		t.Errorf("expected deleted=0, got %d", resp.Deleted)
+	}
+	if n := countTransactions(t, db); n != 1 {
+		t.Errorf("expected 1 row untouched, got %d", n)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_Unauthorized_Returns401(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/delete-by-filter", nil)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+// Regression test: a non-admin deleting with a date filter must get BOTH
+// constraints applied — ownership AND the date range. Previously untested
+// because each constraint had its own isolated test, which would let a
+// future refactor accidentally drop one of them without anything failing.
+func TestHandleDeleteTransactionsByFilter_NonAdminWithDateFilter_BothApplied(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+
+	// Alice has rows inside and outside the filter window.
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-10", 10.0, "Alice in-range 1")
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-15", 20.0, "Alice in-range 2")
+	seedTestTransaction(t, q, alice.ID, 1, "2026-03-01", 30.0, "Alice out-of-range")
+	// Bob also has a row inside the filter window — must be untouched
+	// because ownership is enforced even when a filter matches it.
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-12", 40.0, "Bob in-range")
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/transactions/delete-by-filter?date_from=2026-04-01&date_to=2026-04-30", nil)
+	req = withUser(req, alice)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Deleted != 2 {
+		t.Errorf("expected alice's 2 in-range rows deleted, got %d", resp.Deleted)
+	}
+	// Should leave: alice's out-of-range row + bob's in-range row = 2 rows.
+	if n := countTransactions(t, db); n != 2 {
+		t.Errorf("expected 2 rows remaining (alice out-of-range + bob in-range), got %d", n)
+	}
+}
+
+// Regression test: the endpoint must never honor a crafted ?user_id= query
+// parameter. buildTransactionWhereClause doesn't parse user_id at all, and
+// ownership is enforced separately by the handler — but this test locks that
+// in so a future "oh, let's add user_id filtering for admins" change can't
+// silently open a cross-user delete hole.
+func TestHandleDeleteTransactionsByFilter_IgnoresCraftedUserIDParam(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+
+	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "Alice")
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-02", 20.0, "Bob 1")
+	seedTestTransaction(t, q, bob.ID, 1, "2026-04-03", 30.0, "Bob 2")
+
+	// Alice tries to delete bob's rows by passing user_id=bob.ID.
+	url := fmt.Sprintf("/api/transactions/delete-by-filter?user_id=%d", bob.ID)
+	req := httptest.NewRequest(http.MethodPost, url, nil)
+	req = withUser(req, alice)
+	rec := httptest.NewRecorder()
+
+	h.handleDeleteTransactionsByFilter(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Deleted int64 `json:"deleted"`
+	}
+	decodeResponse(t, rec, &resp)
+	// The user_id param is ignored. The ownership clause still scopes
+	// the delete to alice, so only her single row is removed.
+	if resp.Deleted != 1 {
+		t.Errorf("expected deleted=1 (alice's own row only), got %d", resp.Deleted)
+	}
+	// Bob's two rows must survive.
+	if n := countTransactions(t, db); n != 2 {
+		t.Errorf("expected 2 rows (both bob's) remaining, got %d", n)
+	}
+}

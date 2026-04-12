@@ -372,3 +372,145 @@ describe('useTransactions sorting', () => {
     expect(typeof result.current.setSort).toBe('function');
   });
 });
+
+describe('useTransactions deleteByFilter', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+  const emptyResponse = {
+    transactions: [],
+    total: 0,
+    page: 1,
+    per_page: 20,
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+    fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = typeof input === 'string' ? input : input.toString();
+        // delete-by-filter returns {deleted: n}; list returns the empty
+        // paginated payload. Both need a Response-like shape.
+        const body = url.includes('delete-by-filter')
+          ? { deleted: 42 }
+          : emptyResponse;
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(body),
+        } as Response);
+      },
+    );
+  });
+
+  afterEach(() => {
+    fetchSpy.mockRestore();
+    localStorage.clear();
+  });
+
+  function findCall(predicate: (url: string) => boolean):
+    | { url: string; init?: RequestInit }
+    | undefined {
+    for (const call of fetchSpy.mock.calls) {
+      const url = String(call[0]);
+      if (predicate(url)) {
+        return { url, init: call[1] as RequestInit | undefined };
+      }
+    }
+    return undefined;
+  }
+
+  it('POSTs to delete-by-filter with no query string when filters are empty', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    let deleted = 0;
+    await act(async () => {
+      deleted = await result.current.deleteByFilter();
+    });
+
+    expect(deleted).toBe(42);
+    const call = findCall((u) => u.includes('delete-by-filter'));
+    expect(call).toBeDefined();
+    // No query string when no filters are set.
+    expect(call!.url).toMatch(/delete-by-filter$/);
+    expect(call!.init?.method).toBe('POST');
+  });
+
+  it('serializes active filters into the query string (no pagination/sort)', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      result.current.setFilter('dateFrom', '2026-04-01');
+      result.current.setFilter('dateTo', '2026-04-30');
+      result.current.setFilter('categoryIds', '1,2,3');
+      result.current.setFilter('search', 'coffee');
+    });
+
+    await act(async () => {
+      await result.current.deleteByFilter();
+    });
+
+    const call = findCall((u) => u.includes('delete-by-filter'));
+    expect(call).toBeDefined();
+    const url = call!.url;
+    expect(url).toContain('date_from=2026-04-01');
+    expect(url).toContain('date_to=2026-04-30');
+    expect(url).toContain('category_ids=1%2C2%2C3');
+    expect(url).toContain('search=coffee');
+    // Pagination and sort do NOT leak into the destructive call.
+    expect(url).not.toContain('page=');
+    expect(url).not.toContain('per_page=');
+    expect(url).not.toContain('sort_by=');
+    expect(url).not.toContain('sort_dir=');
+  });
+
+  it('prefers category_ids over category_id, matching the list endpoint', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+
+    await act(async () => {
+      result.current.setFilter('categoryId', '5');
+      result.current.setFilter('categoryIds', '1,2');
+    });
+
+    await act(async () => {
+      await result.current.deleteByFilter();
+    });
+
+    const call = findCall((u) => u.includes('delete-by-filter'));
+    expect(call).toBeDefined();
+    expect(call!.url).toContain('category_ids=1%2C2');
+    expect(call!.url).not.toContain('category_id=5');
+  });
+
+  it('triggers a refetch after a successful delete', async () => {
+    const { result } = renderHook(() => useTransactions());
+    await vi.waitFor(() => {
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+    const callsBefore = fetchSpy.mock.calls.length;
+
+    await act(async () => {
+      await result.current.deleteByFilter();
+    });
+
+    // Expect at least the DELETE call + a follow-up GET to refresh the list.
+    await vi.waitFor(() => {
+      expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(
+        callsBefore + 2,
+      );
+    });
+    // The last call should be a GET transactions (refetch), not the POST.
+    const lastUrl = String(
+      fetchSpy.mock.calls[fetchSpy.mock.calls.length - 1][0],
+    );
+    expect(lastUrl).not.toContain('delete-by-filter');
+    expect(lastUrl).toContain('transactions?');
+  });
+});
