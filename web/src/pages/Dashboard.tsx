@@ -95,9 +95,9 @@ export function Dashboard() {
   // Formatters bound to the household's base currency. `formatFull` returns
   // the full currency-formatted string; `splitCurrency` splits it into
   // integer and fractional parts (plus the currency symbol) for the KPI
-  // card's typography. `splitCurrency` intentionally renders the absolute
-  // value — sign is conveyed by the card's delta badge, and `KpiCard`
-  // displays `{dollars}{cents}` verbatim with no sign handling.
+  // card's typography. The sign is preserved — negative amounts propagate
+  // through `formatToParts` so the `minusSign` part lands in `dollars` and
+  // `KpiCard` renders `{dollars}{cents}` verbatim (e.g. `-$1,598` + `.90`).
   const formatFull = (amount: number): string =>
     formatCurrency(amount, baseCurrency);
   const splitCurrency = (
@@ -107,7 +107,7 @@ export function Dashboard() {
       style: 'currency',
       currency: baseCurrency,
       minimumFractionDigits: 2,
-    }).formatToParts(Math.abs(amount));
+    }).formatToParts(amount);
     let dollars = '';
     let cents = '';
     let seenDecimal = false;

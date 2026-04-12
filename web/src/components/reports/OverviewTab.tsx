@@ -1,5 +1,16 @@
 import { useId, useMemo, useState } from 'react';
-import { BarChart, Bar, AreaChart, Area, XAxis, CartesianGrid } from 'recharts';
+import {
+  BarChart,
+  Bar,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  ReferenceLine,
+} from 'recharts';
+import { formatCurrency } from '@/lib/format';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import {
   ChartContainer,
   ChartTooltip,
@@ -31,17 +42,57 @@ const BVA_CONFIG = {
   actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
+/** Month-name part of the tick formatter — Intl handles locale/ICU
+ *  detail so we don't hardcode a `["Jan", "Feb", ...]` array. We avoid
+ *  the `{ year: '2-digit' }` option because in `en-US` it renders as
+ *  `"Jan 26"` (plain space), which is ambiguous with a day-of-month
+ *  reading (`Jan 26` = January 26th). We compose the `'YY` suffix
+ *  ourselves. `timeZone: 'UTC'` pins parsing so a user in a negative
+ *  UTC offset doesn't see `"Dec '25"` for a January bucket. */
+const MONTH_SHORT_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  timeZone: 'UTC',
+});
+
+/** Tooltip label formatter: full month + full year on hover keeps the
+ *  compact axis readable while giving unambiguous detail on interaction. */
+const MONTH_LONG_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/** `"2026-01-01"` → `"Jan'26"`. Compact, unambiguous, one token wide. */
+function formatMonthTick(value: string): string {
+  const d = new Date(value);
+  const year2 = String(d.getUTCFullYear()).slice(-2);
+  return `${MONTH_SHORT_FMT.format(d)}'${year2}`;
+}
+
+/** `"2026-01-01"` → `"January 2026"` for tooltip headers. */
+function formatMonthLabel(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return MONTH_LONG_FMT.format(new Date(value));
+}
+
 export function OverviewTab() {
   const [months, setMonths] = useState(12);
   const [bvaYear, setBvaYear] = useState(new Date().getFullYear());
   const incExp = useIncomeExpenses(months);
   const bva = useBudgetVsActual(bvaYear);
   const gradientId = useId();
+  const baseCurrency = useBaseCurrency();
+  const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
+  // Store an ISO-8601 `"YYYY-MM-01"` date as the XAxis dataKey — matches
+  // shadcn's `chart-bar-interactive` convention so `new Date(value)` parses
+  // reliably in the tick/tooltip formatters. Using the first-of-month keeps
+  // 24-month ranges from collapsing two same-month buckets into one
+  // category (which would happen with bare `"Jan"` labels).
   const incExpData = useMemo(
     () =>
       incExp.data.map((entry) => ({
-        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
+        date: `${entry.year}-${String(entry.month).padStart(2, '0')}-01`,
         income: entry.income,
         expenses: entry.expenses,
       })),
@@ -49,11 +100,11 @@ export function OverviewTab() {
   );
 
   const cashFlowData = useMemo(() => {
-    const result: { name: string; cumulative: number }[] = [];
+    const result: { date: string; cumulative: number }[] = [];
     incExp.data.reduce((acc, entry) => {
       const total = acc + entry.net;
       result.push({
-        name: `${MONTH_NAMES_SHORT[entry.month - 1]} ${entry.year}`,
+        date: `${entry.year}-${String(entry.month).padStart(2, '0')}-01`,
         cumulative: total,
       });
       return total;
@@ -158,13 +209,19 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="name"
+                  dataKey="date"
                   tickLine={false}
                   axisLine={false}
-                  tickMargin={10}
+                  tickMargin={8}
+                  minTickGap={8}
+                  interval="preserveStartEnd"
+                  angle={-30}
+                  textAnchor="end"
+                  height={48}
+                  tickFormatter={formatMonthTick}
                 />
                 <ChartTooltip
-                  content={<ChartTooltipContent />}
+                  content={<ChartTooltipContent labelFormatter={formatMonthLabel} />}
                 />
                 <Bar
                   dataKey="income"
@@ -236,12 +293,25 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="name"
+                  dataKey="date"
                   tickLine={false}
                   axisLine={false}
-                  tickMargin={10}
+                  tickMargin={8}
+                  interval={0}
+                  angle={-30}
+                  textAnchor="end"
+                  height={48}
+                  tickFormatter={formatMonthTick}
                 />
-                <ChartTooltip content={<ChartTooltipContent />} />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  tickMargin={8}
+                  width={80}
+                  tickFormatter={(v: number) => fmt(v)}
+                />
+                <ReferenceLine y={0} stroke="hsl(var(--border))" />
+                <ChartTooltip content={<ChartTooltipContent labelFormatter={formatMonthLabel} />} />
                 <Area
                   type="monotone"
                   dataKey="cumulative"
