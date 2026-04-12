@@ -42,28 +42,37 @@ const BVA_CONFIG = {
   actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
-/** Axis tick formatter for month-timeseries dataKeys of the form "YYYY-MM".
- *  Returns "Jan '26" on January and on the leading tick (to anchor the year),
- *  and just "Jan", "Feb", ... on other months. Pairs with `interval={0}` so
- *  no tick ever gets decimated — the user saw the leftmost label disappear
- *  at 12- and 24-month ranges because Recharts' default `preserveEnd`
- *  strategy drops left-edge ticks when labels collide. */
-function formatMonthTick(value: string, index: number): string {
-  const [yearStr, monthStr] = value.split('-');
-  const year = Number(yearStr);
-  const month = Number(monthStr);
-  const showYear = month === 1 || index === 0;
-  return showYear
-    ? `${MONTH_NAMES_SHORT[month - 1]} '${String(year).slice(2)}`
-    : MONTH_NAMES_SHORT[month - 1];
+/** Month-name part of the tick formatter — Intl handles locale/ICU
+ *  detail so we don't hardcode a `["Jan", "Feb", ...]` array. We avoid
+ *  the `{ year: '2-digit' }` option because in `en-US` it renders as
+ *  `"Jan 26"` (plain space), which is ambiguous with a day-of-month
+ *  reading (`Jan 26` = January 26th). We compose the `'YY` suffix
+ *  ourselves. `timeZone: 'UTC'` pins parsing so a user in a negative
+ *  UTC offset doesn't see `"Dec '25"` for a January bucket. */
+const MONTH_SHORT_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'short',
+  timeZone: 'UTC',
+});
+
+/** Tooltip label formatter: full month + full year on hover keeps the
+ *  compact axis readable while giving unambiguous detail on interaction. */
+const MONTH_LONG_FMT = new Intl.DateTimeFormat('en-US', {
+  month: 'long',
+  year: 'numeric',
+  timeZone: 'UTC',
+});
+
+/** `"2026-01-01"` → `"Jan'26"`. Compact, unambiguous, one token wide. */
+function formatMonthTick(value: string): string {
+  const d = new Date(value);
+  const year2 = String(d.getUTCFullYear()).slice(-2);
+  return `${MONTH_SHORT_FMT.format(d)}'${year2}`;
 }
 
-/** Tooltip label formatter: "2026-01" → "Jan 2026". Full four-digit year
- *  on hover keeps the axis compact while detail lives in the tooltip. */
+/** `"2026-01-01"` → `"January 2026"` for tooltip headers. */
 function formatMonthLabel(value: unknown): string {
   if (typeof value !== 'string') return '';
-  const [yearStr, monthStr] = value.split('-');
-  return `${MONTH_NAMES_SHORT[Number(monthStr) - 1]} ${yearStr}`;
+  return MONTH_LONG_FMT.format(new Date(value));
 }
 
 export function OverviewTab() {
@@ -75,13 +84,15 @@ export function OverviewTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
-  // Store a stable "YYYY-MM" key as the XAxis dataKey so the formatter can
-  // derive month/year without a closure, and so 24-month ranges don't
-  // collapse two same-month buckets into one category.
+  // Store an ISO-8601 `"YYYY-MM-01"` date as the XAxis dataKey — matches
+  // shadcn's `chart-bar-interactive` convention so `new Date(value)` parses
+  // reliably in the tick/tooltip formatters. Using the first-of-month keeps
+  // 24-month ranges from collapsing two same-month buckets into one
+  // category (which would happen with bare `"Jan"` labels).
   const incExpData = useMemo(
     () =>
       incExp.data.map((entry) => ({
-        key: `${entry.year}-${String(entry.month).padStart(2, '0')}`,
+        date: `${entry.year}-${String(entry.month).padStart(2, '0')}-01`,
         income: entry.income,
         expenses: entry.expenses,
       })),
@@ -89,11 +100,11 @@ export function OverviewTab() {
   );
 
   const cashFlowData = useMemo(() => {
-    const result: { key: string; cumulative: number }[] = [];
+    const result: { date: string; cumulative: number }[] = [];
     incExp.data.reduce((acc, entry) => {
       const total = acc + entry.net;
       result.push({
-        key: `${entry.year}-${String(entry.month).padStart(2, '0')}`,
+        date: `${entry.year}-${String(entry.month).padStart(2, '0')}-01`,
         cumulative: total,
       });
       return total;
@@ -198,14 +209,15 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="key"
+                  dataKey="date"
                   tickLine={false}
                   axisLine={false}
-                  tickMargin={10}
-                  interval={0}
-                  minTickGap={-1}
-                  padding={{ left: 20, right: 20 }}
-                  tick={{ fontSize: 11 }}
+                  tickMargin={8}
+                  minTickGap={8}
+                  interval="preserveStartEnd"
+                  angle={-30}
+                  textAnchor="end"
+                  height={48}
                   tickFormatter={formatMonthTick}
                 />
                 <ChartTooltip
@@ -281,14 +293,14 @@ export function OverviewTab() {
                 </defs>
                 <CartesianGrid vertical={false} />
                 <XAxis
-                  dataKey="key"
+                  dataKey="date"
                   tickLine={false}
                   axisLine={false}
-                  tickMargin={10}
+                  tickMargin={8}
                   interval={0}
-                  minTickGap={-1}
-                  padding={{ left: 20, right: 20 }}
-                  tick={{ fontSize: 11 }}
+                  angle={-30}
+                  textAnchor="end"
+                  height={48}
                   tickFormatter={formatMonthTick}
                 />
                 <YAxis
