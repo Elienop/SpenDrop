@@ -25,6 +25,22 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	// Dispatch CLI subcommands (e.g. `spendrop backup <path>`) before any
+	// server-side initialization. If a subcommand handles os.Args[1],
+	// dispatchSubcommand returns true and we exit with its requested code;
+	// otherwise we fall through to the normal HTTP-server path below.
+	//
+	// LOAD-BEARING ORDER: this dispatch MUST run before any defer below
+	// (sqlDB.Close, cleanupCancel, srv.Shutdown...) is registered. os.Exit
+	// does NOT run main's deferred calls, so if a resource were acquired
+	// first and a subcommand then called os.Exit, that resource would
+	// leak. Keeping dispatch as the first statement after config.Load()
+	// preserves the invariant; any new code that opens resources must go
+	// *after* this block.
+	if handled, code := dispatchSubcommand(context.Background(), cfg); handled {
+		os.Exit(code)
+	}
+
 	// Push password/session tunables into the auth package before any
 	// hashing or token generation happens.
 	auth.Configure(cfg.Password.BcryptCost, cfg.Session.TokenBytes)
