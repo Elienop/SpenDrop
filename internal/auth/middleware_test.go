@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,16 +13,27 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// setupTestDB creates an in-memory SQLite database with migrations applied
-// and returns a Queries instance for testing.
+// setupTestDB creates a file-backed SQLite database with migrations applied
+// and returns a Queries instance for testing. Phase 4.1 forced the shift
+// from `:memory:` to on-disk: RunMigrations now invokes SnapshotForMigration
+// which opens its own read-only connection via a dbPath parameter, and for
+// `:memory:` each connection sees an independent (empty) database. A
+// file-backed temp DB inside t.TempDir() gives every connection the same
+// view and is torn down automatically by the test framework.
 func setupTestDB(t *testing.T) (*database.Queries, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite3", ":memory:?_journal_mode=WAL&_busy_timeout=5000")
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	if err := database.RunMigrations(db); err != nil {
+	if err := database.RunMigrations(db, database.MigrationOptions{
+		DBPath:      dbPath,
+		SnapshotDir: filepath.Join(dir, "snapshots"),
+		BusyTimeout: 5 * time.Second,
+	}); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 	return database.New(db), db

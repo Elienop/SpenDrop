@@ -9,12 +9,16 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 )
 
-// setupTestDB creates an in-memory SQLite database with migrations applied
-// and returns a Queries instance for testing.
+// setupTestDB creates a file-backed SQLite database in t.TempDir() with
+// migrations applied and returns a Queries instance for testing. Phase 4.1
+// forced the switch from `:memory:` to on-disk so SnapshotForMigration
+// (which opens its own read-only connection by dbPath) has a real file to
+// snapshot — for `:memory:` each connection gets an independent empty
+// database, making the snapshot step a meaningless no-op.
 func setupTestDB(t *testing.T) (*Queries, *sql.DB) {
 	t.Helper()
-	db := openTestDB(t)
-	if err := RunMigrations(db); err != nil {
+	db, dbPath := openTestDB(t)
+	if err := RunMigrations(db, defaultMigrationOptions(t, dbPath)); err != nil {
 		t.Fatalf("run migrations: %v", err)
 	}
 	return New(db), db

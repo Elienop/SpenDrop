@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -62,8 +63,32 @@ func main() {
 	}
 	defer sqlDB.Close()
 
-	// Run migrations
-	if err := database.RunMigrations(sqlDB); err != nil {
+	// Run migrations. The snapshot directory is derived from the DB path
+	// rather than exposed as its own env var: the data-stewardship spec
+	// recommends hardcoding the location, and "next to the DB file" is
+	// the only location that makes sense — anything else would need the
+	// operator to pre-create a second mount and keep it writable. Docker's
+	// DB_PATH=/app/data/spendrop.db therefore produces /app/data/migration-snapshots
+	// without any extra wiring, and local dev produces ./migration-snapshots.
+	//
+	// We resolve the configured DB_PATH to absolute *before* joining the
+	// sibling directory so the snapshot dir is a stable, operator-visible
+	// location regardless of the process CWD. A systemd unit or
+	// `docker exec` that launches from "/" with DB_PATH=spendrop.db would
+	// otherwise compute filepath.Dir(".") → "" and try to write snapshots
+	// to "/migration-snapshots", which is not writable for a non-root
+	// service user and not visible to operators looking in the data
+	// directory.
+	absDBPath, err := filepath.Abs(cfg.DBPath)
+	if err != nil {
+		log.Fatalf("resolve DB_PATH to absolute: %v", err)
+	}
+	migrationSnapshotDir := filepath.Join(filepath.Dir(absDBPath), "migration-snapshots")
+	if err := database.RunMigrations(sqlDB, database.MigrationOptions{
+		DBPath:      absDBPath,
+		SnapshotDir: migrationSnapshotDir,
+		BusyTimeout: cfg.SQLite.BusyTimeout,
+	}); err != nil {
 		log.Fatalf("run migrations: %v", err)
 	}
 	log.Println("Database migrations applied successfully")
