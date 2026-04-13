@@ -46,6 +46,9 @@ type Config struct {
 	// SQLite controls SQLite open-time options used to build the DSN.
 	SQLite SQLiteConfig
 
+	// Backup controls the scheduled in-process database backup loop.
+	Backup BackupConfig
+
 	// ShutdownGrace is the maximum time the server waits for in-flight
 	// requests to finish during graceful shutdown.
 	ShutdownGrace time.Duration
@@ -106,6 +109,34 @@ type SQLiteConfig struct {
 	ForeignKeys bool
 }
 
+// BackupConfig holds the scheduled in-process backup knobs. When Enabled is
+// false the scheduler is a hard no-op and the other fields are ignored by
+// Validate — operators should be able to disable backups without also having
+// to satisfy the rest of the config surface.
+type BackupConfig struct {
+	// Enabled toggles the background backup goroutine entirely.
+	// Env: BACKUP_ENABLED. Default: true.
+	Enabled bool
+	// Dir is the directory backups are written to. The Dockerfile
+	// overrides the default to /app/data/backups so the files land on
+	// the persistent volume. Env: BACKUP_DIR. Default: "backups".
+	Dir string
+	// Interval is the time between ticks. Validate rejects values < 1h
+	// because a sub-hour interval implies per-minute filename collisions
+	// and would blow past the retention policy's granularity.
+	// Env: BACKUP_INTERVAL. Default: 24h.
+	Interval time.Duration
+	// KeepDaily is the number of most-recent daily backups to retain.
+	// Env: BACKUP_KEEP_DAILY. Default: 7.
+	KeepDaily int
+	// KeepWeekly is the number of distinct ISO weeks to retain.
+	// Env: BACKUP_KEEP_WEEKLY. Default: 4.
+	KeepWeekly int
+	// KeepMonthly is the number of distinct calendar months to retain.
+	// Env: BACKUP_KEEP_MONTHLY. Default: 12.
+	KeepMonthly int
+}
+
 // Defaults returns the in-source default configuration. All fields are set.
 // The returned value is a fresh copy — callers can mutate it without
 // affecting other callers.
@@ -142,6 +173,14 @@ func Defaults() Config {
 			BusyTimeout: 5 * time.Second,
 			JournalMode: "WAL",
 			ForeignKeys: true,
+		},
+		Backup: BackupConfig{
+			Enabled:     true,
+			Dir:         "backups",
+			Interval:    24 * time.Hour,
+			KeepDaily:   7,
+			KeepWeekly:  4,
+			KeepMonthly: 12,
 		},
 	}
 }
@@ -216,6 +255,26 @@ func Load() (*Config, error) {
 
 	// SQLite
 	if err := parseDuration("SQLITE_BUSY_TIMEOUT", &cfg.SQLite.BusyTimeout); err != nil {
+		return nil, err
+	}
+
+	// Backup
+	if err := parseBool("BACKUP_ENABLED", &cfg.Backup.Enabled); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("BACKUP_DIR"); v != "" {
+		cfg.Backup.Dir = v
+	}
+	if err := parseDuration("BACKUP_INTERVAL", &cfg.Backup.Interval); err != nil {
+		return nil, err
+	}
+	if err := parseInt("BACKUP_KEEP_DAILY", &cfg.Backup.KeepDaily); err != nil {
+		return nil, err
+	}
+	if err := parseInt("BACKUP_KEEP_WEEKLY", &cfg.Backup.KeepWeekly); err != nil {
+		return nil, err
+	}
+	if err := parseInt("BACKUP_KEEP_MONTHLY", &cfg.Backup.KeepMonthly); err != nil {
 		return nil, err
 	}
 
@@ -299,6 +358,37 @@ func (c *Config) Validate() error {
 	if c.SQLite.JournalMode == "" {
 		return fmt.Errorf("SQLite journal mode must not be empty")
 	}
+
+	// Backup settings are only validated when enabled. A disabled
+	// scheduler is a hard no-op and should not force the operator to
+	// satisfy the other backup knobs (they may be unset or intentionally
+	// invalid while the feature is off).
+	if c.Backup.Enabled {
+		if c.Backup.Dir == "" {
+			return fmt.Errorf("BACKUP_DIR must not be empty when BACKUP_ENABLED=true")
+		}
+		if c.Backup.Interval < time.Hour {
+			return fmt.Errorf("BACKUP_INTERVAL must be >= 1h: %s", c.Backup.Interval)
+		}
+		if c.Backup.KeepDaily < 0 || c.Backup.KeepWeekly < 0 || c.Backup.KeepMonthly < 0 {
+			return fmt.Errorf("BACKUP_KEEP_* must be >= 0 (daily=%d weekly=%d monthly=%d)",
+				c.Backup.KeepDaily, c.Backup.KeepWeekly, c.Backup.KeepMonthly)
+		}
+		// Reject all-zero retention. Prune walks the daily/weekly/monthly
+		// buckets in order and breaks out the moment its per-bucket counter
+		// meets the keep-count; with every counter at zero, every bucket
+		// loop exits before adding any file to the keep-set, and the
+		// removal pass at the end deletes the fresh backup this tick just
+		// wrote. The scheduler would log "wrote X in Ys" followed by
+		// "pruned 1 file(s)" on every tick and the backup directory would
+		// stay empty forever — a silent data-loss footgun that looks like
+		// a healthy deployment. Require at least one retention slot.
+		if c.Backup.KeepDaily+c.Backup.KeepWeekly+c.Backup.KeepMonthly < 1 {
+			return fmt.Errorf("BACKUP_KEEP_* sum must be >= 1 when BACKUP_ENABLED=true (daily=%d weekly=%d monthly=%d); otherwise every fresh backup is pruned on the same tick",
+				c.Backup.KeepDaily, c.Backup.KeepWeekly, c.Backup.KeepMonthly)
+		}
+	}
+
 	return nil
 }
 
@@ -360,5 +450,26 @@ func parseInt64(key string, dst *int64) error {
 		return fmt.Errorf("%s: %w", key, err)
 	}
 	*dst = n
+	return nil
+}
+
+// parseBool reads an env var as a boolean using the same permissive rules as
+// most shell-facing config systems: "true"/"false", "1"/"0", "yes"/"no",
+// case-insensitive. Unset leaves the destination alone. Unknown values are
+// rejected with a clear error rather than silently defaulting, so a typo
+// (e.g. BACKUP_ENABLED=tre) cannot accidentally disable a safety feature.
+func parseBool(key string, dst *bool) error {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return nil
+	}
+	switch strings.ToLower(v) {
+	case "true", "1", "yes":
+		*dst = true
+	case "false", "0", "no":
+		*dst = false
+	default:
+		return fmt.Errorf("%s: invalid bool %q (want true/false/1/0/yes/no)", key, v)
+	}
 	return nil
 }

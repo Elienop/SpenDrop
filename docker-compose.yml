@@ -17,6 +17,12 @@ services:
       # - TRUST_PROXY=true
       # CORS origin for split-origin deployments. Leave unset for same-origin.
       # - CORS_ORIGIN=https://spendrop.example.com
+      # Scheduled backups. Default: enabled, every 24h, 7/4/12 GFS retention.
+      # - BACKUP_ENABLED=true
+      # - BACKUP_INTERVAL=24h
+      # - BACKUP_KEEP_DAILY=7
+      # - BACKUP_KEEP_WEEKLY=4
+      # - BACKUP_KEEP_MONTHLY=12
     restart: unless-stopped
 
 volumes:

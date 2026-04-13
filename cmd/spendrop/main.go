@@ -15,6 +15,7 @@ import (
 
 	"github.com/elienop/spendrop/internal/api"
 	"github.com/elienop/spendrop/internal/auth"
+	"github.com/elienop/spendrop/internal/backup"
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
 )
@@ -90,6 +91,22 @@ func main() {
 			}
 		}
 	}()
+
+	// Scheduled database backups. Shares cleanupCtx with session cleanup so
+	// graceful shutdown stops both goroutines at the same time. Run itself
+	// does not hold any DB handles that would block close; it opens its own
+	// read-only connection per tick, independent of sqlDB.
+	scheduler := &backup.Scheduler{
+		Enabled:     cfg.Backup.Enabled,
+		Dir:         cfg.Backup.Dir,
+		Interval:    cfg.Backup.Interval,
+		KeepDaily:   cfg.Backup.KeepDaily,
+		KeepWeekly:  cfg.Backup.KeepWeekly,
+		KeepMonthly: cfg.Backup.KeepMonthly,
+		DBPath:      cfg.DBPath,
+		BusyTimeout: cfg.SQLite.BusyTimeout,
+	}
+	go scheduler.RunLoop(cleanupCtx)
 
 	router := api.NewRouter(queries, sqlDB, cfg)
 
