@@ -312,7 +312,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	txn, err := h.queries.CreateTransaction(r.Context(), database.CreateTransactionParams{
+	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
 		UserID:           user.ID,
 		Date:             date,
 		Amount:           amount,
@@ -346,6 +346,25 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// TOCTOU note: the 404 + ownership check below reads the row OUTSIDE
+	// the TransactionStore's update tx, so in the microsecond gap between
+	// this read and the chokepoint Update, a concurrent writer could have
+	// deleted or mutated the row. The race is benign by construction:
+	//
+	//   - Row deleted: TransactionStore.Update reads the "before" row
+	//     inside its own tx (store.go:97) and surfaces ErrNoRows, which
+	//     rolls back cleanly — no ghost audit row, no orphaned update.
+	//   - Fields mutated: the audit row's before_json captures the
+	//     in-tx state, not the stale copy we read here, so the forensic
+	//     log always reflects what actually committed.
+	//   - user_id changed: impossible — no endpoint mutates user_id, so
+	//     ownership cannot retroactively flip under us.
+	//
+	// Pushing the ownership check into the store would couple database
+	// code to HTTP-level role semantics (member vs. admin) and force
+	// every future chokepoint method to grow a scope parameter. We keep
+	// the check here and rely on the store's own tx-scoped read to catch
+	// the one failure mode (row vanished) that actually matters.
 	existing, err := h.queries.GetTransactionByID(r.Context(), id)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -381,7 +400,7 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	err = h.queries.UpdateTransaction(r.Context(), database.UpdateTransactionParams{
+	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
 		Date:             date,
 		Amount:           amount,
 		OriginalAmount:   origAmt,
@@ -415,6 +434,11 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Same TOCTOU pattern as handleUpdateTransaction — see the long note
+	// there for why reading the row outside the store tx is safe here.
+	// Briefly: if the row is gone by the time TransactionStore.Delete
+	// runs, its in-tx GetTransactionByID returns ErrNoRows and the whole
+	// thing rolls back without producing a stray audit row.
 	existing, err := h.queries.GetTransactionByID(r.Context(), id)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -430,7 +454,7 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := h.queries.DeleteTransaction(r.Context(), id); err != nil {
+	if err := h.txnStore.Delete(r.Context(), user.ID, id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete transaction")
 		return
 	}
@@ -477,6 +501,10 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	}
 	defer tx.Rollback()
 
+	// qtx is still used for the per-item currency lookup (a read the
+	// chokepoint doesn't expose); CreateTx handles the write+audit pair
+	// on the same *sql.Tx so the whole batch — data rows, audit rows,
+	// currency reads — commits or rolls back atomically.
 	qtx := h.queries.WithTx(tx)
 	results := make([]transactionResponse, 0, len(reqs))
 
@@ -489,7 +517,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			return
 		}
 
-		txn, err := qtx.CreateTransaction(r.Context(), database.CreateTransactionParams{
+		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
 			UserID:           user.ID,
 			Date:             date,
 			Amount:           amount,
@@ -594,15 +622,27 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	// Escape SQL LIKE wildcards (same pattern as buildTransactionWhereClause)
 	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(req.Search)
 
+	// Wrap the bulk UPDATE + summary audit row in a single *sql.Tx so the
+	// audit row commits if and only if the data rows commit. RecordBulkTx
+	// writes a single summary row with transaction_id=BulkAuditTransactionID
+	// rather than one-row-per-match; the plan documents this as the
+	// deliberate fidelity/perf trade-off for an endpoint that can touch
+	// tens of thousands of rows.
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
 	var result sql.Result
-	var err error
 	if user.Role == RoleAdmin {
-		result, err = h.db.ExecContext(r.Context(),
+		result, err = tx.ExecContext(r.Context(),
 			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
 			req.NewDescription, "%"+escaped+"%",
 		)
 	} else {
-		result, err = h.db.ExecContext(r.Context(),
+		result, err = tx.ExecContext(r.Context(),
 			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ?`,
 			req.NewDescription, "%"+escaped+"%", user.ID,
 		)
@@ -615,6 +655,32 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get update count")
+		return
+	}
+
+	// Record the summary audit row for the bulk rename. The filter string
+	// embeds BOTH the raw user-supplied search term (quoted with %q so
+	// trailing whitespace, quotes, and escape chars survive a round-trip)
+	// AND the exact SQL LIKE pattern actually executed. Without the
+	// executed pattern an operator replaying the audit log cannot tell
+	// which `%` / `_` characters were literals vs. wildcards — critical
+	// for reconstructing intent when the raw search contains either.
+	scope := "own"
+	if user.Role == RoleAdmin {
+		scope = "all"
+	}
+	filter := fmt.Sprintf("rename scope=%s search=%q -> %q (SQL LIKE %q ESCAPE '\\')",
+		scope, req.Search, req.NewDescription, "%"+escaped+"%")
+	if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate, database.BulkAuditSummary{
+		Count:  rowsAffected,
+		Filter: filter,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record audit")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit bulk rename")
 		return
 	}
 
@@ -658,24 +724,53 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	}
 	defer tx.Rollback()
 
+	// qtx handles the ownership-check read; DeleteTx performs the delete
+	// + audit write on the same *sql.Tx so every deleted row gets its
+	// own audit entry, and a failure rolls back the whole batch.
 	qtx := h.queries.WithTx(tx)
 	deleted := 0
+	var skipped []int64
 
 	for _, id := range req.IDs {
 		existing, err := qtx.GetTransactionByID(r.Context(), id)
 		if err != nil {
+			skipped = append(skipped, id)
 			continue
 		}
 
 		if user.Role != RoleAdmin && existing.UserID != user.ID {
+			skipped = append(skipped, id)
 			continue
 		}
 
-		if err := qtx.DeleteTransaction(r.Context(), id); err != nil {
+		if err := h.txnStore.DeleteTx(r.Context(), tx, user.ID, id); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to delete transaction")
 			return
 		}
 		deleted++
+	}
+
+	// If any requested IDs were skipped (missing or not owned), write an
+	// additional summary audit row so operators can reconstruct operator
+	// *intent* — the per-row audits only record rows that actually
+	// committed, so without this the forensic log would silently lose the
+	// fact that the user asked to delete ID 999 and it wasn't there. The
+	// summary row uses the BULK sentinel transaction_id so it is easy to
+	// filter out during single-row investigations.
+	if len(skipped) > 0 {
+		scope := "own"
+		if user.Role == RoleAdmin {
+			scope = "all"
+		}
+		filterDesc := fmt.Sprintf("batch-delete-skipped scope=%s requested=%d deleted=%d skipped_ids=%v",
+			scope, len(req.IDs), deleted, skipped)
+		if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditDelete, database.BulkAuditSummary{
+			Count:  int64(len(skipped)),
+			Filter: filterDesc,
+		}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record audit")
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -735,7 +830,19 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 		SELECT t.id FROM transactions t
 		JOIN categories c ON t.category_id = c.id` + whereClause + `)`
 
-	result, err := h.db.ExecContext(r.Context(), query, args...)
+	// Wrap DELETE + summary audit row in a single *sql.Tx so the audit row
+	// commits if and only if the deletion commits. The summary row carries
+	// the raw query string as its filter for operator forensics — a full
+	// per-row audit would defeat the point of this endpoint, which exists
+	// precisely to delete tens of thousands of rows in one atomic shot.
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
+	result, err := tx.ExecContext(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete transactions")
 		return
@@ -744,6 +851,27 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	deleted, err := result.RowsAffected()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read delete result")
+		return
+	}
+
+	// filterDesc encodes the raw query string and the admin/own scope so an
+	// operator replaying the audit log can reconstruct exactly which rows
+	// the DELETE targeted, even after the underlying rows are gone.
+	scope := "own"
+	if user.Role == RoleAdmin {
+		scope = "all"
+	}
+	filterDesc := fmt.Sprintf("delete-by-filter scope=%s query=%q", scope, r.URL.RawQuery)
+	if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditDelete, database.BulkAuditSummary{
+		Count:  deleted,
+		Filter: filterDesc,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record audit")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit delete-by-filter")
 		return
 	}
 

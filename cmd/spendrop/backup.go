@@ -1,12 +1,15 @@
 // SpenDrop CLI subcommands.
 //
-// This file implements the `backup` subcommand dispatcher. The real backup
-// primitive lives in internal/backup — see backup.Run for the VACUUM INTO
-// logic, filename format, and load-bearing comments about DSN/TOCTOU/etc.
+// This file implements dispatchSubcommand plus the `backup` subcommand body.
+// Additional subcommands live in sibling files (e.g. audit.go) and are
+// dispatched from the switch below. The real backup primitive lives in
+// internal/backup — see backup.Run for the VACUUM INTO logic, filename
+// format, and load-bearing comments about DSN/TOCTOU/etc.
 //
-// The subcommand is intended to be invoked from inside the running container:
+// Subcommands are intended to be invoked from inside the running container:
 //
 //	docker exec spendrop ./spendrop backup /app/data/backups/test.db
+//	docker exec spendrop ./spendrop audit --transaction-id 1234
 
 package main
 
@@ -29,6 +32,7 @@ import (
 // Subcommands:
 //
 //	spendrop backup <destination-path>
+//	spendrop audit [--transaction-id <id>] [--since <time>] [--limit <n>]
 //
 // Adding more subcommands later: extend the switch and document the usage
 // line.
@@ -37,6 +41,8 @@ func dispatchSubcommand(ctx context.Context, cfg *config.Config) (handled bool, 
 		return false, 0
 	}
 	switch os.Args[1] {
+	case "audit":
+		return true, auditCmd(ctx, cfg, os.Args[2:])
 	case "backup":
 		if len(os.Args) != 3 {
 			fmt.Fprintln(os.Stderr, "usage: spendrop backup <destination-path>")

@@ -80,10 +80,20 @@ type Transaction struct {
 	UpdatedAt        time.Time       `json:"updated_at"`
 }
 
+type TransactionAudit struct {
+	ID            int64          `json:"id"`
+	TransactionID int64          `json:"transaction_id"`
+	Action        string         `json:"action"`
+	ActorUserID   sql.NullInt64  `json:"actor_user_id"`
+	OccurredAt    time.Time      `json:"occurred_at"`
+	BeforeJson    sql.NullString `json:"before_json"`
+	AfterJson     sql.NullString `json:"after_json"`
+}
+
 type User struct {
 	ID           int64     `json:"id"`
 	Username     string    `json:"username"`
-	PasswordHash string    `json:"-"`
+	PasswordHash string    `json:"password_hash"`
 	DisplayName  string    `json:"display_name"`
 	Role         string    `json:"role"`
 	CreatedAt    time.Time `json:"created_at"`
