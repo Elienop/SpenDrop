@@ -27,14 +27,19 @@ func populateSourceDB(t *testing.T, path string) *sql.DB {
 	if err != nil {
 		t.Fatalf("open source db: %v", err)
 	}
-	if _, err := db.Exec(`CREATE TABLE things (
+	// Use the table name "transactions" rather than a generic test name
+	// so scheduler tests (same package) can exercise the Verify path
+	// without a second helper — Verify counts rows in "transactions"
+	// specifically, and a parallel schema here keeps the fixture DB
+	// representative of production.
+	if _, err := db.Exec(`CREATE TABLE transactions (
 		id INTEGER PRIMARY KEY,
 		name TEXT NOT NULL,
 		value REAL NOT NULL
 	)`); err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO things (name, value) VALUES
+	if _, err := db.Exec(`INSERT INTO transactions (name, value) VALUES
 		('alpha', 1.5),
 		('beta',  2.5),
 		('gamma', 3.5)`); err != nil {
@@ -97,10 +102,10 @@ func TestRun_HappyPath(t *testing.T) {
 
 	// Row count parity with source.
 	var srcCount, dstCount int
-	if err := srcDB.QueryRow("SELECT COUNT(*) FROM things").Scan(&srcCount); err != nil {
+	if err := srcDB.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&srcCount); err != nil {
 		t.Fatalf("count src: %v", err)
 	}
-	if err := backupDB.QueryRow("SELECT COUNT(*) FROM things").Scan(&dstCount); err != nil {
+	if err := backupDB.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&dstCount); err != nil {
 		t.Fatalf("count dst: %v", err)
 	}
 	if srcCount != dstCount {

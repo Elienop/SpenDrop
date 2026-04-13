@@ -1,7 +1,10 @@
 // Package backup implements SpenDrop's scheduled-and-on-demand database
-// snapshot primitive. Run writes a consistent, WAL-aware copy of the live
-// SpenDrop database to a target path using SQLite's online-backup primitive
-// (VACUUM INTO), and writes a sidecar SHA-256 checksum file at "<dst>.sha256".
+// snapshot primitive. Snapshot writes a consistent, WAL-aware copy of the
+// live SpenDrop database to a target path using SQLite's online-backup
+// primitive (VACUUM INTO). WriteSidecar writes a sidecar SHA-256 checksum
+// file at "<dst>.sha256". Run calls both in sequence and is the CLI entry
+// point; scheduled backups call Snapshot and WriteSidecar directly so they
+// can splice Verify between the two — see Scheduler.runOnce for that flow.
 //
 // The package is also used by the `spendrop backup` CLI subcommand, which is
 // intended to be invoked from inside the running container:
@@ -10,8 +13,8 @@
 //
 // VACUUM INTO is atomic, page-consistent across the WAL, and produces a fully
 // defragmented copy in one statement. It does not create -wal/-shm companion
-// files alongside the destination, so a backup produced by Run is a single
-// self-contained file plus its sidecar.
+// files alongside the destination, so a backup produced by Snapshot is a
+// single self-contained file plus its (optional) sidecar.
 package backup
 
 import (
@@ -36,15 +39,54 @@ import (
 // busy-timeout to apply to the read connection; pass the same value your
 // server uses (cfg.SQLite.BusyTimeout is the typical source).
 //
-// The function uses VACUUM INTO under the hood, which is the SQLite online
-// backup primitive: it acquires a read snapshot of the source, copies every
-// page through the page cache, and produces a defragmented destination in a
-// single atomic statement. Concurrent writers to the source are blocked only
-// for the duration the snapshot is acquired (microseconds), not for the full
-// copy. The destination contains a consistent point-in-time snapshot of the
-// source: any in-flight transaction either commits before the snapshot point
-// (and is in the backup) or after (and is not). There is no torn-write window.
+// Run is the CLI convenience wrapper around Snapshot + WriteSidecar, with
+// the additional semantic that a WriteSidecar failure rolls back the
+// snapshot file so an operator-invoked backup never leaves a partial result
+// on disk. Scheduled backups go through Snapshot and WriteSidecar directly
+// so they can splice Verify between the two — see Scheduler.runOnce for
+// that flow.
 func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst string) error {
+	if err := Snapshot(ctx, dbPath, busyTimeout, dst); err != nil {
+		return err
+	}
+	if _, err := WriteSidecar(dst); err != nil {
+		// Roll back the snapshot. The sidecar's existence is the
+		// marker every later phase uses to decide whether a file is
+		// trusted, so an orphan .db with no sidecar would be in a
+		// half-state the operator would have to clean up manually.
+		// For the CLI path, "clean up manually" is exactly the
+		// friction we want to avoid: the operator just ran a command
+		// and got an error, so the filesystem should look the same
+		// as before the command ran. The scheduler path, in contrast,
+		// deliberately keeps the .db on sidecar failure so an operator
+		// can inspect it — that divergence is why runOnce bypasses Run.
+		_ = os.Remove(dst)
+		return err
+	}
+	return nil
+}
+
+// Snapshot writes a VACUUM INTO copy of the database at dbPath to dst. It
+// refuses to overwrite an existing dst or an orphan sidecar at dst+".sha256".
+// On VACUUM INTO failure, it sweeps any stale companion files it may have
+// left behind at dst / dst-wal / dst-shm / dst-journal.
+//
+// This is the lower-level primitive that both Run (CLI) and the scheduler
+// use. The scheduler needs the snapshot and the sidecar write to be
+// separate operations because Phase 1.3 verification runs between them:
+// the sidecar is the "this file is trusted" marker and must not be written
+// for a file that failed verification.
+//
+// The function uses VACUUM INTO, which is the SQLite online backup
+// primitive: it acquires a read snapshot of the source, copies every page
+// through the page cache, and produces a defragmented destination in a
+// single atomic statement. Concurrent writers to the source are blocked
+// only for the duration the snapshot is acquired (microseconds), not for
+// the full copy. The destination contains a consistent point-in-time
+// snapshot of the source: any in-flight transaction either commits before
+// the snapshot point (and is in the backup) or after (and is not). There
+// is no torn-write window.
+func Snapshot(ctx context.Context, dbPath string, busyTimeout time.Duration, dst string) error {
 	if dst == "" {
 		return fmt.Errorf("backup destination path must not be empty")
 	}
@@ -134,36 +176,45 @@ func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst stri
 		return fmt.Errorf("VACUUM INTO: %w", err)
 	}
 
-	// Compute the hash of the resulting file and write the sidecar in
-	// `sha256sum` format ("<hex>  <basename>\n"). The sidecar's existence is
-	// the marker every later phase will use to decide whether a file is
-	// trusted; we only write it after the backup is fully on disk.
+	return nil
+}
+
+// WriteSidecar computes sha256(dst) and writes dst+".sha256" via
+// write-to-tmp + atomic rename. It returns the hex digest so callers can
+// log or re-use it without re-reading the file. Assumes the caller has
+// already ensured no sidecar exists at the target path — Snapshot enforces
+// that invariant upstream, so Run / runOnce can call this without an
+// additional check.
+//
+// A straight WriteFile-to-final-path would risk a partial sidecar at the
+// final path if the process is killed, the disk fills, or a syscall is
+// interrupted mid-write — and the next run's orphan-sidecar guard would
+// then refuse to proceed against a valid backup. The tmp file lives in the
+// same directory as the destination so the rename stays on one filesystem
+// and is atomic on every supported OS.
+func WriteSidecar(dst string) (string, error) {
 	sum, err := Sha256File(dst)
 	if err != nil {
-		_ = os.Remove(dst)
-		return fmt.Errorf("hash backup: %w", err)
+		return "", fmt.Errorf("hash backup: %w", err)
 	}
 
-	// Write the sidecar via write-to-tmp + atomic rename. A straight
-	// WriteFile can leave a partial sidecar at the final path if the
-	// process is killed, the disk fills, or a syscall is interrupted
-	// mid-write — and the next run's orphan-sidecar guard above would
-	// then refuse to proceed against a valid backup. The tmp file lives
-	// in the same directory as the destination so the rename stays on
-	// one filesystem and is atomic on every supported OS.
+	sidecarPath := dst + ".sha256"
 	sidecarContent := fmt.Sprintf("%s  %s\n", sum, filepath.Base(dst))
 	sidecarTmp := sidecarPath + ".tmp"
 	if err := os.WriteFile(sidecarTmp, []byte(sidecarContent), 0o644); err != nil {
-		_ = os.Remove(dst)
-		return fmt.Errorf("write sidecar tmp: %w", err)
+		// A partial tmp could sit on disk if WriteFile failed mid-write.
+		// The next run's orphan-sidecar guard looks at the final path
+		// (not the .tmp suffix), so the leak is invisible to future
+		// runs — but a best-effort unlink keeps the backup directory
+		// clean for humans reading `ls`.
+		_ = os.Remove(sidecarTmp)
+		return "", fmt.Errorf("write sidecar tmp: %w", err)
 	}
 	if err := os.Rename(sidecarTmp, sidecarPath); err != nil {
 		_ = os.Remove(sidecarTmp)
-		_ = os.Remove(dst)
-		return fmt.Errorf("rename sidecar: %w", err)
+		return "", fmt.Errorf("rename sidecar: %w", err)
 	}
-
-	return nil
+	return sum, nil
 }
 
 // quoteSQLiteString returns s wrapped in single quotes, with any embedded
@@ -185,8 +236,9 @@ func quoteSQLiteString(s string) string {
 }
 
 // Sha256File returns the lowercase hex SHA-256 digest of the file at path.
-// Exported because Phase 1.3's verification pass will reuse it to re-check a
-// backup against its sidecar.
+// Exported because Phase 1.3's verification pass may reuse it to re-check a
+// backup against its sidecar, and WriteSidecar calls it to compute the
+// digest it writes into the sidecar file.
 func Sha256File(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
