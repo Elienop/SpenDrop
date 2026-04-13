@@ -25,9 +25,10 @@ COPY --from=go-builder /app/spendrop .
 COPY --from=web-builder /app/web/dist ./web/dist
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh \
-    && mkdir -p /app/data \
+    && mkdir -p /app/data /app/data/backups \
     && chown -R spendrop:spendrop /app /app/data
 EXPOSE 8080
 ENV DB_PATH=/app/data/spendrop.db
+ENV BACKUP_DIR=/app/data/backups
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["./spendrop"]
