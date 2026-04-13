@@ -207,13 +207,19 @@ Most deployments only need the first handful of variables. Everything below is a
 | `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
 | `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
 
-#### Uploads and database
+#### Uploads, database, and backups
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_JSON_BYTES` | `1048576` (1 MiB) | Maximum size of a JSON request body |
 | `MAX_UPLOAD_BYTES` | `10485760` (10 MiB) | Maximum size of a multipart file upload (xlsx import) |
 | `SQLITE_BUSY_TIMEOUT` | `5s` | SQLite busy timeout. Raise this if you see `database is locked` errors under heavy concurrent writes |
+| `BACKUP_ENABLED` | `true` | Enable the in-process scheduled backup loop. Set `false` to disable it entirely; no other `BACKUP_*` variables are validated when disabled |
+| `BACKUP_INTERVAL` | `24h` | How often the scheduler runs a backup. Must be at least `1h` |
+| `BACKUP_DIR` | `backups` | Where backups are written. The Docker image overrides this to `/app/data/backups` so the files land in the mounted volume |
+| `BACKUP_KEEP_DAILY` | `7` | Most-recent daily backups retained |
+| `BACKUP_KEEP_WEEKLY` | `4` | Distinct ISO weeks retained |
+| `BACKUP_KEEP_MONTHLY` | `12` | Distinct calendar months retained. The sum of the three `BACKUP_KEEP_*` counts must be ≥ 1 — setting all three to `0` is rejected at startup because the current tick's own backup would be pruned on the same tick |
 
 ## Docker Configuration
 
@@ -331,17 +337,89 @@ spendrop.example.com {
 
 Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start.
 
-### Backup
+### Backup and Restore
 
-Your database lives in the `spendrop-data` Docker volume. To back it up:
+SpenDrop takes a consistent, WAL-aware backup of your database every 24 hours by default. Backups land in `/app/data/backups/` inside the `spendrop-data` volume as timestamped files like `spendrop-2026-04-13T0300Z.db` (ISO-8601, UTC, minute precision, no colons so they work on every filesystem). Each backup is accompanied by a `.sha256` sidecar that is **only** written after the file passes three checks:
+
+1. Size sanity — at least one SQLite page, and at most 10× the previous successful backup (the cheap check runs first so an obviously broken file never even opens SQLite)
+2. `PRAGMA integrity_check` returns `ok`
+3. Row-count parity against the live `transactions` table (tolerates a single in-flight write that landed between the count and the snapshot)
+
+If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups (it ignores `.corrupt` files entirely, leaving them for you to inspect).
+
+Old backups are pruned on a grandfather-father-son schedule: by default, 7 daily, 4 weekly, 12 monthly — roughly 115 MB of backup history for a typical household database.
+
+Every successful backup emits a single log line you can grep for in `docker logs spendrop`:
+
+```
+backup ok: spendrop-2026-04-13T0300Z.db (4.8 MB, 9842 rows, sha256 a1b2c3d4e5f6…) in 87ms
+```
+
+> **Do not** use `docker cp spendrop:/app/data/spendrop.db` on a running container. SQLite in WAL mode keeps uncommitted writes in `spendrop.db-wal` and `spendrop.db-shm`. A naive copy of just `spendrop.db` can be silently inconsistent or lose recent transactions on restore. Use the scheduled backup or the `spendrop backup` subcommand below instead.
+
+#### Take an immediate backup
 
 ```bash
-# Find the volume path
-docker volume inspect spendrop-data
-
-# Or copy it out directly
-docker cp spendrop:/app/data/spendrop.db ./backup-spendrop.db
+docker exec spendrop ./spendrop backup /app/data/backups/manual-$(date -u +%Y%m%dT%H%MZ).db
 ```
+
+The subcommand refuses to overwrite an existing file and writes both the `.db` and its `.sha256` sidecar atomically. Running it a second time with the same target exits non-zero without touching the existing file.
+
+#### Tunables
+
+Backup behavior is controlled by six environment variables — `BACKUP_ENABLED`, `BACKUP_INTERVAL`, `BACKUP_DIR`, `BACKUP_KEEP_DAILY`, `BACKUP_KEEP_WEEKLY`, `BACKUP_KEEP_MONTHLY`. All six are documented in the [Uploads, database, and backups](#uploads-database-and-backups) section of the environment variables table. Most deployments never need to change any of them; the common adjustments are `BACKUP_INTERVAL=12h` for twice-daily backups and `BACKUP_ENABLED=false` for throwaway test environments.
+
+#### Restore drill — do this at least once before you trust the system
+
+A backup you have never restored from is a wish, not a backup. Run this drill once on your actual deployment so you know the commands work, the permissions are right, and the data comes back intact. It takes about two minutes.
+
+```bash
+# 1. Pick a backup to restore (newest is usually what you want)
+docker exec spendrop ls -lt /app/data/backups/
+
+# 2. Verify the checksum still matches the file.
+#    Replace the filename with the one you picked in step 1.
+docker exec spendrop sh -c 'cd /app/data/backups && sha256sum -c spendrop-2026-04-13T0300Z.db.sha256'
+
+# 3. Stop the container so the live DB is closed cleanly
+docker compose stop spendrop
+
+# 4. Replace the live DB. Keep the old one with a .bak suffix in case the
+#    restore is wrong. The -wal and -shm files belong to the OLD database —
+#    leaving them in place would corrupt the restored one.
+docker run --rm -v spendrop-data:/data alpine sh -c '
+  mv /data/spendrop.db /data/spendrop.db.bak &&
+  rm -f /data/spendrop.db-wal /data/spendrop.db-shm &&
+  cp /data/backups/spendrop-2026-04-13T0300Z.db /data/spendrop.db
+'
+
+# 5. Start the container back up
+docker compose start spendrop
+
+# 6. Verify with a real query
+curl -s http://localhost:3535/api/health
+#    Then log in and spot-check that the most recent transactions are present.
+```
+
+If something looks wrong, you can roll back to the original by repeating step 4 with `spendrop.db.bak` as the source. Once the restore is verified, delete the `.bak` file to reclaim space.
+
+#### Off-host transport (pick one)
+
+Backups in the same Docker volume protect you from application bugs and accidental deletes inside the app, but **not** from the host disk dying or the SD card wearing out. Copy backups off the box on whatever schedule fits your paranoia level. Three reasonable choices:
+
+- **[rclone](https://rclone.org)** — many cloud backends (Backblaze B2, S3, Google Drive, Dropbox, WebDAV…), single binary, simplest "copy this folder somewhere else" tool. Good default if you already have any cloud storage.
+- **[restic](https://restic.net)** — deduplicating, encrypted, append-only repositories. Slightly more setup; pays off when you want years of history without paying for years of storage.
+- **rsync to a NAS** — LAN-only, no encryption, no cloud, no monthly cost. The right answer if your threat model is "the Pi's SD card dies" and not "the house burns down".
+
+Run any of these from the host (or another container) against the bind path of the named volume:
+
+```bash
+# Find the host path
+docker volume inspect spendrop-data --format '{{ .Mountpoint }}'
+# /var/lib/docker/volumes/spendrop-data/_data
+```
+
+Then point your tool of choice at `<mountpoint>/backups/`. **Don't forget to also copy the `.sha256` sidecars** — they're how the restore drill decides which backup is trustworthy when you pull one back from off-host storage.
 
 ## API Reference
 
