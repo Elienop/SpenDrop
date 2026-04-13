@@ -403,6 +403,18 @@ curl -s http://localhost:3535/api/health
 
 If something looks wrong, you can roll back to the original by repeating step 4 with `spendrop.db.bak` as the source. Once the restore is verified, delete the `.bak` file to reclaim space.
 
+#### Pre-migration snapshots
+
+Schema migrations are the riskiest thing SpenDrop does to your database — a bug in a new migration can corrupt data in ways the scheduled backup may not have captured yet if the last one was hours ago. Before applying **any** pending migration on startup, SpenDrop writes a dedicated `VACUUM INTO` snapshot to `/app/data/migration-snapshots/` so you always have a pre-upgrade anchor, no matter when the last scheduled backup ran.
+
+Snapshot filenames carry the migration version they are capturing *state before*, e.g. `pre-migration-004_drop_categories_color-2026-04-13T175643Z.db`. Each snapshot has a `.sha256` sidecar with the same trust semantics as the Tier 1 backups above — if the sidecar is present, the file passed the `PRAGMA integrity_check` and row-count checks before being committed.
+
+- **Refuses to start if the snapshot fails.** If the snapshot directory is read-only, full, or missing, the server process exits non-zero with a "refusing to migrate" error and the database is left at its pre-migration version. Fix the disk condition and restart — the migration will retry from the same state.
+- **Hardcoded retention.** The three most recent snapshots are kept; older ones are pruned automatically on the next successful migration. The count is not tunable by design: snapshots are short-term recovery anchors, not history, and the sibling Tier 1 scheduled backups cover the longer tail.
+- **No-op on clean boots.** If there are no pending migrations, no snapshot is written. A normal restart does not churn the directory.
+
+To restore from a migration snapshot, follow the same restore drill above but with a `pre-migration-*.db` file as the source in step 4. The snapshot is a full SQLite database — the restore steps are identical.
+
 #### Off-host transport (pick one)
 
 Backups in the same Docker volume protect you from application bugs and accidental deletes inside the app, but **not** from the host disk dying or the SD card wearing out. Copy backups off the box on whatever schedule fits your paranoia level. Three reasonable choices:
