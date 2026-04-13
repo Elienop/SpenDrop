@@ -415,6 +415,37 @@ Snapshot filenames carry the migration version they are capturing *state before*
 
 To restore from a migration snapshot, follow the same restore drill above but with a `pre-migration-*.db` file as the source in step 4. The snapshot is a full SQLite database — the restore steps are identical.
 
+#### Mutation audit log
+
+Every change to a transaction — create, update, delete, batch create, batch delete, bulk rename, delete-by-filter — writes an append-only row to the `transaction_audit` table **in the same SQL transaction as the mutation**. The audit row exists if and only if the mutation committed: a rollback of either rolls back both. This means you always have a record of *who changed what, and when*, even if the row itself is later hard-deleted.
+
+The table stores the action (`insert` / `update` / `delete`), the acting user (`actor_user_id`, which is `ON DELETE SET NULL` so history outlives the account), the timestamp, and JSON blobs of the row state before and after the mutation. Single-row operations get one audit row per transaction touched. **Bulk operations get a single summary row** with `transaction_id = 0` and a payload like `{"bulk":true,"count":142,"filter":"..."}` — per-row diffs for an endpoint that can rename tens of thousands of rows in a single call would balloon the audit table and slow the operation the endpoint exists to serve.
+
+> The audit log is a **CLI-only operator tool**, not a user-facing feature. There is no REST endpoint that returns audit rows, no UI to browse them, and no per-user authorization check. Read access is via `docker exec` into the container — treat it like a database log, not like a timeline.
+
+The `spendrop audit` subcommand dumps matching rows as JSON-lines on stdout so the output composes cleanly with `jq`, `grep`, and `less`:
+
+```bash
+# Every audit row for one transaction, oldest first — the full lifecycle
+# of a single row including any updates before it was deleted.
+docker exec spendrop ./spendrop audit --transaction-id 1234
+
+# Recent mutations across the whole database (default: last 24h, cap 100 rows,
+# newest first). Bulk summary rows show up here with transaction_id=0.
+docker exec spendrop ./spendrop audit
+
+# Everything since a specific wall-clock date, up to 500 rows. The --since
+# flag accepts either YYYY-MM-DD (interpreted as UTC midnight) or RFC3339.
+docker exec spendrop ./spendrop audit --since 2026-04-01 --limit 500
+
+# Pipe into jq for readable diffs — useful when investigating "who renamed
+# these 200 transactions last Tuesday?"
+docker exec spendrop ./spendrop audit --since 2026-04-07 \
+  | jq -r 'select(.transaction_id == 0) | "\(.occurred_at) actor=\(.actor_user_id // "?") \(.before_json)"'
+```
+
+The audit table is append-only by convention — application code never `UPDATE`s or `DELETE`s rows from it — so the table grows over the lifetime of the deployment. For a typical household the growth is negligible (a few KB per mutation, most days produce fewer than ten mutations). If you ever need to prune it for forensic reasons, do so from `sqlite3` directly, not from the app.
+
 #### Off-host transport (pick one)
 
 Backups in the same Docker volume protect you from application bugs and accidental deletes inside the app, but **not** from the host disk dying or the SD card wearing out. Copy backups off the box on whatever schedule fits your paranoia level. Three reasonable choices:
@@ -508,12 +539,17 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 
 ```
 cmd/spendrop/              Go entrypoint (main.go)
+  backup.go                CLI subcommand dispatch + `spendrop backup`
+  audit.go                 CLI subcommand `spendrop audit` (operator forensics)
 internal/
   api/                     HTTP handlers, router, middleware
   auth/                    Password hashing, session management, middleware
+  backup/                  VACUUM INTO snapshot primitive + scheduler loop
   database/
     migrations/            SQL migration files (auto-applied on startup)
     queries/               sqlc SQL query definitions
+    store.go               TransactionStore chokepoint — every mutation
+                           writes an audit row in the same SQL transaction
     *.go                   Generated sqlc code + migration runner
 web/
   src/

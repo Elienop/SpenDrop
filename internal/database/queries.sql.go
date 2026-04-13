@@ -428,6 +428,32 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 	return i, err
 }
 
+const insertTransactionAudit = `-- name: InsertTransactionAudit :exec
+
+INSERT INTO transaction_audit (transaction_id, action, actor_user_id, before_json, after_json)
+VALUES (?, ?, ?, ?, ?)
+`
+
+type InsertTransactionAuditParams struct {
+	TransactionID int64          `json:"transaction_id"`
+	Action        string         `json:"action"`
+	ActorUserID   sql.NullInt64  `json:"actor_user_id"`
+	BeforeJson    sql.NullString `json:"before_json"`
+	AfterJson     sql.NullString `json:"after_json"`
+}
+
+// Transaction Audit Log
+func (q *Queries) InsertTransactionAudit(ctx context.Context, arg InsertTransactionAuditParams) error {
+	_, err := q.db.ExecContext(ctx, insertTransactionAudit,
+		arg.TransactionID,
+		arg.Action,
+		arg.ActorUserID,
+		arg.BeforeJson,
+		arg.AfterJson,
+	)
+	return err
+}
+
 const listActiveCategories = `-- name: ListActiveCategories :many
 SELECT id, name, type, icon, sort_order, is_active, created_at FROM categories WHERE is_active = 1 ORDER BY type, sort_order
 `
@@ -567,6 +593,49 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 	return items, nil
 }
 
+const listRecentTransactionAudit = `-- name: ListRecentTransactionAudit :many
+SELECT id, transaction_id, "action", actor_user_id, occurred_at, before_json, after_json FROM transaction_audit
+WHERE occurred_at >= CAST(?1 AS TEXT)
+ORDER BY occurred_at DESC, id DESC
+LIMIT ?2
+`
+
+type ListRecentTransactionAuditParams struct {
+	Since string `json:"since"`
+	Limit int64  `json:"limit"`
+}
+
+func (q *Queries) ListRecentTransactionAudit(ctx context.Context, arg ListRecentTransactionAuditParams) ([]TransactionAudit, error) {
+	rows, err := q.db.QueryContext(ctx, listRecentTransactionAudit, arg.Since, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TransactionAudit{}
+	for rows.Next() {
+		var i TransactionAudit
+		if err := rows.Scan(
+			&i.ID,
+			&i.TransactionID,
+			&i.Action,
+			&i.ActorUserID,
+			&i.OccurredAt,
+			&i.BeforeJson,
+			&i.AfterJson,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSavedFilters = `-- name: ListSavedFilters :many
 SELECT id, user_id, name, filter_json, created_at, updated_at FROM saved_filters WHERE user_id = ? ORDER BY name
 `
@@ -619,6 +688,49 @@ func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
 			&i.Year,
 			&i.TargetAmount,
 			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTransactionAuditByID = `-- name: ListTransactionAuditByID :many
+SELECT id, transaction_id, "action", actor_user_id, occurred_at, before_json, after_json FROM transaction_audit
+WHERE transaction_id = ?1
+ORDER BY occurred_at ASC, id ASC
+LIMIT ?2
+`
+
+type ListTransactionAuditByIDParams struct {
+	TransactionID int64 `json:"transaction_id"`
+	Limit         int64 `json:"limit"`
+}
+
+func (q *Queries) ListTransactionAuditByID(ctx context.Context, arg ListTransactionAuditByIDParams) ([]TransactionAudit, error) {
+	rows, err := q.db.QueryContext(ctx, listTransactionAuditByID, arg.TransactionID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TransactionAudit{}
+	for rows.Next() {
+		var i TransactionAudit
+		if err := rows.Scan(
+			&i.ID,
+			&i.TransactionID,
+			&i.Action,
+			&i.ActorUserID,
+			&i.OccurredAt,
+			&i.BeforeJson,
+			&i.AfterJson,
 		); err != nil {
 			return nil, err
 		}

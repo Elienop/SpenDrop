@@ -288,3 +288,21 @@ WHERE c.type = 'expense'
     AND t.tags IS NOT NULL AND t.tags != ''
     AND t.date >= CAST(sqlc.arg(date_from) AS TEXT)
     AND t.date <= CAST(sqlc.arg(date_to) AS TEXT);
+
+-- Transaction Audit Log
+
+-- name: InsertTransactionAudit :exec
+INSERT INTO transaction_audit (transaction_id, action, actor_user_id, before_json, after_json)
+VALUES (?, ?, ?, ?, ?);
+
+-- name: ListTransactionAuditByID :many
+SELECT * FROM transaction_audit
+WHERE transaction_id = sqlc.arg(transaction_id)
+ORDER BY occurred_at ASC, id ASC
+LIMIT sqlc.arg(limit);
+
+-- name: ListRecentTransactionAudit :many
+SELECT * FROM transaction_audit
+WHERE occurred_at >= CAST(sqlc.arg(since) AS TEXT)
+ORDER BY occurred_at DESC, id DESC
+LIMIT sqlc.arg(limit);

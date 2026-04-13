@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -47,6 +48,30 @@ func defaultMigrationOptions(t *testing.T, dbPath string) MigrationOptions {
 		SnapshotDir: filepath.Join(filepath.Dir(dbPath), "snapshots"),
 		BusyTimeout: 5 * time.Second,
 	}
+}
+
+// embeddedMigrationNames reads migrationsFS and returns every *.sql
+// migration filename in sort order. Tests use this to derive their
+// expected migration count and highest-version label from the same
+// source of truth RunMigrations loads from, so adding a new migration
+// file never silently breaks the assertions here. Panics on error
+// because a corrupted embed.FS at test time indicates a build-system
+// bug that should fail the whole suite loudly.
+func embeddedMigrationNames(t *testing.T) []string {
+	t.Helper()
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		t.Fatalf("read embedded migrations dir: %v", err)
+	}
+	var names []string
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".sql") {
+			continue
+		}
+		names = append(names, e.Name())
+	}
+	sort.Strings(names)
+	return names
 }
 
 // countSnapshotFiles returns the number of pre-migration snapshot .db
@@ -139,13 +164,17 @@ func TestRunMigrations_IsIdempotent(t *testing.T) {
 		t.Fatalf("second RunMigrations: %v", err)
 	}
 
-	// Should still have exactly 4 migration records (one per migration file)
+	// Idempotency invariant: after N invocations the table still holds
+	// exactly one row per embedded migration. We derive `want` from
+	// migrationsFS rather than hardcoding it so adding a future
+	// migration file never silently breaks this assertion.
+	want := len(embeddedMigrationNames(t))
 	var count int
 	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if count != 4 {
-		t.Fatalf("expected 4 migration records, got %d", count)
+	if count != want {
+		t.Fatalf("expected %d migration records, got %d", want, count)
 	}
 }
 
@@ -213,11 +242,20 @@ func TestRunMigrations_WritesPreMigrationSnapshot(t *testing.T) {
 	if sidecarCount != 1 {
 		t.Fatalf("expected 1 sidecar .sha256 file, got %d", sidecarCount)
 	}
-	// The highest pending migration on a fresh DB is 004_drop_categories_color.sql.
-	// Carrying the target version in the filename lets an operator instantly
-	// identify which upgrade the snapshot captures state before.
-	if !strings.Contains(snapName, "004_drop_categories_color") {
-		t.Errorf("snapshot name %q should carry target version '004_drop_categories_color'", snapName)
+	// The highest pending migration on a fresh DB is the last name in
+	// the embedded, sort-ordered migration set. Carrying that target
+	// version in the filename lets an operator instantly identify which
+	// upgrade the snapshot captures state before. Deriving `wantVersion`
+	// from migrationsFS rather than hardcoding it means adding a new
+	// migration file automatically shifts the expectation — the
+	// assertion stays correct without a companion test edit.
+	names := embeddedMigrationNames(t)
+	if len(names) == 0 {
+		t.Fatalf("embedded migrations set is empty")
+	}
+	wantVersion := strings.TrimSuffix(names[len(names)-1], ".sql")
+	if !strings.Contains(snapName, wantVersion) {
+		t.Errorf("snapshot name %q should carry target version %q", snapName, wantVersion)
 	}
 }
 

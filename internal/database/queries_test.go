@@ -922,3 +922,141 @@ func TestDashboardAggregations_EmptyMonth(t *testing.T) {
 		t.Errorf("expected 0 categories for empty month, got %d", len(byCat))
 	}
 }
+
+// TestListRecentTransactionAudit_SmokeTest exercises the recent-rows
+// query that `spendrop audit` (no --transaction-id flag) is built on.
+// It exists specifically because Phase 4.2's first cut shipped with a
+// sqlc-numbering bug that went undetected: the query mixed a named
+// `sqlc.arg(since)` with a bare `?` for LIMIT, which generated
+// `CAST(?2 AS TEXT) ... LIMIT ?` — where the bare `?` became `?3` at
+// the SQLite layer while the Go caller only passed 2 positional args,
+// crashing every `spendrop audit` invocation on first use. No test
+// covered the recent-rows mode at the time, so the bind mismatch
+// slipped all the way through to the reviewer. This test closes that
+// hole: it runs the actual query against a real DB and asserts the
+// smoke — if the placeholder numbering regresses, SQLite will return
+// "wrong number of bind parameters" and this test fails loudly.
+//
+// Uses TransactionStore.Create so the audit row is written by the same
+// chokepoint production uses, not a hand-rolled INSERT. The test is
+// resilient to future column additions because it asserts on the
+// fields the CLI actually displays (action, transaction_id, actor).
+func TestListRecentTransactionAudit_SmokeTest(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "auditor",
+		PasswordHash: "$2a$10$fakehash",
+		DisplayName:  "Auditor",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	store := NewTransactionStore(db, q)
+	txn, err := store.Create(ctx, user.ID, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Amount:      12.50,
+		Description: "audit smoke probe",
+		CategoryID:  1,
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	// Since = far past so the insert row is always in range. The
+	// datetime layout matches internal/api/audit.go's sqliteDatetimeFormat
+	// ("2006-01-02 15:04:05") — the CLI has to use the same layout
+	// because transaction_audit.occurred_at is compared lexicographically.
+	rows, err := q.ListRecentTransactionAudit(ctx, ListRecentTransactionAuditParams{
+		Since: "2000-01-01 00:00:00",
+		Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ListRecentTransactionAudit: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("expected at least 1 audit row after store.Create, got 0")
+	}
+
+	var found bool
+	for _, r := range rows {
+		if r.TransactionID == txn.ID && r.Action == AuditInsert {
+			found = true
+			if !r.ActorUserID.Valid || r.ActorUserID.Int64 != user.ID {
+				t.Errorf("smoke row actor_user_id=%+v, want %d", r.ActorUserID, user.ID)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected audit row for transaction_id=%d action=insert, got %d rows without a match", txn.ID, len(rows))
+	}
+}
+
+// TestListTransactionAuditByID_SmokeTest is the sibling to the recent-
+// rows smoke test: it exercises the transaction-id-filtered query used
+// by `spendrop audit --transaction-id N`. The Phase 4.2 first cut
+// initially took its limit as a bare `int64` rather than a named param,
+// which forced the CLI to slice the result in Go and could have
+// produced the same binding regression if the query definition drifted.
+// This test pins the contract: `ListTransactionAuditByIDParams` with a
+// TransactionID and a Limit must come back with chronological rows,
+// oldest first.
+func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "auditor2",
+		PasswordHash: "$2a$10$fakehash",
+		DisplayName:  "Auditor2",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	store := NewTransactionStore(db, q)
+	txn, err := store.Create(ctx, user.ID, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Amount:      5.00,
+		Description: "by-id smoke probe",
+		CategoryID:  1,
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+	// Second mutation so there's more than one audit row for this txn
+	// and we can assert on chronological ordering.
+	if err := store.Update(ctx, user.ID, UpdateTransactionParams{
+		ID:          txn.ID,
+		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Amount:      6.00,
+		Description: "by-id smoke probe (updated)",
+		CategoryID:  1,
+	}); err != nil {
+		t.Fatalf("store.Update: %v", err)
+	}
+
+	rows, err := q.ListTransactionAuditByID(ctx, ListTransactionAuditByIDParams{
+		TransactionID: txn.ID,
+		Limit:         10,
+	})
+	if err != nil {
+		t.Fatalf("ListTransactionAuditByID: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 audit rows (insert + update), got %d", len(rows))
+	}
+	if rows[0].Action != AuditInsert {
+		t.Errorf("row[0].action=%q, want insert (chronological order)", rows[0].Action)
+	}
+	if rows[1].Action != AuditUpdate {
+		t.Errorf("row[1].action=%q, want update (chronological order)", rows[1].Action)
+	}
+}
