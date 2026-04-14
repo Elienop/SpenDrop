@@ -54,17 +54,22 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 		args = append(args, "%"+escaped+"%")
 	}
 
-	// Amount range
+	// Amount range. Phase 3.1a: user-entered min/max arrive as float
+	// strings; parse once, convert to int64 cents immediately, then compare
+	// against t.amount_cents (not t.amount) so the filter inherits the
+	// exact-integer semantics of the cents column. Comparing against the
+	// legacy REAL column could drop edge-case rows where a float roundtrip
+	// shifted the stored value by one ULP from the user's input.
 	if v := q.Get("amount_min"); v != "" {
 		if min, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount >= ?")
-			args = append(args, min)
+			conditions = append(conditions, "t.amount_cents >= ?")
+			args = append(args, dollarsToCents(min))
 		}
 	}
 	if v := q.Get("amount_max"); v != "" {
 		if max, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount <= ?")
-			args = append(args, max)
+			conditions = append(conditions, "t.amount_cents <= ?")
+			args = append(args, dollarsToCents(max))
 		}
 	}
 
@@ -131,8 +136,15 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	whereClause, args := buildTransactionWhereClause(r.URL.Query())
 	liveClause := appendLiveTransactionsFilter(whereClause)
 
+	// Phase 3.1a: SELECT t.amount_cents / t.original_amount_cents and
+	// convert to float dollars at the Excel cell boundary. The xlsx wire
+	// format is unchanged (dollars as a spreadsheet number) because that is
+	// what every downstream consumer - humans, Excel formulae, pivot
+	// tables - already expects; the only move is shifting the conversion
+	// step from the SQL side (legacy REAL) to the Go side (int64 ->
+	// float64 via centsToDollars).
 	query := `SELECT t.date, t.description, c.name AS category_name, c.type AS category_type,
-		t.amount, t.original_amount, t.original_currency, t.tags, t.notes
+		t.amount_cents, t.original_amount_cents, t.original_currency, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id` + liveClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
 	args = append(args, MaxExportRows)
@@ -160,17 +172,17 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	row := 2
 	for rows.Next() {
 		var (
-			date    time.Time
-			desc    string
-			catName string
-			catType string
-			amount  float64
-			origAmt sql.NullFloat64
-			origCur sql.NullString
-			tags    sql.NullString
-			notes   sql.NullString
+			date         time.Time
+			desc         string
+			catName      string
+			catType      string
+			amountCents  int64
+			origAmtCents sql.NullInt64
+			origCur      sql.NullString
+			tags         sql.NullString
+			notes        sql.NullString
 		)
-		if err := rows.Scan(&date, &desc, &catName, &catType, &amount, &origAmt, &origCur, &tags, &notes); err != nil {
+		if err := rows.Scan(&date, &desc, &catName, &catType, &amountCents, &origAmtCents, &origCur, &tags, &notes); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
 		}
@@ -179,9 +191,9 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 		f.SetCellValue(sheet, cellAt(2, row), desc)
 		f.SetCellValue(sheet, cellAt(3, row), catName)
 		f.SetCellValue(sheet, cellAt(4, row), catType)
-		f.SetCellValue(sheet, cellAt(5, row), amount)
-		if origAmt.Valid {
-			f.SetCellValue(sheet, cellAt(6, row), origAmt.Float64)
+		f.SetCellValue(sheet, cellAt(5, row), centsToDollars(amountCents))
+		if origAmtCents.Valid {
+			f.SetCellValue(sheet, cellAt(6, row), centsToDollars(origAmtCents.Int64))
 		}
 		if origCur.Valid {
 			f.SetCellValue(sheet, cellAt(7, row), origCur.String)
@@ -252,18 +264,22 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	// Soft-delete filter placement is defensive: `t.deleted_at IS NULL` lives
 	// in the LEFT JOIN ON clause so the JOIN shape is preserved. The HAVING
 	// clause below still hides zero-total rows from the final output, so in
-	// steady state the ON vs WHERE distinction is not observable — but if the
+	// steady state the ON vs WHERE distinction is not observable - but if the
 	// HAVING were ever relaxed (e.g. to show empty categories in the export),
 	// a WHERE-placed filter would silently collapse the LEFT JOIN to inner-
 	// join semantics and drop any category whose only rows were tombstoned.
 	// Keeping the predicate in ON means that change stays a one-line tweak
 	// instead of a silent correctness regression.
-	summaryQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount), 0) AS total
+	//
+	// Phase 3.1a: sums t.amount_cents (int64) instead of t.amount (float64)
+	// and scans total_cents into int64, converting to float at the Excel
+	// cell boundary via centsToDollars.
+	summaryQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
 		FROM categories c
 		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		GROUP BY c.id
-		HAVING total > 0
-		ORDER BY c.type, total DESC`
+		HAVING total_cents > 0
+		ORDER BY c.type, total_cents DESC`
 
 	summaryRows, err := h.db.QueryContext(ctx, summaryQuery, dateFrom, dateTo)
 	if err != nil {
@@ -275,14 +291,14 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	sRow := 2
 	for summaryRows.Next() {
 		var name, catType string
-		var total float64
-		if err := summaryRows.Scan(&name, &catType, &total); err != nil {
+		var totalCents int64
+		if err := summaryRows.Scan(&name, &catType, &totalCents); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan category summary")
 			return
 		}
 		f.SetCellValue(summarySheet, cellAt(1, sRow), name)
 		f.SetCellValue(summarySheet, cellAt(2, sRow), catType)
-		f.SetCellValue(summarySheet, cellAt(3, sRow), total)
+		f.SetCellValue(summarySheet, cellAt(3, sRow), centsToDollars(totalCents))
 		sRow++
 	}
 	if err := summaryRows.Err(); err != nil {
@@ -300,8 +316,9 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		f.SetCellValue(txnSheet, cellAt(i+1, 1), h)
 	}
 
-	txnQuery := `SELECT t.date, t.description, c.name, c.type, t.amount,
-		t.original_amount, t.original_currency, t.tags, t.notes
+	// Phase 3.1a: same cents->float conversion as handleExportTransactions.
+	txnQuery := `SELECT t.date, t.description, c.name, c.type, t.amount_cents,
+		t.original_amount_cents, t.original_currency, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
@@ -317,17 +334,17 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	tRow := 2
 	for txnRows.Next() {
 		var (
-			date    time.Time
-			desc    string
-			catName string
-			catType string
-			amount  float64
-			origAmt sql.NullFloat64
-			origCur sql.NullString
-			tags    sql.NullString
-			notes   sql.NullString
+			date         time.Time
+			desc         string
+			catName      string
+			catType      string
+			amountCents  int64
+			origAmtCents sql.NullInt64
+			origCur      sql.NullString
+			tags         sql.NullString
+			notes        sql.NullString
 		)
-		if err := txnRows.Scan(&date, &desc, &catName, &catType, &amount, &origAmt, &origCur, &tags, &notes); err != nil {
+		if err := txnRows.Scan(&date, &desc, &catName, &catType, &amountCents, &origAmtCents, &origCur, &tags, &notes); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
 		}
@@ -335,9 +352,9 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		f.SetCellValue(txnSheet, cellAt(2, tRow), desc)
 		f.SetCellValue(txnSheet, cellAt(3, tRow), catName)
 		f.SetCellValue(txnSheet, cellAt(4, tRow), catType)
-		f.SetCellValue(txnSheet, cellAt(5, tRow), amount)
-		if origAmt.Valid {
-			f.SetCellValue(txnSheet, cellAt(6, tRow), origAmt.Float64)
+		f.SetCellValue(txnSheet, cellAt(5, tRow), centsToDollars(amountCents))
+		if origAmtCents.Valid {
+			f.SetCellValue(txnSheet, cellAt(6, tRow), centsToDollars(origAmtCents.Int64))
 		}
 		if origCur.Valid {
 			f.SetCellValue(txnSheet, cellAt(7, tRow), origCur.String)
@@ -396,10 +413,13 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		f.SetCellValue(monthlySheet, cellAt(i+1, 1), h)
 	}
 
+	// Phase 3.1a: SUM t.amount_cents (int64) so the per-month totals stay
+	// exact end-to-end. Convert to float dollars once per row at the Excel
+	// cell boundary below.
 	monthlyQuery := `SELECT
 		CAST(strftime('%m', t.date) AS INTEGER) AS month_num,
-		COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount ELSE 0 END), 0) AS expenses,
-		COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS income
+		COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount_cents ELSE 0 END), 0) AS expenses_cents,
+		COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount_cents ELSE 0 END), 0) AS income_cents
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
@@ -413,21 +433,23 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 	}
 	defer monthlyRows.Close()
 
-	// Pre-fill all 12 months with zero, then overwrite from query results
+	// Pre-fill all 12 months with zero, then overwrite from query results.
+	// Phase 3.1a: keep per-month totals as int64 cents; the conversion to
+	// float dollars happens once at the Excel cell boundary.
 	type monthData struct {
-		expenses, income float64
+		expensesCents, incomeCents int64
 	}
 	months := make([]monthData, 12)
 
 	for monthlyRows.Next() {
 		var monthNum int
-		var expenses, income float64
-		if err := monthlyRows.Scan(&monthNum, &expenses, &income); err != nil {
+		var expensesCents, incomeCents int64
+		if err := monthlyRows.Scan(&monthNum, &expensesCents, &incomeCents); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan monthly totals")
 			return
 		}
 		if monthNum >= 1 && monthNum <= 12 {
-			months[monthNum-1] = monthData{expenses: expenses, income: income}
+			months[monthNum-1] = monthData{expensesCents: expensesCents, incomeCents: incomeCents}
 		}
 	}
 	if err := monthlyRows.Err(); err != nil {
@@ -439,11 +461,13 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		"July", "August", "September", "October", "November", "December"}
 	for i, m := range months {
 		row := i + 2
-		net := m.income - m.expenses
+		// Phase 3.1a: compute net in cents (int64) so the subtraction is
+		// exact, then convert the three money fields to float dollars once.
+		netCents := m.incomeCents - m.expensesCents
 		f.SetCellValue(monthlySheet, cellAt(1, row), monthNames[i])
-		f.SetCellValue(monthlySheet, cellAt(2, row), m.expenses)
-		f.SetCellValue(monthlySheet, cellAt(3, row), m.income)
-		f.SetCellValue(monthlySheet, cellAt(4, row), net)
+		f.SetCellValue(monthlySheet, cellAt(2, row), centsToDollars(m.expensesCents))
+		f.SetCellValue(monthlySheet, cellAt(3, row), centsToDollars(m.incomeCents))
+		f.SetCellValue(monthlySheet, cellAt(4, row), centsToDollars(netCents))
 	}
 
 	// --- Sheet 2: Category Totals ---
@@ -464,12 +488,14 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 	// join semantics and drop any category whose only rows were tombstoned.
 	// Keeping the predicate in ON means that change stays a one-line tweak
 	// instead of a silent correctness regression.
-	catQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount), 0) AS total
+	// Phase 3.1a: sums t.amount_cents (int64) and exposes total_cents; the
+	// Go side scans int64 and converts at the Excel cell boundary.
+	catQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
 		FROM categories c
 		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		GROUP BY c.id
-		HAVING total > 0
-		ORDER BY c.type, total DESC`
+		HAVING total_cents > 0
+		ORDER BY c.type, total_cents DESC`
 
 	catRows, err := h.db.QueryContext(ctx, catQuery, dateFrom, dateTo)
 	if err != nil {
@@ -481,14 +507,14 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 	cRow := 2
 	for catRows.Next() {
 		var name, catType string
-		var total float64
-		if err := catRows.Scan(&name, &catType, &total); err != nil {
+		var totalCents int64
+		if err := catRows.Scan(&name, &catType, &totalCents); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan category totals")
 			return
 		}
 		f.SetCellValue(catSheet, cellAt(1, cRow), name)
 		f.SetCellValue(catSheet, cellAt(2, cRow), catType)
-		f.SetCellValue(catSheet, cellAt(3, cRow), total)
+		f.SetCellValue(catSheet, cellAt(3, cRow), centsToDollars(totalCents))
 		cRow++
 	}
 	if err := catRows.Err(); err != nil {

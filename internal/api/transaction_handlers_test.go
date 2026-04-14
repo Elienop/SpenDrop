@@ -109,7 +109,10 @@ func seedTestCurrency(t *testing.T, q *database.Queries, code string, rate float
 	}
 }
 
-// seedTestTransaction creates a transaction directly via sqlc.
+// seedTestTransaction creates a transaction directly via sqlc. Phase 3.1a:
+// dual-writes amount_cents alongside the legacy REAL amount so any test that
+// reads through a *_cents aggregation sees the same value the handler-path
+// inserts produce in production.
 func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amount float64, desc string) database.Transaction {
 	t.Helper()
 	d, _ := time.Parse("2006-01-02", date)
@@ -117,6 +120,7 @@ func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID i
 		UserID:      userID,
 		Date:        d,
 		Amount:      amount,
+		AmountCents: dollarsToCents(amount),
 		Description: desc,
 		CategoryID:  categoryID,
 	})
@@ -126,7 +130,8 @@ func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID i
 	return txn
 }
 
-// seedTestTransactionWithTags creates a transaction with tags set.
+// seedTestTransactionWithTags creates a transaction with tags set. Phase
+// 3.1a: dual-writes amount_cents (see seedTestTransaction).
 func seedTestTransactionWithTags(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amount float64, desc, tags string) database.Transaction {
 	t.Helper()
 	d, _ := time.Parse("2006-01-02", date)
@@ -134,6 +139,7 @@ func seedTestTransactionWithTags(t *testing.T, q *database.Queries, userID, cate
 		UserID:      userID,
 		Date:        d,
 		Amount:      amount,
+		AmountCents: dollarsToCents(amount),
 		Description: desc,
 		CategoryID:  categoryID,
 		Tags:        sql.NullString{String: tags, Valid: tags != ""},

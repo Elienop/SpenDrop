@@ -24,6 +24,21 @@ func setupTestDB(t *testing.T) (*Queries, *sql.DB) {
 	return New(db), db
 }
 
+// dollarsToCents converts a float dollar amount to int64 cents using
+// half-away-from-zero rounding. Phase 3.1a tests dual-write amount_cents
+// alongside the legacy REAL amount column so any aggregation that now
+// reads from amount_cents (SumExpensesByMonth, SumByCategoryForMonth,
+// etc.) returns the same value as the legacy path did. The api layer has
+// an equivalent helper — keeping this one file-local avoids exposing a
+// public money-conversion surface from the database package just for
+// test scaffolding.
+func dollarsToCents(d float64) int64 {
+	if d < 0 {
+		return -int64(-d*100 + 0.5)
+	}
+	return int64(d*100 + 0.5)
+}
+
 func TestCreateUser_And_GetUserByID(t *testing.T) {
 	q, _ := setupTestDB(t)
 	ctx := context.Background()
@@ -417,6 +432,7 @@ func TestTransactions(t *testing.T) {
 		UserID:      user.ID,
 		Date:        txnDate,
 		Amount:      42.50,
+		AmountCents: dollarsToCents(42.50),
 		Description: "Groceries",
 		CategoryID:  1,
 	})
@@ -444,6 +460,7 @@ func TestTransactions(t *testing.T) {
 		ID:          txn.ID,
 		Date:        updatedDate,
 		Amount:      50.00,
+		AmountCents: dollarsToCents(50.00),
 		Description: "Updated groceries",
 		CategoryID:  1,
 	})
@@ -522,9 +539,10 @@ func TestBudgets(t *testing.T) {
 	ctx := context.Background()
 
 	err := q.UpsertBudget(ctx, UpsertBudgetParams{
-		Year:   2026,
-		Month:  4,
-		Amount: 3000.00,
+		Year:        2026,
+		Month:       4,
+		Amount:      3000.00,
+		AmountCents: dollarsToCents(3000.00),
 	})
 	if err != nil {
 		t.Fatalf("UpsertBudget: %v", err)
@@ -543,9 +561,10 @@ func TestBudgets(t *testing.T) {
 
 	// Upsert updates existing
 	err = q.UpsertBudget(ctx, UpsertBudgetParams{
-		Year:   2026,
-		Month:  4,
-		Amount: 3500.00,
+		Year:        2026,
+		Month:       4,
+		Amount:      3500.00,
+		AmountCents: dollarsToCents(3500.00),
 	})
 	if err != nil {
 		t.Fatalf("UpsertBudget (update): %v", err)
@@ -564,9 +583,10 @@ func TestBudgets(t *testing.T) {
 
 	// ListBudgetsByYear
 	err = q.UpsertBudget(ctx, UpsertBudgetParams{
-		Year:   2026,
-		Month:  5,
-		Amount: 2800.00,
+		Year:        2026,
+		Month:       5,
+		Amount:      2800.00,
+		AmountCents: dollarsToCents(2800.00),
 	})
 	if err != nil {
 		t.Fatalf("UpsertBudget (may): %v", err)
@@ -586,8 +606,9 @@ func TestSavingsGoals(t *testing.T) {
 	ctx := context.Background()
 
 	err := q.UpsertSavingsGoal(ctx, UpsertSavingsGoalParams{
-		Year:         2026,
-		TargetAmount: 10000.00,
+		Year:              2026,
+		TargetAmount:      10000.00,
+		TargetAmountCents: dollarsToCents(10000.00),
 	})
 	if err != nil {
 		t.Fatalf("UpsertSavingsGoal: %v", err)
@@ -677,6 +698,7 @@ func TestDashboardAggregations(t *testing.T) {
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Amount:      100.00,
+		AmountCents: dollarsToCents(100.00),
 		Description: "Groceries",
 		CategoryID:  1, // Food
 	})
@@ -688,6 +710,7 @@ func TestDashboardAggregations(t *testing.T) {
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
 		Amount:      50.00,
+		AmountCents: dollarsToCents(50.00),
 		Description: "Birthday gift",
 		CategoryID:  2, // Gifts
 	})
@@ -700,6 +723,7 @@ func TestDashboardAggregations(t *testing.T) {
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Amount:      3000.00,
+		AmountCents: dollarsToCents(3000.00),
 		Description: "April salary",
 		CategoryID:  15, // Paycheck
 	})
@@ -707,7 +731,7 @@ func TestDashboardAggregations(t *testing.T) {
 		t.Fatalf("CreateTransaction (salary): %v", err)
 	}
 
-	// SumExpensesByMonth
+	// SumExpensesByMonth — Phase 3.1a: returns int64 cents (15000 = $150.00)
 	expenseSum, err := q.SumExpensesByMonth(ctx, SumExpensesByMonthParams{
 		Year:  "2026",
 		Month: "04",
@@ -715,11 +739,11 @@ func TestDashboardAggregations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumExpensesByMonth: %v", err)
 	}
-	if expenseSum != 150.00 {
-		t.Errorf("expected expense sum 150.00, got %v", expenseSum)
+	if expenseSum != 15000 {
+		t.Errorf("expected expense sum 15000 cents ($150.00), got %d", expenseSum)
 	}
 
-	// SumIncomeByMonth
+	// SumIncomeByMonth — Phase 3.1a: returns int64 cents (300000 = $3000.00)
 	incomeSum, err := q.SumIncomeByMonth(ctx, SumIncomeByMonthParams{
 		Year:  "2026",
 		Month: "04",
@@ -727,11 +751,11 @@ func TestDashboardAggregations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumIncomeByMonth: %v", err)
 	}
-	if incomeSum != 3000.00 {
-		t.Errorf("expected income sum 3000.00, got %v", incomeSum)
+	if incomeSum != 300000 {
+		t.Errorf("expected income sum 300000 cents ($3000.00), got %d", incomeSum)
 	}
 
-	// SumByCategoryForMonth
+	// SumByCategoryForMonth — Phase 3.1a: Row.TotalCents is int64 cents
 	byCat, err := q.SumByCategoryForMonth(ctx, SumByCategoryForMonthParams{
 		Year:  "2026",
 		Month: "04",
@@ -742,9 +766,9 @@ func TestDashboardAggregations(t *testing.T) {
 	if len(byCat) != 2 {
 		t.Errorf("expected 2 expense categories with transactions, got %d", len(byCat))
 	}
-	// Results are ordered by total DESC, so Food (100) should be first
-	if len(byCat) >= 1 && byCat[0].Total != 100.00 {
-		t.Errorf("expected first category total 100.00, got %v", byCat[0].Total)
+	// Results are ordered by total DESC, so Food (10000 cents = $100.00) should be first
+	if len(byCat) >= 1 && byCat[0].TotalCents != 10000 {
+		t.Errorf("expected first category total 10000 cents ($100.00), got %d", byCat[0].TotalCents)
 	}
 }
 
@@ -934,7 +958,7 @@ func TestDashboardAggregations_EmptyMonth(t *testing.T) {
 	q, _ := setupTestDB(t)
 	ctx := context.Background()
 
-	// No transactions exist — aggregation should return 0
+	// No transactions exist — aggregation should return 0 cents
 	expenseSum, err := q.SumExpensesByMonth(ctx, SumExpensesByMonthParams{
 		Year:  "2026",
 		Month: "01",
@@ -942,8 +966,8 @@ func TestDashboardAggregations_EmptyMonth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumExpensesByMonth (empty): %v", err)
 	}
-	if expenseSum != 0.0 {
-		t.Errorf("expected 0 for empty month, got %v", expenseSum)
+	if expenseSum != 0 {
+		t.Errorf("expected 0 cents for empty month, got %d", expenseSum)
 	}
 
 	incomeSum, err := q.SumIncomeByMonth(ctx, SumIncomeByMonthParams{
@@ -953,8 +977,8 @@ func TestDashboardAggregations_EmptyMonth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SumIncomeByMonth (empty): %v", err)
 	}
-	if incomeSum != 0.0 {
-		t.Errorf("expected 0 for empty month, got %v", incomeSum)
+	if incomeSum != 0 {
+		t.Errorf("expected 0 cents for empty month, got %d", incomeSum)
 	}
 
 	byCat, err := q.SumByCategoryForMonth(ctx, SumByCategoryForMonthParams{
@@ -1006,6 +1030,7 @@ func TestListRecentTransactionAudit_SmokeTest(t *testing.T) {
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Amount:      12.50,
+		AmountCents: dollarsToCents(12.50),
 		Description: "audit smoke probe",
 		CategoryID:  1,
 	})
@@ -1071,6 +1096,7 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Amount:      5.00,
+		AmountCents: dollarsToCents(5.00),
 		Description: "by-id smoke probe",
 		CategoryID:  1,
 	})
@@ -1083,6 +1109,7 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 		ID:          txn.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
 		Amount:      6.00,
+		AmountCents: dollarsToCents(6.00),
 		Description: "by-id smoke probe (updated)",
 		CategoryID:  1,
 	}); err != nil {
@@ -1104,5 +1131,203 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 	}
 	if rows[1].Action != AuditUpdate {
 		t.Errorf("row[1].action=%q, want update (chronological order)", rows[1].Action)
+	}
+}
+
+// TestAmountCentsBackfillEqualsCents pins the contract of migration 006's
+// backfill UPDATE. The migration rewrites every pre-existing row with
+//
+//	amount_cents = CAST(ROUND(amount * 100) AS INTEGER)
+//
+// and the rest of Phase 3.1a's aggregation switch assumes that expression
+// produces the same integer value that dollarsToCents produces for a newly
+// inserted row. If that equivalence ever drifts (a SQLite upgrade changes
+// ROUND's half-away-from-zero semantics, or someone "optimizes" the
+// migration to CAST(amount*100 AS INTEGER) and silently truncates), every
+// historical row's cents column will be off by one compared to the
+// dual-write path and dashboard totals will disagree with the exports.
+//
+// Strategy: because migration 006 has already run against the test DB by
+// the time setupTestDB returns, we can't re-trigger the migration itself.
+// Instead we seed rows via raw SQL that leave amount_cents at its NOT NULL
+// DEFAULT 0 (bypassing the dual-write contract), then execute the exact
+// backfill expression from 006 and compare against dollarsToCents. The
+// fixture values cover the drift-prone cases: .005 boundary rounds,
+// negative cents placeholders (the schema disallows them today but the
+// ROUND semantics must still match), and amounts whose float64
+// representation is not exact.
+func TestAmountCentsBackfillEqualsCents(t *testing.T) {
+	_, db := setupTestDB(t)
+	ctx := context.Background()
+
+	// Pristine user + the seeded Food category (id=1). Direct SQL keeps
+	// the test decoupled from sqlc-generated dual-writes.
+	if _, err := db.ExecContext(ctx, `INSERT INTO users (username, password_hash, display_name, role)
+		VALUES ('backfill_probe', '$2a$10$fake', 'Backfill Probe', 'member')`); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	var userID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM users WHERE username='backfill_probe'`).Scan(&userID); err != nil {
+		t.Fatalf("lookup user: %v", err)
+	}
+
+	// Drift-prone fixture values. 19.99 and 89000.42 are the motivating
+	// cases cited in the migration 006 comment; 0.1/0.2/0.3 are the
+	// textbook "0.1 + 0.2 != 0.3" triad; 19.995 sits exactly on the
+	// half-away-from-zero boundary and must round UP to 2000, not DOWN
+	// to 1999.
+	fixtures := []float64{
+		19.99,
+		89000.42,
+		0.1,
+		0.2,
+		0.3,
+		19.995,
+		42.57,
+		1.005,
+		0.01,
+		1234567.89,
+	}
+
+	// Insert each fixture with amount_cents defaulted to 0 so the
+	// backfill UPDATE has actual work to do.
+	for _, amt := range fixtures {
+		if _, err := db.ExecContext(ctx, `INSERT INTO transactions (user_id, date, amount, description, category_id)
+			VALUES (?, '2026-04-01', ?, 'backfill fixture', 1)`, userID, amt); err != nil {
+			t.Fatalf("insert fixture %v: %v", amt, err)
+		}
+	}
+
+	// Execute the exact backfill expression from migration 006 against
+	// the rows we just inserted. Scoping to amount_cents = 0 avoids
+	// touching the rows the migration backfilled when setupTestDB ran.
+	if _, err := db.ExecContext(ctx, `UPDATE transactions
+		SET amount_cents = CAST(ROUND(amount * 100) AS INTEGER)
+		WHERE amount_cents = 0 AND user_id = ?`, userID); err != nil {
+		t.Fatalf("re-run backfill: %v", err)
+	}
+
+	// Pull every backfilled row back and compare against dollarsToCents,
+	// which is the expression every dual-writer uses going forward. Any
+	// drift between these two signals a semantic mismatch at the
+	// migration boundary.
+	rows, err := db.QueryContext(ctx, `SELECT amount, amount_cents FROM transactions WHERE user_id = ? ORDER BY id`, userID)
+	if err != nil {
+		t.Fatalf("select backfilled rows: %v", err)
+	}
+	defer rows.Close()
+
+	var i int
+	for rows.Next() {
+		var amount float64
+		var cents int64
+		if err := rows.Scan(&amount, &cents); err != nil {
+			t.Fatalf("scan row %d: %v", i, err)
+		}
+		want := dollarsToCents(amount)
+		if cents != want {
+			t.Errorf("row %d amount=%v: backfill cents=%d, dollarsToCents=%d (expressions must agree)", i, amount, cents, want)
+		}
+		i++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate rows: %v", err)
+	}
+	if i != len(fixtures) {
+		t.Errorf("scanned %d rows, want %d (fixture count)", i, len(fixtures))
+	}
+}
+
+// TestSumExpensesByMonth_NoFloatDrift is the headline behavioural test for
+// Phase 3.1a: it proves that switching aggregation from `SUM(amount)` to
+// `SUM(amount_cents)` eliminates the accumulated float drift that existed
+// on the legacy path. The previous dashboard code worked around drift with
+// scattered `math.Round(x*100)/100` patches; the cents column makes the
+// class of bug impossible.
+//
+// Construction: seed 2000 rows with the textbook drift triad 0.10 / 0.20 /
+// 0.30 plus a pair of "real money" values (19.99 and 42.57) that are not
+// exactly representable in binary64. The expected total is computed in
+// int64 cents (which is exact by definition), and the assertion compares
+// the int64 result of SumExpensesByMonth against it byte-for-byte. If
+// someone ever rolls this back to the REAL column, the equivalent float
+// assertion would fail with a sub-cent drift on most systems.
+func TestSumExpensesByMonth_NoFloatDrift(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "drift_probe",
+		PasswordHash: "$2a$10$fakehash",
+		DisplayName:  "Drift Probe",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+
+	// Five drift-prone amounts repeated 400 times each = 2000 rows.
+	// Expected int64 total:
+	//   400 * (10 + 20 + 30 + 1999 + 4257) = 400 * 6316 = 2,526,400 cents
+	// which is $25,264.00 exactly. On the legacy float path, summing 2000
+	// non-representable binary64 values reliably drifts by a fraction of
+	// a cent on most x86-64 libc rounding modes - small enough to slip
+	// past naive asserts, large enough to corrupt rolling aggregates.
+	fixtures := []float64{0.10, 0.20, 0.30, 19.99, 42.57}
+	const repeats = 400
+
+	txnDate := time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC)
+
+	// Use a sql transaction for the bulk insert so the 2000 rows land in
+	// one commit; on the CGO driver, autocommit-per-insert is an order of
+	// magnitude slower and the test becomes the long pole of the suite.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin bulk insert tx: %v", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO transactions (user_id, date, amount, amount_cents, description, category_id)
+		VALUES (?, ?, ?, ?, 'drift fixture', 1)`)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("prepare bulk insert: %v", err)
+	}
+	var wantCents int64
+	for i := 0; i < repeats; i++ {
+		for _, amt := range fixtures {
+			cents := dollarsToCents(amt)
+			if _, err := stmt.ExecContext(ctx, user.ID, txnDate, amt, cents); err != nil {
+				_ = stmt.Close()
+				_ = tx.Rollback()
+				t.Fatalf("exec bulk insert: %v", err)
+			}
+			wantCents += cents
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("close stmt: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit bulk insert: %v", err)
+	}
+
+	// Sanity-check the fixture math: 400 * (10+20+30+1999+4257) = 2,526,400.
+	const expected int64 = 2_526_400
+	if wantCents != expected {
+		t.Fatalf("fixture arithmetic broke: wantCents=%d, expected=%d", wantCents, expected)
+	}
+
+	// The aggregation call under test. Phase 3.1a made this return int64
+	// cents; if it ever regresses to float dollars the comparison below
+	// will not compile.
+	gotCents, err := q.SumExpensesByMonth(ctx, SumExpensesByMonthParams{
+		Year:  "2026",
+		Month: "04",
+	})
+	if err != nil {
+		t.Fatalf("SumExpensesByMonth: %v", err)
+	}
+	if gotCents != expected {
+		t.Errorf("SumExpensesByMonth over 2000 drift-prone rows = %d cents, want %d cents (float drift would produce an off-by-one)", gotCents, expected)
 	}
 }

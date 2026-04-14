@@ -651,6 +651,7 @@ func TestAudit_StoreCreate_CoCommitsDataAndAudit(t *testing.T) {
 		UserID:      user.ID,
 		Date:        mustParseDate(t, "2026-04-01"),
 		Amount:      7.50,
+		AmountCents: dollarsToCents(7.50),
 		Description: "store direct",
 		CategoryID:  1,
 	})

@@ -17,15 +17,17 @@ func TestHandleGetBudgets_ReturnsBudgetsForYear(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Seed some budgets
+	// Seed some budgets. Phase 3.1a: dual-write amount_cents so the
+	// get handler (which reads via ListBudgetsByYear) sees the same
+	// value in both columns.
 	err := q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 1, Amount: 2500,
+		Year: 2026, Month: 1, Amount: 2500, AmountCents: dollarsToCents(2500),
 	})
 	if err != nil {
 		t.Fatalf("seed budget: %v", err)
 	}
 	err = q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 2, Amount: 3000,
+		Year: 2026, Month: 2, Amount: 3000, AmountCents: dollarsToCents(3000),
 	})
 	if err != nil {
 		t.Fatalf("seed budget: %v", err)

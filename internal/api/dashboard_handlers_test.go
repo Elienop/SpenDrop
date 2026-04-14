@@ -105,9 +105,9 @@ func TestHandleDashboardSummary_BudgetFromMonthlyBudget(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Set a monthly budget for April 2026
+	// Set a monthly budget for April 2026. Phase 3.1a: dual-write cents.
 	err := q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 4, Amount: 2500,
+		Year: 2026, Month: 4, Amount: 2500, AmountCents: dollarsToCents(2500),
 	})
 	if err != nil {
 		t.Fatalf("seed budget: %v", err)
@@ -171,9 +171,9 @@ func TestHandleDashboardSummary_SavingsGoalProgress(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Set savings goal for 2026
+	// Set savings goal for 2026. Phase 3.1a: dual-write cents.
 	err := q.UpsertSavingsGoal(context.Background(), database.UpsertSavingsGoalParams{
-		Year: 2026, TargetAmount: 10000,
+		Year: 2026, TargetAmount: 10000, TargetAmountCents: dollarsToCents(10000),
 	})
 	if err != nil {
 		t.Fatalf("seed savings goal: %v", err)

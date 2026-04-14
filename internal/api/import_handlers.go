@@ -423,10 +423,16 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		// Build params. Amount is expected to already be in base currency
 		// (the Excel "Amount (USD)" column). Original amount/currency are
 		// stored as-is for reference; no conversion is applied during import.
+		//
+		// Phase 3.1a: dual-write amount_cents alongside the legacy REAL
+		// amount. The cents value is derived from the same float parsed out
+		// of the spreadsheet so a round-trip export->import is lossless for
+		// any representable money amount.
 		params := database.CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        date,
 			Amount:      amount,
+			AmountCents: dollarsToCents(amount),
 			Description: row.Description,
 			CategoryID:  categoryID,
 			Tags:        toNullString(row.Tags),
@@ -435,7 +441,9 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 		// Handle original amount/currency if present
 		if row.OriginalAmount != 0 {
-			params.OriginalAmount = sql.NullFloat64{Float64: math.Abs(row.OriginalAmount), Valid: true}
+			origAmt := math.Abs(row.OriginalAmount)
+			params.OriginalAmount = sql.NullFloat64{Float64: origAmt, Valid: true}
+			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(origAmt), Valid: true}
 		}
 		if row.OriginalCurrency != "" {
 			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
