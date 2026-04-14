@@ -15,6 +15,20 @@ type AppSetting struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type BalanceCheckpoint struct {
+	ID                     int64          `json:"id"`
+	UserID                 int64          `json:"user_id"`
+	ScopeType              string         `json:"scope_type"`
+	ScopeID                sql.NullInt64  `json:"scope_id"`
+	ScopeLabel             sql.NullString `json:"scope_label"`
+	Date                   time.Time      `json:"date"`
+	ExpectedAmountCents    int64          `json:"expected_amount_cents"`
+	Note                   sql.NullString `json:"note"`
+	CreatedAt              time.Time      `json:"created_at"`
+	LastVerifiedAt         sql.NullTime   `json:"last_verified_at"`
+	LastVerificationStatus sql.NullString `json:"last_verification_status"`
+}
+
 type Budget struct {
 	ID          int64     `json:"id"`
 	Year        int64     `json:"year"`

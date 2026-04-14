@@ -145,6 +145,17 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/reports/recurring/dismiss", h.handleDismissRecurring)
 		r.Get("/reports/tag-breakdown", h.handleTagBreakdown)
 
+		// Balance checkpoints (Phase 3.3). User-asserted sums that the
+		// server re-runs on demand and after every transaction mutation.
+		// Listed here rather than inside a subroute because the endpoint
+		// set is flat (list/create/delete/verify) and sits at the same
+		// level as /reports — checkpoints are a read-mostly surface
+		// visible to every household member.
+		r.Get("/checkpoints", h.handleListCheckpoints)
+		r.Post("/checkpoints", h.handleCreateCheckpoint)
+		r.Delete("/checkpoints/{id}", h.handleDeleteCheckpoint)
+		r.Post("/checkpoints/{id}/verify", h.handleVerifyCheckpoint)
+
 		// Users (admin only)
 		r.Route("/users", func(r chi.Router) {
 			r.Use(auth.RequireAdmin)

@@ -30,6 +30,30 @@ func (q *Queries) CountAllTransactions(ctx context.Context) (CountAllTransaction
 	return i, err
 }
 
+const countCheckpointsByStatus = `-- name: CountCheckpointsByStatus :one
+SELECT
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'ok' THEN 1 ELSE 0 END), 0) AS INTEGER) AS ok,
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'mismatch' THEN 1 ELSE 0 END), 0) AS INTEGER) AS mismatch,
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'pending' OR last_verification_status IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS pending
+FROM balance_checkpoints
+`
+
+type CountCheckpointsByStatusRow struct {
+	Ok       int64 `json:"ok"`
+	Mismatch int64 `json:"mismatch"`
+	Pending  int64 `json:"pending"`
+}
+
+// One-row, three-column count used by /healthz/data. NULL status is
+// bucketed into pending so the counts always sum to the total row
+// count of the table.
+func (q *Queries) CountCheckpointsByStatus(ctx context.Context) (CountCheckpointsByStatusRow, error) {
+	row := q.db.QueryRowContext(ctx, countCheckpointsByStatus)
+	var i CountCheckpointsByStatusRow
+	err := row.Scan(&i.Ok, &i.Mismatch, &i.Pending)
+	return i, err
+}
+
 const countDeletedTransactions = `-- name: CountDeletedTransactions :one
 SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL
 `
@@ -39,6 +63,24 @@ func (q *Queries) CountDeletedTransactions(ctx context.Context) (int64, error) {
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const countStaleMismatchCheckpoints = `-- name: CountStaleMismatchCheckpoints :one
+SELECT CAST(COALESCE(SUM(1), 0) AS INTEGER) AS n
+FROM balance_checkpoints
+WHERE last_verification_status = 'mismatch'
+  AND last_verified_at IS NOT NULL
+  AND last_verified_at < CAST(?1 AS TEXT)
+`
+
+// Counts mismatched checkpoints whose last_verified_at is older than the
+// supplied threshold. /healthz/data flips to 503 when this is greater than
+// zero, matching the degradation trigger documented in the phase plan.
+func (q *Queries) CountStaleMismatchCheckpoints(ctx context.Context, threshold string) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countStaleMismatchCheckpoints, threshold)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
 }
 
 const createCategory = `-- name: CreateCategory :one
@@ -66,6 +108,73 @@ func (q *Queries) CreateCategory(ctx context.Context, arg CreateCategoryParams) 
 		&i.SortOrder,
 		&i.IsActive,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const createCheckpoint = `-- name: CreateCheckpoint :one
+
+INSERT INTO balance_checkpoints (
+    user_id,
+    scope_type,
+    scope_id,
+    scope_label,
+    date,
+    expected_amount_cents,
+    note,
+    last_verification_status
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+RETURNING id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status
+`
+
+type CreateCheckpointParams struct {
+	UserID              int64          `json:"user_id"`
+	ScopeType           string         `json:"scope_type"`
+	ScopeID             sql.NullInt64  `json:"scope_id"`
+	ScopeLabel          sql.NullString `json:"scope_label"`
+	Date                time.Time      `json:"date"`
+	ExpectedAmountCents int64          `json:"expected_amount_cents"`
+	Note                sql.NullString `json:"note"`
+}
+
+// Balance Checkpoints
+//
+// Beancount-style assertions of the form: on date D, the scope X summed
+// to Y cents. The verification query is the load-bearing one: it computes
+// the actual sum over live transactions (t.deleted_at IS NULL, Phase 2.1
+// invariant) up to and including the checkpoint date and returns int64
+// cents so the handler can compare against expected_amount_cents without
+// any float coercion. The scope switch is done inline in the WHERE clause
+// so the same query serves all three scope types and sqlc generates a
+// single Go helper.
+//
+// Tag-scope note: tags are CSV-encoded in transactions.tags, so tag match
+// uses the canonical CSV-token LIKE pattern. See the long comment on
+// migration 007_balance_checkpoints.sql for the rationale and the exact
+// form of the LIKE expression.
+func (q *Queries) CreateCheckpoint(ctx context.Context, arg CreateCheckpointParams) (BalanceCheckpoint, error) {
+	row := q.db.QueryRowContext(ctx, createCheckpoint,
+		arg.UserID,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.ScopeLabel,
+		arg.Date,
+		arg.ExpectedAmountCents,
+		arg.Note,
+	)
+	var i BalanceCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.ScopeType,
+		&i.ScopeID,
+		&i.ScopeLabel,
+		&i.Date,
+		&i.ExpectedAmountCents,
+		&i.Note,
+		&i.CreatedAt,
+		&i.LastVerifiedAt,
+		&i.LastVerificationStatus,
 	)
 	return i, err
 }
@@ -232,6 +341,14 @@ func (q *Queries) DeleteCategory(ctx context.Context, id int64) (sql.Result, err
 	return q.db.ExecContext(ctx, deleteCategory, id)
 }
 
+const deleteCheckpoint = `-- name: DeleteCheckpoint :execresult
+DELETE FROM balance_checkpoints WHERE id = ?
+`
+
+func (q *Queries) DeleteCheckpoint(ctx context.Context, id int64) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteCheckpoint, id)
+}
+
 const deleteExpiredSessions = `-- name: DeleteExpiredSessions :exec
 DELETE FROM sessions WHERE expires_at < CURRENT_TIMESTAMP
 `
@@ -320,6 +437,29 @@ func (q *Queries) GetCategoryByID(ctx context.Context, id int64) (Category, erro
 		&i.SortOrder,
 		&i.IsActive,
 		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getCheckpoint = `-- name: GetCheckpoint :one
+SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints WHERE id = ?
+`
+
+func (q *Queries) GetCheckpoint(ctx context.Context, id int64) (BalanceCheckpoint, error) {
+	row := q.db.QueryRowContext(ctx, getCheckpoint, id)
+	var i BalanceCheckpoint
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.ScopeType,
+		&i.ScopeID,
+		&i.ScopeLabel,
+		&i.Date,
+		&i.ExpectedAmountCents,
+		&i.Note,
+		&i.CreatedAt,
+		&i.LastVerifiedAt,
+		&i.LastVerificationStatus,
 	)
 	return i, err
 }
@@ -615,6 +755,132 @@ func (q *Queries) ListBudgetsByYear(ctx context.Context, year int64) ([]Budget, 
 	return items, nil
 }
 
+const listCheckpoints = `-- name: ListCheckpoints :many
+SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints
+ORDER BY date DESC, id DESC
+`
+
+func (q *Queries) ListCheckpoints(ctx context.Context) ([]BalanceCheckpoint, error) {
+	rows, err := q.db.QueryContext(ctx, listCheckpoints)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BalanceCheckpoint{}
+	for rows.Next() {
+		var i BalanceCheckpoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ScopeType,
+			&i.ScopeID,
+			&i.ScopeLabel,
+			&i.Date,
+			&i.ExpectedAmountCents,
+			&i.Note,
+			&i.CreatedAt,
+			&i.LastVerifiedAt,
+			&i.LastVerificationStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCheckpointsAffectedByDate = `-- name: ListCheckpointsAffectedByDate :many
+SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints
+WHERE date >= CAST(?1 AS TEXT)
+ORDER BY date ASC, id ASC
+`
+
+// Returns every checkpoint whose date is on or after the supplied date.
+// Used by the post-mutation/post-import hook: a transaction with date D
+// can only change the sum-as-of-date for dates greater than or equal to
+// D, so earlier checkpoints are untouchable by definition and skipped.
+func (q *Queries) ListCheckpointsAffectedByDate(ctx context.Context, date string) ([]BalanceCheckpoint, error) {
+	rows, err := q.db.QueryContext(ctx, listCheckpointsAffectedByDate, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BalanceCheckpoint{}
+	for rows.Next() {
+		var i BalanceCheckpoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ScopeType,
+			&i.ScopeID,
+			&i.ScopeLabel,
+			&i.Date,
+			&i.ExpectedAmountCents,
+			&i.Note,
+			&i.CreatedAt,
+			&i.LastVerifiedAt,
+			&i.LastVerificationStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCheckpointsByUser = `-- name: ListCheckpointsByUser :many
+SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints
+WHERE user_id = ?
+ORDER BY date DESC, id DESC
+`
+
+func (q *Queries) ListCheckpointsByUser(ctx context.Context, userID int64) ([]BalanceCheckpoint, error) {
+	rows, err := q.db.QueryContext(ctx, listCheckpointsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BalanceCheckpoint{}
+	for rows.Next() {
+		var i BalanceCheckpoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ScopeType,
+			&i.ScopeID,
+			&i.ScopeLabel,
+			&i.Date,
+			&i.ExpectedAmountCents,
+			&i.Note,
+			&i.CreatedAt,
+			&i.LastVerifiedAt,
+			&i.LastVerificationStatus,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listCurrencies = `-- name: ListCurrencies :many
 
 SELECT code, name, symbol, rate_to_base, is_base, updated_at FROM currencies
@@ -822,6 +1088,52 @@ func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
 			&i.TargetAmount,
 			&i.UpdatedAt,
 			&i.TargetAmountCents,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listStaleCheckpoints = `-- name: ListStaleCheckpoints :many
+SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints
+WHERE last_verified_at IS NULL
+   OR last_verified_at < CAST(?1 AS TEXT)
+ORDER BY id ASC
+`
+
+// Returns checkpoints whose last_verified_at is older than
+// sqlc.arg(threshold) (RFC3339) or NULL. Consumed by /healthz/data to
+// re-verify everything that has drifted beyond the freshness window, so
+// the monitoring scraper carries the cost of periodic re-verification.
+func (q *Queries) ListStaleCheckpoints(ctx context.Context, threshold string) ([]BalanceCheckpoint, error) {
+	rows, err := q.db.QueryContext(ctx, listStaleCheckpoints, threshold)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []BalanceCheckpoint{}
+	for rows.Next() {
+		var i BalanceCheckpoint
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.ScopeType,
+			&i.ScopeID,
+			&i.ScopeLabel,
+			&i.Date,
+			&i.ExpectedAmountCents,
+			&i.Note,
+			&i.CreatedAt,
+			&i.LastVerifiedAt,
+			&i.LastVerificationStatus,
 		); err != nil {
 			return nil, err
 		}
@@ -1455,6 +1767,23 @@ func (q *Queries) UpdateCategorySortOrder(ctx context.Context, arg UpdateCategor
 	return err
 }
 
+const updateCheckpointVerification = `-- name: UpdateCheckpointVerification :exec
+UPDATE balance_checkpoints
+SET last_verified_at = CURRENT_TIMESTAMP,
+    last_verification_status = ?
+WHERE id = ?
+`
+
+type UpdateCheckpointVerificationParams struct {
+	LastVerificationStatus sql.NullString `json:"last_verification_status"`
+	ID                     int64          `json:"id"`
+}
+
+func (q *Queries) UpdateCheckpointVerification(ctx context.Context, arg UpdateCheckpointVerificationParams) error {
+	_, err := q.db.ExecContext(ctx, updateCheckpointVerification, arg.LastVerificationStatus, arg.ID)
+	return err
+}
+
 const updateSavedFilter = `-- name: UpdateSavedFilter :execresult
 UPDATE saved_filters SET name = ?, filter_json = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND user_id = ?
@@ -1631,4 +1960,52 @@ type UpsertSettingParams struct {
 func (q *Queries) UpsertSetting(ctx context.Context, arg UpsertSettingParams) error {
 	_, err := q.db.ExecContext(ctx, upsertSetting, arg.Key, arg.Value)
 	return err
+}
+
+const verifyCheckpointTotal = `-- name: VerifyCheckpointTotal :one
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS actual_cents
+FROM transactions t
+WHERE t.deleted_at IS NULL
+  AND t.date <= CAST(?1 AS TEXT)
+  AND (
+    CAST(?2 AS TEXT) = 'total'
+    OR (CAST(?2 AS TEXT) = 'category' AND t.category_id = CAST(?3 AS INTEGER))
+    OR (CAST(?2 AS TEXT) = 'tag' AND ',' || COALESCE(t.tags, '') || ',' LIKE '%,' || CAST(?4 AS TEXT) || ',%')
+  )
+`
+
+type VerifyCheckpointTotalParams struct {
+	Date       string `json:"date"`
+	ScopeType  string `json:"scope_type"`
+	ScopeID    int64  `json:"scope_id"`
+	ScopeLabel string `json:"scope_label"`
+}
+
+// The load-bearing verification query. Returns an int64 cents sum over
+// live transactions up to and including the checkpoint date, for the
+// scope matching the supplied arguments. Handler compares the returned
+// actual_cents against the checkpoint expected_amount_cents.
+//
+// Phase 2.1: t.deleted_at IS NULL filters tombstoned rows out of the
+// aggregate so a soft-deleted transaction cannot silently flip a
+// previously-verified checkpoint.
+// Phase 3.1a: SUM(t.amount_cents) keeps the aggregate in int64 cents; the
+// COALESCE pins the empty-match case to 0 (not NULL), and the CAST locks
+// sqlc into an int64 return type.
+//
+// Every sqlc.arg is wrapped in an explicit CAST so sqlc infers a concrete
+// Go type for every parameter. Without the casts, scope_type lands as
+// interface{} because it is only compared against string literals and
+// scope_id lands as int64 (non-null) which obscures the intent that it
+// is meaningful only when scope_type = 'category'.
+func (q *Queries) VerifyCheckpointTotal(ctx context.Context, arg VerifyCheckpointTotalParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, verifyCheckpointTotal,
+		arg.Date,
+		arg.ScopeType,
+		arg.ScopeID,
+		arg.ScopeLabel,
+	)
+	var actual_cents int64
+	err := row.Scan(&actual_cents)
+	return actual_cents, err
 }
