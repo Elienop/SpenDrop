@@ -93,6 +93,29 @@ func main() {
 	}
 	log.Println("Database migrations applied successfully")
 
+	// Phase 3.4 content_hash backfill. Idempotent and resumable: the
+	// query filters `content_hash IS NULL` so once a row is hashed the
+	// backfill skips it on every subsequent boot, and a crash mid-sweep
+	// picks up where it left off. Placed outside RunMigrations because
+	// the migration runner early-returns when no migrations are pending,
+	// and the backfill needs to run on every boot until every legacy
+	// row has a hash (which could span multiple boots if the first boot
+	// crashes mid-sweep). Errors are fatal for the same reason migration
+	// failures are: a container booting with some rows hashed and some
+	// not will deduplicate inconsistently, and recovering is cheaper
+	// than diagnosing a half-completed index.
+	//
+	// We pass context.Background() intentionally: BackfillContentHashes
+	// sizes its own wall-clock deadline from the pre-counted pending row
+	// count (see content_hash.go). Wrapping the call in an outer fixed
+	// timeout here would re-introduce the boot-loop hazard the proportional
+	// budget was written to avoid — a large legacy household DB that takes
+	// six minutes to hash cannot be allowed to crash-loop under a naive
+	// five-minute outer cap.
+	if err := database.BackfillContentHashes(context.Background(), sqlDB); err != nil {
+		log.Fatalf("backfill content_hash: %v", err)
+	}
+
 	// Full PRAGMA integrity_check runs synchronously at boot, immediately
 	// after migrations and before the HTTP server binds a port. Any
 	// non-"ok" result — or any query error — is fatal: a corrupt database

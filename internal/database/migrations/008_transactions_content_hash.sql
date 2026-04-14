@@ -1,0 +1,60 @@
+-- Phase 3.4 of the data-stewardship rollout: make imports idempotent by
+-- content-hashing every row. Without this, reimporting last quarter's
+-- spreadsheet silently doubles every row in it. With this, the second
+-- import is detected and reported as a batch of skipped duplicates.
+--
+-- The hash is SHA-256 over a normalized form of the row:
+--
+--     date|amount_cents|lower(trim(description))|lower(trim(category_name))
+--
+-- computed in Go (SQLite has no SHA-256). This migration only makes room
+-- for it — the backfill of pre-existing rows runs at process startup via
+-- database.BackfillContentHashes, called from main.go right after
+-- RunMigrations. Running the backfill in Go has two advantages: (1) no
+-- dependency on a SQLite extension, and (2) the same computeContentHash
+-- function that the import handler uses is the same one the backfill
+-- uses, so a deliberate "import the same file twice" regression test
+-- proves the two paths agree on every byte.
+--
+-- The partial unique index lets this migration ship before the backfill
+-- completes: pre-existing rows have content_hash = NULL and a NULL
+-- column is not unique-indexed in SQLite. New inserts (which always
+-- populate content_hash via the import path) are covered from the
+-- first boot after the migration applies. Once BackfillContentHashes
+-- finishes its one-shot sweep on a fresh container boot, every row has
+-- a hash and subsequent reimports hit the unique index.
+--
+-- The WHERE clause ALSO filters deleted_at IS NULL so that a tombstoned
+-- row drops out of the uniqueness constraint. The trash-then-reimport
+-- UX (documented on GetTransactionByContentHash in queries.sql) needs
+-- the INSERT of a re-added row NOT to collide with the tombstoned copy
+-- still carrying its original hash. SoftDeleteTransaction deliberately
+-- does not clear content_hash (the audit trail needs the pre-delete
+-- row state preserved), so the filter has to live on the index side.
+-- SQLite re-evaluates partial-index predicates on UPDATE, so a
+-- soft-delete automatically removes the row from the index, and a
+-- restore re-inserts it — the query filter and the index filter
+-- therefore agree about which rows are "visible" at every point.
+--
+-- The index is global, not per-user. SpenDrop is a household ledger
+-- where transactions imported by one member should deduplicate against
+-- the same row imported by another member — if alice already imported
+-- this quarter's credit-card statement, bob's second import of the
+-- same PDF-to-Excel conversion should be detected as duplicates, not
+-- silently doubled. Per-user scoping would defeat that.
+--
+-- Force-add override: when the user ticks "import anyway" on a predicted
+-- duplicate, the import handler appends " (N)" to the description before
+-- computing the hash, which lands a different hash and a distinct row.
+-- The UI surfaces the mutation loudly so the user knows what they're
+-- agreeing to — see handleImportConfirm in import_handlers.go.
+--
+-- Forward-only: reverting this migration requires dropping the index
+-- and the column. Migration 010 (Phase 3.1b) will not touch this — the
+-- content_hash column stays in place permanently.
+
+ALTER TABLE transactions ADD COLUMN content_hash TEXT;
+
+CREATE UNIQUE INDEX idx_transactions_content_hash
+    ON transactions(content_hash)
+    WHERE content_hash IS NOT NULL AND deleted_at IS NULL;

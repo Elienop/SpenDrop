@@ -1,9 +1,11 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -314,20 +316,153 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Phase 3.4 upload-time duplicate prediction. Best-effort: we don't
+	// have the user's category_map yet (that's on the confirm request),
+	// so we predict using only the case-insensitive name match against
+	// existing DB categories. Rows whose category doesn't resolve here
+	// are omitted from the prediction — they'll either be mapped
+	// explicitly at confirm time (and checked there) or fall to the
+	// default category (and checked there). A false-negative from the
+	// preview is acceptable because handleImportConfirm runs the
+	// authoritative check against the live index before every insert.
+	predictedSkips := predictDuplicateSkips(r.Context(), h.queries, parsedRows)
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"import_id":         importID,
 		"row_count":         len(parsedRows),
 		"rows":              parsedRows,
 		"columns":           detectedColumns,
 		"unique_categories": uniqueCategories,
+		"predicted_skips":   predictedSkips,
 	})
 }
 
+// predictDuplicateSkips walks the parsed preview rows and returns the
+// subset that would collide with an existing live transaction's content
+// hash if imported as-is. The check mirrors the confirm-time path exactly
+// except for category resolution: because the upload endpoint fires
+// before the user picks a category_map or default_category_id, this
+// function only predicts for rows whose spreadsheet category name has an
+// unambiguous case-insensitive match against an existing DB category.
+// Rows that don't match are silently skipped in the prediction — the
+// authoritative check still runs in handleImportConfirm, so a
+// false-negative here just means the UI doesn't grey the row out
+// ahead of time.
+//
+// The hash formula and DB lookup MUST agree with the confirm path. We
+// delegate to database.ComputeContentHash and
+// queries.GetTransactionByContentHash so there is no chance of drift.
+//
+// A DB error on any single row is logged and the row is dropped from
+// the prediction set — we do not abort the upload. The prediction is a
+// UX nicety, not a correctness gate; the worst case of a DB outage
+// here is that the user sees a less-informative preview, then hits
+// the real check at confirm time.
+func predictDuplicateSkips(ctx context.Context, queries *database.Queries, rows []importRow) []predictedSkip {
+	// Materialize the category lookups in one query. Upload payloads
+	// are capped at MaxImportRows so the memory cost is bounded, and
+	// loading categories once keeps the hash-prediction loop DB-free
+	// until the actual GetTransactionByContentHash call.
+	cats, err := queries.ListAllCategories(ctx)
+	if err != nil {
+		log.Printf("import preview: list categories: %v", err)
+		return []predictedSkip{}
+	}
+	nameToID := make(map[string]int64, len(cats))
+	idToName := make(map[int64]string, len(cats))
+	for _, c := range cats {
+		nameToID[strings.ToLower(c.Name)] = c.ID
+		idToName[c.ID] = c.Name
+	}
+
+	skips := []predictedSkip{}
+	for i, row := range rows {
+		// Short-circuit rows that will never produce a valid hash.
+		// These mirror the confirm-time "skip" reasons so the preview
+		// stays consistent with the eventual outcome.
+		if row.Description == "" || row.Amount == 0 {
+			continue
+		}
+		date, err := parseImportDate(row.Date)
+		if err != nil {
+			continue
+		}
+		// Case-insensitive match against the existing DB categories.
+		// Rows whose spreadsheet category doesn't land on an existing
+		// category (or whose category cell is empty) can't be hashed
+		// with the DB name, so we skip them from the prediction.
+		name := strings.TrimSpace(row.Category)
+		if name == "" {
+			continue
+		}
+		catID, ok := nameToID[strings.ToLower(name)]
+		if !ok {
+			continue
+		}
+		canonical := idToName[catID]
+
+		hash := database.ComputeContentHash(
+			date,
+			dollarsToCents(math.Abs(row.Amount)),
+			row.Description,
+			canonical,
+		)
+		existing, err := queries.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
+		if err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				log.Printf("import preview: lookup hash for row %d: %v", i, err)
+			}
+			continue
+		}
+		skips = append(skips, predictedSkip{
+			RowIndex:   i,
+			Reason:     "duplicate",
+			ExistingID: existing.ID,
+		})
+	}
+	return skips
+}
+
+// predictedSkip describes one row that the upload-time duplicate check
+// believes will be rejected at confirm time because its content hash
+// collides with an already-imported live row. The frontend uses this to
+// grey out the row in the preview and offer a "force-add" checkbox; the
+// authoritative check still happens in handleImportConfirm.
+//
+// RowIndex is the 0-based position of the row in the parsed preview (the
+// same index the frontend uses to render the row list), so the force-add
+// opt-in can refer back to the row by index without round-tripping the
+// entire row payload.
+//
+// ExistingID is the id of the live DB row that collides. It is exposed so
+// the frontend can deep-link to the duplicate in the transactions list
+// ("this row was first imported on 2026-01-17; open it"), and so operators
+// reading the JSON response can trace a false-positive back to the data.
+//
+// Reason is always "duplicate" for this phase — the field exists as a
+// discriminator so later phases can add reasons like "archived" or
+// "locked_period" without breaking the shape.
+type predictedSkip struct {
+	RowIndex   int    `json:"row_index"`
+	Reason     string `json:"reason"`
+	ExistingID int64  `json:"existing_id"`
+}
+
 // importConfirmRequest is the JSON body for confirming an import.
+//
+// ForceAdd lists the RowIndex values of predicted duplicates that the
+// user has explicitly ticked "import anyway" on. Rows listed here skip
+// the duplicate check and instead append a " (N)" suffix to their
+// description until the resulting content hash no longer collides. The
+// UI renders this mutation loudly so the user knows what they're
+// agreeing to — a forced duplicate is a legitimate-but-distinct row
+// (e.g. two identical coffees on the same day) and the suffix is what
+// disambiguates them in charts and totals.
 type importConfirmRequest struct {
 	ImportID          string           `json:"import_id"`
 	DefaultCategoryID int64            `json:"default_category_id"`
 	CategoryMap       map[string]int64 `json:"category_map"`
+	ForceAdd          []int            `json:"force_add"`
 }
 
 // handleImportConfirm inserts all rows from a previously uploaded import
@@ -371,15 +506,32 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build category name-to-ID lookup from existing categories
+	// Build category name-to-ID and id-to-name lookups from existing
+	// categories. The id-to-name map feeds the Phase 3.4 content-hash
+	// formula — the hash is computed from the DB category name, not
+	// the raw spreadsheet cell, so that the backfill path (which
+	// JOINs categories via category_id) and the import path agree on
+	// the bytes hashed for any given row.
 	existingCats, err := h.queries.ListAllCategories(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load categories")
 		return
 	}
 	catNameToID := make(map[string]int64, len(existingCats))
+	catIDToName := make(map[int64]string, len(existingCats))
 	for _, c := range existingCats {
 		catNameToID[strings.ToLower(c.Name)] = c.ID
+		catIDToName[c.ID] = c.Name
+	}
+
+	// Phase 3.4: materialize force-add row indices into a set for
+	// O(1) lookup. The request ships them as a slice for ergonomics;
+	// we flip them into a map once rather than doing a linear scan
+	// inside the per-row hot path. Empty slice → empty map → every
+	// row flows through the ordinary duplicate check.
+	forceAddSet := make(map[int]struct{}, len(req.ForceAdd))
+	for _, idx := range req.ForceAdd {
+		forceAddSet[idx] = struct{}{}
 	}
 
 	// Start a database transaction for all inserts
@@ -399,7 +551,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// A zero value means every row was skipped and the hook is a no-op.
 	var minImportDate time.Time
 
-	for _, row := range entry.Rows {
+	for i, row := range entry.Rows {
 		// Parse date
 		date, dateErr := parseImportDate(row.Date)
 		if dateErr != nil {
@@ -423,6 +575,63 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
+		canonicalCategoryName, ok := catIDToName[categoryID]
+		if !ok {
+			// Caller supplied a category_id that isn't in the DB. This
+			// is a client bug (or a racey category deletion); log and
+			// skip rather than 500ing mid-batch.
+			log.Printf("import: resolved category_id=%d not found in lookup (row desc=%s)", categoryID, sanitizeLogValue(row.Description))
+			skipped++
+			continue
+		}
+
+		// Phase 3.4: compute the content hash from the resolved row
+		// identity and check the live index before inserting. Rows
+		// listed in ForceAdd bypass the skip and instead mutate the
+		// description until a non-colliding hash is found.
+		description := row.Description
+		amountCents := dollarsToCents(amount)
+		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
+		_, forceAdd := forceAddSet[i]
+		if !forceAdd {
+			// Ordinary path: look up the hash and skip on a hit. The
+			// lookup runs on qtx so it observes any rows inserted
+			// earlier in this very batch — importing a spreadsheet
+			// that contains the same row twice detects the second
+			// occurrence as a duplicate of the first within the same
+			// commit, which is the correct answer for a household
+			// shared ledger.
+			_, lookupErr := qtx.GetTransactionByContentHash(r.Context(), sql.NullString{String: hash, Valid: true})
+			if lookupErr == nil {
+				skipped++
+				continue
+			}
+			if !errors.Is(lookupErr, sql.ErrNoRows) {
+				log.Printf("import: content hash lookup failed (row=%d): %v", i, lookupErr)
+				skipped++
+				continue
+			}
+		} else {
+			// Force-add path: append " (N)" to the description and
+			// loop until the resulting hash does not collide in the
+			// DB. Start at 2 because "Coffee" and "Coffee (2)" read
+			// naturally as a first and second occurrence to the user.
+			// The cap of 1000 is defensive: under pathological input
+			// (a merchant with 999 legitimate same-day same-amount
+			// transactions) we'd rather fail loudly than spin
+			// forever. In practice the loop almost always terminates
+			// at n=2.
+			suffixed, suffixedHash, suffixErr := resolveForceAddSuffix(
+				r.Context(), qtx, description, date, amountCents, canonicalCategoryName,
+			)
+			if suffixErr != nil {
+				log.Printf("import: force-add suffix failed (row=%d): %v", i, suffixErr)
+				skipped++
+				continue
+			}
+			description = suffixed
+			hash = suffixedHash
+		}
 
 		// Build params. Amount is expected to already be in base currency
 		// (the Excel "Amount (USD)" column). Original amount/currency are
@@ -432,15 +641,21 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		// amount. The cents value is derived from the same float parsed out
 		// of the spreadsheet so a round-trip export->import is lossless for
 		// any representable money amount.
+		//
+		// Phase 3.4: content_hash is populated from the resolved row
+		// identity computed above. The partial unique index guarantees
+		// the insert fails loudly if the dup check above raced a parallel
+		// import of the same row — there is no silent double-insert path.
 		params := database.CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        date,
 			Amount:      amount,
-			AmountCents: dollarsToCents(amount),
-			Description: row.Description,
+			AmountCents: amountCents,
+			Description: description,
 			CategoryID:  categoryID,
 			Tags:        toNullString(row.Tags),
 			Notes:       toNullString(row.Notes),
+			ContentHash: sql.NullString{String: hash, Valid: true},
 		}
 
 		// Handle original amount/currency if present
@@ -454,7 +669,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if _, err := qtx.CreateTransaction(r.Context(), params); err != nil {
-			log.Printf("import: failed to insert row (date=%s, desc=%s): %v", sanitizeLogValue(row.Date), sanitizeLogValue(row.Description), err)
+			log.Printf("import: failed to insert row (date=%s, desc=%s): %v", sanitizeLogValue(row.Date), sanitizeLogValue(description), err)
 			skipped++
 			continue
 		}
@@ -576,6 +791,49 @@ func parseImportDate(s string) (time.Time, error) {
 		}
 	}
 	return time.Time{}, fmt.Errorf("unparseable date: %q", s)
+}
+
+// forceAddSuffixCap is the ceiling on how many " (N)" suffixes
+// resolveForceAddSuffix will try before giving up. Under realistic
+// household data the loop terminates at n=2 or n=3; the cap is defensive
+// against a pathological input (say, a merchant that is legitimately
+// charged 500+ times on the same day for the same amount, which we
+// never see, but which would otherwise spin forever).
+const forceAddSuffixCap = 1000
+
+// resolveForceAddSuffix finds the smallest " (N)" suffix (starting at
+// N=2) such that the content hash of the suffixed description does not
+// collide with an existing live row. It returns the suffixed description
+// and its hash.
+//
+// The function runs inside the same sqlc transaction as the surrounding
+// import so an earlier row in this batch that landed with "(2)" is
+// visible to a later row looking for "(3)". If the cap is exhausted
+// without finding a non-colliding suffix, the error is surfaced to the
+// caller — the import handler logs it and counts the row as skipped,
+// preserving the "no silent doubles" invariant at the cost of the
+// legitimate-but-pathological row.
+func resolveForceAddSuffix(
+	ctx context.Context,
+	qtx *database.Queries,
+	description string,
+	date time.Time,
+	amountCents int64,
+	categoryName string,
+) (string, string, error) {
+	for n := 2; n <= forceAddSuffixCap; n++ {
+		candidate := fmt.Sprintf("%s (%d)", description, n)
+		hash := database.ComputeContentHash(date, amountCents, candidate, categoryName)
+		_, err := qtx.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
+		if errors.Is(err, sql.ErrNoRows) {
+			return candidate, hash, nil
+		}
+		if err != nil {
+			return "", "", fmt.Errorf("lookup suffix %q: %w", candidate, err)
+		}
+		// err == nil → hash hit, try the next suffix.
+	}
+	return "", "", fmt.Errorf("no free suffix in [2, %d]", forceAddSuffixCap)
 }
 
 // resolveCategoryID determines the category ID for an imported row.
