@@ -471,6 +471,7 @@ func TestHandleUpdateUser_EmptyFields_Returns400(t *testing.T) {
 // --- parseYearMonth month range validation ---
 
 func TestParseYearMonth_InvalidMonthRange_ReturnsError(t *testing.T) {
+	h := setupHandler(t)
 	tests := []struct {
 		month string
 	}{
@@ -483,7 +484,7 @@ func TestParseYearMonth_InvalidMonthRange_ReturnsError(t *testing.T) {
 	for _, tc := range tests {
 		t.Run("month="+tc.month, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/api/test?month="+tc.month, nil)
-			_, _, err := parseYearMonth(req)
+			_, _, err := h.parseYearMonth(req)
 			if err == nil {
 				t.Errorf("expected error for month=%s, got nil", tc.month)
 			}
@@ -492,10 +493,11 @@ func TestParseYearMonth_InvalidMonthRange_ReturnsError(t *testing.T) {
 }
 
 func TestParseYearMonth_ValidMonth_NoError(t *testing.T) {
+	h := setupHandler(t)
 	for m := 1; m <= 12; m++ {
 		t.Run(fmt.Sprintf("month=%d", m), func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/test?month=%d", m), nil)
-			_, month, err := parseYearMonth(req)
+			_, month, err := h.parseYearMonth(req)
 			if err != nil {
 				t.Errorf("expected no error for month=%d, got %v", m, err)
 			}

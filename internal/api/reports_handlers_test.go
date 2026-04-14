@@ -343,3 +343,30 @@ func TestHandleReportIncomeExpenses_HidesTombstoned(t *testing.T) {
 		t.Errorf("current-month income=%v, want 3000 (tombstoned 888 must be excluded)", got)
 	}
 }
+
+// TestHandleReportIncomeExpenses_Fixture is the Phase 3.2 worked example:
+// the entire test is eight lines of setup, and every piece of domain data
+// (clock, users, categories, transactions) lives in testdata/*.fixture.json
+// with the expected HTTP response in testdata/*.golden.json. Compare to
+// TestHandleReportIncomeExpenses_HidesTombstoned above, which has to seed
+// rows for "whatever month the wall clock happens to be showing" because
+// the handler there uses real time.Now(). This one does not care what day
+// it is - the frozen clock (2026-04-13) means Feb/Mar/Apr 2026 data is
+// always exactly in the rolling window.
+//
+// To regenerate the golden file after an intentional handler change, run:
+//
+//	UPDATE_GOLDEN=1 go test ./internal/api/ -run TestHandleReportIncomeExpenses_Fixture
+func TestHandleReportIncomeExpenses_Fixture(t *testing.T) {
+	fx := loadFixture(t, "income_expenses_basic")
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/income-expenses?months=3", nil)
+	req = withUser(req, fx.Users["alice"])
+	rec := httptest.NewRecorder()
+
+	fx.Handler.handleReportIncomeExpenses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	assertGoldenJSON(t, "income_expenses_basic", rec.Body.Bytes())
+}

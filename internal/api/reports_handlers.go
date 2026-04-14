@@ -31,7 +31,7 @@ func (h *Handler) handleReportYoY(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	year := time.Now().Year()
+	year := h.clock.Now().Year()
 	if v := r.URL.Query().Get("year"); v != "" {
 		parsed, err := strconv.Atoi(v)
 		if err != nil || parsed < MinYear || parsed > MaxYear {
@@ -125,7 +125,7 @@ func (h *Handler) handleReportCategoryTrends(w http.ResponseWriter, r *http.Requ
 		months = parsed
 	}
 
-	now := time.Now()
+	now := h.clock.Now()
 	earliest := now.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
 	dateTo := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
@@ -194,7 +194,7 @@ func (h *Handler) handleReportIncomeExpenses(w http.ResponseWriter, r *http.Requ
 		months = parsed
 	}
 
-	now := time.Now()
+	now := h.clock.Now()
 	earliest := now.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
 	dateTo := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
@@ -246,7 +246,7 @@ func (h *Handler) handleReportTopMerchants(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	year, month, err := parseYearMonth(r)
+	year, month, err := h.parseYearMonth(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
