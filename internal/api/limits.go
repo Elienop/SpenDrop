@@ -31,8 +31,17 @@ const (
 // Batch-operation caps. These bound how many items a single request can
 // mutate in one database transaction.
 const (
-	MaxBatchTransactions   = 500
-	MaxBatchDeleteIDs      = 500
+	MaxBatchTransactions = 500
+	MaxBatchDeleteIDs    = 500
+	// MaxBatchRestoreIDs is pinned to MaxBatchDeleteIDs so "undo the
+	// last batch delete" is always possible in a single request — an
+	// operator who just nuked 500 rows by accident cannot have the
+	// restore cap be smaller than the delete cap or the undo becomes
+	// a multi-step dance. Declared as a named alias rather than a
+	// literal reference at the call site so the symmetry is visible
+	// in code review and a future split (if the two ever diverge) is
+	// a one-line change here.
+	MaxBatchRestoreIDs     = MaxBatchDeleteIDs
 	MaxCategoryReorder     = 200
 	MaxImportRows          = 10000
 	MaxSavedFilters        = 50

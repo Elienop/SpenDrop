@@ -635,7 +635,7 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 }
 
 const listDeletedTransactions = `-- name: ListDeletedTransactions :many
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.name AS category_name, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NOT NULL
@@ -662,6 +662,7 @@ type ListDeletedTransactionsRow struct {
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
 	DeletedAt        sql.NullTime    `json:"deleted_at"`
+	CategoryName     string          `json:"category_name"`
 	CategoryType     string          `json:"category_type"`
 }
 
@@ -688,6 +689,7 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DeletedAt,
+			&i.CategoryName,
 			&i.CategoryType,
 		); err != nil {
 			return nil, err

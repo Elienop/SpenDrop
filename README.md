@@ -403,6 +403,12 @@ curl -s http://localhost:3535/api/health
 
 If something looks wrong, you can roll back to the original by repeating step 4 with `spendrop.db.bak` as the source. Once the restore is verified, delete the `.bak` file to reclaim space.
 
+#### Integrity checks
+
+SpenDrop runs a full `PRAGMA integrity_check` **synchronously at startup** — after migrations, before the HTTP server binds a port — and refuses to start on any non-`ok` result. A corrupt database under a live server compounds damage with every write, so the right operator response is "crash loudly, restore from backup, investigate" rather than "limp along and hope." The full result (not just pass/fail) is logged verbatim so the exact SQLite error list is in `docker logs spendrop`.
+
+Once the server is up, a background ticker reruns the full check **every 24 hours** and caches the result. `GET /healthz/data` surfaces both the cached full-check result (`last_integrity_check_at`, `last_integrity_check_result`) and a per-request `PRAGMA quick_check` that catches torn page writes between scheduled runs. Monitoring scrapers should alert on the HTTP status code (503 on degraded) and include the response body in the alert payload so the exact wording reaches the operator without needing another shell.
+
 #### Pre-migration snapshots
 
 Schema migrations are the riskiest thing SpenDrop does to your database — a bug in a new migration can corrupt data in ways the scheduled backup may not have captured yet if the last one was hours ago. Before applying **any** pending migration on startup, SpenDrop writes a dedicated `VACUUM INTO` snapshot to `/app/data/migration-snapshots/` so you always have a pre-upgrade anchor, no matter when the last scheduled backup ran.
@@ -485,7 +491,23 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
 | PUT | `/api/transactions/{id}` | Update a transaction |
-| DELETE | `/api/transactions/{id}` | Delete a transaction |
+| DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
+
+#### Trash view (admin only)
+Deleted transactions are retained as tombstones and surfaced through admin-only endpoints so the "undo the last nuke" recovery story is in-band rather than a DB shell visit.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/transactions/deleted` | Paginated list of tombstoned transactions, newest first |
+| POST | `/api/transactions/{id}/restore` | Restore a single tombstoned row (clears `deleted_at`, emits a `restore` audit row) |
+| POST | `/api/transactions/restore-batch` | Restore up to 500 rows in one request; already-live or missing IDs are silently skipped |
+| DELETE | `/api/transactions/{id}/purge` | Hard-delete a tombstoned row (the only code path that physically removes a transaction) |
+
+### Health and monitoring
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
+| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, and the cached result of the daily full `PRAGMA integrity_check`. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, or version string that is safe to expose on a self-hosted LAN. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
 
 ### Categories
 | Method | Endpoint | Description |

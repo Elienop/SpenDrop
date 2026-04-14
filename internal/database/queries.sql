@@ -149,7 +149,7 @@ WHERE id = ? AND deleted_at IS NOT NULL;
 DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 
 -- name: ListDeletedTransactions :many
-SELECT t.*, c.type AS category_type
+SELECT t.*, c.name AS category_name, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NOT NULL

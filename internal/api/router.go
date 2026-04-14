@@ -19,7 +19,25 @@ import (
 // TTL) — pass config.Defaults() if you don't care. A nil cfg also falls back
 // to defaults so tests and callers that don't need custom limits can stay
 // terse.
+//
+// NewRouter discards the constructed *Handler. Production main.go uses
+// NewRouterWithHandler instead so it can seed Handler.SetIntegrityResult
+// with the startup integrity check outcome before any /healthz/data
+// scrape can observe the zero value; tests that only need the router
+// keep the shorter signature.
 func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Router {
+	r, _ := NewRouterWithHandler(queries, db, cfg)
+	return r
+}
+
+// NewRouterWithHandler is the full constructor used by production main.go.
+// It returns both the chi router and the Handler instance so that the
+// startup path can push the initial PRAGMA integrity_check result into
+// Handler.SetIntegrityResult before the HTTP server accepts its first
+// request. Without this seam the /healthz/data endpoint would briefly
+// report "never checked" even though main.go ran the check synchronously
+// a few statements earlier.
+func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Config) (chi.Router, *Handler) {
 	if cfg == nil {
 		d := config.Defaults()
 		cfg = &d
@@ -40,6 +58,28 @@ func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Ro
 	r.Get("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+
+	// Data-aware health endpoint (public). Exposes transaction counts,
+	// schema version, last-write timestamp, and the cached integrity
+	// result so monitoring scrapers on the Docker network can alert on
+	// DB-level degradation without needing an auth session. See the long
+	// comment on handleHealthzData for the sub-check ordering and why
+	// every field is safe to expose unauthenticated.
+	//
+	// OPERATIONAL NOTE — scrape interval: every request runs the
+	// synchronous PRAGMA quick_check plus three small SELECTs against
+	// the transactions table. At household scale (≤10k rows) the whole
+	// handler returns in single-digit milliseconds, and Prometheus/Kuma
+	// scraping once every 15-30s is cost-free. On larger databases the
+	// quick_check walks every page of the main DB file, which is still
+	// fast but no longer free: a scraper that hits this endpoint every
+	// second is both wasting I/O and reintroducing the "busy DB starves
+	// writes" failure mode that WAL mode was supposed to eliminate.
+	// Recommendation: keep scrape intervals at ≥10s. We do NOT rate
+	// limit the endpoint in code — household deployments are trusted
+	// by construction and an in-process cache would add complexity for
+	// no real-world payoff. Revisit if we ever ship a multi-tenant build.
+	r.Get("/healthz/data", h.handleHealthzData)
 
 	// Auth routes (public, except /me)
 	r.Route("/api/auth", func(r chi.Router) {
@@ -114,6 +154,22 @@ func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Ro
 			r.Delete("/{id}", h.handleDeleteUser)
 		})
 
+		// Trash view (admin only). Mounted as a chi.Group rather than a
+		// Route sub-tree because the trash endpoints live alongside the
+		// existing /transactions routes — using Route("/transactions", …)
+		// here would shadow the member-facing list/create handlers
+		// registered above. Group applies auth.RequireAdmin to all four
+		// endpoints without adding a path prefix, and chi's radix router
+		// distinguishes the literal segments (deleted, restore-batch)
+		// from the {id} sub-routes cleanly.
+		r.Group(func(r chi.Router) {
+			r.Use(auth.RequireAdmin)
+			r.Get("/transactions/deleted", h.handleListDeletedTransactions)
+			r.Post("/transactions/restore-batch", h.handleBatchRestoreTransactions)
+			r.Post("/transactions/{id}/restore", h.handleRestoreTransaction)
+			r.Delete("/transactions/{id}/purge", h.handlePurgeTransaction)
+		})
+
 		// Export
 		r.Get("/export/transactions", h.handleExportTransactions)
 		r.Get("/export/monthly/{year}/{month}", h.handleExportMonthly)
@@ -141,7 +197,7 @@ func NewRouter(queries *database.Queries, db *sql.DB, cfg *config.Config) chi.Ro
 		r.NotFound(SPAHandler(distPath))
 	}
 
-	return r
+	return r, h
 }
 
 // securityHeaders adds standard security headers to every response. HSTS is

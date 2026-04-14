@@ -93,6 +93,35 @@ func main() {
 	}
 	log.Println("Database migrations applied successfully")
 
+	// Full PRAGMA integrity_check runs synchronously at boot, immediately
+	// after migrations and before the HTTP server binds a port. Any
+	// non-"ok" result — or any query error — is fatal: a corrupt database
+	// under a live server compounds the damage with every subsequent
+	// write, so the correct operator response is "crash loudly, restore
+	// from backup, investigate." We capture the result (not just the
+	// pass/fail) so /healthz/data can surface the exact wording without
+	// re-running the multi-second scan on every scrape.
+	//
+	// The five-minute timeout is a safety net for pathological DBs that
+	// hang the pragma; at household scale a healthy check finishes in
+	// milliseconds. Tune only if real operators ever hit it — no
+	// configuration knob until then.
+	startupIntegrityCtx, startupIntegrityCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	startupIntegrityResult, err := database.RunIntegrityCheckAtStartup(startupIntegrityCtx, sqlDB)
+	startupIntegrityCancel()
+	if err != nil {
+		log.Fatalf("integrity check at startup: %v", err)
+	}
+	if startupIntegrityResult != database.IntegrityOK {
+		// Log the full multi-line pragma output rather than truncating —
+		// the operator's only clue to the nature of the corruption is
+		// the exact SQLite error list, and cutting it off here to fit
+		// one log line would leave the recovery guess-and-check.
+		log.Fatalf("integrity check at startup returned non-ok result:\n%s", startupIntegrityResult)
+	}
+	startupIntegrityAt := time.Now().UTC()
+	log.Println("Database integrity check passed")
+
 	queries := database.New(sqlDB)
 
 	// Clean expired sessions on startup
@@ -101,7 +130,19 @@ func main() {
 	}
 
 	// Clean expired sessions at the configured cadence, stopping on shutdown.
+	//
+	// The defer is a safety net: the graceful-shutdown path below calls
+	// cleanupCancel() explicitly before srv.Shutdown so the background
+	// goroutines stop before the DB handle closes, and this defer then
+	// runs as a no-op on a cancelled context. The value of the defer is
+	// that any future refactor which grows an error-returning exit path
+	// between here and the quit-channel block below (or a panic caught
+	// by a middleware-level recover) still releases the context's
+	// resources instead of leaking them. log.Fatalf paths bypass defers
+	// via os.Exit, so this is not a fix for fatal errors — it is the
+	// standard go vet-compliant idiom for context.WithCancel hygiene.
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
+	defer cleanupCancel()
 	go func() {
 		ticker := time.NewTicker(cfg.Session.CleanupInterval)
 		defer ticker.Stop()
@@ -133,7 +174,62 @@ func main() {
 	}
 	go scheduler.RunLoop(cleanupCtx)
 
-	router := api.NewRouter(queries, sqlDB, cfg)
+	router, h := api.NewRouterWithHandler(queries, sqlDB, cfg)
+
+	// Seed the health endpoint's cached integrity result with the startup
+	// check outcome so the first /healthz/data scrape immediately after
+	// boot sees the just-ran value rather than the zero "never checked"
+	// state. The timestamp was captured right after the synchronous
+	// pragma returned above.
+	h.SetIntegrityResult(startupIntegrityAt, startupIntegrityResult)
+
+	// Daily full PRAGMA integrity_check runs in the background alongside
+	// session cleanup. This is the long-running scan that cross-checks
+	// every index against its table — the per-request quick_check in
+	// /healthz/data catches torn page writes but silently misses index
+	// rot, so we schedule the expensive scan once per day to close that
+	// gap. Results land in the Handler's cached pair via SetIntegrityResult
+	// so the next /healthz/data scrape surfaces them.
+	//
+	// cleanupCtx is shared with the other background goroutines so
+	// graceful shutdown aborts an in-flight check. The per-tick context
+	// has a ten-minute timeout — at household scale the real scan is
+	// sub-second, but a corrupt DB listing 100 errors can take noticeably
+	// longer, and we do not want the ticker to leak goroutines on a
+	// pathologically slow DB.
+	//
+	// We deliberately do NOT call SetIntegrityResult if the query itself
+	// fails (e.g. context cancelled on shutdown): the cached value from
+	// the last successful run is more useful to the operator than a
+	// spurious "error: context deadline exceeded" string.
+	go func() {
+		const integrityInterval = 24 * time.Hour
+		const integrityPerRunTimeout = 10 * time.Minute
+		ticker := time.NewTicker(integrityInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				integrityCtx, integrityCancel := context.WithTimeout(cleanupCtx, integrityPerRunTimeout)
+				result, err := database.IntegrityCheck(integrityCtx, sqlDB)
+				integrityCancel()
+				if err != nil {
+					// Do not overwrite the cached result on error —
+					// an operator inspecting /healthz/data on a
+					// transient glitch is better served by the last
+					// good value than by a context-cancelled string.
+					log.Printf("daily integrity check error: %v", err)
+					continue
+				}
+				if result != database.IntegrityOK {
+					log.Printf("daily integrity check returned non-ok:\n%s", result)
+				}
+				h.SetIntegrityResult(time.Now().UTC(), result)
+			case <-cleanupCtx.Done():
+				return
+			}
+		}
+	}()
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{
