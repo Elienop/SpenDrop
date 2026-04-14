@@ -55,5 +55,11 @@ docs/templates/
 coverage/
 *.out
 
+# pgregory.net/rapid persists shrunk failure reproductions under
+# testdata/rapid/... on any failing rapid.Check. Those files are only
+# useful to whoever ran the failing test locally and should not land
+# in commits or PRs.
+internal/api/testdata/rapid/
+
 # Logs
 *.log
