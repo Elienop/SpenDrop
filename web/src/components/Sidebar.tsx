@@ -6,10 +6,12 @@ import {
   ChartNoAxesColumnIncreasing,
   Tag,
   Settings as SettingsIcon,
+  Trash2,
   ChevronLeft,
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { isAdmin } from '@/lib/roles';
 import { Logo } from '@/components/Logo';
 import { LogoWordmark } from '@/components/LogoWordmark';
 import {
@@ -25,19 +27,44 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
-const menuItems = [
+interface MenuItem {
+  path: string;
+  label: string;
+  icon: React.ElementType;
+  end?: boolean;
+  /** When true, the item is only rendered for admin users. */
+  adminOnly?: boolean;
+}
+
+const menuItems: MenuItem[] = [
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
   { path: '/categories', label: 'Categories', icon: Tag },
 ];
 
-const generalItems = [
+// Admin-only recovery surface. Kept in its own group below the main
+// menu so it sits visually adjacent to Settings — both are operator
+// tools — rather than mixing it into the day-to-day navigation and
+// cluttering the sidebar for members who never see it.
+const adminItems: MenuItem[] = [
+  { path: '/trash', label: 'Trash', icon: Trash2, adminOnly: true },
+];
+
+const generalItems: MenuItem[] = [
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 export function Sidebar() {
   const { user, logout } = useAuth();
+  const admin = isAdmin(user);
+  // Hide the admin section entirely for non-admins so a member never
+  // even has the link rendered in the DOM. The backend still enforces
+  // 403 on the underlying routes — this is purely UX cleanup. Every
+  // item in `adminItems` is currently admin-only, so the `adminOnly`
+  // flag on `MenuItem` is kept as a forward-compatible hook in case a
+  // future entry in this section should be visible to members.
+  const visibleAdminItems = admin ? adminItems : [];
   const [expanded, setExpanded] = useState(
     () => localStorage.getItem(STORAGE_KEYS.sidebar) === 'true',
   );
@@ -114,6 +141,20 @@ export function Sidebar() {
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
           </div>
+
+          {/*
+            Admin group — only rendered when there's at least one visible
+            admin item, so members (and any future role with no entries)
+            don't see a naked section title with nothing under it.
+          */}
+          {visibleAdminItems.length > 0 && (
+            <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
+              <SidebarSectionTitle expanded={expanded} title="Admin" />
+              {visibleAdminItems.map((item) => (
+                <SidebarLink key={item.path} item={item} expanded={expanded} />
+              ))}
+            </div>
+          )}
 
           {/* General group */}
           <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
@@ -201,12 +242,7 @@ function SidebarLink({
   item,
   expanded,
 }: {
-  item: {
-    path: string;
-    label: string;
-    icon: React.ElementType;
-    end?: boolean;
-  };
+  item: MenuItem;
   expanded: boolean;
 }) {
   const Icon = item.icon;

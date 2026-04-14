@@ -6,6 +6,7 @@ import { Transactions } from '../pages/Transactions';
 import { Categories } from '../pages/Categories';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
+import { Trash } from '../pages/Trash';
 import { Toaster } from '@/components/ui/sonner';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
@@ -41,6 +42,7 @@ export function AppShell() {
           <Route path="/reports" element={<Reports />} />
           <Route path="/transactions" element={<Transactions />} />
           <Route path="/categories" element={<Categories />} />
+          <Route path="/trash" element={<Trash />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

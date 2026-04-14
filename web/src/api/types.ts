@@ -26,6 +26,28 @@ export interface Transaction {
   updated_at: string;
 }
 
+/**
+ * A soft-deleted (tombstoned) transaction, as returned by the admin-only
+ * Trash view endpoints (`GET /api/transactions/deleted`,
+ * `POST /api/transactions/restore-batch`, etc.).
+ *
+ * Same shape as `Transaction` plus a guaranteed `deleted_at` — the
+ * backend's `deletedTransactionResponse` deliberately does NOT use
+ * `omitempty` on this field so the recovery surface always shows the
+ * exact moment each row was tombstoned, even for the zero-value case.
+ */
+export interface DeletedTransaction extends Transaction {
+  deleted_at: string;
+}
+
+/** Paginated response shape for the admin Trash view list endpoint. */
+export interface DeletedTransactionList {
+  transactions: DeletedTransaction[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
 export interface Category {
   id: number;
   name: string;

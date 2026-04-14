@@ -171,6 +171,109 @@ func (s *TransactionStore) DeleteTx(ctx context.Context, tx *sql.Tx, actorID int
 	return writeDeleteAudit(ctx, qtx, actorID, id, before, after)
 }
 
+// Restore reverses a prior soft-delete: it loads the tombstoned row,
+// calls RestoreTransaction to clear deleted_at, reloads the now-live
+// row, and writes a paired "restore" audit row — all inside one SQL
+// transaction. The two reads are issued against the same tx so the
+// after_json reflects exactly what the UPDATE wrote, even under
+// concurrent mutators.
+//
+// Race contract: if the row is not tombstoned when Restore is called
+// (racing admin, retry after a dropped response that already succeeded,
+// purge slipping in between the handler's TOCTOU check and the store
+// call), Restore returns sql.ErrNoRows. The handler maps that to a
+// 404, which matches the contract from the user's perspective: "the
+// id you asked to restore is not in the trash." A sentinel error is
+// correct here because a silent no-op would leave the client's trash
+// view stale and the user would keep seeing a row that is actually
+// live.
+func (s *TransactionStore) Restore(ctx context.Context, actorID int64, id int64) error {
+	return s.withTx(ctx, func(qtx *Queries) error {
+		before, err := qtx.GetTransactionByID(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load before: %w", err)
+		}
+		if !before.DeletedAt.Valid {
+			return sql.ErrNoRows
+		}
+		if err := qtx.RestoreTransaction(ctx, id); err != nil {
+			return fmt.Errorf("restore transaction: %w", err)
+		}
+		after, err := qtx.GetTransactionByID(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load after: %w", err)
+		}
+		return writeRestoreAudit(ctx, qtx, actorID, id, before, after)
+	})
+}
+
+// RestoreTx performs Restore inside a caller-owned *sql.Tx. Used by
+// the batch restore handler so that up to MaxBatchDeleteIDs restores
+// + N audit rows all share one commit. Same race contract as Restore:
+// a not-tombstoned row returns sql.ErrNoRows and the caller decides
+// whether to abort the whole batch or continue with the remaining IDs.
+func (s *TransactionStore) RestoreTx(ctx context.Context, tx *sql.Tx, actorID int64, id int64) error {
+	qtx := s.q.WithTx(tx)
+	before, err := qtx.GetTransactionByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load before: %w", err)
+	}
+	if !before.DeletedAt.Valid {
+		return sql.ErrNoRows
+	}
+	if err := qtx.RestoreTransaction(ctx, id); err != nil {
+		return fmt.Errorf("restore transaction: %w", err)
+	}
+	after, err := qtx.GetTransactionByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load after: %w", err)
+	}
+	return writeRestoreAudit(ctx, qtx, actorID, id, before, after)
+}
+
+// Purge hard-deletes a tombstoned row from the transactions table.
+// This is the only path in the codebase that physically removes a
+// transaction; every other delete flows through Delete / DeleteTx
+// which flips deleted_at.
+//
+// Purge does NOT write an audit row. The original soft-delete audit
+// row already captures who tombstoned the data and when, the row's
+// pre-tombstone state is preserved in that audit row's before_json,
+// and the audit table has no FK to transactions (see 009_transaction_audit.sql)
+// specifically so that the purge cannot orphan its own delete history.
+// From the auditability standpoint, a purge is the continuation of
+// the soft-delete that already lives in the log — a second audit row
+// would require extending the CHECK constraint to allow 'purge',
+// which needs a full table rewrite migration in SQLite. The plan
+// explicitly scopes that to a future phase; this one inherits the
+// existing four-action constraint.
+//
+// Race contract (identical to Restore): if the row is not tombstoned,
+// Purge returns sql.ErrNoRows so the handler can return 404. A
+// not-found row (no row with that id at all) also returns sql.ErrNoRows
+// via GetTransactionByID.
+//
+// We do the load-then-delete inside a single tx so a concurrent
+// restore racing with a purge cannot leave the transaction in a
+// half-state: the tx's snapshot of deleted_at is what PurgeTransaction's
+// `AND deleted_at IS NOT NULL` guard sees, and either the purge
+// succeeds (row is gone) or the whole tx rolls back.
+func (s *TransactionStore) Purge(ctx context.Context, id int64) error {
+	return s.withTx(ctx, func(qtx *Queries) error {
+		before, err := qtx.GetTransactionByID(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load before: %w", err)
+		}
+		if !before.DeletedAt.Valid {
+			return sql.ErrNoRows
+		}
+		if err := qtx.PurgeTransaction(ctx, id); err != nil {
+			return fmt.Errorf("purge transaction: %w", err)
+		}
+		return nil
+	})
+}
+
 // BulkAuditSummary describes a bulk mutation for the single summary audit
 // row written by RecordBulkTx. Count is the number of data rows affected;
 // Filter is a human-readable description of which rows (the LIKE pattern, a
@@ -292,6 +395,42 @@ func writeDeleteAudit(ctx context.Context, qtx *Queries, actorID int64, id int64
 	return qtx.InsertTransactionAudit(ctx, InsertTransactionAuditParams{
 		TransactionID: id,
 		Action:        AuditDelete,
+		ActorUserID:   actorNullInt64(actorID),
+		BeforeJson:    sql.NullString{String: string(beforeJSON), Valid: true},
+		AfterJson:     sql.NullString{String: string(afterJSON), Valid: true},
+	})
+}
+
+// writeRestoreAudit marshals the pre-restore (tombstoned) and post-restore
+// (live) rows and writes a single restore audit row. before_json is the
+// tombstoned row (deleted_at populated), after_json is the same row with
+// deleted_at cleared — forensic readers can diff the two to confirm the
+// only field that changed between the pre-restore snapshot and the live
+// row was deleted_at (plus the updated_at touch that RestoreTransaction
+// also bumps).
+//
+// Mirror of writeDeleteAudit: same paranoia guards, inverted — before
+// MUST be tombstoned and after MUST be live. A misrouted call would
+// otherwise produce an audit pair that silently misrepresents the
+// transition, so we fail loudly rather than write a misleading row.
+func writeRestoreAudit(ctx context.Context, qtx *Queries, actorID int64, id int64, before, after GetTransactionByIDRow) error {
+	if !before.DeletedAt.Valid {
+		return fmt.Errorf("writeRestoreAudit: before snapshot not tombstoned (id=%d) — caller passed the wrong row", id)
+	}
+	if after.DeletedAt.Valid {
+		return fmt.Errorf("writeRestoreAudit: after snapshot still tombstoned (id=%d) — restore did not run before the audit re-read", id)
+	}
+	beforeJSON, err := json.Marshal(before)
+	if err != nil {
+		return fmt.Errorf("marshal restore audit before: %w", err)
+	}
+	afterJSON, err := json.Marshal(after)
+	if err != nil {
+		return fmt.Errorf("marshal restore audit after: %w", err)
+	}
+	return qtx.InsertTransactionAudit(ctx, InsertTransactionAuditParams{
+		TransactionID: id,
+		Action:        AuditRestore,
 		ActorUserID:   actorNullInt64(actorID),
 		BeforeJson:    sql.NullString{String: string(beforeJSON), Valid: true},
 		AfterJson:     sql.NullString{String: string(afterJSON), Valid: true},
