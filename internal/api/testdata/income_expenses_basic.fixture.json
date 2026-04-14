@@ -1,0 +1,23 @@
+{
+  "clock": "2026-04-13T12:00:00Z",
+  "users": [
+    {"username": "alice", "role": "member"}
+  ],
+  "categories": [
+    {"name": "Salary",    "type": "income"},
+    {"name": "Groceries", "type": "expense"},
+    {"name": "Rent",      "type": "expense"}
+  ],
+  "transactions": [
+    {"user": "alice", "category": "Salary",    "date": "2026-02-10", "amount": 4500.00, "description": "Paycheck Feb"},
+    {"user": "alice", "category": "Groceries", "date": "2026-02-20", "amount":  120.50, "description": "Weekly shop"},
+    {"user": "alice", "category": "Rent",      "date": "2026-02-28", "amount": 1500.00, "description": "Rent Feb"},
+
+    {"user": "alice", "category": "Salary",    "date": "2026-03-10", "amount": 4500.00, "description": "Paycheck Mar"},
+    {"user": "alice", "category": "Groceries", "date": "2026-03-18", "amount":   95.75, "description": "Weekly shop"},
+    {"user": "alice", "category": "Rent",      "date": "2026-03-28", "amount": 1500.00, "description": "Rent Mar"},
+
+    {"user": "alice", "category": "Groceries", "date": "2026-04-05", "amount":  140.00, "description": "Weekly shop"},
+    {"user": "alice", "category": "Rent",      "date": "2026-04-10", "amount": 1500.00, "description": "Rent Apr"}
+  ]
+}

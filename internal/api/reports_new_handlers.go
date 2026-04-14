@@ -31,7 +31,7 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	year := time.Now().Year()
+	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
 		if err != nil || parsed < MinYear || parsed > MaxYear {
@@ -114,7 +114,7 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	year, month, err := parseYearMonth(r)
+	year, month, err := h.parseYearMonth(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -201,7 +201,7 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	year := time.Now().Year()
+	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
 		if err != nil || parsed < MinYear || parsed > MaxYear {
@@ -240,7 +240,7 @@ func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	year := time.Now().Year()
+	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
 		if err != nil || parsed < MinYear || parsed > MaxYear {
@@ -382,7 +382,7 @@ func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	year := time.Now().Year()
+	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
 		if err != nil || parsed < MinYear || parsed > MaxYear {

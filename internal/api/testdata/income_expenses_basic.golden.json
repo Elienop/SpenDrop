@@ -1,0 +1,25 @@
+{
+  "data": [
+    {
+      "expenses": 1620.5,
+      "income": 4500,
+      "month": 2,
+      "net": 2879.5,
+      "year": 2026
+    },
+    {
+      "expenses": 1595.75,
+      "income": 4500,
+      "month": 3,
+      "net": 2904.25,
+      "year": 2026
+    },
+    {
+      "expenses": 1640,
+      "income": 0,
+      "month": 4,
+      "net": -1640,
+      "year": 2026
+    }
+  ]
+}

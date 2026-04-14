@@ -42,9 +42,14 @@ type categoryEntry struct {
 	Total float64 `json:"total"`
 }
 
-// parseYearMonth extracts year and month from query params, defaulting to current date.
-func parseYearMonth(r *http.Request) (int, int, error) {
-	now := time.Now()
+// parseYearMonth extracts year and month from query params, defaulting to
+// the Handler's current clock instant. Phase 3.2 moved this from a
+// package-level function to a method on *Handler so every caller picks up
+// the injected clock automatically - the alternative (adding a `now
+// time.Time` parameter at every call site) touched four handlers and made
+// the test signature incompatible with the rest of the codebase.
+func (h *Handler) parseYearMonth(r *http.Request) (int, int, error) {
+	now := h.clock.Now()
 	year := now.Year()
 	month := int(now.Month())
 
@@ -83,7 +88,7 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	year, month, err := parseYearMonth(r)
+	year, month, err := h.parseYearMonth(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -223,7 +228,7 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// Use optional year/month to anchor the trend window, defaulting to now.
-	anchor := time.Now()
+	anchor := h.clock.Now()
 	if y := r.URL.Query().Get("year"); y != "" {
 		if m := r.URL.Query().Get("month"); m != "" {
 			py, errY := strconv.Atoi(y)
@@ -281,7 +286,7 @@ func (h *Handler) handleDashboardCategories(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	year, month, err := parseYearMonth(r)
+	year, month, err := h.parseYearMonth(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

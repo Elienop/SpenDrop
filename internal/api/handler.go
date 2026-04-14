@@ -14,6 +14,18 @@ type Handler struct {
 	db       *sql.DB
 	txnStore *database.TransactionStore
 
+	// clock is the time source every reports/dashboard handler reads for
+	// "current date" decisions (year-over-year default year, rolling
+	// trend windows, YTD end-of-month). Phase 3.2 introduces it so the
+	// report test suite can drive handlers from a frozen instant without
+	// touching the global wall clock.
+	//
+	// NewHandler initializes this to realClock{}; NewHandlerWithClock
+	// accepts a caller-supplied implementation for test setup. All
+	// non-test constructors must route through NewHandler so production
+	// code never has a chance to pick up a fixedClock accidentally.
+	clock Clock
+
 	// integrityMu guards lastIntegrityCheckAt / lastIntegrityCheckResult.
 	// The `/healthz/data` handler reads these under an RLock on every
 	// request (so monitoring scrapers at 1 QPS cannot stampede a single
@@ -42,11 +54,32 @@ type Handler struct {
 // audit logging without needing a signature change. Every mutating
 // transaction endpoint routes through txnStore so the audit row commits in
 // the same SQL transaction as the data row.
+//
+// Phase 3.2 added a clock dependency for the reports/dashboard surface.
+// NewHandler keeps the same `(queries, db)` signature and initializes the
+// clock to realClock{} internally, again so the 50+ pre-existing test call
+// sites compile unchanged and every production caller picks up real wall
+// time. Tests that need a frozen instant must go through NewHandlerWithClock.
 func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 	return &Handler{
 		queries:  queries,
 		db:       db,
 		txnStore: database.NewTransactionStore(db, queries),
+		clock:    realClock{},
+	}
+}
+
+// NewHandlerWithClock is the test-only constructor for Handlers that need a
+// fixed time source. Production code must call NewHandler instead so a
+// fixedClock cannot leak into a running server. Kept as a separate function
+// rather than a functional option so a misuse in production grep's easily
+// (`NewHandlerWithClock` outside a _test.go file is a bug).
+func NewHandlerWithClock(queries *database.Queries, db *sql.DB, clock Clock) *Handler {
+	return &Handler{
+		queries:  queries,
+		db:       db,
+		txnStore: database.NewTransactionStore(db, queries),
+		clock:    clock,
 	}
 }
 
