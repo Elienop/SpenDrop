@@ -91,6 +91,17 @@ ON CONFLICT(code) DO UPDATE SET
     updated_at = CURRENT_TIMESTAMP;
 
 -- Transactions
+--
+-- Every read query in this section (and every other transactions read in
+-- this file) MUST filter t.deleted_at IS NULL so soft-deleted rows stay
+-- hidden from the live app. The only exceptions are:
+--   * GetTransactionByID: mutation-only caller (TransactionStore.Update /
+--     Delete) needs to see the tombstone row to emit the audit before/after.
+--   * ListDeletedTransactions / CountDeletedTransactions: the trash view
+--     specifically wants tombstoned rows.
+--   * CountAllTransactions: the live/deleted split used by operator tools.
+-- When adding a new transactions read, place it in queries.sql (not raw
+-- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 
 -- name: CreateTransaction :one
 INSERT INTO transactions (user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes)
@@ -98,6 +109,11 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetTransactionByID :one
+-- Mutation-only caller: used by TransactionStore.Update/Delete to emit the
+-- audit before/after rows. Deliberately leaks tombstoned rows so Delete can
+-- load the live row before marking it deleted_at; the handlers that serve
+-- user-facing reads go through ListTransactions / sqlc aggregation queries
+-- which all filter deleted_at IS NULL.
 SELECT t.*, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
@@ -108,8 +124,46 @@ UPDATE transactions
 SET date = ?, amount = ?, original_amount = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
--- name: DeleteTransaction :exec
-DELETE FROM transactions WHERE id = ?;
+-- name: SoftDeleteTransaction :exec
+-- Tombstones a live row. The AND deleted_at IS NULL guard makes this
+-- idempotent: tombstoning an already-tombstoned row is a no-op and leaves
+-- the original deleted_at value intact so the audit trail stays stable.
+UPDATE transactions
+SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL;
+
+-- name: RestoreTransaction :exec
+-- Clears the tombstone on a previously soft-deleted row. The
+-- AND deleted_at IS NOT NULL guard prevents a restore from silently
+-- touching a live row (which would still be a legal UPDATE without the
+-- guard, but carries no semantic meaning).
+UPDATE transactions
+SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NOT NULL;
+
+-- name: PurgeTransaction :exec
+-- Hard delete, used only by the trash purge worker and by operator tools.
+-- The AND deleted_at IS NOT NULL guard makes it impossible to purge a
+-- live row via this query: the only code path that permanently removes a
+-- live row is a full-retention soft-delete-then-purge sequence.
+DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
+
+-- name: ListDeletedTransactions :many
+SELECT t.*, c.type AS category_type
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.deleted_at IS NOT NULL
+ORDER BY t.deleted_at DESC, t.id DESC
+LIMIT ? OFFSET ?;
+
+-- name: CountDeletedTransactions :one
+SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL;
+
+-- name: CountAllTransactions :one
+SELECT
+    CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,
+    CAST(COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS deleted
+FROM transactions;
 
 -- Budgets
 
@@ -160,6 +214,7 @@ SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
@@ -168,6 +223,7 @@ SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'income'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
@@ -176,6 +232,7 @@ SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT)
 GROUP BY c.id
@@ -189,7 +246,8 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
+WHERE t.deleted_at IS NULL
+    AND t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY year, month
 ORDER BY year, month;
 
@@ -222,7 +280,8 @@ SELECT
     CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
+WHERE t.deleted_at IS NULL
+    AND t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY c.id, year, month
 ORDER BY c.name, year, month;
 
@@ -235,6 +294,7 @@ SELECT
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY t.description
 ORDER BY total DESC
@@ -247,6 +307,7 @@ SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
 GROUP BY t.date
 ORDER BY t.date;
@@ -259,6 +320,7 @@ SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT)
 GROUP BY day
@@ -273,6 +335,7 @@ SELECT t.description,
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
 GROUP BY t.description
 HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
@@ -285,6 +348,7 @@ SELECT t.amount, t.tags
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND t.tags IS NOT NULL AND t.tags != ''
     AND t.date >= CAST(sqlc.arg(date_from) AS TEXT)
     AND t.date <= CAST(sqlc.arg(date_to) AS TEXT);
