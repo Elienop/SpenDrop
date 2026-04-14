@@ -459,15 +459,61 @@ func TestTransactions(t *testing.T) {
 		t.Errorf("expected amount 50.00, got %f", updated.Amount)
 	}
 
-	// Delete transaction
-	err = q.DeleteTransaction(ctx, txn.ID)
+	// Soft-delete transaction: row survives, deleted_at is set, and the
+	// mutation-only GetTransactionByID read (which deliberately leaks
+	// tombstoned rows) still returns the row so TransactionStore can emit
+	// the before/after audit pair.
+	err = q.SoftDeleteTransaction(ctx, txn.ID)
 	if err != nil {
-		t.Fatalf("DeleteTransaction: %v", err)
+		t.Fatalf("SoftDeleteTransaction: %v", err)
 	}
 
-	_, err = q.GetTransactionByID(ctx, txn.ID)
-	if err != sql.ErrNoRows {
-		t.Errorf("expected ErrNoRows after delete, got %v", err)
+	tombstoned, err := q.GetTransactionByID(ctx, txn.ID)
+	if err != nil {
+		t.Fatalf("GetTransactionByID after soft-delete: %v", err)
+	}
+	if !tombstoned.DeletedAt.Valid {
+		t.Errorf("expected deleted_at to be set after soft-delete, got NULL")
+	}
+	if tombstoned.Description != "Updated groceries" {
+		t.Errorf("expected payload to survive soft-delete, got description %q", tombstoned.Description)
+	}
+
+	// SoftDelete is idempotent: second call is a no-op because of the
+	// AND deleted_at IS NULL guard.
+	firstDeletedAt := tombstoned.DeletedAt.Time
+	if err := q.SoftDeleteTransaction(ctx, txn.ID); err != nil {
+		t.Fatalf("second SoftDeleteTransaction: %v", err)
+	}
+	reread, err := q.GetTransactionByID(ctx, txn.ID)
+	if err != nil {
+		t.Fatalf("GetTransactionByID after idempotent soft-delete: %v", err)
+	}
+	if !reread.DeletedAt.Time.Equal(firstDeletedAt) {
+		t.Errorf("expected deleted_at unchanged by second SoftDelete, got %v → %v", firstDeletedAt, reread.DeletedAt.Time)
+	}
+
+	// Restore clears the tombstone.
+	if err := q.RestoreTransaction(ctx, txn.ID); err != nil {
+		t.Fatalf("RestoreTransaction: %v", err)
+	}
+	restored, err := q.GetTransactionByID(ctx, txn.ID)
+	if err != nil {
+		t.Fatalf("GetTransactionByID after restore: %v", err)
+	}
+	if restored.DeletedAt.Valid {
+		t.Errorf("expected deleted_at cleared after restore, got %v", restored.DeletedAt.Time)
+	}
+
+	// Purge only works on tombstoned rows — re-tombstone then purge.
+	if err := q.SoftDeleteTransaction(ctx, txn.ID); err != nil {
+		t.Fatalf("SoftDeleteTransaction before purge: %v", err)
+	}
+	if err := q.PurgeTransaction(ctx, txn.ID); err != nil {
+		t.Fatalf("PurgeTransaction: %v", err)
+	}
+	if _, err := q.GetTransactionByID(ctx, txn.ID); err != sql.ErrNoRows {
+		t.Errorf("expected ErrNoRows after purge, got %v", err)
 	}
 }
 

@@ -345,3 +345,138 @@ func TestHandleTagBreakdown_YTD(t *testing.T) {
 		t.Errorf("expected YTD total 300, got %v", tag["total"])
 	}
 }
+
+// --- Phase 2.1 soft-delete invariant: tag/heatmap/recurring/budget read paths must hide tombstoned rows ---
+
+func TestHandleTagBreakdown_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	// Two live "groceries" rows (100 + 80 = 180) plus a tombstoned row with
+	// the same tag and amount 999. If the filter is dropped, the tag total
+	// becomes 1179 or the tag count goes from 2 to 3.
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-10", 100, "Store A", "groceries")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-20", 80, "Store B", "groceries")
+	tombstoned := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-03-15", 999, "Ghost", "groceries")
+	if err := q.SoftDeleteTransaction(context.Background(), tombstoned.ID); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/tag-breakdown?year=2026&month=3", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleTagBreakdown(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 tag (groceries), got %d", len(data))
+	}
+	tag := data[0].(map[string]any)
+	if tag["tag"] != "groceries" {
+		t.Errorf("tag=%v, want groceries", tag["tag"])
+	}
+	if got := tag["total"].(float64); got != 180.0 {
+		t.Errorf("groceries total=%v, want 180 (tombstoned 999 must be excluded)", got)
+	}
+	if got := tag["count"].(float64); got != 2 {
+		t.Errorf("groceries count=%v, want 2 (tombstoned row must be excluded)", got)
+	}
+}
+
+func TestHandleSpendingHeatmap_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 50, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 999, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/spending-heatmap?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleSpendingHeatmap(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 day with spending, got %d", len(data))
+	}
+	day := data[0].(map[string]any)
+	if got := day["total"].(float64); got != 50 {
+		t.Errorf("day total=%v, want 50 (tombstoned 999 must be excluded)", got)
+	}
+}
+
+func TestHandleBudgetVsActual_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
+		Year: 2026, Month: 1, Amount: 3000,
+	})
+	cat := seedTestCategory(t, q, "TestFood", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-15", 1200, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-01-16", 999, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/budget-vs-actual?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBudgetVsActual(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	jan := data[0].(map[string]any)
+	if got := jan["actual"].(float64); got != 1200 {
+		t.Errorf("Jan actual=%v, want 1200 (tombstoned 999 must be excluded)", got)
+	}
+}
+
+func TestHandleRecurring_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Subscriptions", "expense")
+
+	// Netflix appears in only 2 months live (3rd month is tombstoned).
+	// The recurring detector needs at least 3 months — so if the filter is
+	// dropped, Netflix will qualify. If the filter holds, Netflix will not.
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-15", 15, "Netflix")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-02-15", 15, "Netflix")
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-03-15", 15, "Netflix")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/recurring?year=2026", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleRecurring(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 0 {
+		t.Errorf("expected 0 recurring entries (Netflix had only 2 live months), got %d", len(data))
+	}
+}

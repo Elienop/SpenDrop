@@ -144,6 +144,21 @@ func seedTestTransactionWithTags(t *testing.T, q *database.Queries, userID, cate
 	return txn
 }
 
+// seedTombstonedTestTransaction creates a transaction and immediately soft-
+// deletes it. Used by the soft-delete read-path tests: each aggregator /
+// reporter / exporter / suggestion query must skip a row that exists in the
+// DB with deleted_at set. Seeding a tombstone straight from tests avoids
+// tying the tests to the handler-path delete behaviour they're trying to
+// verify independently.
+func seedTombstonedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amount float64, desc string) database.Transaction {
+	t.Helper()
+	txn := seedTestTransaction(t, q, userID, categoryID, date, amount, desc)
+	if err := q.SoftDeleteTransaction(context.Background(), txn.ID); err != nil {
+		t.Fatalf("soft-delete seeded transaction: %v", err)
+	}
+	return txn
+}
+
 // --- handleCreateTransaction ---
 
 func TestHandleCreateTransaction_ValidInput_Returns201(t *testing.T) {
@@ -480,10 +495,22 @@ func TestHandleDeleteTransaction_OwnerCanDelete(t *testing.T) {
 		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 
-	// Verify it's actually deleted
-	_, err := q.GetTransactionByID(context.Background(), txn.ID)
-	if err != sql.ErrNoRows {
-		t.Errorf("expected transaction to be deleted, got err: %v", err)
+	// Post-soft-delete: the physical row survives with deleted_at set.
+	// GetTransactionByID deliberately leaks tombstoned rows (mutation-only
+	// caller), so the row is still visible here; user-facing list queries
+	// filter it out via AND t.deleted_at IS NULL.
+	tombstoned, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("GetTransactionByID after soft-delete: %v", err)
+	}
+	if !tombstoned.DeletedAt.Valid {
+		t.Errorf("expected deleted_at to be set, got NULL")
+	}
+	if got := countAllTransactions(t, db); got != 1 {
+		t.Errorf("expected row to survive soft-delete (1 physical row), got %d", got)
+	}
+	if got := countTransactions(t, db); got != 0 {
+		t.Errorf("expected 0 live rows after soft-delete, got %d", got)
 	}
 }
 
@@ -1746,10 +1773,23 @@ func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
 	user := seedTestUser(t, q, "alice", "member")
 
 	txn := seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown")
-	origUpdatedAt := txn.UpdatedAt
 
-	// SQLite CURRENT_TIMESTAMP has second-level precision
-	time.Sleep(1100 * time.Millisecond)
+	// SQLite CURRENT_TIMESTAMP has only second-level precision, so a
+	// time.Sleep race against the handler's subsequent CURRENT_TIMESTAMP
+	// update is fragile (both operations can land inside the same wall-clock
+	// second under scheduler jitter). Backdate the seeded row 10 seconds into
+	// the past instead — the handler's CURRENT_TIMESTAMP is then guaranteed
+	// strictly greater, with no dependency on sleep timing.
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE transactions SET updated_at = datetime('now', '-10 seconds') WHERE id = ?",
+		txn.ID); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	reread, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("reread transaction: %v", err)
+	}
+	origUpdatedAt := reread.UpdatedAt
 
 	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
@@ -1776,11 +1816,38 @@ func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
 
 // countTransactions returns the total row count in the transactions table,
 // used by delete-by-filter tests to verify atomic bulk deletes.
+// countTransactions counts LIVE transactions only. The handlers that write
+// to the database now soft-delete rather than hard-delete, so tests that
+// want to assert "N rows are gone from the user's perspective" must filter
+// tombstoned rows out. For asserting on the raw physical row count
+// (including tombstones), use countAllTransactions below.
 func countTransactions(t *testing.T, db *sql.DB) int {
 	t.Helper()
 	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&n); err != nil {
+	if err := db.QueryRow("SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL").Scan(&n); err != nil {
 		t.Fatalf("count transactions: %v", err)
+	}
+	return n
+}
+
+// countAllTransactions counts every physical row including tombstones.
+// Use this to assert that a soft-delete did NOT purge the row.
+func countAllTransactions(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM transactions").Scan(&n); err != nil {
+		t.Fatalf("count all transactions: %v", err)
+	}
+	return n
+}
+
+// countTombstonedTransactions counts only soft-deleted rows. Used by tests
+// that assert a delete flipped deleted_at without hard-deleting.
+func countTombstonedTransactions(t *testing.T, db *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL").Scan(&n); err != nil {
+		t.Fatalf("count tombstoned transactions: %v", err)
 	}
 	return n
 }
@@ -2074,5 +2141,169 @@ func TestHandleDeleteTransactionsByFilter_IgnoresCraftedUserIDParam(t *testing.T
 	// Bob's two rows must survive.
 	if n := countTransactions(t, db); n != 2 {
 		t.Errorf("expected 2 rows (both bob's) remaining, got %d", n)
+	}
+}
+
+// --- Phase 2.1 soft-delete read-path invariant tests ---
+//
+// Every user-facing read must hide tombstoned rows. These tests pin the
+// invariant in one place per read path, so a future change that drops
+// AND t.deleted_at IS NULL from a query fails loudly instead of leaking
+// trashed rows into production dashboards / reports / exports.
+
+func TestHandleListTransactions_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "live 1")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "tombstoned")
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "live 2")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Transactions []map[string]any `json:"transactions"`
+		Total        int              `json:"total"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if resp.Total != 2 {
+		t.Errorf("total=%d, want 2 (tombstone excluded)", resp.Total)
+	}
+	if len(resp.Transactions) != 2 {
+		t.Errorf("len(transactions)=%d, want 2", len(resp.Transactions))
+	}
+	for _, tx := range resp.Transactions {
+		if tx["description"] == "tombstoned" {
+			t.Errorf("list returned tombstoned row: %v", tx)
+		}
+	}
+}
+
+func TestHandleTransactionSuggestions_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransactionWithTags(t, q, user.ID, 1, "2026-04-01", 10.0, "live desc", "livetag")
+	tombstoned := seedTestTransactionWithTags(t, q, user.ID, 1, "2026-04-02", 20.0, "deleted desc", "deadtag")
+	if err := q.SoftDeleteTransaction(context.Background(), tombstoned.ID); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/suggestions", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleTransactionSuggestions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Descriptions []string `json:"descriptions"`
+		Tags         []string `json:"tags"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	for _, d := range resp.Descriptions {
+		if d == "deleted desc" {
+			t.Errorf("suggestions include tombstoned description: %q", d)
+		}
+	}
+	for _, tag := range resp.Tags {
+		if tag == "deadtag" {
+			t.Errorf("suggestions include tombstoned tag: %q", tag)
+		}
+	}
+	// Sanity: the live row's tag/description must still appear.
+	foundDesc := false
+	for _, d := range resp.Descriptions {
+		if d == "live desc" {
+			foundDesc = true
+		}
+	}
+	if !foundDesc {
+		t.Errorf("live description missing from suggestions: %v", resp.Descriptions)
+	}
+}
+
+func TestHandleBulkRename_SkipsTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "mr brown tombstoned")
+
+	body := strings.NewReader(`{"search":"mr brown","new_description":"MR BROWN"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBulkRename(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (tombstoned excluded)", resp.Updated)
+	}
+
+	// Verify the tombstoned row's description is unchanged (still the
+	// original, not MR BROWN).
+	var tombDesc string
+	if err := db.QueryRow(
+		`SELECT description FROM transactions WHERE deleted_at IS NOT NULL`,
+	).Scan(&tombDesc); err != nil {
+		t.Fatalf("load tombstoned desc: %v", err)
+	}
+	if tombDesc != "mr brown tombstoned" {
+		t.Errorf("tombstoned description got rewritten to %q — bulk-rename leaked into trash", tombDesc)
+	}
+}
+
+func TestHandleDeleteTransaction_AlreadyTombstoned_Returns404(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	txn := seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "gone")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/transactions/"+fmt.Sprintf("%d", txn.ID), nil)
+	req = withUserAndURLParam(req, user, "id", fmt.Sprintf("%d", txn.ID))
+	rec := httptest.NewRecorder()
+	h.handleDeleteTransaction(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for already-tombstoned row, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleUpdateTransaction_AlreadyTombstoned_Returns404(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	txn := seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "gone")
+
+	body := strings.NewReader(`{"date":"2026-04-01","amount":99,"description":"x","category_id":1}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/transactions/"+fmt.Sprintf("%d", txn.ID), body)
+	req = withUserAndURLParam(req, user, "id", fmt.Sprintf("%d", txn.ID))
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransaction(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for already-tombstoned row, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }

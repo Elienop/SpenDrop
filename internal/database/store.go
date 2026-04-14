@@ -11,9 +11,14 @@ import (
 // match the CHECK constraint in migrations/009_transaction_audit.sql. Adding
 // a new action requires editing both places in lockstep.
 //
-// AuditRestore is reserved for Tier 2 soft-delete + restore and is not
-// emitted by any current code path; the TransactionStore will grow a
-// Restore method once the soft-delete migration ships.
+// AuditRestore is reserved for the trash/restore UI that follows the
+// Phase 2.1 soft-delete migration. Phase 2.1 ships the soft-delete
+// semantics on Delete / DeleteTx (this file) and the five new trash
+// queries in queries.sql (ListDeleted, CountDeleted, Restore, Purge,
+// CountAll), but does NOT yet add a TransactionStore.Restore method or
+// a HTTP handler that would emit this action. Once the restore endpoint
+// lands, the new code path will call qtx.RestoreTransaction and emit a
+// row with this action.
 const (
 	AuditInsert  = "insert"
 	AuditUpdate  = "update"
@@ -109,36 +114,61 @@ func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTr
 	})
 }
 
-// Delete captures the before row, runs the DELETE, and writes an audit row
-// carrying the tombstoned content in before_json. Pre-Tier-2 this is a hard
-// delete and after_json is NULL; once Tier 2 ships soft-delete this method
-// will also load the tombstoned after row via a follow-up phase.
+// Delete soft-deletes a transaction: it loads the live row, flips
+// deleted_at via SoftDeleteTransaction, reloads the now-tombstoned row, and
+// writes a single audit row carrying both pre-tombstone and post-tombstone
+// state. The two reads are issued against the same tx so the after_json
+// reflects exactly what the UPDATE wrote, even under concurrent mutators.
+//
+// Idempotency: if the row is already tombstoned when Delete is called
+// (racing caller, retry after a dropped response), Delete returns nil
+// without writing another audit row. The tombstone was already recorded
+// by whichever call actually flipped deleted_at. Emitting a second
+// "delete" audit row for an already-tombstoned row would be noise that
+// makes forensic reads harder, not easier. Not-found rows still error
+// out via GetTransactionByID's sql.ErrNoRows return — idempotency is
+// scoped to tombstone races, not missing IDs.
 func (s *TransactionStore) Delete(ctx context.Context, actorID int64, id int64) error {
 	return s.withTx(ctx, func(qtx *Queries) error {
 		before, err := qtx.GetTransactionByID(ctx, id)
 		if err != nil {
 			return fmt.Errorf("load before: %w", err)
 		}
-		if err := qtx.DeleteTransaction(ctx, id); err != nil {
-			return fmt.Errorf("delete transaction: %w", err)
+		if before.DeletedAt.Valid {
+			return nil
 		}
-		return writeDeleteAudit(ctx, qtx, actorID, id, before)
+		if err := qtx.SoftDeleteTransaction(ctx, id); err != nil {
+			return fmt.Errorf("soft-delete transaction: %w", err)
+		}
+		after, err := qtx.GetTransactionByID(ctx, id)
+		if err != nil {
+			return fmt.Errorf("load after: %w", err)
+		}
+		return writeDeleteAudit(ctx, qtx, actorID, id, before, after)
 	})
 }
 
 // DeleteTx performs Delete inside a caller-owned *sql.Tx. Used by the batch
 // delete handler so that up to MaxBatchDeleteIDs deletes + N audit rows all
-// share one commit.
+// share one commit. Same idempotency contract as Delete: already-tombstoned
+// rows are a silent no-op inside the caller's tx.
 func (s *TransactionStore) DeleteTx(ctx context.Context, tx *sql.Tx, actorID int64, id int64) error {
 	qtx := s.q.WithTx(tx)
 	before, err := qtx.GetTransactionByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("load before: %w", err)
 	}
-	if err := qtx.DeleteTransaction(ctx, id); err != nil {
-		return fmt.Errorf("delete transaction: %w", err)
+	if before.DeletedAt.Valid {
+		return nil
 	}
-	return writeDeleteAudit(ctx, qtx, actorID, id, before)
+	if err := qtx.SoftDeleteTransaction(ctx, id); err != nil {
+		return fmt.Errorf("soft-delete transaction: %w", err)
+	}
+	after, err := qtx.GetTransactionByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load after: %w", err)
+	}
+	return writeDeleteAudit(ctx, qtx, actorID, id, before, after)
 }
 
 // BulkAuditSummary describes a bulk mutation for the single summary audit
@@ -232,20 +262,39 @@ func writeUpdateAudit(ctx context.Context, qtx *Queries, actorID int64, id int64
 	})
 }
 
-// writeDeleteAudit marshals the row being deleted as before_json and writes
-// a single delete audit row. after_json is NULL pre-Tier-2 (hard delete);
-// post-Tier-2 it will carry the tombstoned row once soft-delete lands.
-func writeDeleteAudit(ctx context.Context, qtx *Queries, actorID int64, id int64, before GetTransactionByIDRow) error {
+// writeDeleteAudit marshals the pre-tombstone and post-tombstone rows and
+// writes a single delete audit row. before_json is the live row (deleted_at
+// NULL), after_json is the same row with deleted_at populated — forensic
+// readers can diff the two to confirm the only field that changed between
+// the pre-delete snapshot and the tombstone was deleted_at (plus the
+// updated_at touch that the soft-delete query also bumps).
+func writeDeleteAudit(ctx context.Context, qtx *Queries, actorID int64, id int64, before, after GetTransactionByIDRow) error {
+	// Guard against caller bugs: a delete audit must always describe the
+	// transition live -> tombstoned. If before is already tombstoned, the
+	// caller passed the wrong row; if after is still live, the soft-delete
+	// SQL never ran (or ran against a different row). Either case would
+	// produce an audit pair that silently misrepresents what happened, so
+	// we fail loudly rather than write a misleading row.
+	if before.DeletedAt.Valid {
+		return fmt.Errorf("writeDeleteAudit: before snapshot already tombstoned (id=%d) — caller passed the wrong row", id)
+	}
+	if !after.DeletedAt.Valid {
+		return fmt.Errorf("writeDeleteAudit: after snapshot still live (id=%d) — soft-delete did not run before the audit re-read", id)
+	}
 	beforeJSON, err := json.Marshal(before)
 	if err != nil {
 		return fmt.Errorf("marshal delete audit before: %w", err)
+	}
+	afterJSON, err := json.Marshal(after)
+	if err != nil {
+		return fmt.Errorf("marshal delete audit after: %w", err)
 	}
 	return qtx.InsertTransactionAudit(ctx, InsertTransactionAuditParams{
 		TransactionID: id,
 		Action:        AuditDelete,
 		ActorUserID:   actorNullInt64(actorID),
 		BeforeJson:    sql.NullString{String: string(beforeJSON), Valid: true},
-		AfterJson:     sql.NullString{},
+		AfterJson:     sql.NullString{String: string(afterJSON), Valid: true},
 	})
 }
 

@@ -99,6 +99,25 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
+// appendLiveTransactionsFilter tacks the soft-delete predicate onto a WHERE
+// clause built by buildTransactionWhereClause. The helper is shared between
+// list, export, and delete-by-filter handlers, and the helper itself is
+// shared with a future trash view that does NOT want the live-only filter.
+// Rather than baking deleted_at into buildTransactionWhereClause, every live
+// read routes its output through this helper so the live-vs-trash split
+// stays explicit at the call site.
+//
+// If the input clause is empty (no user filters), we emit a fresh WHERE.
+// Otherwise we extend the existing WHERE with an AND. The helper assumes
+// the input clause came from buildTransactionWhereClause and therefore
+// either starts with " WHERE " or is empty.
+func appendLiveTransactionsFilter(whereClause string) string {
+	if whereClause == "" {
+		return " WHERE t.deleted_at IS NULL"
+	}
+	return whereClause + " AND t.deleted_at IS NULL"
+}
+
 // handleExportTransactions exports filtered transactions as an Excel (.xlsx)
 // file. It accepts the same query parameters as handleListTransactions.
 func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Request) {
@@ -110,11 +129,12 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	// Transactions are visible to all authenticated household members (by design).
 
 	whereClause, args := buildTransactionWhereClause(r.URL.Query())
+	liveClause := appendLiveTransactionsFilter(whereClause)
 
 	query := `SELECT t.date, t.description, c.name AS category_name, c.type AS category_type,
 		t.amount, t.original_amount, t.original_currency, t.tags, t.notes
 		FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + whereClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
+		JOIN categories c ON t.category_id = c.id` + liveClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
 	args = append(args, MaxExportRows)
 
 	rows, err := h.db.QueryContext(r.Context(), query, args...)
@@ -229,9 +249,18 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		f.SetCellValue(summarySheet, cellAt(i+1, 1), h)
 	}
 
+	// Soft-delete filter placement is defensive: `t.deleted_at IS NULL` lives
+	// in the LEFT JOIN ON clause so the JOIN shape is preserved. The HAVING
+	// clause below still hides zero-total rows from the final output, so in
+	// steady state the ON vs WHERE distinction is not observable — but if the
+	// HAVING were ever relaxed (e.g. to show empty categories in the export),
+	// a WHERE-placed filter would silently collapse the LEFT JOIN to inner-
+	// join semantics and drop any category whose only rows were tombstoned.
+	// Keeping the predicate in ON means that change stays a one-line tweak
+	// instead of a silent correctness regression.
 	summaryQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount), 0) AS total
 		FROM categories c
-		LEFT JOIN transactions t ON t.category_id = c.id AND t.date >= ? AND t.date <= ?
+		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		GROUP BY c.id
 		HAVING total > 0
 		ORDER BY c.type, total DESC`
@@ -275,7 +304,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		t.original_amount, t.original_currency, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
-		WHERE t.date >= ? AND t.date <= ?
+		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		ORDER BY t.date DESC, t.id DESC LIMIT ?`
 
 	txnRows, err := h.db.QueryContext(ctx, txnQuery, dateFrom, dateTo, MaxExportRows)
@@ -373,7 +402,7 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS income
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
-		WHERE t.date >= ? AND t.date <= ?
+		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		GROUP BY month_num
 		ORDER BY month_num`
 
@@ -426,9 +455,18 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		f.SetCellValue(catSheet, cellAt(i+1, 1), h)
 	}
 
+	// Soft-delete filter placement is defensive: `t.deleted_at IS NULL` lives
+	// in the LEFT JOIN ON clause so the JOIN shape is preserved. The HAVING
+	// clause below still hides zero-total rows from the final output, so in
+	// steady state the ON vs WHERE distinction is not observable — but if the
+	// HAVING were ever relaxed (e.g. to show empty categories in the export),
+	// a WHERE-placed filter would silently collapse the LEFT JOIN to inner-
+	// join semantics and drop any category whose only rows were tombstoned.
+	// Keeping the predicate in ON means that change stays a one-line tweak
+	// instead of a silent correctness regression.
 	catQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount), 0) AS total
 		FROM categories c
-		LEFT JOIN transactions t ON t.category_id = c.id AND t.date >= ? AND t.date <= ?
+		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
 		GROUP BY c.id
 		HAVING total > 0
 		ORDER BY c.type, total DESC`

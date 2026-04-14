@@ -11,6 +11,36 @@ import (
 	"time"
 )
 
+const countAllTransactions = `-- name: CountAllTransactions :one
+SELECT
+    CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,
+    CAST(COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS deleted
+FROM transactions
+`
+
+type CountAllTransactionsRow struct {
+	Live    int64 `json:"live"`
+	Deleted int64 `json:"deleted"`
+}
+
+func (q *Queries) CountAllTransactions(ctx context.Context) (CountAllTransactionsRow, error) {
+	row := q.db.QueryRowContext(ctx, countAllTransactions)
+	var i CountAllTransactionsRow
+	err := row.Scan(&i.Live, &i.Deleted)
+	return i, err
+}
+
+const countDeletedTransactions = `-- name: CountDeletedTransactions :one
+SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL
+`
+
+func (q *Queries) CountDeletedTransactions(ctx context.Context) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countDeletedTransactions)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const createCategory = `-- name: CreateCategory :one
 
 INSERT INTO categories (name, type, sort_order)
@@ -90,7 +120,7 @@ const createTransaction = `-- name: CreateTransaction :one
 
 INSERT INTO transactions (user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at
+RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at
 `
 
 type CreateTransactionParams struct {
@@ -106,6 +136,18 @@ type CreateTransactionParams struct {
 }
 
 // Transactions
+//
+// Every read query in this section (and every other transactions read in
+// this file) MUST filter t.deleted_at IS NULL so soft-deleted rows stay
+// hidden from the live app. The only exceptions are:
+//   - GetTransactionByID: mutation-only caller (TransactionStore.Update /
+//     Delete) needs to see the tombstone row to emit the audit before/after.
+//   - ListDeletedTransactions / CountDeletedTransactions: the trash view
+//     specifically wants tombstoned rows.
+//   - CountAllTransactions: the live/deleted split used by operator tools.
+//
+// When adding a new transactions read, place it in queries.sql (not raw
+// SQL in a handler) and add AND t.deleted_at IS NULL by default.
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
@@ -132,6 +174,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
 	)
 	return i, err
 }
@@ -216,15 +259,6 @@ DELETE FROM sessions WHERE user_id = ?
 
 func (q *Queries) DeleteSessionsByUserID(ctx context.Context, userID int64) error {
 	_, err := q.db.ExecContext(ctx, deleteSessionsByUserID, userID)
-	return err
-}
-
-const deleteTransaction = `-- name: DeleteTransaction :exec
-DELETE FROM transactions WHERE id = ?
-`
-
-func (q *Queries) DeleteTransaction(ctx context.Context, id int64) error {
-	_, err := q.db.ExecContext(ctx, deleteTransaction, id)
 	return err
 }
 
@@ -347,7 +381,7 @@ func (q *Queries) GetSetting(ctx context.Context, key string) (AppSetting, error
 }
 
 const getTransactionByID = `-- name: GetTransactionByID :one
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?
@@ -366,9 +400,15 @@ type GetTransactionByIDRow struct {
 	Notes            sql.NullString  `json:"notes"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`
+	DeletedAt        sql.NullTime    `json:"deleted_at"`
 	CategoryType     string          `json:"category_type"`
 }
 
+// Mutation-only caller: used by TransactionStore.Update/Delete to emit the
+// audit before/after rows. Deliberately leaks tombstoned rows so Delete can
+// load the live row before marking it deleted_at; the handlers that serve
+// user-facing reads go through ListTransactions / sqlc aggregation queries
+// which all filter deleted_at IS NULL.
 func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransactionByIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getTransactionByID, id)
 	var i GetTransactionByIDRow
@@ -385,6 +425,7 @@ func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransact
 		&i.Notes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.DeletedAt,
 		&i.CategoryType,
 	)
 	return i, err
@@ -593,6 +634,75 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 	return items, nil
 }
 
+const listDeletedTransactions = `-- name: ListDeletedTransactions :many
+SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.type AS category_type
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.deleted_at IS NOT NULL
+ORDER BY t.deleted_at DESC, t.id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListDeletedTransactionsParams struct {
+	Limit  int64 `json:"limit"`
+	Offset int64 `json:"offset"`
+}
+
+type ListDeletedTransactionsRow struct {
+	ID               int64           `json:"id"`
+	UserID           int64           `json:"user_id"`
+	Date             time.Time       `json:"date"`
+	Amount           float64         `json:"amount"`
+	OriginalAmount   sql.NullFloat64 `json:"original_amount"`
+	OriginalCurrency sql.NullString  `json:"original_currency"`
+	Description      string          `json:"description"`
+	CategoryID       int64           `json:"category_id"`
+	Tags             sql.NullString  `json:"tags"`
+	Notes            sql.NullString  `json:"notes"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+	DeletedAt        sql.NullTime    `json:"deleted_at"`
+	CategoryType     string          `json:"category_type"`
+}
+
+func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTransactionsParams) ([]ListDeletedTransactionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDeletedTransactions, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDeletedTransactionsRow{}
+	for rows.Next() {
+		var i ListDeletedTransactionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Date,
+			&i.Amount,
+			&i.OriginalAmount,
+			&i.OriginalCurrency,
+			&i.Description,
+			&i.CategoryID,
+			&i.Tags,
+			&i.Notes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.CategoryType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listRecentTransactionAudit = `-- name: ListRecentTransactionAudit :many
 SELECT id, transaction_id, "action", actor_user_id, occurred_at, before_json, after_json FROM transaction_audit
 WHERE occurred_at >= CAST(?1 AS TEXT)
@@ -780,6 +890,19 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return items, nil
 }
 
+const purgeTransaction = `-- name: PurgeTransaction :exec
+DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL
+`
+
+// Hard delete, used only by the trash purge worker and by operator tools.
+// The AND deleted_at IS NOT NULL guard makes it impossible to purge a
+// live row via this query: the only code path that permanently removes a
+// live row is a full-retention soft-delete-then-purge sequence.
+func (q *Queries) PurgeTransaction(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, purgeTransaction, id)
+	return err
+}
+
 const recurringDescriptions = `-- name: RecurringDescriptions :many
 
 SELECT t.description,
@@ -788,6 +911,7 @@ SELECT t.description,
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
 GROUP BY t.description
 HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
@@ -824,11 +948,41 @@ func (q *Queries) RecurringDescriptions(ctx context.Context, year string) ([]Rec
 	return items, nil
 }
 
+const restoreTransaction = `-- name: RestoreTransaction :exec
+UPDATE transactions
+SET deleted_at = NULL, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NOT NULL
+`
+
+// Clears the tombstone on a previously soft-deleted row. The
+// AND deleted_at IS NOT NULL guard prevents a restore from silently
+// touching a live row (which would still be a legal UPDATE without the
+// guard, but carries no semantic meaning).
+func (q *Queries) RestoreTransaction(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, restoreTransaction, id)
+	return err
+}
+
+const softDeleteTransaction = `-- name: SoftDeleteTransaction :exec
+UPDATE transactions
+SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND deleted_at IS NULL
+`
+
+// Tombstones a live row. The AND deleted_at IS NULL guard makes this
+// idempotent: tombstoning an already-tombstoned row is a no-op and leaves
+// the original deleted_at value intact so the audit trail stays stable.
+func (q *Queries) SoftDeleteTransaction(ctx context.Context, id int64) error {
+	_, err := q.db.ExecContext(ctx, softDeleteTransaction, id)
+	return err
+}
+
 const sumByCategoryForMonth = `-- name: SumByCategoryForMonth :many
 SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
     AND strftime('%m', t.date) = CAST(?2 AS TEXT)
 GROUP BY c.id
@@ -880,7 +1034,8 @@ SELECT
     CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+WHERE t.deleted_at IS NULL
+    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
 GROUP BY c.id, year, month
 ORDER BY c.name, year, month
 `
@@ -938,7 +1093,8 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+WHERE t.deleted_at IS NULL
+    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
 GROUP BY year, month
 ORDER BY year, month
 `
@@ -989,6 +1145,7 @@ SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
 GROUP BY t.date
 ORDER BY t.date
@@ -1030,6 +1187,7 @@ SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
     AND strftime('%m', t.date) = CAST(?2 AS TEXT)
 GROUP BY day
@@ -1076,6 +1234,7 @@ SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
     AND strftime('%m', t.date) = CAST(?2 AS TEXT)
 `
@@ -1098,6 +1257,7 @@ SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'income'
+    AND t.deleted_at IS NULL
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
     AND strftime('%m', t.date) = CAST(?2 AS TEXT)
 `
@@ -1123,6 +1283,7 @@ SELECT
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
 GROUP BY t.description
 ORDER BY total DESC
@@ -1176,6 +1337,7 @@ SELECT t.amount, t.tags
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
     AND t.tags IS NOT NULL AND t.tags != ''
     AND t.date >= CAST(?1 AS TEXT)
     AND t.date <= CAST(?2 AS TEXT)

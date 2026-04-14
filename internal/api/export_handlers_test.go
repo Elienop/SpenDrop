@@ -459,3 +459,148 @@ func TestHandleExportYearly_ReturnsXLSXWithTwoSheets(t *testing.T) {
 		t.Errorf("expected at least 2 rows in Category Totals, got %d", len(catRows))
 	}
 }
+
+// --- Phase 2.1 soft-delete invariant: export read paths must hide tombstoned rows ---
+
+func TestHandleExportTransactions_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// One live row plus one tombstoned row in the same date window. If the
+	// liveClause helper is ever dropped from handleExportTransactions, the
+	// xlsx will contain 2 data rows instead of 1.
+	seedTestTransaction(t, q, user.ID, 1, "2026-03-15", 42.50, "live Lunch")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-03-16", 999.00, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/transactions", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleExportTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+
+	rows, err := f.GetRows("Transactions")
+	if err != nil {
+		t.Fatalf("get Transactions sheet: %v", err)
+	}
+	// Header + 1 data row (tombstoned must be excluded).
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows (1 header + 1 live), got %d", len(rows))
+	}
+	// Verify the surviving row is the live one, not the tombstoned one.
+	if len(rows[1]) < 2 || rows[1][1] != "live Lunch" {
+		t.Errorf("expected live row description 'live Lunch', got %v", rows[1])
+	}
+}
+
+func TestHandleExportMonthly_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Category 1 = Food (expense) from seed.
+	seedTestTransaction(t, q, user.ID, 1, "2026-03-10", 50.00, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-03-20", 999.00, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/monthly/2026/03", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026", "month": "03"})
+	rec := httptest.NewRecorder()
+	h.handleExportMonthly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+
+	// Transactions sheet: header + 1 live row.
+	txnRows, _ := f.GetRows("Transactions")
+	if len(txnRows) != 2 {
+		t.Fatalf("expected 2 rows in Transactions sheet (1 header + 1 live), got %d", len(txnRows))
+	}
+
+	// Summary sheet: Food category total must be 50, not 1049.
+	summaryRows, _ := f.GetRows("Summary")
+	if len(summaryRows) < 2 {
+		t.Fatalf("expected at least 2 rows in Summary sheet, got %d", len(summaryRows))
+	}
+	// Find the Food row.
+	foundFood := false
+	for _, row := range summaryRows[1:] {
+		if len(row) >= 3 && row[0] == "Food" {
+			foundFood = true
+			if row[2] != "50" {
+				t.Errorf("Food total=%q, want 50 (tombstoned 999 must be excluded)", row[2])
+			}
+		}
+	}
+	if !foundFood {
+		t.Errorf("Food row missing from Summary sheet")
+	}
+}
+
+func TestHandleExportYearly_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-03-15", 200.00, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-03-20", 999.00, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/yearly/2026", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026"})
+	rec := httptest.NewRecorder()
+	h.handleExportYearly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+
+	// Monthly Totals: March (index 4 = header + March=3) expenses must be 200.
+	monthlyRows, _ := f.GetRows("Monthly Totals")
+	if len(monthlyRows) != 13 {
+		t.Fatalf("expected 13 rows in Monthly Totals, got %d", len(monthlyRows))
+	}
+	// Row index 3 (1-based row 4) = March (January=row 2, February=row 3, March=row 4).
+	march := monthlyRows[3]
+	if len(march) < 2 || march[0] != "March" {
+		t.Fatalf("expected March row at index 3, got %v", march)
+	}
+	if march[1] != "200" {
+		t.Errorf("March expenses=%q, want 200 (tombstoned 999 must be excluded)", march[1])
+	}
+
+	// Category Totals: Food row must total 200, not 1199.
+	catRows, _ := f.GetRows("Category Totals")
+	foundFood := false
+	for _, row := range catRows[1:] {
+		if len(row) >= 3 && row[0] == "Food" {
+			foundFood = true
+			if row[2] != "200" {
+				t.Errorf("Food total=%q, want 200 (tombstoned 999 must be excluded)", row[2])
+			}
+		}
+	}
+	if !foundFood {
+		t.Errorf("Food row missing from Category Totals sheet")
+	}
+}

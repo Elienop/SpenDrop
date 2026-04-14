@@ -480,3 +480,107 @@ func TestHandleDashboardCategories_InvalidYear_Returns400(t *testing.T) {
 		t.Errorf("expected 400, got %d", rec.Code)
 	}
 }
+
+// --- Phase 2.1 soft-delete invariant: dashboard read paths must hide tombstoned rows ---
+
+func TestHandleDashboardSummary_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// 1 live expense, 1 tombstoned expense, 1 live income in April 2026.
+	// The tombstoned 999 expense would blow total_spent sky-high if the
+	// soft-delete filter is ever dropped from SumExpensesByMonth.
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 50.0, "live expense")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-07", 999.0, "tombstoned expense")
+	seedTestTransaction(t, q, user.ID, 15, "2026-04-01", 3000.0, "Salary")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/summary?year=2026&month=4", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardSummary(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+
+	if got := resp["total_spent"].(float64); got != 50.0 {
+		t.Errorf("total_spent=%v, want 50 (tombstoned 999 must be excluded)", got)
+	}
+	if got := resp["total_income"].(float64); got != 3000.0 {
+		t.Errorf("total_income=%v, want 3000", got)
+	}
+	if got := resp["savings_this_month"].(float64); got != 2950.0 {
+		t.Errorf("savings_this_month=%v, want 2950", got)
+	}
+}
+
+func TestHandleDashboardCategories_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Category 1 = Food (expense). One live row at 100, one tombstoned at
+	// 999. If the JOIN filter is dropped the tombstoned row will inflate the
+	// Food total (or appear as a second row).
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 100.0, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-07", 999.0, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/categories?year=2026&month=4", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardCategories(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Categories []map[string]any `json:"categories"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Categories) != 1 {
+		t.Fatalf("categories len=%d, want 1 (only Food with live row)", len(resp.Categories))
+	}
+	if got := resp.Categories[0]["total"].(float64); got != 100.0 {
+		t.Errorf("Food total=%v, want 100 (tombstoned 999 must be excluded)", got)
+	}
+}
+
+func TestHandleDashboardTrend_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 100.0, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-07", 999.0, "tombstoned")
+	seedTestTransaction(t, q, user.ID, 15, "2026-04-01", 3000.0, "income")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trend?months=1", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardTrend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Trend []map[string]any `json:"trend"`
+	}
+	decodeResponse(t, rec, &resp)
+	if len(resp.Trend) != 1 {
+		t.Fatalf("trend len=%d, want 1", len(resp.Trend))
+	}
+	entry := resp.Trend[0]
+	if got := entry["total_spent"].(float64); got != 100.0 {
+		t.Errorf("total_spent=%v, want 100 (tombstoned 999 must be excluded)", got)
+	}
+	if got := entry["total_income"].(float64); got != 3000.0 {
+		t.Errorf("total_income=%v, want 3000", got)
+	}
+}

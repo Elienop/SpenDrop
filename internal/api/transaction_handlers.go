@@ -199,8 +199,16 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 
 	whereClause, args := buildTransactionWhereClause(q)
 
+	// Soft-delete filter: list endpoints only ever surface live rows.
+	// buildTransactionWhereClause is shared with the trash view, so the
+	// deleted_at predicate is applied here by the caller instead of inside
+	// the helper. Every live-transactions read path in this file does the
+	// same: append "AND t.deleted_at IS NULL" (or the "WHERE" form when the
+	// helper returned an empty clause).
+	liveClause := appendLiveTransactionsFilter(whereClause)
+
 	// Count query
-	countQuery := "SELECT COUNT(*) FROM transactions t JOIN categories c ON t.category_id = c.id" + whereClause
+	countQuery := "SELECT COUNT(*) FROM transactions t JOIN categories c ON t.category_id = c.id" + liveClause
 	var total int
 	if err := h.db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count transactions")
@@ -217,7 +225,7 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
 		c.name AS category_name, c.type AS category_type
 		FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + whereClause + orderClause + ` LIMIT ? OFFSET ?`
+		JOIN categories c ON t.category_id = c.id` + liveClause + orderClause + ` LIMIT ? OFFSET ?`
 
 	dataArgs := make([]any, len(args))
 	copy(dataArgs, args)
@@ -374,6 +382,15 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to get transaction")
 		return
 	}
+	// GetTransactionByID deliberately leaks tombstoned rows so that
+	// TransactionStore.Update/Delete can load the row inside its own tx
+	// to emit audit before/after. From the user's perspective a
+	// tombstoned row is not visible, so treat it as not-found here
+	// (stale client, race with trash purge, bogus hand-crafted ID).
+	if existing.DeletedAt.Valid {
+		writeError(w, http.StatusNotFound, "transaction not found")
+		return
+	}
 
 	// Ownership check: members can only edit their own
 	if user.Role != RoleAdmin && existing.UserID != user.ID {
@@ -446,6 +463,12 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to get transaction")
+		return
+	}
+	// Already-tombstoned rows are not-found from the HTTP caller's
+	// perspective; see the matching comment in handleUpdateTransaction.
+	if existing.DeletedAt.Valid {
+		writeError(w, http.StatusNotFound, "transaction not found")
 		return
 	}
 
@@ -636,14 +659,18 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback()
 
 	var result sql.Result
+	// Soft-delete aware: the rename must skip tombstoned rows because
+	// those are "no longer in the live set" and reviving them via an
+	// incidental bulk rename would silently restore deleted data. If an
+	// operator wants to rename tombstoned rows, they restore first.
 	if user.Role == RoleAdmin {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\'`,
+			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%",
 		)
 	} else {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ?`,
+			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%", user.ID,
 		)
 	}
@@ -737,6 +764,12 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			skipped = append(skipped, id)
 			continue
 		}
+		// Tombstoned rows are "skipped" just like missing rows: from
+		// the caller's perspective they have already been deleted.
+		if existing.DeletedAt.Valid {
+			skipped = append(skipped, id)
+			continue
+		}
 
 		if user.Role != RoleAdmin && existing.UserID != user.ID {
 			skipped = append(skipped, id)
@@ -823,12 +856,25 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 		args = append(args, user.ID)
 	}
 
-	// SQLite does not allow DELETE with a JOIN directly, so we select the
-	// IDs via a correlated subquery that joins categories — identical shape
-	// to handleListTransactions so filter semantics stay in lockstep.
-	query := `DELETE FROM transactions WHERE id IN (
-		SELECT t.id FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + whereClause + `)`
+	// Add the live-only filter onto the inner subquery so we only tombstone
+	// rows that are currently live. The outer UPDATE re-asserts the same
+	// predicate as documentation that a previously-tombstoned row cannot
+	// have its deleted_at (or audit trail) re-stamped — SQLite's snapshot
+	// isolation within a single statement makes the inner filter sufficient
+	// in practice, but the outer guard makes that invariant explicit at the
+	// SQL level for future maintainers reviewing this query.
+	liveClause := appendLiveTransactionsFilter(whereClause)
+
+	// Phase 2.1 turns the DELETE into a soft-delete UPDATE. The outer
+	// UPDATE sets deleted_at on every matching live row in one atomic step;
+	// the inner subquery joins categories (same shape as the list handler)
+	// so filter semantics stay in lockstep. SQLite does not allow UPDATE
+	// with a JOIN directly, hence the subquery form.
+	query := `UPDATE transactions
+		SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE deleted_at IS NULL AND id IN (
+			SELECT t.id FROM transactions t
+			JOIN categories c ON t.category_id = c.id` + liveClause + `)`
 
 	// Wrap DELETE + summary audit row in a single *sql.Tx so the audit row
 	// commits if and only if the deletion commits. The summary row carries
@@ -890,9 +936,12 @@ func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Re
 	ctx := r.Context()
 
 	// Suggestions are shared across all household users — same visibility as
-	// handleListTransactions. No per-user scoping needed.
+	// handleListTransactions. No per-user scoping needed. Both queries filter
+	// deleted_at IS NULL so suggestions never leak data from the trash; a
+	// soft-deleted row whose description or tag only appears in the trash
+	// should not autocomplete for users creating new transactions.
 	descRows, err := h.db.QueryContext(ctx,
-		`SELECT DISTINCT description FROM transactions ORDER BY description LIMIT ?`,
+		`SELECT DISTINCT description FROM transactions WHERE deleted_at IS NULL ORDER BY description LIMIT ?`,
 		DescriptionSuggestionLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query descriptions")
@@ -913,7 +962,7 @@ func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Re
 	}
 
 	tagRows, err := h.db.QueryContext(ctx,
-		`SELECT DISTINCT tags FROM transactions WHERE tags != '' AND tags IS NOT NULL LIMIT ?`,
+		`SELECT DISTINCT tags FROM transactions WHERE deleted_at IS NULL AND tags != '' AND tags IS NOT NULL LIMIT ?`,
 		TagSuggestionLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query tags")

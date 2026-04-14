@@ -210,7 +210,7 @@ func TestAudit_UpdateTransaction_WritesUpdateRowWithBeforeAndAfter(t *testing.T)
 	assertAllActorsEqual(t, rows, user.ID)
 }
 
-func TestAudit_DeleteTransaction_WritesDeleteRowWithBeforeOnly(t *testing.T) {
+func TestAudit_DeleteTransaction_WritesBeforeAndTombstoneAfter(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
@@ -239,14 +239,38 @@ func TestAudit_DeleteTransaction_WritesDeleteRowWithBeforeOnly(t *testing.T) {
 	if r.Before == nil {
 		t.Fatalf("delete row must carry before_json")
 	}
-	// after_json is NULL pre-Tier-2 (hard delete). The AfterRaw check
-	// below locks the contract in: if a future change accidentally writes
-	// after_json on a hard delete, the test catches it.
-	if r.AfterRaw != "" {
-		t.Errorf("after_json should be NULL on pre-Tier-2 delete, got %q", r.AfterRaw)
-	}
 	if r.Before["description"] != "soon-to-be-gone" {
 		t.Errorf("before.description=%v", r.Before["description"])
+	}
+	// Post-Phase-2.1: soft-delete writes a before/after pair. before_json
+	// is the live row (deleted_at NULL), after_json is the tombstoned row
+	// with the same payload plus deleted_at populated. Forensic readers
+	// can diff the two to confirm the soft-delete only changed deleted_at
+	// and updated_at.
+	if r.After == nil {
+		t.Fatalf("delete row must carry after_json post Phase 2.1 (tombstoned row)")
+	}
+	if r.After["description"] != "soon-to-be-gone" {
+		t.Errorf("after.description=%v (tombstone should preserve payload)", r.After["description"])
+	}
+	// deleted_at on the before snapshot must be NULL; on the after snapshot
+	// it must be a non-empty timestamp. sqlc's GetTransactionByIDRow tags
+	// the field json:"deleted_at" (snake_case), and the json package encodes
+	// sql.NullTime as {"Time":"...","Valid":false}, so we read
+	// r.Before["deleted_at"]["Valid"].
+	if beforeDel, ok := r.Before["deleted_at"].(map[string]any); ok {
+		if v, _ := beforeDel["Valid"].(bool); v {
+			t.Errorf("before.deleted_at.Valid=true, want false")
+		}
+	} else {
+		t.Errorf("before.deleted_at missing or wrong shape: %v", r.Before["deleted_at"])
+	}
+	if afterDel, ok := r.After["deleted_at"].(map[string]any); ok {
+		if v, _ := afterDel["Valid"].(bool); !v {
+			t.Errorf("after.deleted_at.Valid=false, want true (tombstone)")
+		}
+	} else {
+		t.Errorf("after.deleted_at missing or wrong shape: %v", r.After["deleted_at"])
 	}
 	assertAllActorsEqual(t, rows, user.ID)
 }
@@ -380,12 +404,36 @@ func TestAudit_BatchDelete_WritesOneDeleteRowPerID(t *testing.T) {
 		if r.TransactionID == database.BulkAuditTransactionID {
 			t.Errorf("batch delete must write per-row rows, not a summary")
 		}
+		// Post-Phase-2.1 each per-row delete audit is a before/after pair
+		// where before_json is the live row and after_json is the
+		// tombstoned row.
+		if r.Before == nil {
+			t.Errorf("row %d missing before_json", r.TransactionID)
+		}
+		if r.After == nil {
+			t.Errorf("row %d missing after_json (expected tombstoned row)", r.TransactionID)
+			continue
+		}
+		if afterDel, ok := r.After["deleted_at"].(map[string]any); ok {
+			if v, _ := afterDel["Valid"].(bool); !v {
+				t.Errorf("row %d after.deleted_at.Valid=false, want true", r.TransactionID)
+			}
+		} else {
+			t.Errorf("row %d after.deleted_at missing/wrong shape: %v", r.TransactionID, r.After["deleted_at"])
+		}
 		gotIDs[r.TransactionID] = true
 	}
 	for _, id := range []int64{t1.ID, t2.ID, t3.ID} {
 		if !gotIDs[id] {
 			t.Errorf("missing audit row for deleted transaction id=%d", id)
 		}
+	}
+	// Physical rows must survive as tombstones.
+	if got := countAllTransactions(t, db); got != 3 {
+		t.Errorf("expected 3 tombstoned rows to survive, got %d physical rows", got)
+	}
+	if got := countTransactions(t, db); got != 0 {
+		t.Errorf("expected 0 live rows after batch soft-delete, got %d", got)
 	}
 	assertAllActorsEqual(t, rows, user.ID)
 }
@@ -477,21 +525,22 @@ func TestAudit_DeleteByFilter_WritesSingleSummaryRow(t *testing.T) {
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "b")
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-10", 30.0, "c")
 
-	// Snapshot the transaction row count BEFORE the handler runs so the
-	// audit assertion can compare against the real SQL delta rather than
-	// a hardcoded `2`. handleDeleteTransactionsByFilter resolves its
-	// WHERE clause through buildTransactionWhereClause, which relies on
+	// Snapshot the LIVE row count BEFORE the handler runs so the audit
+	// assertion can compare against the real SQL delta rather than a
+	// hardcoded `2`. handleDeleteTransactionsByFilter resolves its WHERE
+	// clause through buildTransactionWhereClause, which relies on
 	// lexicographic DATETIME comparison against the go-sqlite3 TEXT
-	// layout ("2026-04-05 00:00:00+00:00"). Pinning the expected count
-	// to a literal 2 would break silently on any change to how the
-	// driver serialises time.Time. Deriving it from the row delta
-	// asserts the real Phase 4.2 invariant: "the audit summary's count
-	// equals whatever the filter actually deleted" — robust to SQL
-	// plumbing changes underneath.
-	var txBefore int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txBefore); err != nil {
-		t.Fatalf("count transactions before: %v", err)
-	}
+	// layout ("2026-04-05 00:00:00+00:00"). Pinning the expected count to
+	// a literal 2 would break silently on any change to how the driver
+	// serialises time.Time. Deriving it from the live-row delta asserts
+	// the real Phase 4.2 invariant — "the audit summary's count equals
+	// whatever the filter actually removed from live view" — robust to
+	// SQL plumbing changes underneath.
+	//
+	// Post-Phase-2.1: this must count LIVE rows, not all physical rows.
+	// handleDeleteTransactionsByFilter now soft-deletes, so the physical
+	// row count is unchanged; only deleted_at flips.
+	txBefore := countTransactions(t, db)
 
 	req := httptest.NewRequest(http.MethodDelete, "/api/transactions?date_from=2026-04-01&date_to=2026-04-05", nil)
 	req = withUser(req, user)
@@ -501,10 +550,7 @@ func TestAudit_DeleteByFilter_WritesSingleSummaryRow(t *testing.T) {
 		t.Fatalf("delete by filter: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	var txAfter int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txAfter); err != nil {
-		t.Fatalf("count transactions after: %v", err)
-	}
+	txAfter := countTransactions(t, db)
 	wantDeleted := txBefore - txAfter
 	// Guard against the "filter matched nothing" degenerate case: if
 	// wantDeleted is zero the test below would accept a count-of-zero
@@ -512,7 +558,18 @@ func TestAudit_DeleteByFilter_WritesSingleSummaryRow(t *testing.T) {
 	// filter semantics. Fail loudly so a future SQL/driver change that
 	// breaks the lex comparison shows up here instead of a silent pass.
 	if wantDeleted <= 0 {
-		t.Fatalf("handler deleted %d rows, expected > 0 (seeded 3 with filter bracketing 2)", wantDeleted)
+		t.Fatalf("handler soft-deleted %d rows, expected > 0 (seeded 3 with filter bracketing 2)", wantDeleted)
+	}
+	// Belt-and-suspenders: physical rows (including tombstones) must be
+	// unchanged. This guards against a regression where
+	// handleDeleteTransactionsByFilter accidentally reverts to a hard
+	// DELETE — wantDeleted would still be > 0 but the tombstoned audit
+	// log would be unrecoverable because the target rows are gone.
+	if got := countAllTransactions(t, db); got != 3 {
+		t.Errorf("expected 3 physical rows post-soft-delete, got %d", got)
+	}
+	if got := countTombstonedTransactions(t, db); got != wantDeleted {
+		t.Errorf("expected %d tombstoned rows, got %d", wantDeleted, got)
 	}
 
 	rows := listAuditRows(t, db)
