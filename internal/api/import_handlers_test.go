@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/xuri/excelize/v2"
+
+	"github.com/elienop/spendrop/internal/database"
 )
 
 // clearImportStore removes all entries from the package-level importStore.
@@ -1071,5 +1073,406 @@ func TestHandleImportConfirm_Unauthenticated_Returns401(t *testing.T) {
 
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d", rec.Code)
+	}
+}
+
+// --- Phase 3.4 idempotent imports ---
+
+// uploadAndConfirmImport runs the full two-step import flow against the
+// handler once: upload the xlsx bytes, pull the import_id, then POST the
+// confirm with the given force_add indices. Returns the parsed confirm
+// response so the caller can assert on imported/skipped counts without
+// reconstructing the plumbing each time. Any non-200 along the way is a
+// t.Fatal — the Phase 3.4 tests all exercise the happy-path wiring and
+// want the assertions on the end-state counts, not on the transport.
+func uploadAndConfirmImport(t *testing.T, h *Handler, user database.User, xlsxData []byte, forceAdd []int) map[string]any {
+	t.Helper()
+	ctx := context.Background()
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, err := h.queries.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	catMap := make(map[string]float64, len(cats))
+	var defaultID int64
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+		if c.Name == "Food" {
+			defaultID = c.ID
+		}
+	}
+	if defaultID == 0 {
+		defaultID = cats[0].ID
+	}
+
+	confirmBodyMap := map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultID,
+		"category_map":        catMap,
+	}
+	if forceAdd != nil {
+		confirmBodyMap["force_add"] = forceAdd
+	}
+	confirmBody, _ := json.Marshal(confirmBodyMap)
+
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var confirmResp map[string]any
+	decodeResponse(t, confirmRec, &confirmResp)
+	return confirmResp
+}
+
+// TestHandleImport_DoubleImport_SkipsDuplicates locks in the Phase 3.4
+// acceptance criterion that importing the same file twice produces zero
+// new rows. The first confirm inserts two rows with content_hash set; the
+// second confirm recomputes the same hashes, finds them via
+// GetTransactionByContentHash in qtx, and skips each one. A regression
+// that reverted the dedup check (or broke hash parity between the import
+// path and the backfill) would surface here as imported=2/skipped=0 on
+// the second pass.
+func TestHandleImport_DoubleImport_SkipsDuplicates(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "dbl", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+		{"2026-01-16", "Electric bill", "120.00", "Utilities"},
+	})
+
+	first := uploadAndConfirmImport(t, h, user, xlsxData, nil)
+	if int(first["imported"].(float64)) != 2 {
+		t.Fatalf("first import: expected imported=2, got %v", first["imported"])
+	}
+	if int(first["skipped"].(float64)) != 0 {
+		t.Errorf("first import: expected skipped=0, got %v", first["skipped"])
+	}
+
+	second := uploadAndConfirmImport(t, h, user, xlsxData, nil)
+	if int(second["imported"].(float64)) != 0 {
+		t.Errorf("second import: expected imported=0, got %v", second["imported"])
+	}
+	if int(second["skipped"].(float64)) != 2 {
+		t.Errorf("second import: expected skipped=2, got %v", second["skipped"])
+	}
+	if int(second["total"].(float64)) != 2 {
+		t.Errorf("second import: expected total=2, got %v", second["total"])
+	}
+
+	// DB sanity: still only two live rows, no silent doubling.
+	var live int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
+	).Scan(&live); err != nil {
+		t.Fatalf("count live transactions: %v", err)
+	}
+	if live != 2 {
+		t.Errorf("expected 2 live rows after double-import, got %d", live)
+	}
+}
+
+// TestHandleImport_ForceAdd_AppendsSuffixAndInserts exercises the
+// opt-in override: the user ticks "import anyway" on both rows of the
+// second upload, the handler runs resolveForceAddSuffix on each, and
+// two new rows land with " (2)" appended to their description. The
+// suffixed rows have different content hashes from the originals (and
+// from each other), so a THIRD import of the plain file without force-add
+// would still skip both originals — force-add does not poison the dedup
+// index for future runs.
+func TestHandleImport_ForceAdd_AppendsSuffixAndInserts(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "forcer", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+		{"2026-01-16", "Electric bill", "120.00", "Utilities"},
+	})
+
+	// First import plays it straight.
+	first := uploadAndConfirmImport(t, h, user, xlsxData, nil)
+	if int(first["imported"].(float64)) != 2 {
+		t.Fatalf("first import: expected imported=2, got %v", first["imported"])
+	}
+
+	// Second import marks both row indices for force-add. Both originals
+	// already exist in the DB so resolveForceAddSuffix has to bump them.
+	second := uploadAndConfirmImport(t, h, user, xlsxData, []int{0, 1})
+	if int(second["imported"].(float64)) != 2 {
+		t.Errorf("force-add import: expected imported=2, got %v", second["imported"])
+	}
+	if int(second["skipped"].(float64)) != 0 {
+		t.Errorf("force-add import: expected skipped=0, got %v", second["skipped"])
+	}
+
+	// Four distinct live rows: the two originals plus the two suffixed copies.
+	var live int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
+	).Scan(&live); err != nil {
+		t.Fatalf("count live transactions: %v", err)
+	}
+	if live != 4 {
+		t.Fatalf("expected 4 live rows after force-add, got %d", live)
+	}
+
+	// Suffixed descriptions must be exactly "<original> (2)". Use a
+	// targeted query per description so a failure reports which row is
+	// missing its suffix.
+	for _, orig := range []string{"Groceries", "Electric bill"} {
+		var count int64
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM transactions WHERE description = ? AND deleted_at IS NULL`,
+			orig+" (2)",
+		).Scan(&count); err != nil {
+			t.Fatalf("count suffixed %q: %v", orig, err)
+		}
+		if count != 1 {
+			t.Errorf("expected exactly one row for %q, got %d", orig+" (2)", count)
+		}
+	}
+
+	// A third plain import (no force-add) must still skip the originals and
+	// also skip the suffixed copies — both hashes are now in the index.
+	third := uploadAndConfirmImport(t, h, user, xlsxData, nil)
+	if int(third["imported"].(float64)) != 0 {
+		t.Errorf("third plain import: expected imported=0, got %v", third["imported"])
+	}
+	if int(third["skipped"].(float64)) != 2 {
+		t.Errorf("third plain import: expected skipped=2, got %v", third["skipped"])
+	}
+}
+
+// TestHandleImportUpload_PredictedSkips_ReflectsExistingRow verifies that
+// the upload-time preview surfaces duplicate predictions for rows that
+// would collide at confirm time, so the UI can pre-grey the row and offer
+// the force-add checkbox without a round-trip. We seed the DB via the
+// real import flow (rather than a synthetic CreateTransaction with a
+// hand-computed hash) so the test exercises the same path an operator
+// hits in production, and so a drift between predictDuplicateSkips and
+// handleImportConfirm's hash formula shows up here instead of hiding
+// behind a test fixture that matches only one of the two.
+func TestHandleImportUpload_PredictedSkips_ReflectsExistingRow(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "predictor", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+		{"2026-01-16", "Coffee", "5.75", "Food"},
+	})
+
+	// Seed by running a first upload+confirm. After this the DB has the
+	// two hashes; a second upload should predict both as duplicates.
+	if resp := uploadAndConfirmImport(t, h, user, xlsxData, nil); int(resp["imported"].(float64)) != 2 {
+		t.Fatalf("seed import: expected imported=2, got %v", resp["imported"])
+	}
+
+	// Second upload: preview only — don't confirm. We want to inspect
+	// predicted_skips in the upload response body.
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+
+	raw, ok := resp["predicted_skips"].([]any)
+	if !ok {
+		t.Fatalf("expected predicted_skips in response, got %T", resp["predicted_skips"])
+	}
+	if len(raw) != 2 {
+		t.Fatalf("expected 2 predicted skips, got %d: %v", len(raw), raw)
+	}
+	seen := make(map[int]bool, 2)
+	for _, r := range raw {
+		skip := r.(map[string]any)
+		idx := int(skip["row_index"].(float64))
+		seen[idx] = true
+		if skip["reason"] != "duplicate" {
+			t.Errorf("row %d: expected reason=duplicate, got %v", idx, skip["reason"])
+		}
+		if int64(skip["existing_id"].(float64)) == 0 {
+			t.Errorf("row %d: expected non-zero existing_id", idx)
+		}
+	}
+	for _, want := range []int{0, 1} {
+		if !seen[want] {
+			t.Errorf("expected row_index %d in predicted_skips, not found", want)
+		}
+	}
+
+	// Verify the predicted existing_ids actually point at the seeded live
+	// rows (guards against a bug where the handler returns the wrong
+	// foreign key from GetTransactionByContentHash).
+	var count int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
+	).Scan(&count); err != nil {
+		t.Fatalf("count live: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 live rows, got %d", count)
+	}
+}
+
+// TestHandleImportUpload_PredictedSkips_IgnoresTombstoned guards the
+// interaction between Phase 3.4's hash lookup and Phase 2.1's soft-delete
+// discipline. GetTransactionByContentHash filters deleted_at IS NULL, so
+// a row that the user trashed and then re-imports must NOT come back as
+// a predicted duplicate — otherwise the UI greys a row the user actively
+// wants back, and the confirm path would silently skip it. Seed a row,
+// tombstone it, then upload a matching file and assert predicted_skips
+// is empty.
+func TestHandleImportUpload_PredictedSkips_IgnoresTombstoned(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "ghosts", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+	})
+
+	// Seed via the real import path, then tombstone the inserted row.
+	// Using the handler path here means the seeded row lands with a real
+	// content_hash — if we inserted via CreateTransaction directly we'd
+	// have to compute the hash by hand and risk drifting from the actual
+	// formula.
+	if resp := uploadAndConfirmImport(t, h, user, xlsxData, nil); int(resp["imported"].(float64)) != 1 {
+		t.Fatalf("seed import: expected imported=1, got %v", resp["imported"])
+	}
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP`,
+	); err != nil {
+		t.Fatalf("tombstone row: %v", err)
+	}
+
+	// Re-upload the same file: the tombstoned row must not appear in the
+	// predicted_skips set.
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+
+	raw, ok := resp["predicted_skips"].([]any)
+	if !ok {
+		t.Fatalf("expected predicted_skips array in response, got %T", resp["predicted_skips"])
+	}
+	if len(raw) != 0 {
+		t.Errorf("expected 0 predicted skips against tombstoned row, got %d: %v", len(raw), raw)
+	}
+}
+
+// TestHandleImport_ReimportAfterTombstone_SucceedsOnConfirm is the
+// confirm-path sibling of PredictedSkips_IgnoresTombstoned. The upload
+// preview correctly reports no predicted duplicates against a tombstoned
+// row — but that is only half the contract. The confirm call also has
+// to actually land the re-insert. This test fails under a partial
+// unique index that does not filter deleted_at (the INSERT hits UNIQUE
+// on the tombstoned row's hash and is counted as skipped), and passes
+// once the migration includes AND deleted_at IS NULL in the index WHERE
+// clause.
+//
+// Regression for: "user trashes a row, re-imports the spreadsheet, row
+// silently does not come back." The Phase 2.1 trash-then-reimport UX
+// promise is only kept when the partial unique index and the
+// GetTransactionByContentHash filter agree on "tombstoned rows are
+// invisible."
+func TestHandleImport_ReimportAfterTombstone_SucceedsOnConfirm(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "reimporter", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+	})
+
+	// Seed via the real import path so the row lands with a real hash.
+	// Inserting via CreateTransaction directly would couple this test to
+	// the exact ComputeContentHash formula and risk drifting from it.
+	if resp := uploadAndConfirmImport(t, h, user, xlsxData, nil); int(resp["imported"].(float64)) != 1 {
+		t.Fatalf("seed import: expected imported=1, got %v", resp["imported"])
+	}
+
+	// Tombstone the seeded row. Raw UPDATE keeps the test decoupled
+	// from the trash handler — we only need the row in the tombstoned
+	// state, not the audit row.
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP`,
+	); err != nil {
+		t.Fatalf("tombstone row: %v", err)
+	}
+
+	// Re-import the exact same spreadsheet through upload+confirm. The
+	// row must come back live. GetTransactionByContentHash filters
+	// deleted_at IS NULL so the prediction step returns no duplicates,
+	// and the partial unique index must also filter deleted_at IS NULL
+	// so the INSERT does not collide with the tombstoned row still
+	// carrying its original hash.
+	resp := uploadAndConfirmImport(t, h, user, xlsxData, nil)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Errorf("expected imported=1 after reimport of tombstoned row, got %d (resp=%v)", got, resp)
+	}
+	if got := int(resp["skipped"].(float64)); got != 0 {
+		t.Errorf("expected skipped=0 after reimport of tombstoned row, got %d (resp=%v)", got, resp)
+	}
+
+	// Verify DB state: one live row (the re-imported one), one
+	// tombstoned row (the original we trashed).
+	var live, tombstoned int64
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
+	).Scan(&live); err != nil {
+		t.Fatalf("count live: %v", err)
+	}
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL`,
+	).Scan(&tombstoned); err != nil {
+		t.Fatalf("count tombstoned: %v", err)
+	}
+	if live != 1 {
+		t.Errorf("expected 1 live row after reimport, got %d", live)
+	}
+	if tombstoned != 1 {
+		t.Errorf("expected 1 tombstoned row after reimport, got %d", tombstoned)
 	}
 }

@@ -108,8 +108,15 @@ ON CONFLICT(code) DO UPDATE SET
 -- columns (amount, original_amount) AND the new INTEGER _cents columns until
 -- migration 010 drops the legacy columns. Keep the caller math local -
 -- amount_cents = int64(math.Round(amount*100)) at the call site.
-INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+--
+-- Phase 3.4: content_hash is nullable. The import path populates it with
+-- SHA-256 over the normalized row (see database.ComputeContentHash); the
+-- partial unique index idx_transactions_content_hash then enforces
+-- idempotent imports. Manual entries and test fixtures may pass
+-- sql.NullString{} — the index ignores NULL rows, so they coexist with
+-- hashed import rows without collision.
+INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetTransactionByID :one
@@ -171,6 +178,49 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS deleted
 FROM transactions;
+
+-- name: GetTransactionByContentHash :one
+-- Phase 3.4 import-idempotency lookup. Returns the live row whose content
+-- hash matches, or sql.ErrNoRows if none exists. The deleted_at IS NULL
+-- filter is deliberate: a tombstoned row with the same hash as a fresh
+-- import should NOT block the import (the user previously trashed that
+-- row and is now re-adding it, most likely via a spreadsheet re-pull).
+-- Without this filter, a user who trashed a row then reimported the
+-- spreadsheet would see the row silently dropped with reason "duplicate"
+-- — a worse UX than the occasional legitimate double.
+--
+-- The partial unique index idx_transactions_content_hash guarantees this
+-- lookup returns at most one row across the live set, so the :one
+-- (exactly-one-or-ErrNoRows) cardinality is safe.
+SELECT t.id, t.date, t.amount_cents, t.description, t.category_id, t.content_hash
+FROM transactions t
+WHERE t.content_hash = ? AND t.deleted_at IS NULL;
+
+-- name: ListTransactionsForHashBackfill :many
+-- Phase 3.4 startup backfill. Returns a bounded page of rows whose
+-- content_hash is NULL, joined against categories for the name (the
+-- hash formula needs category name, not id). The backfill runner pages
+-- through this query until it returns zero rows. Tombstoned rows get
+-- a hash too — the backfill is a one-shot hygiene pass and we want the
+-- audit trail (before_json snapshots) to carry the hash forward. The
+-- partial unique index filters `deleted_at IS NULL` so a tombstoned
+-- row holding a hash does not block a later re-import of the same
+-- content; see migration 008_transactions_content_hash.sql for the
+-- full rationale on why the index filter and the lookup filter must
+-- agree.
+SELECT t.id, t.date, t.amount_cents, t.description, c.name AS category_name
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.content_hash IS NULL
+ORDER BY t.id
+LIMIT ?;
+
+-- name: UpdateTransactionContentHash :exec
+-- Phase 3.4 startup backfill writer. Sets content_hash for a single row.
+-- No updated_at bump: the backfill is a one-shot schema-hygiene pass,
+-- not a user-visible edit, and promoting it into the updated_at stream
+-- would make "what did I change yesterday" reports lie.
+UPDATE transactions SET content_hash = ? WHERE id = ?;
 
 -- Budgets
 

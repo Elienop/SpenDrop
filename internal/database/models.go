@@ -97,6 +97,7 @@ type Transaction struct {
 	DeletedAt           sql.NullTime    `json:"deleted_at"`
 	AmountCents         int64           `json:"amount_cents"`
 	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	ContentHash         sql.NullString  `json:"content_hash"`
 }
 
 type TransactionAudit struct {

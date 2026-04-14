@@ -227,9 +227,9 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 
 const createTransaction = `-- name: CreateTransaction :one
 
-INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents
+INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash
 `
 
 type CreateTransactionParams struct {
@@ -244,6 +244,7 @@ type CreateTransactionParams struct {
 	CategoryID          int64           `json:"category_id"`
 	Tags                sql.NullString  `json:"tags"`
 	Notes               sql.NullString  `json:"notes"`
+	ContentHash         sql.NullString  `json:"content_hash"`
 }
 
 // Transactions
@@ -263,6 +264,11 @@ type CreateTransactionParams struct {
 // columns (amount, original_amount) AND the new INTEGER _cents columns until
 // migration 010 drops the legacy columns. Keep the caller math local -
 // amount_cents = int64(math.Round(amount*100)) at the call site.
+//
+// Phase 3.4: content_hash is nullable. Import callers pass the SHA-256
+// over the normalized row (database.ComputeContentHash); manual-entry
+// handlers and tests pass sql.NullString{} and the partial unique index
+// ignores them.
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
@@ -276,6 +282,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.CategoryID,
 		arg.Tags,
 		arg.Notes,
+		arg.ContentHash,
 	)
 	var i Transaction
 	err := row.Scan(
@@ -294,6 +301,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.DeletedAt,
 		&i.AmountCents,
 		&i.OriginalAmountCents,
+		&i.ContentHash,
 	)
 	return i, err
 }
@@ -529,6 +537,42 @@ func (q *Queries) GetSetting(ctx context.Context, key string) (AppSetting, error
 	row := q.db.QueryRowContext(ctx, getSetting, key)
 	var i AppSetting
 	err := row.Scan(&i.Key, &i.Value, &i.UpdatedAt)
+	return i, err
+}
+
+const getTransactionByContentHash = `-- name: GetTransactionByContentHash :one
+SELECT t.id, t.date, t.amount_cents, t.description, t.category_id, t.content_hash
+FROM transactions t
+WHERE t.content_hash = ? AND t.deleted_at IS NULL
+`
+
+type GetTransactionByContentHashRow struct {
+	ID          int64          `json:"id"`
+	Date        time.Time      `json:"date"`
+	AmountCents int64          `json:"amount_cents"`
+	Description string         `json:"description"`
+	CategoryID  int64          `json:"category_id"`
+	ContentHash sql.NullString `json:"content_hash"`
+}
+
+// Phase 3.4 import-idempotency lookup. Returns the live row whose content
+// hash matches, or sql.ErrNoRows if none exists. The deleted_at IS NULL
+// filter is deliberate: a tombstoned row with the same hash as a fresh
+// import should NOT block the import — the user previously trashed that
+// row and is now re-adding it, most likely via a spreadsheet re-pull.
+// The partial unique index idx_transactions_content_hash guarantees this
+// lookup returns at most one row across the live set.
+func (q *Queries) GetTransactionByContentHash(ctx context.Context, contentHash sql.NullString) (GetTransactionByContentHashRow, error) {
+	row := q.db.QueryRowContext(ctx, getTransactionByContentHash, contentHash)
+	var i GetTransactionByContentHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.Date,
+		&i.AmountCents,
+		&i.Description,
+		&i.CategoryID,
+		&i.ContentHash,
+	)
 	return i, err
 }
 
@@ -1191,6 +1235,60 @@ func (q *Queries) ListTransactionAuditByID(ctx context.Context, arg ListTransact
 	return items, nil
 }
 
+const listTransactionsForHashBackfill = `-- name: ListTransactionsForHashBackfill :many
+SELECT t.id, t.date, t.amount_cents, t.description, c.name AS category_name
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.content_hash IS NULL
+ORDER BY t.id
+LIMIT ?
+`
+
+type ListTransactionsForHashBackfillRow struct {
+	ID           int64     `json:"id"`
+	Date         time.Time `json:"date"`
+	AmountCents  int64     `json:"amount_cents"`
+	Description  string    `json:"description"`
+	CategoryName string    `json:"category_name"`
+}
+
+// Phase 3.4 startup backfill. Returns a bounded page of rows whose
+// content_hash is NULL, joined against categories for the name (the
+// hash formula needs category name, not id). The backfill runner pages
+// through this query until it returns zero rows. Tombstoned rows get
+// a hash too — the filter on content_hash IS NULL does not care about
+// deleted_at, because the partial unique index also ignores deleted_at
+// and we want the tombstoned row's hash to be stable so a later Restore
+// flows through Phase 3.3's checkpoint hook cleanly.
+func (q *Queries) ListTransactionsForHashBackfill(ctx context.Context, limit int64) ([]ListTransactionsForHashBackfillRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTransactionsForHashBackfill, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTransactionsForHashBackfillRow{}
+	for rows.Next() {
+		var i ListTransactionsForHashBackfillRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Date,
+			&i.AmountCents,
+			&i.Description,
+			&i.CategoryName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUsers = `-- name: ListUsers :many
 SELECT id, username, password_hash, display_name, role, created_at, updated_at FROM users ORDER BY id
 `
@@ -1828,6 +1926,11 @@ type UpdateTransactionParams struct {
 // Dual-write contract (Phase 3.1a): see CreateTransaction above. Both the
 // legacy REAL column and the new INTEGER cents column are rewritten on every
 // edit. The caller computes cents from the float amount before invoking.
+//
+// Phase 3.4 note: UpdateTransaction deliberately does NOT touch content_hash.
+// An edited row keeps the hash it was imported with, so a reimport of the
+// source spreadsheet still detects the edited row as a duplicate rather than
+// silently doubling it.
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
@@ -1842,6 +1945,24 @@ func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionPa
 		arg.Notes,
 		arg.ID,
 	)
+	return err
+}
+
+const updateTransactionContentHash = `-- name: UpdateTransactionContentHash :exec
+UPDATE transactions SET content_hash = ? WHERE id = ?
+`
+
+type UpdateTransactionContentHashParams struct {
+	ContentHash sql.NullString `json:"content_hash"`
+	ID          int64          `json:"id"`
+}
+
+// Phase 3.4 startup backfill writer. Sets content_hash for a single row.
+// No updated_at bump: the backfill is a one-shot schema-hygiene pass, not
+// a user-visible edit, and promoting it into the updated_at stream would
+// make "what did I change yesterday" reports lie.
+func (q *Queries) UpdateTransactionContentHash(ctx context.Context, arg UpdateTransactionContentHashParams) error {
+	_, err := q.db.ExecContext(ctx, updateTransactionContentHash, arg.ContentHash, arg.ID)
 	return err
 }
 
