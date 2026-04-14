@@ -841,7 +841,7 @@ func (q *Queries) ListCheckpoints(ctx context.Context) ([]BalanceCheckpoint, err
 
 const listCheckpointsAffectedByDate = `-- name: ListCheckpointsAffectedByDate :many
 SELECT id, user_id, scope_type, scope_id, scope_label, date, expected_amount_cents, note, created_at, last_verified_at, last_verification_status FROM balance_checkpoints
-WHERE date >= CAST(?1 AS TEXT)
+WHERE date(date) >= date(CAST(?1 AS TEXT))
 ORDER BY date ASC, id ASC
 `
 
@@ -849,6 +849,16 @@ ORDER BY date ASC, id ASC
 // Used by the post-mutation/post-import hook: a transaction with date D
 // can only change the sum-as-of-date for dates greater than or equal to
 // D, so earlier checkpoints are untouchable by definition and skipped.
+//
+// The date() wrapper normalizes balance_checkpoints.date before the
+// comparison. Same rationale as the Phase 3.6 fix on SumByMonthRange and
+// friends: sqlc + go-sqlite3 writes time.Time values to DATE columns as
+// RFC3339 ("YYYY-MM-DDTHH:MM:SSZ"), and a lexical compare against a
+// "YYYY-MM-DD" argument string is ACCIDENTALLY safe in the `>=`
+// direction (the 'T' byte sorts after end-of-string) but silently broken
+// for any `<` / `<=` / BETWEEN rewrite. Wrapping with date() pins the
+// semantics at date-only on both sides so the query cannot regress if a
+// future caller flips the inequality.
 func (q *Queries) ListCheckpointsAffectedByDate(ctx context.Context, date string) ([]BalanceCheckpoint, error) {
 	rows, err := q.db.QueryContext(ctx, listCheckpointsAffectedByDate, date)
 	if err != nil {
@@ -1458,7 +1468,6 @@ func (q *Queries) SumByCategoryForMonth(ctx context.Context, arg SumByCategoryFo
 }
 
 const sumByCategoryForRange = `-- name: SumByCategoryForRange :many
-
 SELECT
     c.id,
     c.name,
@@ -1469,7 +1478,7 @@ SELECT
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
-    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+    AND date(t.date) >= CAST(?1 AS TEXT) AND date(t.date) <= CAST(?2 AS TEXT)
 GROUP BY c.id, year, month
 ORDER BY c.name, year, month
 `
@@ -1489,6 +1498,8 @@ type SumByCategoryForRangeRow struct {
 }
 
 // Reports
+// date() wrapper normalizes stored RFC3339 dates before lexical compare;
+// see SumByMonthRange above for the full rationale on the month-end bug.
 func (q *Queries) SumByCategoryForRange(ctx context.Context, arg SumByCategoryForRangeParams) ([]SumByCategoryForRangeRow, error) {
 	rows, err := q.db.QueryContext(ctx, sumByCategoryForRange, arg.DateFrom, arg.DateTo)
 	if err != nil {
@@ -1528,7 +1539,7 @@ SELECT
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
-    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+    AND date(t.date) >= CAST(?1 AS TEXT) AND date(t.date) <= CAST(?2 AS TEXT)
 GROUP BY year, month
 ORDER BY year, month
 `
@@ -1545,6 +1556,13 @@ type SumByMonthRangeRow struct {
 	IncomeCents   int64 `json:"income_cents"`
 }
 
+// Every t.date comparison below goes through SQLite's date() function so the
+// mattn/go-sqlite3 driver's RFC3339 storage format ("YYYY-MM-DDTHH:MM:SSZ")
+// is normalized to "YYYY-MM-DD" before the lexical compare. Without the
+// wrapper, "2026-04-30T00:00:00Z" <= "2026-04-30" evaluates to FALSE (the
+// "T" sorts after end-of-string), silently dropping transactions dated on
+// the last day of the upper-bound month from every range-scoped report.
+// See reports_metamorphic_test.go for the property-test regression guard.
 func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams) ([]SumByMonthRangeRow, error) {
 	rows, err := q.db.QueryContext(ctx, sumByMonthRange, arg.DateFrom, arg.DateTo)
 	if err != nil {
@@ -1726,7 +1744,7 @@ FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
     AND t.deleted_at IS NULL
-    AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
+    AND date(t.date) >= CAST(?1 AS TEXT) AND date(t.date) <= CAST(?2 AS TEXT)
 GROUP BY t.description
 ORDER BY total_cents DESC
 LIMIT ?3
@@ -1745,6 +1763,11 @@ type TopDescriptionsRow struct {
 	TotalCents   int64  `json:"total_cents"`
 }
 
+// date() wrapper normalizes stored RFC3339 dates before lexical compare;
+// see SumByMonthRange above for the full rationale on the month-end bug.
+// The c.type = 'expense' predicate is baked in (expense-only surface),
+// so the wrapper protects the range filter without changing the
+// top-level semantics of the query.
 func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams) ([]TopDescriptionsRow, error) {
 	rows, err := q.db.QueryContext(ctx, topDescriptions, arg.DateFrom, arg.DateTo, arg.Limit)
 	if err != nil {
@@ -1774,15 +1797,14 @@ func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams
 }
 
 const transactionAmountsAndTags = `-- name: TransactionAmountsAndTags :many
-
 SELECT t.amount_cents, t.tags
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
     AND t.deleted_at IS NULL
     AND t.tags IS NOT NULL AND t.tags != ''
-    AND t.date >= CAST(?1 AS TEXT)
-    AND t.date <= CAST(?2 AS TEXT)
+    AND date(t.date) >= CAST(?1 AS TEXT)
+    AND date(t.date) <= CAST(?2 AS TEXT)
 `
 
 type TransactionAmountsAndTagsParams struct {
@@ -1799,6 +1821,9 @@ type TransactionAmountsAndTagsRow struct {
 // Returns int64 amount_cents instead of float64 amount - Go-side tag
 // aggregation sums cents to avoid float drift, then the handler converts
 // the per-tag totals to dollars at the JSON wire edge.
+//
+// date() wrapper normalizes stored RFC3339 dates before lexical compare;
+// see SumByMonthRange above for the full rationale on the month-end bug.
 func (q *Queries) TransactionAmountsAndTags(ctx context.Context, arg TransactionAmountsAndTagsParams) ([]TransactionAmountsAndTagsRow, error) {
 	rows, err := q.db.QueryContext(ctx, transactionAmountsAndTags, arg.DateFrom, arg.DateTo)
 	if err != nil {
@@ -2087,7 +2112,7 @@ const verifyCheckpointTotal = `-- name: VerifyCheckpointTotal :one
 SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS actual_cents
 FROM transactions t
 WHERE t.deleted_at IS NULL
-  AND t.date <= CAST(?1 AS TEXT)
+  AND date(t.date) <= CAST(?1 AS TEXT)
   AND (
     CAST(?2 AS TEXT) = 'total'
     OR (CAST(?2 AS TEXT) = 'category' AND t.category_id = CAST(?3 AS INTEGER))
@@ -2113,6 +2138,15 @@ type VerifyCheckpointTotalParams struct {
 // Phase 3.1a: SUM(t.amount_cents) keeps the aggregate in int64 cents; the
 // COALESCE pins the empty-match case to 0 (not NULL), and the CAST locks
 // sqlc into an int64 return type.
+//
+// Phase 3.6: date(t.date) wrapper normalizes the driver's RFC3339 date
+// storage ("YYYY-MM-DDTHH:MM:SSZ") to "YYYY-MM-DD" before the lexical
+// compare. Without the wrapper a transaction dated on the checkpoint day
+// itself would silently drop out of the sum because
+// "2026-04-30T00:00:00Z" <= "2026-04-30" evaluates to FALSE. A verify
+// over a clean set of rows would then return the wrong total and flip
+// the checkpoint to 'mismatch', producing a false alert in /healthz/data.
+// See reports_metamorphic_test.go for the property-test regression guard.
 //
 // Every sqlc.arg is wrapped in an explicit CAST so sqlc infers a concrete
 // Go type for every parameter. Without the casts, scope_type lands as
