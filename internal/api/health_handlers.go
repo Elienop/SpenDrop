@@ -4,11 +4,23 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 )
+
+// checkpointStaleWindow is the age beyond which a checkpoint row is
+// considered stale enough to re-verify during a /healthz/data scrape. 24h
+// matches the cadence of the daily full integrity check, so the two
+// background maintenance passes share a single freshness envelope. The
+// same window is re-used by CountStaleMismatchCheckpoints as the 503-flip
+// threshold: after a successful sweep every affected row has its
+// last_verified_at bumped to now, so CountStaleMismatchCheckpoints returns
+// non-zero only when the verifier itself failed on a still-mismatching
+// row — which IS a real degradation signal worth paging on.
+const checkpointStaleWindow = 24 * time.Hour
 
 // healthzDataResponse is the payload returned by GET /healthz/data.
 //
@@ -75,6 +87,26 @@ type healthzDataResponse struct {
 	// LastIntegrityCheckResult is the verbatim last-known result of
 	// the full integrity check. Same encoding rules as QuickCheck.
 	LastIntegrityCheckResult string `json:"last_integrity_check_result"`
+
+	// Checkpoints is the per-status count of balance checkpoints.
+	// Always emitted (even as all-zero) so monitoring rules can alert
+	// on "the checkpoint count dropped to zero overnight" without
+	// special-casing an absent field. A non-zero Mismatch is a
+	// user-visible data-quality signal, not a system-health signal —
+	// the status flip to 503 only happens when the verifier itself
+	// cannot make progress (CountStaleMismatchCheckpoints > 0 after
+	// the re-verify sweep), not when a user has merely asserted a
+	// number that no longer matches the live SUM.
+	Checkpoints healthzCheckpointCounts `json:"checkpoints"`
+}
+
+// healthzCheckpointCounts is the nested shape inside healthzDataResponse
+// for per-status counts. Matches the row returned by
+// queries.CountCheckpointsByStatus field-for-field.
+type healthzCheckpointCounts struct {
+	OK       int64 `json:"ok"`
+	Mismatch int64 `json:"mismatch"`
+	Pending  int64 `json:"pending"`
 }
 
 // handleHealthzData serves GET /healthz/data — the DB-aware liveness
@@ -173,6 +205,56 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.LastIntegrityCheckResult = result
 	if result != "" && result != database.IntegrityOK {
+		degraded = true
+	}
+
+	// Phase 3.3 checkpoint freshness sweep. Re-verify every row whose
+	// last_verified_at is older than the stale window (or NULL),
+	// report the resulting per-status counts, and flip to 503 only
+	// when a mismatch has evaded the verifier for longer than the
+	// window. At household scale (tens of checkpoints) the entire
+	// block is sub-millisecond. DO NOT promote /healthz/data to a
+	// hot path on a deployment with thousands of checkpoints without
+	// first adding an index on balance_checkpoints.last_verified_at
+	// — ListStaleCheckpoints currently full-scans the table.
+	//
+	// h.clock.Now() (not time.Now()) is used so the fixture test
+	// harness (Phase 3.2) can drive the sweep under a frozen clock
+	// without flaking on wall-clock jitter.
+	staleThreshold := h.clock.Now().UTC().Add(-checkpointStaleWindow).Format(time.RFC3339)
+	if stale, err := h.queries.ListStaleCheckpoints(ctx, staleThreshold); err == nil {
+		for _, cp := range stale {
+			if _, _, verr := h.verifyCheckpointOnce(ctx, cp); verr != nil {
+				// Log and continue: the sweep is best-effort, and
+				// leaving this row's last_verified_at unchanged
+				// means the next CountStaleMismatchCheckpoints call
+				// will surface the failure as a 503 if the row is
+				// in mismatch state.
+				log.Printf("/healthz/data: reverify stale checkpoint id=%d: %v", cp.ID, verr)
+			}
+		}
+	} else {
+		log.Printf("/healthz/data: list stale checkpoints: %v", err)
+		degraded = true
+	}
+
+	if counts, err := h.queries.CountCheckpointsByStatus(ctx); err == nil {
+		resp.Checkpoints = healthzCheckpointCounts{
+			OK:       counts.Ok,
+			Mismatch: counts.Mismatch,
+			Pending:  counts.Pending,
+		}
+	} else {
+		log.Printf("/healthz/data: count checkpoints by status: %v", err)
+		degraded = true
+	}
+
+	if staleMismatches, err := h.queries.CountStaleMismatchCheckpoints(ctx, staleThreshold); err == nil {
+		if staleMismatches > 0 {
+			degraded = true
+		}
+	} else {
+		log.Printf("/healthz/data: count stale mismatches: %v", err)
 		degraded = true
 	}
 

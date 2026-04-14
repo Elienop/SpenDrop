@@ -394,6 +394,10 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 	imported := 0
 	skipped := 0
+	// Phase 3.3: track the earliest date across successfully imported
+	// rows so the post-commit checkpoint verifier can bound its sweep.
+	// A zero value means every row was skipped and the hook is a no-op.
+	var minImportDate time.Time
 
 	for _, row := range entry.Rows {
 		// Parse date
@@ -455,6 +459,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		minImportDate = earliestDate(minImportDate, date)
 		imported++
 	}
 
@@ -465,6 +470,17 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 	// Clean up the import entry
 	importStore.Delete(req.ImportID)
+
+	// Phase 3.3: reverify every checkpoint on or after the earliest
+	// imported row. Imports are the single largest write path in the
+	// system and are the most likely source of "my checkpoint went red
+	// overnight" surprises — running the hook once at the end of the
+	// batch is cheap and keeps the /healthz/data counts consistent
+	// without bloating the hot per-row loop. Skipped-only imports keep
+	// minImportDate zero and no-op the hook.
+	if !minImportDate.IsZero() {
+		h.verifyAffectedCheckpoints(r.Context(), minImportDate)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"imported": imported,

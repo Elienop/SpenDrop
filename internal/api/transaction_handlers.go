@@ -359,6 +359,11 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Phase 3.3: re-verify every checkpoint on or after the new row's date.
+	// Best-effort; logs but never fails the mutation. See the comment on
+	// verifyAffectedCheckpoints for the error contract.
+	h.verifyAffectedCheckpoints(r.Context(), txn.Date)
+
 	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
 }
 
@@ -458,6 +463,13 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Phase 3.3: an update can change either the amount or the date, so
+	// the earliest affected checkpoint is bounded by MIN(old_date, new_date).
+	// existing.Date is the pre-edit value we already loaded for the TOCTOU
+	// check; `date` is the post-edit value. The verifier walks every
+	// checkpoint on or after that minimum.
+	h.verifyAffectedCheckpoints(r.Context(), earliestDate(existing.Date, date))
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -507,6 +519,11 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Phase 3.3: the tombstoned row stops contributing to the live SUM,
+	// so every checkpoint on or after its date needs to be re-verified.
+	// existing.Date is the pre-delete copy we loaded for the TOCTOU check.
+	h.verifyAffectedCheckpoints(r.Context(), existing.Date)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -555,6 +572,10 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	// currency reads — commits or rolls back atomically.
 	qtx := h.queries.WithTx(tx)
 	results := make([]transactionResponse, 0, len(reqs))
+	// Track the earliest date across the batch for the post-commit
+	// checkpoint hook; a zero value means "no rows committed yet" and
+	// suppresses the hook call entirely.
+	var minBatchDate time.Time
 
 	for i, req := range reqs {
 		date, _ := time.Parse("2006-01-02", req.Date)
@@ -583,12 +604,22 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			return
 		}
 
+		minBatchDate = earliestDate(minBatchDate, txn.Date)
 		results = append(results, toTransactionResponse(txn))
 	}
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit batch")
 		return
+	}
+
+	// Phase 3.3: re-verify every checkpoint on or after the earliest
+	// inserted date. The post-commit position is deliberate — the hook
+	// must see the rows as they exist in the committed live set. A zero
+	// minBatchDate means the batch produced zero successful inserts, in
+	// which case the loop short-circuits with no query.
+	if !minBatchDate.IsZero() {
+		h.verifyAffectedCheckpoints(r.Context(), minBatchDate)
 	}
 
 	writeJSON(w, http.StatusCreated, results)
@@ -784,6 +815,11 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	qtx := h.queries.WithTx(tx)
 	deleted := 0
 	var skipped []int64
+	// Earliest date among rows actually tombstoned by this batch.
+	// Stays zero if every requested ID was skipped, which suppresses
+	// the post-commit checkpoint hook (nothing changed, nothing to
+	// re-verify).
+	var minDeletedDate time.Time
 
 	for _, id := range req.IDs {
 		existing, err := qtx.GetTransactionByID(r.Context(), id)
@@ -807,6 +843,7 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			writeError(w, http.StatusInternalServerError, "failed to delete transaction")
 			return
 		}
+		minDeletedDate = earliestDate(minDeletedDate, existing.Date)
 		deleted++
 	}
 
@@ -836,6 +873,14 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit batch delete")
 		return
+	}
+
+	// Phase 3.3: reverify every checkpoint on or after the earliest
+	// tombstoned row's date. A zero minDeletedDate means every requested
+	// ID was skipped (missing / tombstoned / not owned) so no rows
+	// actually changed and the hook is a no-op.
+	if !minDeletedDate.IsZero() {
+		h.verifyAffectedCheckpoints(r.Context(), minDeletedDate)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
@@ -946,6 +991,16 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit delete-by-filter")
 		return
+	}
+
+	// Phase 3.3: filter-delete doesn't enumerate per-row dates, and pulling
+	// MIN(date) up-front would require a second round trip to the same
+	// subquery. Since this endpoint exists specifically for wipe-and-reimport
+	// workflows that already touch tens of thousands of rows, conservatively
+	// reverify every checkpoint by passing a zero time.Time — the helper
+	// treats that as "walk all checkpoints regardless of date".
+	if deleted > 0 {
+		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})

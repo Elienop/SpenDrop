@@ -396,3 +396,120 @@ SELECT * FROM transaction_audit
 WHERE occurred_at >= CAST(sqlc.arg(since) AS TEXT)
 ORDER BY occurred_at DESC, id DESC
 LIMIT sqlc.arg(limit);
+
+-- Balance Checkpoints
+--
+-- Beancount-style assertions of the form: on date D, the scope X summed
+-- to Y cents. The verification query is the load-bearing one: it computes
+-- the actual sum over live transactions (t.deleted_at IS NULL, Phase 2.1
+-- invariant) up to and including the checkpoint date and returns int64
+-- cents so the handler can compare against expected_amount_cents without
+-- any float coercion. The scope switch is done inline in the WHERE clause
+-- so the same query serves all three scope types and sqlc generates a
+-- single Go helper.
+--
+-- Tag-scope note: tags are CSV-encoded in transactions.tags, so tag match
+-- uses the canonical CSV-token LIKE pattern. See the long comment on
+-- migration 007_balance_checkpoints.sql for the rationale and the exact
+-- form of the LIKE expression.
+
+-- name: CreateCheckpoint :one
+INSERT INTO balance_checkpoints (
+    user_id,
+    scope_type,
+    scope_id,
+    scope_label,
+    date,
+    expected_amount_cents,
+    note,
+    last_verification_status
+) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+RETURNING *;
+
+-- name: GetCheckpoint :one
+SELECT * FROM balance_checkpoints WHERE id = ?;
+
+-- name: ListCheckpoints :many
+SELECT * FROM balance_checkpoints
+ORDER BY date DESC, id DESC;
+
+-- name: ListCheckpointsByUser :many
+SELECT * FROM balance_checkpoints
+WHERE user_id = ?
+ORDER BY date DESC, id DESC;
+
+-- name: DeleteCheckpoint :execresult
+DELETE FROM balance_checkpoints WHERE id = ?;
+
+-- name: UpdateCheckpointVerification :exec
+UPDATE balance_checkpoints
+SET last_verified_at = CURRENT_TIMESTAMP,
+    last_verification_status = ?
+WHERE id = ?;
+
+-- name: ListCheckpointsAffectedByDate :many
+-- Returns every checkpoint whose date is on or after the supplied date.
+-- Used by the post-mutation/post-import hook: a transaction with date D
+-- can only change the sum-as-of-date for dates greater than or equal to
+-- D, so earlier checkpoints are untouchable by definition and skipped.
+SELECT * FROM balance_checkpoints
+WHERE date >= CAST(sqlc.arg(date) AS TEXT)
+ORDER BY date ASC, id ASC;
+
+-- name: ListStaleCheckpoints :many
+-- Returns checkpoints whose last_verified_at is older than
+-- sqlc.arg(threshold) (RFC3339) or NULL. Consumed by /healthz/data to
+-- re-verify everything that has drifted beyond the freshness window, so
+-- the monitoring scraper carries the cost of periodic re-verification.
+SELECT * FROM balance_checkpoints
+WHERE last_verified_at IS NULL
+   OR last_verified_at < CAST(sqlc.arg(threshold) AS TEXT)
+ORDER BY id ASC;
+
+-- name: CountCheckpointsByStatus :one
+-- One-row, three-column count used by /healthz/data. NULL status is
+-- bucketed into pending so the counts always sum to the total row
+-- count of the table.
+SELECT
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'ok' THEN 1 ELSE 0 END), 0) AS INTEGER) AS ok,
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'mismatch' THEN 1 ELSE 0 END), 0) AS INTEGER) AS mismatch,
+    CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'pending' OR last_verification_status IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS pending
+FROM balance_checkpoints;
+
+-- name: CountStaleMismatchCheckpoints :one
+-- Counts mismatched checkpoints whose last_verified_at is older than the
+-- supplied threshold. /healthz/data flips to 503 when this is greater than
+-- zero, matching the degradation trigger documented in the phase plan.
+SELECT CAST(COALESCE(SUM(1), 0) AS INTEGER) AS n
+FROM balance_checkpoints
+WHERE last_verification_status = 'mismatch'
+  AND last_verified_at IS NOT NULL
+  AND last_verified_at < CAST(sqlc.arg(threshold) AS TEXT);
+
+-- name: VerifyCheckpointTotal :one
+-- The load-bearing verification query. Returns an int64 cents sum over
+-- live transactions up to and including the checkpoint date, for the
+-- scope matching the supplied arguments. Handler compares the returned
+-- actual_cents against the checkpoint expected_amount_cents.
+--
+-- Phase 2.1: t.deleted_at IS NULL filters tombstoned rows out of the
+-- aggregate so a soft-deleted transaction cannot silently flip a
+-- previously-verified checkpoint.
+-- Phase 3.1a: SUM(t.amount_cents) keeps the aggregate in int64 cents; the
+-- COALESCE pins the empty-match case to 0 (not NULL), and the CAST locks
+-- sqlc into an int64 return type.
+--
+-- Every sqlc.arg is wrapped in an explicit CAST so sqlc infers a concrete
+-- Go type for every parameter. Without the casts, scope_type lands as
+-- interface{} because it is only compared against string literals and
+-- scope_id lands as int64 (non-null) which obscures the intent that it
+-- is meaningful only when scope_type = 'category'.
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS actual_cents
+FROM transactions t
+WHERE t.deleted_at IS NULL
+  AND t.date <= CAST(sqlc.arg(date) AS TEXT)
+  AND (
+    CAST(sqlc.arg(scope_type) AS TEXT) = 'total'
+    OR (CAST(sqlc.arg(scope_type) AS TEXT) = 'category' AND t.category_id = CAST(sqlc.arg(scope_id) AS INTEGER))
+    OR (CAST(sqlc.arg(scope_type) AS TEXT) = 'tag' AND ',' || COALESCE(t.tags, '') || ',' LIKE '%,' || CAST(sqlc.arg(scope_label) AS TEXT) || ',%')
+  );

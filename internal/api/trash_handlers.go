@@ -209,6 +209,13 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Phase 3.3: reversing a soft-delete puts the row's cents back into
+	// the live SUM, so every checkpoint on or after existing.Date needs
+	// to be re-verified. existing.Date is the pre-restore copy loaded by
+	// the TOCTOU pre-check above — the store's Restore call doesn't
+	// mutate the date column so that value is still authoritative.
+	h.verifyAffectedCheckpoints(r.Context(), existing.Date)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }
 
@@ -345,6 +352,16 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit batch")
 		return
+	}
+
+	// Phase 3.3: batch restore doesn't pre-load row dates (the IDs arrive
+	// straight from the UI list and adding a per-row GetTransactionByID
+	// would double the query count for no forensic benefit), so pass a
+	// zero time.Time to reverify every checkpoint. This is conservative
+	// but correct — restoring a row always re-adds cents to the live SUM,
+	// so every red/green state is potentially affected.
+	if restored > 0 {
+		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
 
 	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored})
