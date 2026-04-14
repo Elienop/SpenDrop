@@ -465,6 +465,114 @@ type importConfirmRequest struct {
 	ForceAdd          []int            `json:"force_add"`
 }
 
+// importSkipReason enumerates the closed set of reasons a row can be
+// rejected at user-data level during handleImportConfirm. The set is
+// intentionally small and stable — Phase 3.5 property tests in
+// `import_handlers_property_test.go` assert that every row in
+// importResult.Skipped carries one of these reasons, so adding a new
+// rejection branch to processImportRows without also adding a reason
+// constant here will fail the "no silent drops" property and surface
+// the regression loudly instead of letting a row vanish from the count.
+//
+// The reasons are lowercase_snake_case to match the JSON wire format
+// used by predictedSkip on the upload preview path, so a frontend that
+// renders both preview skips and confirm-time outcomes can match
+// strings byte-for-byte without a translation table.
+type importSkipReason string
+
+const (
+	skipReasonEmptyDescription  importSkipReason = "empty_description"
+	skipReasonZeroAmount        importSkipReason = "zero_amount"
+	skipReasonUnparseableDate   importSkipReason = "unparseable_date"
+	skipReasonMissingCategory   importSkipReason = "missing_category"
+	skipReasonDuplicate         importSkipReason = "duplicate"
+	skipReasonForceAddCollision importSkipReason = "force_add_collision"
+)
+
+// importInserted records a row that made it into the transactions table.
+// RowIndex is the 0-based position in the preview so properties can
+// assert one-to-one correspondence between input rows and outcomes.
+// Date and AmountCents carry forward the normalized values stored in
+// the transactions row so Phase 3.5 properties (`TestImportProperty_DateSanity`,
+// `TestImportProperty_AmountSanity`) can assert contract-level
+// invariants without re-querying the database.
+type importInserted struct {
+	RowIndex    int
+	Date        time.Time
+	AmountCents int64
+}
+
+// importSkipped records a user-data-level rejection (bad date, empty
+// description, duplicate content hash, etc.). Reason is drawn from the
+// closed importSkipReason set — no free-form strings — so the "every
+// skipped row names its reason" property can be a simple set membership
+// test.
+type importSkipped struct {
+	RowIndex int
+	Reason   importSkipReason
+}
+
+// importErrored records a system-level failure during row processing
+// (DB lookup error, insert error, unknown category_id). Unlike
+// importSkipped, Reason is free-form because the source is an
+// environmental fault rather than a policy decision. Properties only
+// assert that every row lands in exactly one of the three buckets;
+// they do not test the shape of Reason for errored rows.
+//
+// Reason is scrubbed via sanitizeLogValue at the point of capture so
+// control characters from a pathological underlying error (a corrupt
+// DSN, a SQLite error carrying embedded terminal escapes) cannot
+// reach a downstream consumer verbatim. Today the field is never
+// serialized — the HTTP handler folds the count into `skipped` — but
+// a future operator surface that surfaces per-row errors on
+// `/healthz/data` or an audit-log row would otherwise inherit a
+// log-injection / XSS hazard without any code change at that surface.
+// Sanitizing here means future callers can format the string into
+// any sink without re-checking its provenance.
+type importErrored struct {
+	RowIndex int
+	Reason   string
+}
+
+// importResult is the structured outcome of processImportRows. The
+// conservation invariant — `len(Inserted) + len(Skipped) + len(Errored)
+// == len(input.Rows)` — is enforced by the loop structure:
+// every iteration appends to exactly one of the three slices and then
+// continues. The property test for conservation fuzzes this with
+// randomized input mixes so a future refactor that accidentally drops a
+// row without accounting for it fails loudly.
+type importResult struct {
+	Inserted []importInserted
+	Skipped  []importSkipped
+	Errored  []importErrored
+}
+
+// importProcessInput bundles the already-resolved inputs that
+// processImportRows needs. The HTTP handler builds this once from the
+// incoming importConfirmRequest and the categories table, and passes it
+// by value because it's a handful of slices/maps and the processor only
+// reads from them. The refactored boundary keeps auth, JSON, SQL
+// transaction lifecycle, and the category-load query out of the hot
+// loop so property tests can observe row outcomes without standing up
+// an HTTP round-trip.
+type importProcessInput struct {
+	UserID            int64
+	Rows              []importRow
+	CategoryMap       map[string]int64
+	DefaultCategoryID int64
+	ForceAddSet       map[int]struct{}
+	CatNameToID       map[string]int64
+	CatIDToName       map[int64]string
+}
+
+// errForceAddExhausted is the sentinel returned by resolveForceAddSuffix
+// when no free " (N)" suffix exists within [2, forceAddSuffixCap]. The
+// processor maps this to skipReasonForceAddCollision, while any other
+// error from the suffix loop is treated as a DB fault and flows into
+// the Errored bucket. Separating the two reasons prevents a DB blip
+// from silently burning a force-add slot.
+var errForceAddExhausted = errors.New("force-add suffix exhausted")
+
 // handleImportConfirm inserts all rows from a previously uploaded import
 // into the transactions table.
 func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
@@ -544,139 +652,21 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 	qtx := h.queries.WithTx(tx)
 
-	imported := 0
-	skipped := 0
-	// Phase 3.3: track the earliest date across successfully imported
-	// rows so the post-commit checkpoint verifier can bound its sweep.
-	// A zero value means every row was skipped and the hook is a no-op.
-	var minImportDate time.Time
-
-	for i, row := range entry.Rows {
-		// Parse date
-		date, dateErr := parseImportDate(row.Date)
-		if dateErr != nil {
-			skipped++
-			continue
-		}
-
-		// Validate required fields. Use absolute value for amount because the
-		// system stores amounts as positive numbers (category type determines
-		// expense vs income). Negative values in spreadsheets (refunds/credits)
-		// are converted to positive so they are not silently dropped.
-		amount := math.Abs(row.Amount)
-		if row.Description == "" || amount == 0 {
-			skipped++
-			continue
-		}
-
-		// Resolve category
-		categoryID := resolveCategoryID(row.Category, req.CategoryMap, catNameToID, req.DefaultCategoryID)
-		if categoryID == 0 {
-			skipped++
-			continue
-		}
-		canonicalCategoryName, ok := catIDToName[categoryID]
-		if !ok {
-			// Caller supplied a category_id that isn't in the DB. This
-			// is a client bug (or a racey category deletion); log and
-			// skip rather than 500ing mid-batch.
-			log.Printf("import: resolved category_id=%d not found in lookup (row desc=%s)", categoryID, sanitizeLogValue(row.Description))
-			skipped++
-			continue
-		}
-
-		// Phase 3.4: compute the content hash from the resolved row
-		// identity and check the live index before inserting. Rows
-		// listed in ForceAdd bypass the skip and instead mutate the
-		// description until a non-colliding hash is found.
-		description := row.Description
-		amountCents := dollarsToCents(amount)
-		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
-		_, forceAdd := forceAddSet[i]
-		if !forceAdd {
-			// Ordinary path: look up the hash and skip on a hit. The
-			// lookup runs on qtx so it observes any rows inserted
-			// earlier in this very batch — importing a spreadsheet
-			// that contains the same row twice detects the second
-			// occurrence as a duplicate of the first within the same
-			// commit, which is the correct answer for a household
-			// shared ledger.
-			_, lookupErr := qtx.GetTransactionByContentHash(r.Context(), sql.NullString{String: hash, Valid: true})
-			if lookupErr == nil {
-				skipped++
-				continue
-			}
-			if !errors.Is(lookupErr, sql.ErrNoRows) {
-				log.Printf("import: content hash lookup failed (row=%d): %v", i, lookupErr)
-				skipped++
-				continue
-			}
-		} else {
-			// Force-add path: append " (N)" to the description and
-			// loop until the resulting hash does not collide in the
-			// DB. Start at 2 because "Coffee" and "Coffee (2)" read
-			// naturally as a first and second occurrence to the user.
-			// The cap of 1000 is defensive: under pathological input
-			// (a merchant with 999 legitimate same-day same-amount
-			// transactions) we'd rather fail loudly than spin
-			// forever. In practice the loop almost always terminates
-			// at n=2.
-			suffixed, suffixedHash, suffixErr := resolveForceAddSuffix(
-				r.Context(), qtx, description, date, amountCents, canonicalCategoryName,
-			)
-			if suffixErr != nil {
-				log.Printf("import: force-add suffix failed (row=%d): %v", i, suffixErr)
-				skipped++
-				continue
-			}
-			description = suffixed
-			hash = suffixedHash
-		}
-
-		// Build params. Amount is expected to already be in base currency
-		// (the Excel "Amount (USD)" column). Original amount/currency are
-		// stored as-is for reference; no conversion is applied during import.
-		//
-		// Phase 3.1a: dual-write amount_cents alongside the legacy REAL
-		// amount. The cents value is derived from the same float parsed out
-		// of the spreadsheet so a round-trip export->import is lossless for
-		// any representable money amount.
-		//
-		// Phase 3.4: content_hash is populated from the resolved row
-		// identity computed above. The partial unique index guarantees
-		// the insert fails loudly if the dup check above raced a parallel
-		// import of the same row — there is no silent double-insert path.
-		params := database.CreateTransactionParams{
-			UserID:      user.ID,
-			Date:        date,
-			Amount:      amount,
-			AmountCents: amountCents,
-			Description: description,
-			CategoryID:  categoryID,
-			Tags:        toNullString(row.Tags),
-			Notes:       toNullString(row.Notes),
-			ContentHash: sql.NullString{String: hash, Valid: true},
-		}
-
-		// Handle original amount/currency if present
-		if row.OriginalAmount != 0 {
-			origAmt := math.Abs(row.OriginalAmount)
-			params.OriginalAmount = sql.NullFloat64{Float64: origAmt, Valid: true}
-			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(origAmt), Valid: true}
-		}
-		if row.OriginalCurrency != "" {
-			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
-		}
-
-		if _, err := qtx.CreateTransaction(r.Context(), params); err != nil {
-			log.Printf("import: failed to insert row (date=%s, desc=%s): %v", sanitizeLogValue(row.Date), sanitizeLogValue(description), err)
-			skipped++
-			continue
-		}
-
-		minImportDate = earliestDate(minImportDate, date)
-		imported++
-	}
+	// Phase 3.5: the per-row loop moved into processImportRows so
+	// property tests can observe structured outcomes (inserted/
+	// skipped/errored) without an HTTP round-trip. The handler still
+	// owns auth, JSON, store lookup, category loading, and the SQL
+	// transaction lifecycle — processImportRows only runs the policy
+	// loop.
+	result, minImportDate := processImportRows(r.Context(), qtx, importProcessInput{
+		UserID:            user.ID,
+		Rows:              entry.Rows,
+		CategoryMap:       req.CategoryMap,
+		DefaultCategoryID: req.DefaultCategoryID,
+		ForceAddSet:       forceAddSet,
+		CatNameToID:       catNameToID,
+		CatIDToName:       catIDToName,
+	})
 
 	if err := tx.Commit(); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to commit import")
@@ -697,9 +687,16 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		h.verifyAffectedCheckpoints(r.Context(), minImportDate)
 	}
 
+	// The HTTP response still reports the two-way split (imported vs
+	// skipped) for backwards compatibility with the existing frontend
+	// and the Phase 3.4 regression tests. Errored rows — DB faults, bad
+	// category_ids — are folded into the `skipped` count because from
+	// the user's perspective they are indistinguishable ("this row did
+	// not land"). The structured importResult is only observed by
+	// property tests that call processImportRows directly.
 	writeJSON(w, http.StatusOK, map[string]any{
-		"imported": imported,
-		"skipped":  skipped,
+		"imported": len(result.Inserted),
+		"skipped":  len(result.Skipped) + len(result.Errored),
 		"total":    len(entry.Rows),
 	})
 }
@@ -734,6 +731,242 @@ func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 
 	importStore.Delete(importID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// processImportRows is the pure-processing core of handleImportConfirm.
+// Given an already-open sqlc transaction (qtx), a set of preview rows,
+// and the resolved category lookups, it walks the rows and returns a
+// structured outcome plus the earliest inserted date (for the Phase 3.3
+// checkpoint verifier hook).
+//
+// Phase 3.5 extracted this function out of the HTTP handler so property
+// tests can observe row outcomes directly, without an HTTP round-trip
+// and without standing up auth/JSON plumbing. The HTTP handler still
+// owns auth, decoding, the import store lookup, the category load, and
+// the SQL transaction lifecycle — none of which are interesting to a
+// fuzzed input mix.
+//
+// Conservation invariant — `len(input.Rows) == len(result.Inserted) +
+// len(result.Skipped) + len(result.Errored)` — is enforced by the loop
+// shape: every iteration appends to exactly one slice and then
+// continues. The `import_handlers_property_test.go` TestConservation
+// property exercises this with randomized input so a refactor that
+// forgets to account for a branch fails loudly instead of silently
+// dropping a row from the count.
+//
+// Reason discipline — every row in result.Skipped carries a reason
+// drawn from the closed importSkipReason set — is also exercised by a
+// property. A branch that increments "skipped" without naming the
+// reason fails the "no silent drops with reasons" property within a
+// handful of shrinks.
+//
+// Errors that reach qtx (DB lookup failure, insert failure, unknown
+// category_id) flow into result.Errored rather than a Go-level
+// `error` return. Callers that want to distinguish data errors from
+// systemic errors inspect len(result.Errored); the HTTP handler folds
+// both skipped and errored into the `skipped` count of its JSON
+// response because from the user's perspective a row that did not
+// land is a row that did not land. A future operator surface
+// (`/healthz/data`, audit log) can read the bucket split directly if
+// we decide per-row error visibility is worth the schema change.
+func processImportRows(
+	ctx context.Context,
+	qtx *database.Queries,
+	in importProcessInput,
+) (importResult, time.Time) {
+	var result importResult
+	var minDate time.Time
+
+	for i, row := range in.Rows {
+		// Parse date first — every other check below depends on having
+		// a valid time.Time to feed into the hash formula, and an
+		// unparseable date is the single most common real-world input
+		// bug (stray header rows, footer totals, blank rows). Ordering
+		// matters for which reason "wins" on a row with multiple
+		// defects; the order here matches the pre-refactor behaviour
+		// so no existing test changes its outcome label.
+		//
+		// Phase 3.5 tightens the acceptable date range to the realistic
+		// household ledger window [1900-01-01, 2100-12-31]. parseImportDate
+		// itself still accepts Excel serials up to 9999, but a year outside
+		// the ledger window is almost always a data-entry bug or a
+		// mislabelled cell (someone put an amount into the Date column
+		// and got a 5-digit year out of excelize). The check routes such
+		// rows to `skipReasonUnparseableDate` — the same bucket as a
+		// genuinely garbled string — because the closed reason set
+		// deliberately does not include a separate "out_of_range" code
+		// and downstream UI messaging ("this row has an unusable date")
+		// applies to both paths. Property test
+		// `TestImportProperty_DateSanity` asserts every inserted row
+		// lands in this window.
+		date, dateErr := parseImportDate(row.Date)
+		if dateErr != nil || date.Year() < 1900 || date.Year() > 2100 {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonUnparseableDate,
+			})
+			continue
+		}
+
+		// Required fields. Description is compared to "" not whitespace —
+		// the parsing path already runs strings.TrimSpace before it lands
+		// here, so an all-whitespace cell arrives as "". Amount uses
+		// math.Abs because negative values in spreadsheets (refunds,
+		// credits) are legitimate and get flipped positive at insert
+		// time; the policy is "expense/income is determined by category,
+		// not amount sign".
+		if row.Description == "" {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonEmptyDescription,
+			})
+			continue
+		}
+
+		amount := math.Abs(row.Amount)
+		if amount == 0 {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonZeroAmount,
+			})
+			continue
+		}
+
+		categoryID := resolveCategoryID(row.Category, in.CategoryMap, in.CatNameToID, in.DefaultCategoryID)
+		if categoryID == 0 {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonMissingCategory,
+			})
+			continue
+		}
+		canonicalCategoryName, ok := in.CatIDToName[categoryID]
+		if !ok {
+			// Caller supplied a category_id that isn't in the DB. This
+			// is a client bug (or a racey category deletion); log and
+			// route to Errored rather than Skipped — it's a systemic
+			// fault, not a user-data rejection, and it's correctable
+			// by re-running with a valid default_category_id.
+			log.Printf("import: resolved category_id=%d not found in lookup (row desc=%s)", categoryID, sanitizeLogValue(row.Description))
+			result.Errored = append(result.Errored, importErrored{
+				RowIndex: i,
+				Reason:   fmt.Sprintf("unknown category_id=%d", categoryID),
+			})
+			continue
+		}
+
+		// Phase 3.4: compute the content hash from the resolved row
+		// identity and check the live index before inserting. Rows
+		// listed in ForceAddSet bypass the skip and instead mutate the
+		// description until a non-colliding hash is found.
+		description := row.Description
+		amountCents := dollarsToCents(amount)
+		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
+		_, forceAdd := in.ForceAddSet[i]
+
+		if !forceAdd {
+			// Ordinary path: look up the hash and skip on a hit. The
+			// lookup runs on qtx so it observes any rows inserted
+			// earlier in this very batch — importing a spreadsheet
+			// that contains the same row twice detects the second
+			// occurrence as a duplicate of the first within the same
+			// commit.
+			_, lookupErr := qtx.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
+			if lookupErr == nil {
+				result.Skipped = append(result.Skipped, importSkipped{
+					RowIndex: i,
+					Reason:   skipReasonDuplicate,
+				})
+				continue
+			}
+			if !errors.Is(lookupErr, sql.ErrNoRows) {
+				log.Printf("import: content hash lookup failed (row=%d): %v", i, lookupErr)
+				result.Errored = append(result.Errored, importErrored{
+					RowIndex: i,
+					Reason:   sanitizeLogValue(lookupErr.Error()),
+				})
+				continue
+			}
+		} else {
+			// Force-add path: append " (N)" to the description and
+			// loop until the resulting hash does not collide. An
+			// exhausted suffix cap maps to skipReasonForceAddCollision;
+			// any other error is a DB fault and goes to Errored. The
+			// split is why resolveForceAddSuffix wraps its exhaustion
+			// error with the errForceAddExhausted sentinel.
+			suffixed, suffixedHash, suffixErr := resolveForceAddSuffix(
+				ctx, qtx, description, date, amountCents, canonicalCategoryName,
+			)
+			if suffixErr != nil {
+				if errors.Is(suffixErr, errForceAddExhausted) {
+					result.Skipped = append(result.Skipped, importSkipped{
+						RowIndex: i,
+						Reason:   skipReasonForceAddCollision,
+					})
+				} else {
+					log.Printf("import: force-add suffix failed (row=%d): %v", i, suffixErr)
+					result.Errored = append(result.Errored, importErrored{
+						RowIndex: i,
+						Reason:   sanitizeLogValue(suffixErr.Error()),
+					})
+				}
+				continue
+			}
+			description = suffixed
+			hash = suffixedHash
+		}
+
+		// Build params. Amount is expected to already be in base currency
+		// (the Excel "Amount (USD)" column). Original amount/currency are
+		// stored as-is for reference; no conversion is applied during import.
+		//
+		// Phase 3.1a: dual-write amount_cents alongside the legacy REAL
+		// amount. The cents value is derived from the same float parsed
+		// out of the spreadsheet so a round-trip export->import is
+		// lossless for any representable money amount.
+		//
+		// Phase 3.4: content_hash is populated from the resolved row
+		// identity computed above. The partial unique index guarantees
+		// the insert fails loudly if the dup check above raced a parallel
+		// import of the same row — there is no silent double-insert path.
+		params := database.CreateTransactionParams{
+			UserID:      in.UserID,
+			Date:        date,
+			Amount:      amount,
+			AmountCents: amountCents,
+			Description: description,
+			CategoryID:  categoryID,
+			Tags:        toNullString(row.Tags),
+			Notes:       toNullString(row.Notes),
+			ContentHash: sql.NullString{String: hash, Valid: true},
+		}
+		if row.OriginalAmount != 0 {
+			origAmt := math.Abs(row.OriginalAmount)
+			params.OriginalAmount = sql.NullFloat64{Float64: origAmt, Valid: true}
+			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(origAmt), Valid: true}
+		}
+		if row.OriginalCurrency != "" {
+			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
+		}
+
+		if _, err := qtx.CreateTransaction(ctx, params); err != nil {
+			log.Printf("import: failed to insert row (date=%s, desc=%s): %v", sanitizeLogValue(row.Date), sanitizeLogValue(description), err)
+			result.Errored = append(result.Errored, importErrored{
+				RowIndex: i,
+				Reason:   sanitizeLogValue(err.Error()),
+			})
+			continue
+		}
+
+		minDate = earliestDate(minDate, date)
+		result.Inserted = append(result.Inserted, importInserted{
+			RowIndex:    i,
+			Date:        date,
+			AmountCents: amountCents,
+		})
+	}
+
+	return result, minDate
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
@@ -833,7 +1066,7 @@ func resolveForceAddSuffix(
 		}
 		// err == nil → hash hit, try the next suffix.
 	}
-	return "", "", fmt.Errorf("no free suffix in [2, %d]", forceAddSuffixCap)
+	return "", "", fmt.Errorf("no free suffix in [2, %d]: %w", forceAddSuffixCap, errForceAddExhausted)
 }
 
 // resolveCategoryID determines the category ID for an imported row.
