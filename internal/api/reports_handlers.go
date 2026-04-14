@@ -73,8 +73,8 @@ func (h *Handler) handleReportYoY(w http.ResponseWriter, r *http.Request) {
 		for m := 1; m <= 12; m++ {
 			entries[m-1] = yoyMonthEntry{Month: m}
 			if row, ok := lookup[m]; ok {
-				entries[m-1].Expenses = row.Expenses
-				entries[m-1].Income = row.Income
+				entries[m-1].Expenses = centsToDollars(row.ExpensesCents)
+				entries[m-1].Income = centsToDollars(row.IncomeCents)
 			}
 		}
 		return entries
@@ -150,7 +150,7 @@ func (h *Handler) handleReportCategoryTrends(w http.ResponseWriter, r *http.Requ
 			catOrder = append(catOrder, row.ID)
 		}
 		entry.Data = append(entry.Data, monthTotal{
-			Year: int(row.Year), Month: int(row.Month), Total: row.Total,
+			Year: int(row.Year), Month: int(row.Month), Total: centsToDollars(row.TotalCents),
 		})
 	}
 
@@ -219,9 +219,12 @@ func (h *Handler) handleReportIncomeExpenses(w http.ResponseWriter, r *http.Requ
 		y, m := t.Year(), int(t.Month())
 		entry := incomeExpenseEntry{Year: y, Month: m}
 		if row, ok := lookup[mk{y, m}]; ok {
-			entry.Income = row.Income
-			entry.Expenses = row.Expenses
-			entry.Net = row.Income - row.Expenses
+			// Phase 3.1a: compute net in cents (int64) before converting
+			// so the subtraction is exact, then convert once at the edge.
+			netCents := row.IncomeCents - row.ExpensesCents
+			entry.Income = centsToDollars(row.IncomeCents)
+			entry.Expenses = centsToDollars(row.ExpensesCents)
+			entry.Net = centsToDollars(netCents)
 		}
 		entries = append(entries, entry)
 	}
@@ -278,7 +281,7 @@ func (h *Handler) handleReportTopMerchants(w http.ResponseWriter, r *http.Reques
 		merchants[i] = topMerchantEntry{
 			Description: row.Description,
 			TxCount:     row.TxCount,
-			Total:       row.Total,
+			Total:       centsToDollars(row.TotalCents),
 		}
 	}
 

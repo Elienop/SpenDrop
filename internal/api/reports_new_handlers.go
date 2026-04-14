@@ -43,24 +43,27 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Get all explicit budgets for the year
+	// Get all explicit budgets for the year. Phase 3.1a: consume the new
+	// AmountCents column and keep the budgetMap in int64 cents so the
+	// fallback / default arithmetic is exact.
 	budgets, err := h.queries.ListBudgetsByYear(ctx, int64(year))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list budgets")
 		return
 	}
-	budgetMap := make(map[int]float64)
+	budgetMap := make(map[int]int64)
 	for _, b := range budgets {
-		budgetMap[int(b.Month)] = b.Amount
+		budgetMap[int(b.Month)] = b.AmountCents
 	}
 
-	// Fallback: default_budget setting
-	var defaultBudget float64
+	// Fallback: default_budget setting - stored as a user-entered string, so
+	// parse once as float and immediately convert to cents.
+	var defaultBudgetCents int64
 	setting, err := h.queries.GetSetting(ctx, SettingDefaultBudget)
 	if err == nil {
 		parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 		if parseErr == nil {
-			defaultBudget = parsed
+			defaultBudgetCents = dollarsToCents(parsed)
 		}
 	}
 
@@ -75,22 +78,23 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to sum expenses")
 		return
 	}
-	actualMap := make(map[int]float64)
+	actualMap := make(map[int]int64)
 	for _, row := range rows {
-		actualMap[int(row.Month)] = row.Expenses
+		actualMap[int(row.Month)] = row.ExpensesCents
 	}
 
-	// Build 12-month response
+	// Build 12-month response. Conversion to float dollars happens once
+	// per month here, at the wire edge.
 	data := make([]budgetVsActualEntry, 12)
 	for m := 1; m <= 12; m++ {
-		budget, ok := budgetMap[m]
+		budgetCents, ok := budgetMap[m]
 		if !ok {
-			budget = defaultBudget
+			budgetCents = defaultBudgetCents
 		}
 		data[m-1] = budgetVsActualEntry{
 			Month:  m,
-			Budget: budget,
-			Actual: actualMap[m],
+			Budget: centsToDollars(budgetCents),
+			Actual: centsToDollars(actualMap[m]),
 		}
 	}
 
@@ -120,7 +124,8 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 	yearStr := fmt.Sprintf("%d", year)
 	monthStr := fmt.Sprintf("%02d", month)
 
-	// Current month daily totals
+	// Current month daily totals. Phase 3.1a: sqlc returns DailyTotalCents
+	// (int64); convert to float dollars per row at the wire edge.
 	currentRows, err := h.queries.SumExpensesByDayInMonth(ctx, database.SumExpensesByDayInMonthParams{
 		Year:  yearStr,
 		Month: monthStr,
@@ -131,7 +136,7 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 	}
 	current := make([]dailyEntry, len(currentRows))
 	for i, row := range currentRows {
-		current[i] = dailyEntry{Day: int(row.Day), DailyTotal: row.DailyTotal}
+		current[i] = dailyEntry{Day: int(row.Day), DailyTotal: centsToDollars(row.DailyTotalCents)}
 	}
 
 	// Previous month daily totals
@@ -148,22 +153,24 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 	}
 	previous := make([]dailyEntry, len(prevRows))
 	for i, row := range prevRows {
-		previous[i] = dailyEntry{Day: int(row.Day), DailyTotal: row.DailyTotal}
+		previous[i] = dailyEntry{Day: int(row.Day), DailyTotal: centsToDollars(row.DailyTotalCents)}
 	}
 
-	// Budget resolution (same fallback as budget-vs-actual)
-	var budget float64
+	// Budget resolution (same fallback as budget-vs-actual). Phase 3.1a:
+	// consume AmountCents from the row; parse the default-budget setting
+	// once then convert to cents immediately.
+	var budgetCents int64
 	b, err := h.queries.GetBudget(ctx, database.GetBudgetParams{
 		Year: int64(year), Month: int64(month),
 	})
 	if err == nil {
-		budget = b.Amount
+		budgetCents = b.AmountCents
 	} else if errors.Is(err, sql.ErrNoRows) {
 		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
 			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 			if parseErr == nil {
-				budget = parsed
+				budgetCents = dollarsToCents(parsed)
 			}
 		}
 	} else {
@@ -175,7 +182,7 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"days_in_month": daysInMonth,
-		"budget":        budget,
+		"budget":        centsToDollars(budgetCents),
 		"current":       current,
 		"previous":      previous,
 	})
@@ -212,7 +219,7 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 
 	data := make([]heatmapEntry, len(rows))
 	for i, row := range rows {
-		data[i] = heatmapEntry{Date: row.Date.Format("2006-01-02"), Total: row.Total}
+		data[i] = heatmapEntry{Date: row.Date.Format("2006-01-02"), Total: centsToDollars(row.TotalCents)}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
@@ -263,16 +270,22 @@ func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Phase 3.1a: AnnualTotalCents (int64) flows out of sqlc; convert to
+	// float dollars at the wire edge. MonthlyAvg does a float division
+	// because it is an average, but the int64 numerator/denominator are
+	// themselves exact so the only float step is the final rounding, which
+	// matches pre-cents behaviour exactly.
 	data := make([]recurringEntry, 0, len(rows))
 	for _, row := range rows {
 		if dismissed[row.Description] {
 			continue
 		}
+		annualTotal := centsToDollars(row.AnnualTotalCents)
 		data = append(data, recurringEntry{
 			Description: row.Description,
-			MonthlyAvg:  math.Round(row.AnnualTotal/float64(row.MonthCount)*100) / 100,
+			MonthlyAvg:  math.Round(annualTotal/float64(row.MonthCount)*100) / 100,
 			MonthCount:  row.MonthCount,
-			AnnualTotal: row.AnnualTotal,
+			AnnualTotal: annualTotal,
 		})
 	}
 
@@ -408,10 +421,15 @@ func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Go-side aggregation: split CSV tags, accumulate per tag
+	// Go-side aggregation: split CSV tags, accumulate per tag. Phase 3.1a:
+	// the per-tag running total is int64 cents (not float64 dollars) so the
+	// accumulation across thousands of rows is exact. The previous version
+	// accumulated row.Amount (float64) and wore a math.Round(*100)/100
+	// patch at the end - that is the exact pattern Phase 3.1a exists to
+	// eliminate by making float drift impossible by construction.
 	type tagAgg struct {
-		total float64
-		count int
+		totalCents int64
+		count      int
 	}
 	agg := make(map[string]*tagAgg)
 	for _, row := range rows {
@@ -426,17 +444,18 @@ func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
 			if _, ok := agg[tag]; !ok {
 				agg[tag] = &tagAgg{}
 			}
-			agg[tag].total += row.Amount
+			agg[tag].totalCents += row.AmountCents
 			agg[tag].count++
 		}
 	}
 
-	// Sort by total descending
+	// Sort by total descending. Convert to dollars at the wire edge; the
+	// rounding patch is gone because the int64 sum is already exact.
 	data := make([]tagEntry, 0, len(agg))
 	for tag, a := range agg {
 		data = append(data, tagEntry{
 			Tag:   tag,
-			Total: math.Round(a.total*100) / 100,
+			Total: centsToDollars(a.totalCents),
 			Count: a.count,
 		})
 	}

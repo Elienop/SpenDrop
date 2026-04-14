@@ -17,10 +17,14 @@ import (
 	"github.com/elienop/spendrop/internal/database"
 )
 
-// sortColumnWhitelist maps frontend sort_by values to safe SQL column expressions.
+// sortColumnWhitelist maps frontend sort_by values to safe SQL column
+// expressions. Phase 3.1a: "amount" now routes to t.amount_cents so sort
+// order is determined by exact int64 values; sorting on the legacy REAL
+// column would occasionally invert two rows whose float representations
+// differed by one ULP below the visible cent.
 var sortColumnWhitelist = map[string]string{
 	"date":        "t.date",
-	"amount":      "t.amount",
+	"amount":      "t.amount_cents",
 	"description": "t.description",
 	"category":    "c.name",
 	"tags":        "t.tags",
@@ -89,19 +93,27 @@ type transactionListResponse struct {
 	PerPage      int                   `json:"per_page"`
 }
 
+// toTransactionResponse converts a database.Transaction into the JSON wire
+// shape. Phase 3.1a: reads t.AmountCents / t.OriginalAmountCents (the new
+// integer cents columns) and converts to dollars exactly once via
+// centsToDollars. The legacy t.Amount / t.OriginalAmount REAL columns stay
+// populated by every writer until migration 010, but we deliberately ignore
+// them on the read side so the handler path never touches a float sum -
+// the whole point of Phase 3.1a is to make float drift impossible by
+// construction for every aggregation that flows through this function.
 func toTransactionResponse(t database.Transaction) transactionResponse {
 	resp := transactionResponse{
 		ID:          t.ID,
 		UserID:      t.UserID,
 		Date:        t.Date.Format("2006-01-02"),
-		Amount:      t.Amount,
+		Amount:      centsToDollars(t.AmountCents),
 		Description: t.Description,
 		CategoryID:  t.CategoryID,
 		CreatedAt:   t.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:   t.UpdatedAt.Format(time.RFC3339),
 	}
-	if t.OriginalAmount.Valid {
-		amt := t.OriginalAmount.Float64
+	if t.OriginalAmountCents.Valid {
+		amt := centsToDollars(t.OriginalAmountCents.Int64)
 		resp.OriginalAmount = &amt
 	}
 	if t.OriginalCurrency.Valid {
@@ -220,8 +232,15 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	orderClause := fmt.Sprintf(" ORDER BY %s %s, t.id %s", sortCol, sortDir, sortDir)
 
 	// Data query
+	//
+	// Phase 3.1a: reads t.amount_cents (int64) rather than t.amount (float64).
+	// The legacy REAL column is still populated by every writer (dual-write
+	// contract in queries.sql), but the aggregation/list path consumes cents
+	// only and converts to dollars exactly once at the wire edge via
+	// centsToDollars. This eliminates the per-row float round-trip that
+	// would otherwise reintroduce IEEE-754 drift into the list endpoint.
 	offset := (page - 1) * perPage
-	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency,
+	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount_cents, t.original_amount_cents, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
 		c.name AS category_name, c.type AS category_type
 		FROM transactions t
@@ -242,7 +261,8 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	for rows.Next() {
 		var (
 			tr           transactionResponse
-			origAmt      sql.NullFloat64
+			amountCents  int64
+			origAmtCents sql.NullInt64
 			origCur      sql.NullString
 			tags         sql.NullString
 			notes        sql.NullString
@@ -253,20 +273,21 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 			categoryType string
 		)
 		if err := rows.Scan(
-			&tr.ID, &tr.UserID, &date, &tr.Amount, &origAmt, &origCur,
+			&tr.ID, &tr.UserID, &date, &amountCents, &origAmtCents, &origCur,
 			&tr.Description, &tr.CategoryID, &tags, &notes, &createdAt, &updatedAt,
 			&categoryName, &categoryType,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
 		}
+		tr.Amount = centsToDollars(amountCents)
 		tr.Date = date.Format("2006-01-02")
 		tr.CreatedAt = createdAt.Format(time.RFC3339)
 		tr.UpdatedAt = updatedAt.Format(time.RFC3339)
 		tr.CategoryName = categoryName
 		tr.CategoryType = categoryType
-		if origAmt.Valid {
-			v := origAmt.Float64
+		if origAmtCents.Valid {
+			v := centsToDollars(origAmtCents.Int64)
 			tr.OriginalAmount = &v
 		}
 		if origCur.Valid {
@@ -321,15 +342,17 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
-		UserID:           user.ID,
-		Date:             date,
-		Amount:           amount,
-		OriginalAmount:   origAmt,
-		OriginalCurrency: origCur,
-		Description:      req.Description,
-		CategoryID:       req.CategoryID,
-		Tags:             toNullString(req.Tags),
-		Notes:            toNullString(req.Notes),
+		UserID:              user.ID,
+		Date:                date,
+		Amount:              amount,
+		AmountCents:         dollarsToCents(amount),
+		OriginalAmount:      origAmt,
+		OriginalAmountCents: nullableDollarsToCents(origAmt),
+		OriginalCurrency:    origCur,
+		Description:         req.Description,
+		CategoryID:          req.CategoryID,
+		Tags:                toNullString(req.Tags),
+		Notes:               toNullString(req.Notes),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
@@ -418,15 +441,17 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
-		Date:             date,
-		Amount:           amount,
-		OriginalAmount:   origAmt,
-		OriginalCurrency: origCur,
-		Description:      req.Description,
-		CategoryID:       req.CategoryID,
-		Tags:             toNullString(req.Tags),
-		Notes:            toNullString(req.Notes),
-		ID:               id,
+		Date:                date,
+		Amount:              amount,
+		AmountCents:         dollarsToCents(amount),
+		OriginalAmount:      origAmt,
+		OriginalAmountCents: nullableDollarsToCents(origAmt),
+		OriginalCurrency:    origCur,
+		Description:         req.Description,
+		CategoryID:          req.CategoryID,
+		Tags:                toNullString(req.Tags),
+		Notes:               toNullString(req.Notes),
+		ID:                  id,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update transaction")
@@ -541,15 +566,17 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		}
 
 		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
-			UserID:           user.ID,
-			Date:             date,
-			Amount:           amount,
-			OriginalAmount:   origAmt,
-			OriginalCurrency: origCur,
-			Description:      req.Description,
-			CategoryID:       req.CategoryID,
-			Tags:             toNullString(req.Tags),
-			Notes:            toNullString(req.Notes),
+			UserID:              user.ID,
+			Date:                date,
+			Amount:              amount,
+			AmountCents:         dollarsToCents(amount),
+			OriginalAmount:      origAmt,
+			OriginalAmountCents: nullableDollarsToCents(origAmt),
+			OriginalCurrency:    origCur,
+			Description:         req.Description,
+			CategoryID:          req.CategoryID,
+			Tags:                toNullString(req.Tags),
+			Notes:               toNullString(req.Notes),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))

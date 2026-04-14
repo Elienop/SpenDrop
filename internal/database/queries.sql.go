@@ -118,21 +118,23 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 
 const createTransaction = `-- name: CreateTransaction :one
 
-INSERT INTO transactions (user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at
+INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents
 `
 
 type CreateTransactionParams struct {
-	UserID           int64           `json:"user_id"`
-	Date             time.Time       `json:"date"`
-	Amount           float64         `json:"amount"`
-	OriginalAmount   sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency sql.NullString  `json:"original_currency"`
-	Description      string          `json:"description"`
-	CategoryID       int64           `json:"category_id"`
-	Tags             sql.NullString  `json:"tags"`
-	Notes            sql.NullString  `json:"notes"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	Amount              float64         `json:"amount"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
 }
 
 // Transactions
@@ -148,12 +150,18 @@ type CreateTransactionParams struct {
 //
 // When adding a new transactions read, place it in queries.sql (not raw
 // SQL in a handler) and add AND t.deleted_at IS NULL by default.
+// Dual-write contract (Phase 3.1a): writers populate BOTH the legacy REAL
+// columns (amount, original_amount) AND the new INTEGER _cents columns until
+// migration 010 drops the legacy columns. Keep the caller math local -
+// amount_cents = int64(math.Round(amount*100)) at the call site.
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
 		arg.Date,
 		arg.Amount,
+		arg.AmountCents,
 		arg.OriginalAmount,
+		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
 		arg.Description,
 		arg.CategoryID,
@@ -175,6 +183,8 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.AmountCents,
+		&i.OriginalAmountCents,
 	)
 	return i, err
 }
@@ -272,7 +282,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id int64) (sql.Result, error) 
 
 const getBudget = `-- name: GetBudget :one
 
-SELECT id, year, month, amount, updated_at FROM budgets WHERE year = ? AND month = ?
+SELECT id, year, month, amount, updated_at, amount_cents FROM budgets WHERE year = ? AND month = ?
 `
 
 type GetBudgetParams struct {
@@ -290,6 +300,7 @@ func (q *Queries) GetBudget(ctx context.Context, arg GetBudgetParams) (Budget, e
 		&i.Month,
 		&i.Amount,
 		&i.UpdatedAt,
+		&i.AmountCents,
 	)
 	return i, err
 }
@@ -333,7 +344,7 @@ func (q *Queries) GetCurrency(ctx context.Context, code string) (Currency, error
 
 const getSavingsGoal = `-- name: GetSavingsGoal :one
 
-SELECT id, year, target_amount, updated_at FROM savings_goals WHERE year = ?
+SELECT id, year, target_amount, updated_at, target_amount_cents FROM savings_goals WHERE year = ?
 `
 
 // Savings Goals
@@ -345,6 +356,7 @@ func (q *Queries) GetSavingsGoal(ctx context.Context, year int64) (SavingsGoal, 
 		&i.Year,
 		&i.TargetAmount,
 		&i.UpdatedAt,
+		&i.TargetAmountCents,
 	)
 	return i, err
 }
@@ -381,27 +393,29 @@ func (q *Queries) GetSetting(ctx context.Context, key string) (AppSetting, error
 }
 
 const getTransactionByID = `-- name: GetTransactionByID :one
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?
 `
 
 type GetTransactionByIDRow struct {
-	ID               int64           `json:"id"`
-	UserID           int64           `json:"user_id"`
-	Date             time.Time       `json:"date"`
-	Amount           float64         `json:"amount"`
-	OriginalAmount   sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency sql.NullString  `json:"original_currency"`
-	Description      string          `json:"description"`
-	CategoryID       int64           `json:"category_id"`
-	Tags             sql.NullString  `json:"tags"`
-	Notes            sql.NullString  `json:"notes"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	DeletedAt        sql.NullTime    `json:"deleted_at"`
-	CategoryType     string          `json:"category_type"`
+	ID                  int64           `json:"id"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	Amount              float64         `json:"amount"`
+	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	DeletedAt           sql.NullTime    `json:"deleted_at"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	CategoryType        string          `json:"category_type"`
 }
 
 // Mutation-only caller: used by TransactionStore.Update/Delete to emit the
@@ -426,6 +440,8 @@ func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransact
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.DeletedAt,
+		&i.AmountCents,
+		&i.OriginalAmountCents,
 		&i.CategoryType,
 	)
 	return i, err
@@ -566,7 +582,7 @@ func (q *Queries) ListAllCategories(ctx context.Context) ([]Category, error) {
 }
 
 const listBudgetsByYear = `-- name: ListBudgetsByYear :many
-SELECT id, year, month, amount, updated_at FROM budgets WHERE year = ? ORDER BY month
+SELECT id, year, month, amount, updated_at, amount_cents FROM budgets WHERE year = ? ORDER BY month
 `
 
 func (q *Queries) ListBudgetsByYear(ctx context.Context, year int64) ([]Budget, error) {
@@ -584,6 +600,7 @@ func (q *Queries) ListBudgetsByYear(ctx context.Context, year int64) ([]Budget, 
 			&i.Month,
 			&i.Amount,
 			&i.UpdatedAt,
+			&i.AmountCents,
 		); err != nil {
 			return nil, err
 		}
@@ -635,7 +652,7 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 }
 
 const listDeletedTransactions = `-- name: ListDeletedTransactions :many
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, c.name AS category_name, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NOT NULL
@@ -649,21 +666,23 @@ type ListDeletedTransactionsParams struct {
 }
 
 type ListDeletedTransactionsRow struct {
-	ID               int64           `json:"id"`
-	UserID           int64           `json:"user_id"`
-	Date             time.Time       `json:"date"`
-	Amount           float64         `json:"amount"`
-	OriginalAmount   sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency sql.NullString  `json:"original_currency"`
-	Description      string          `json:"description"`
-	CategoryID       int64           `json:"category_id"`
-	Tags             sql.NullString  `json:"tags"`
-	Notes            sql.NullString  `json:"notes"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
-	DeletedAt        sql.NullTime    `json:"deleted_at"`
-	CategoryName     string          `json:"category_name"`
-	CategoryType     string          `json:"category_type"`
+	ID                  int64           `json:"id"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	Amount              float64         `json:"amount"`
+	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	DeletedAt           sql.NullTime    `json:"deleted_at"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	CategoryName        string          `json:"category_name"`
+	CategoryType        string          `json:"category_type"`
 }
 
 func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTransactionsParams) ([]ListDeletedTransactionsRow, error) {
@@ -689,6 +708,8 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.DeletedAt,
+			&i.AmountCents,
+			&i.OriginalAmountCents,
 			&i.CategoryName,
 			&i.CategoryType,
 		); err != nil {
@@ -783,7 +804,7 @@ func (q *Queries) ListSavedFilters(ctx context.Context, userID int64) ([]SavedFi
 }
 
 const listSavingsGoals = `-- name: ListSavingsGoals :many
-SELECT id, year, target_amount, updated_at FROM savings_goals ORDER BY year DESC
+SELECT id, year, target_amount, updated_at, target_amount_cents FROM savings_goals ORDER BY year DESC
 `
 
 func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
@@ -800,6 +821,7 @@ func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
 			&i.Year,
 			&i.TargetAmount,
 			&i.UpdatedAt,
+			&i.TargetAmountCents,
 		); err != nil {
 			return nil, err
 		}
@@ -909,7 +931,7 @@ const recurringDescriptions = `-- name: RecurringDescriptions :many
 
 SELECT t.description,
        COUNT(DISTINCT strftime('%Y-%m', t.date)) AS month_count,
-       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS annual_total
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS annual_total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -917,13 +939,13 @@ WHERE c.type = 'expense'
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
 GROUP BY t.description
 HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
-ORDER BY annual_total DESC
+ORDER BY annual_total_cents DESC
 `
 
 type RecurringDescriptionsRow struct {
-	Description string  `json:"description"`
-	MonthCount  int64   `json:"month_count"`
-	AnnualTotal float64 `json:"annual_total"`
+	Description      string `json:"description"`
+	MonthCount       int64  `json:"month_count"`
+	AnnualTotalCents int64  `json:"annual_total_cents"`
 }
 
 // Recurring Expenses
@@ -936,7 +958,7 @@ func (q *Queries) RecurringDescriptions(ctx context.Context, year string) ([]Rec
 	items := []RecurringDescriptionsRow{}
 	for rows.Next() {
 		var i RecurringDescriptionsRow
-		if err := rows.Scan(&i.Description, &i.MonthCount, &i.AnnualTotal); err != nil {
+		if err := rows.Scan(&i.Description, &i.MonthCount, &i.AnnualTotalCents); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -980,7 +1002,7 @@ func (q *Queries) SoftDeleteTransaction(ctx context.Context, id int64) error {
 }
 
 const sumByCategoryForMonth = `-- name: SumByCategoryForMonth :many
-SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -988,7 +1010,7 @@ WHERE c.type = 'expense'
     AND strftime('%Y', t.date) = CAST(?1 AS TEXT)
     AND strftime('%m', t.date) = CAST(?2 AS TEXT)
 GROUP BY c.id
-ORDER BY total DESC
+ORDER BY total_cents DESC
 `
 
 type SumByCategoryForMonthParams struct {
@@ -997,9 +1019,9 @@ type SumByCategoryForMonthParams struct {
 }
 
 type SumByCategoryForMonthRow struct {
-	ID    int64   `json:"id"`
-	Name  string  `json:"name"`
-	Total float64 `json:"total"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	TotalCents int64  `json:"total_cents"`
 }
 
 func (q *Queries) SumByCategoryForMonth(ctx context.Context, arg SumByCategoryForMonthParams) ([]SumByCategoryForMonthRow, error) {
@@ -1011,7 +1033,7 @@ func (q *Queries) SumByCategoryForMonth(ctx context.Context, arg SumByCategoryFo
 	items := []SumByCategoryForMonthRow{}
 	for rows.Next() {
 		var i SumByCategoryForMonthRow
-		if err := rows.Scan(&i.ID, &i.Name, &i.Total); err != nil {
+		if err := rows.Scan(&i.ID, &i.Name, &i.TotalCents); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1033,7 +1055,7 @@ SELECT
     c.type AS category_type,
     CAST(strftime('%Y', t.date) AS INTEGER) AS year,
     CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+    CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
@@ -1048,12 +1070,12 @@ type SumByCategoryForRangeParams struct {
 }
 
 type SumByCategoryForRangeRow struct {
-	ID           int64   `json:"id"`
-	Name         string  `json:"name"`
-	CategoryType string  `json:"category_type"`
-	Year         int64   `json:"year"`
-	Month        int64   `json:"month"`
-	Total        float64 `json:"total"`
+	ID           int64  `json:"id"`
+	Name         string `json:"name"`
+	CategoryType string `json:"category_type"`
+	Year         int64  `json:"year"`
+	Month        int64  `json:"month"`
+	TotalCents   int64  `json:"total_cents"`
 }
 
 // Reports
@@ -1072,7 +1094,7 @@ func (q *Queries) SumByCategoryForRange(ctx context.Context, arg SumByCategoryFo
 			&i.CategoryType,
 			&i.Year,
 			&i.Month,
-			&i.Total,
+			&i.TotalCents,
 		); err != nil {
 			return nil, err
 		}
@@ -1091,8 +1113,8 @@ const sumByMonthRange = `-- name: SumByMonthRange :many
 SELECT
     CAST(strftime('%Y', t.date) AS INTEGER) AS year,
     CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount ELSE 0 END), 0) AS REAL) AS expenses,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount_cents ELSE 0 END), 0) AS INTEGER) AS expenses_cents,
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount_cents ELSE 0 END), 0) AS INTEGER) AS income_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
@@ -1107,10 +1129,10 @@ type SumByMonthRangeParams struct {
 }
 
 type SumByMonthRangeRow struct {
-	Year     int64   `json:"year"`
-	Month    int64   `json:"month"`
-	Expenses float64 `json:"expenses"`
-	Income   float64 `json:"income"`
+	Year          int64 `json:"year"`
+	Month         int64 `json:"month"`
+	ExpensesCents int64 `json:"expenses_cents"`
+	IncomeCents   int64 `json:"income_cents"`
 }
 
 func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams) ([]SumByMonthRangeRow, error) {
@@ -1125,8 +1147,8 @@ func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams
 		if err := rows.Scan(
 			&i.Year,
 			&i.Month,
-			&i.Expenses,
-			&i.Income,
+			&i.ExpensesCents,
+			&i.IncomeCents,
 		); err != nil {
 			return nil, err
 		}
@@ -1143,7 +1165,7 @@ func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams
 
 const sumExpensesByDay = `-- name: SumExpensesByDay :many
 
-SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT t.date, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -1154,8 +1176,8 @@ ORDER BY t.date
 `
 
 type SumExpensesByDayRow struct {
-	Date  time.Time `json:"date"`
-	Total float64   `json:"total"`
+	Date       time.Time `json:"date"`
+	TotalCents int64     `json:"total_cents"`
 }
 
 // Spending Heatmap
@@ -1168,7 +1190,7 @@ func (q *Queries) SumExpensesByDay(ctx context.Context, year string) ([]SumExpen
 	items := []SumExpensesByDayRow{}
 	for rows.Next() {
 		var i SumExpensesByDayRow
-		if err := rows.Scan(&i.Date, &i.Total); err != nil {
+		if err := rows.Scan(&i.Date, &i.TotalCents); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1185,7 +1207,7 @@ func (q *Queries) SumExpensesByDay(ctx context.Context, year string) ([]SumExpen
 const sumExpensesByDayInMonth = `-- name: SumExpensesByDayInMonth :many
 
 SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
-       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS daily_total
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS daily_total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -1202,8 +1224,8 @@ type SumExpensesByDayInMonthParams struct {
 }
 
 type SumExpensesByDayInMonthRow struct {
-	Day        int64   `json:"day"`
-	DailyTotal float64 `json:"daily_total"`
+	Day             int64 `json:"day"`
+	DailyTotalCents int64 `json:"daily_total_cents"`
 }
 
 // Expense Velocity
@@ -1216,7 +1238,7 @@ func (q *Queries) SumExpensesByDayInMonth(ctx context.Context, arg SumExpensesBy
 	items := []SumExpensesByDayInMonthRow{}
 	for rows.Next() {
 		var i SumExpensesByDayInMonthRow
-		if err := rows.Scan(&i.Day, &i.DailyTotal); err != nil {
+		if err := rows.Scan(&i.Day, &i.DailyTotalCents); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1232,7 +1254,7 @@ func (q *Queries) SumExpensesByDayInMonth(ctx context.Context, arg SumExpensesBy
 
 const sumExpensesByMonth = `-- name: SumExpensesByMonth :one
 
-SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -1247,15 +1269,23 @@ type SumExpensesByMonthParams struct {
 }
 
 // Dashboard aggregation queries
-func (q *Queries) SumExpensesByMonth(ctx context.Context, arg SumExpensesByMonthParams) (float64, error) {
+//
+// Phase 3.1a: every aggregation below sums t.amount_cents (int64) instead of
+// t.amount (float64). The result alias is renamed to `*_cents` so the
+// generated Go field is self-documenting and so every consumer at the
+// handler boundary is forced to decide "do I need cents or dollars here?"
+// at the call site rather than trusting float arithmetic implicitly. The
+// CAST(... AS INTEGER) pins the return type - without it sqlc can get
+// confused by SUM() over a nullable integer column.
+func (q *Queries) SumExpensesByMonth(ctx context.Context, arg SumExpensesByMonthParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, sumExpensesByMonth, arg.Year, arg.Month)
-	var total float64
-	err := row.Scan(&total)
-	return total, err
+	var total_cents int64
+	err := row.Scan(&total_cents)
+	return total_cents, err
 }
 
 const sumIncomeByMonth = `-- name: SumIncomeByMonth :one
-SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'income'
@@ -1269,11 +1299,11 @@ type SumIncomeByMonthParams struct {
 	Month string `json:"month"`
 }
 
-func (q *Queries) SumIncomeByMonth(ctx context.Context, arg SumIncomeByMonthParams) (float64, error) {
+func (q *Queries) SumIncomeByMonth(ctx context.Context, arg SumIncomeByMonthParams) (int64, error) {
 	row := q.db.QueryRowContext(ctx, sumIncomeByMonth, arg.Year, arg.Month)
-	var total float64
-	err := row.Scan(&total)
-	return total, err
+	var total_cents int64
+	err := row.Scan(&total_cents)
+	return total_cents, err
 }
 
 const topDescriptions = `-- name: TopDescriptions :many
@@ -1281,14 +1311,14 @@ SELECT
     t.description,
     c.type AS category_type,
     COUNT(*) AS tx_count,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+    CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
     AND t.deleted_at IS NULL
     AND t.date >= CAST(?1 AS TEXT) AND t.date <= CAST(?2 AS TEXT)
 GROUP BY t.description
-ORDER BY total DESC
+ORDER BY total_cents DESC
 LIMIT ?3
 `
 
@@ -1299,10 +1329,10 @@ type TopDescriptionsParams struct {
 }
 
 type TopDescriptionsRow struct {
-	Description  string  `json:"description"`
-	CategoryType string  `json:"category_type"`
-	TxCount      int64   `json:"tx_count"`
-	Total        float64 `json:"total"`
+	Description  string `json:"description"`
+	CategoryType string `json:"category_type"`
+	TxCount      int64  `json:"tx_count"`
+	TotalCents   int64  `json:"total_cents"`
 }
 
 func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams) ([]TopDescriptionsRow, error) {
@@ -1318,7 +1348,7 @@ func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams
 			&i.Description,
 			&i.CategoryType,
 			&i.TxCount,
-			&i.Total,
+			&i.TotalCents,
 		); err != nil {
 			return nil, err
 		}
@@ -1335,7 +1365,7 @@ func (q *Queries) TopDescriptions(ctx context.Context, arg TopDescriptionsParams
 
 const transactionAmountsAndTags = `-- name: TransactionAmountsAndTags :many
 
-SELECT t.amount, t.tags
+SELECT t.amount_cents, t.tags
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -1351,11 +1381,14 @@ type TransactionAmountsAndTagsParams struct {
 }
 
 type TransactionAmountsAndTagsRow struct {
-	Amount float64        `json:"amount"`
-	Tags   sql.NullString `json:"tags"`
+	AmountCents int64          `json:"amount_cents"`
+	Tags        sql.NullString `json:"tags"`
 }
 
 // Tag Breakdown (raw data for Go-side aggregation)
+// Returns int64 amount_cents instead of float64 amount - Go-side tag
+// aggregation sums cents to avoid float drift, then the handler converts
+// the per-tag totals to dollars at the JSON wire edge.
 func (q *Queries) TransactionAmountsAndTags(ctx context.Context, arg TransactionAmountsAndTagsParams) ([]TransactionAmountsAndTagsRow, error) {
 	rows, err := q.db.QueryContext(ctx, transactionAmountsAndTags, arg.DateFrom, arg.DateTo)
 	if err != nil {
@@ -1365,7 +1398,7 @@ func (q *Queries) TransactionAmountsAndTags(ctx context.Context, arg Transaction
 	items := []TransactionAmountsAndTagsRow{}
 	for rows.Next() {
 		var i TransactionAmountsAndTagsRow
-		if err := rows.Scan(&i.Amount, &i.Tags); err != nil {
+		if err := rows.Scan(&i.AmountCents, &i.Tags); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1445,27 +1478,34 @@ func (q *Queries) UpdateSavedFilter(ctx context.Context, arg UpdateSavedFilterPa
 
 const updateTransaction = `-- name: UpdateTransaction :exec
 UPDATE transactions
-SET date = ?, amount = ?, original_amount = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount = ?, amount_cents = ?, original_amount = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 `
 
 type UpdateTransactionParams struct {
-	Date             time.Time       `json:"date"`
-	Amount           float64         `json:"amount"`
-	OriginalAmount   sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency sql.NullString  `json:"original_currency"`
-	Description      string          `json:"description"`
-	CategoryID       int64           `json:"category_id"`
-	Tags             sql.NullString  `json:"tags"`
-	Notes            sql.NullString  `json:"notes"`
-	ID               int64           `json:"id"`
+	Date                time.Time       `json:"date"`
+	Amount              float64         `json:"amount"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	ID                  int64           `json:"id"`
 }
 
+// Dual-write contract (Phase 3.1a): see CreateTransaction above. Both the
+// legacy REAL column and the new INTEGER cents column are rewritten on every
+// edit. The caller computes cents from the float amount before invoking.
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
 		arg.Amount,
+		arg.AmountCents,
 		arg.OriginalAmount,
+		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
 		arg.Description,
 		arg.CategoryID,
@@ -1494,21 +1534,31 @@ func (q *Queries) UpdateUser(ctx context.Context, arg UpdateUserParams) error {
 }
 
 const upsertBudget = `-- name: UpsertBudget :exec
-INSERT INTO budgets (year, month, amount)
-VALUES (?, ?, ?)
+INSERT INTO budgets (year, month, amount, amount_cents)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(year, month) DO UPDATE SET
     amount = excluded.amount,
+    amount_cents = excluded.amount_cents,
     updated_at = CURRENT_TIMESTAMP
 `
 
 type UpsertBudgetParams struct {
-	Year   int64   `json:"year"`
-	Month  int64   `json:"month"`
-	Amount float64 `json:"amount"`
+	Year        int64   `json:"year"`
+	Month       int64   `json:"month"`
+	Amount      float64 `json:"amount"`
+	AmountCents int64   `json:"amount_cents"`
 }
 
+// Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
+// REAL column and the new INTEGER cents column are populated on every
+// upsert. Caller computes cents from the float amount.
 func (q *Queries) UpsertBudget(ctx context.Context, arg UpsertBudgetParams) error {
-	_, err := q.db.ExecContext(ctx, upsertBudget, arg.Year, arg.Month, arg.Amount)
+	_, err := q.db.ExecContext(ctx, upsertBudget,
+		arg.Year,
+		arg.Month,
+		arg.Amount,
+		arg.AmountCents,
+	)
 	return err
 }
 
@@ -1543,20 +1593,25 @@ func (q *Queries) UpsertCurrency(ctx context.Context, arg UpsertCurrencyParams) 
 }
 
 const upsertSavingsGoal = `-- name: UpsertSavingsGoal :exec
-INSERT INTO savings_goals (year, target_amount)
-VALUES (?, ?)
+INSERT INTO savings_goals (year, target_amount, target_amount_cents)
+VALUES (?, ?, ?)
 ON CONFLICT(year) DO UPDATE SET
     target_amount = excluded.target_amount,
+    target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP
 `
 
 type UpsertSavingsGoalParams struct {
-	Year         int64   `json:"year"`
-	TargetAmount float64 `json:"target_amount"`
+	Year              int64   `json:"year"`
+	TargetAmount      float64 `json:"target_amount"`
+	TargetAmountCents int64   `json:"target_amount_cents"`
 }
 
+// Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
+// REAL column and the new INTEGER cents column are populated on every
+// upsert. Caller computes cents from the float target amount.
 func (q *Queries) UpsertSavingsGoal(ctx context.Context, arg UpsertSavingsGoalParams) error {
-	_, err := q.db.ExecContext(ctx, upsertSavingsGoal, arg.Year, arg.TargetAmount)
+	_, err := q.db.ExecContext(ctx, upsertSavingsGoal, arg.Year, arg.TargetAmount, arg.TargetAmountCents)
 	return err
 }
 

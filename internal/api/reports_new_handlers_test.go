@@ -18,7 +18,7 @@ func TestHandleBudgetVsActual_Default(t *testing.T) {
 
 	// Seed a budget for Jan 2026
 	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 1, Amount: 3000,
+		Year: 2026, Month: 1, Amount: 3000, AmountCents: dollarsToCents(3000),
 	})
 
 	// Seed an expense transaction in Jan 2026
@@ -105,7 +105,7 @@ func TestHandleExpenseVelocity_Default(t *testing.T) {
 
 	// Seed a budget
 	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 1, Amount: 3000,
+		Year: 2026, Month: 1, Amount: 3000, AmountCents: dollarsToCents(3000),
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
@@ -427,7 +427,7 @@ func TestHandleBudgetVsActual_HidesTombstoned(t *testing.T) {
 	user := seedTestUser(t, q, "alice", "member")
 
 	q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 1, Amount: 3000,
+		Year: 2026, Month: 1, Amount: 3000, AmountCents: dollarsToCents(3000),
 	})
 	cat := seedTestCategory(t, q, "TestFood", "expense")
 	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-15", 1200, "live")

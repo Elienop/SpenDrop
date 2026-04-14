@@ -133,11 +133,21 @@ func TestBuildTransactionWhereClause_AmountRange(t *testing.T) {
 		"amount_max": {"100.00"},
 	}
 	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.amount >= ? AND t.amount <= ?" {
+	// Phase 3.1a: the amount range filter now compares against t.amount_cents
+	// (int64) instead of t.amount (float64). The float bound is converted to
+	// cents by dollarsToCents at parse time so SQLite never sees a float in
+	// the comparison.
+	if where != " WHERE t.amount_cents >= ? AND t.amount_cents <= ?" {
 		t.Errorf("unexpected where clause: %q", where)
 	}
 	if len(args) != 2 {
 		t.Errorf("expected 2 args, got %d", len(args))
+	}
+	if args[0] != int64(1050) {
+		t.Errorf("args[0]=%v, want 1050 (10.50 in cents)", args[0])
+	}
+	if args[1] != int64(10000) {
+		t.Errorf("args[1]=%v, want 10000 (100.00 in cents)", args[1])
 	}
 }
 
@@ -183,7 +193,8 @@ func TestBuildTransactionWhereClause_MultipleFilters(t *testing.T) {
 		"amount_min": {"500"},
 	}
 	where, args := buildTransactionWhereClause(q)
-	expected := " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount >= ?"
+	// Phase 3.1a: amount_min compares against t.amount_cents, not t.amount.
+	expected := " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?"
 	if where != expected {
 		t.Errorf("unexpected where clause:\ngot:  %q\nwant: %q", where, expected)
 	}

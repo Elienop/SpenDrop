@@ -106,10 +106,14 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Phase 3.1a: dual-write amount_cents alongside the legacy REAL amount.
+	// The cents value is derived once from the client-supplied float so the
+	// two columns stay in lockstep on every upsert.
 	err = h.queries.UpsertBudget(r.Context(), database.UpsertBudgetParams{
-		Year:   year,
-		Month:  month,
-		Amount: req.Amount,
+		Year:        year,
+		Month:       month,
+		Amount:      req.Amount,
+		AmountCents: dollarsToCents(req.Amount),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to set budget")

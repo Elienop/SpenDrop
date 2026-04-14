@@ -104,8 +104,12 @@ ON CONFLICT(code) DO UPDATE SET
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 
 -- name: CreateTransaction :one
-INSERT INTO transactions (user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+-- Dual-write contract (Phase 3.1a): writers populate BOTH the legacy REAL
+-- columns (amount, original_amount) AND the new INTEGER _cents columns until
+-- migration 010 drops the legacy columns. Keep the caller math local -
+-- amount_cents = int64(math.Round(amount*100)) at the call site.
+INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetTransactionByID :one
@@ -120,8 +124,11 @@ JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?;
 
 -- name: UpdateTransaction :exec
+-- Dual-write contract (Phase 3.1a): see CreateTransaction above. Both the
+-- legacy REAL column and the new INTEGER cents column are rewritten on every
+-- edit. The caller computes cents from the float amount before invoking.
 UPDATE transactions
-SET date = ?, amount = ?, original_amount = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount = ?, amount_cents = ?, original_amount = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
 -- name: SoftDeleteTransaction :exec
@@ -171,10 +178,14 @@ FROM transactions;
 SELECT * FROM budgets WHERE year = ? AND month = ?;
 
 -- name: UpsertBudget :exec
-INSERT INTO budgets (year, month, amount)
-VALUES (?, ?, ?)
+-- Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
+-- REAL column and the new INTEGER cents column are populated on every
+-- upsert. Caller computes cents from the float amount.
+INSERT INTO budgets (year, month, amount, amount_cents)
+VALUES (?, ?, ?, ?)
 ON CONFLICT(year, month) DO UPDATE SET
     amount = excluded.amount,
+    amount_cents = excluded.amount_cents,
     updated_at = CURRENT_TIMESTAMP;
 
 -- name: ListBudgetsByYear :many
@@ -186,10 +197,14 @@ SELECT * FROM budgets WHERE year = ? ORDER BY month;
 SELECT * FROM savings_goals WHERE year = ?;
 
 -- name: UpsertSavingsGoal :exec
-INSERT INTO savings_goals (year, target_amount)
-VALUES (?, ?)
+-- Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
+-- REAL column and the new INTEGER cents column are populated on every
+-- upsert. Caller computes cents from the float target amount.
+INSERT INTO savings_goals (year, target_amount, target_amount_cents)
+VALUES (?, ?, ?)
 ON CONFLICT(year) DO UPDATE SET
     target_amount = excluded.target_amount,
+    target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP;
 
 -- name: ListSavingsGoals :many
@@ -208,9 +223,17 @@ ON CONFLICT(key) DO UPDATE SET
     updated_at = CURRENT_TIMESTAMP;
 
 -- Dashboard aggregation queries
+--
+-- Phase 3.1a: every aggregation below sums t.amount_cents (int64) instead of
+-- t.amount (float64). The result alias is renamed to `*_cents` so the
+-- generated Go field is self-documenting and so every consumer at the
+-- handler boundary is forced to decide "do I need cents or dollars here?"
+-- at the call site rather than trusting float arithmetic implicitly. The
+-- CAST(... AS INTEGER) pins the return type - without it sqlc can get
+-- confused by SUM() over a nullable integer column.
 
 -- name: SumExpensesByMonth :one
-SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -219,7 +242,7 @@ WHERE c.type = 'expense'
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
 -- name: SumIncomeByMonth :one
-SELECT CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'income'
@@ -228,7 +251,7 @@ WHERE c.type = 'income'
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
 -- name: SumByCategoryForMonth :many
-SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -236,14 +259,14 @@ WHERE c.type = 'expense'
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT)
 GROUP BY c.id
-ORDER BY total DESC;
+ORDER BY total_cents DESC;
 
 -- name: SumByMonthRange :many
 SELECT
     CAST(strftime('%Y', t.date) AS INTEGER) AS year,
     CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount ELSE 0 END), 0) AS REAL) AS expenses,
-    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount ELSE 0 END), 0) AS REAL) AS income
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount_cents ELSE 0 END), 0) AS INTEGER) AS expenses_cents,
+    CAST(COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount_cents ELSE 0 END), 0) AS INTEGER) AS income_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
@@ -277,7 +300,7 @@ SELECT
     c.type AS category_type,
     CAST(strftime('%Y', t.date) AS INTEGER) AS year,
     CAST(strftime('%m', t.date) AS INTEGER) AS month,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+    CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NULL
@@ -290,20 +313,20 @@ SELECT
     t.description,
     c.type AS category_type,
     COUNT(*) AS tx_count,
-    CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+    CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
     AND t.deleted_at IS NULL
     AND t.date >= CAST(sqlc.arg(date_from) AS TEXT) AND t.date <= CAST(sqlc.arg(date_to) AS TEXT)
 GROUP BY t.description
-ORDER BY total DESC
+ORDER BY total_cents DESC
 LIMIT sqlc.arg(limit);
 
 -- Spending Heatmap
 
 -- name: SumExpensesByDay :many
-SELECT t.date, CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS total
+SELECT t.date, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -316,7 +339,7 @@ ORDER BY t.date;
 
 -- name: SumExpensesByDayInMonth :many
 SELECT CAST(strftime('%d', t.date) AS INTEGER) AS day,
-       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS daily_total
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS daily_total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -331,7 +354,7 @@ ORDER BY day;
 -- name: RecurringDescriptions :many
 SELECT t.description,
        COUNT(DISTINCT strftime('%Y-%m', t.date)) AS month_count,
-       CAST(COALESCE(SUM(t.amount), 0) AS REAL) AS annual_total
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS annual_total_cents
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -339,12 +362,15 @@ WHERE c.type = 'expense'
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
 GROUP BY t.description
 HAVING COUNT(DISTINCT strftime('%Y-%m', t.date)) >= 3
-ORDER BY annual_total DESC;
+ORDER BY annual_total_cents DESC;
 
 -- Tag Breakdown (raw data for Go-side aggregation)
 
 -- name: TransactionAmountsAndTags :many
-SELECT t.amount, t.tags
+-- Returns int64 amount_cents instead of float64 amount - Go-side tag
+-- aggregation sums cents to avoid float drift, then the handler converts
+-- the per-tag totals to dollars at the JSON wire edge.
+SELECT t.amount_cents, t.tags
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'

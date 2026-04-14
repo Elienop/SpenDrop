@@ -93,20 +93,28 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	yearStr := fmt.Sprintf("%d", year)
 	monthStr := fmt.Sprintf("%02d", month)
 
-	// Resolve budget: monthly budget -> default setting -> 0
-	var budget float64
+	// Resolve budget: monthly budget -> default setting -> 0.
+	//
+	// Phase 3.1a: the handler tracks budgetCents (int64) through the whole
+	// computation and only converts to dollars at the JSON wire edge. The
+	// default-budget setting comes in as a user-entered string, so we parse
+	// it as a float once and immediately convert to cents with
+	// dollarsToCents - after that point, nothing in this handler touches a
+	// float sum, so float drift across SUM() / subtraction / division
+	// becomes impossible by construction.
+	var budgetCents int64
 	b, err := h.queries.GetBudget(ctx, database.GetBudgetParams{
 		Year:  int64(year),
 		Month: int64(month),
 	})
 	if err == nil {
-		budget = b.Amount
+		budgetCents = b.AmountCents
 	} else if errors.Is(err, sql.ErrNoRows) {
 		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
 			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
 			if parseErr == nil {
-				budget = parsed
+				budgetCents = dollarsToCents(parsed)
 			}
 		}
 		// If setting not found either, budget stays 0
@@ -116,7 +124,7 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Total expenses for the month
-	totalSpent, err := h.queries.SumExpensesByMonth(ctx, database.SumExpensesByMonthParams{
+	totalSpentCents, err := h.queries.SumExpensesByMonth(ctx, database.SumExpensesByMonthParams{
 		Year:  yearStr,
 		Month: monthStr,
 	})
@@ -126,7 +134,7 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	}
 
 	// Total income for the month
-	totalIncome, err := h.queries.SumIncomeByMonth(ctx, database.SumIncomeByMonthParams{
+	totalIncomeCents, err := h.queries.SumIncomeByMonth(ctx, database.SumIncomeByMonthParams{
 		Year:  yearStr,
 		Month: monthStr,
 	})
@@ -135,8 +143,8 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	remaining := budget - totalSpent
-	savingsThisMonth := totalIncome - totalSpent
+	remainingCents := budgetCents - totalSpentCents
+	savingsThisMonthCents := totalIncomeCents - totalSpentCents
 
 	// Savings YTD: single aggregate query for Jan through end of current month
 	ytdFrom := fmt.Sprintf("%d-01-01", year)
@@ -149,37 +157,41 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to calculate savings ytd")
 		return
 	}
-	var savingsYTD float64
+	var savingsYTDCents int64
 	for _, row := range ytdRows {
-		savingsYTD += row.Income - row.Expenses
+		savingsYTDCents += row.IncomeCents - row.ExpensesCents
 	}
 
 	// Savings goal
-	var savingsGoal float64
+	var savingsGoalCents int64
 	goal, err := h.queries.GetSavingsGoal(ctx, int64(year))
 	if err == nil {
-		savingsGoal = goal.TargetAmount
+		savingsGoalCents = goal.TargetAmountCents
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusInternalServerError, "failed to get savings goal")
 		return
 	}
 
-	// Savings goal progress
+	// Savings goal progress: percentage with 2 decimal places. Computed in
+	// float because the output is inherently a ratio, not a money amount -
+	// the input operands are integer cents so the numerator/denominator
+	// themselves are exact, and the final math.Round to 0.01% matches the
+	// pre-cents behaviour exactly.
 	var savingsGoalProgress float64
-	if savingsGoal > 0 {
-		savingsGoalProgress = math.Round(savingsYTD/savingsGoal*10000) / 100
+	if savingsGoalCents > 0 {
+		savingsGoalProgress = math.Round(float64(savingsYTDCents)/float64(savingsGoalCents)*10000) / 100
 	}
 
 	writeJSON(w, http.StatusOK, dashboardSummaryResponse{
 		Year:                year,
 		Month:               month,
-		Budget:              budget,
-		TotalSpent:          totalSpent,
-		TotalIncome:         totalIncome,
-		Remaining:           remaining,
-		SavingsThisMonth:    savingsThisMonth,
-		SavingsGoal:         savingsGoal,
-		SavingsYTD:          savingsYTD,
+		Budget:              centsToDollars(budgetCents),
+		TotalSpent:          centsToDollars(totalSpentCents),
+		TotalIncome:         centsToDollars(totalIncomeCents),
+		Remaining:           centsToDollars(remainingCents),
+		SavingsThisMonth:    centsToDollars(savingsThisMonthCents),
+		SavingsGoal:         centsToDollars(savingsGoalCents),
+		SavingsYTD:          centsToDollars(savingsYTDCents),
 		SavingsGoalProgress: savingsGoalProgress,
 	})
 }
@@ -236,7 +248,9 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build lookup from query results
+	// Build lookup from query results. Phase 3.1a: SumByMonthRangeRow now
+	// carries ExpensesCents/IncomeCents (int64), converted to float dollars
+	// at the wire edge below.
 	type monthKey struct{ y, m int }
 	lookup := make(map[monthKey]database.SumByMonthRangeRow, len(rows))
 	for _, row := range rows {
@@ -251,8 +265,8 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 		m := int(t.Month())
 		entry := trendEntry{Year: y, Month: m}
 		if row, ok := lookup[monthKey{y, m}]; ok {
-			entry.TotalSpent = row.Expenses
-			entry.TotalIncome = row.Income
+			entry.TotalSpent = centsToDollars(row.ExpensesCents)
+			entry.TotalIncome = centsToDollars(row.IncomeCents)
 		}
 		trend = append(trend, entry)
 	}
@@ -290,7 +304,7 @@ func (h *Handler) handleDashboardCategories(w http.ResponseWriter, r *http.Reque
 		categories[i] = categoryEntry{
 			ID:    row.ID,
 			Name:  row.Name,
-			Total: row.Total,
+			Total: centsToDollars(row.TotalCents),
 		}
 	}
 

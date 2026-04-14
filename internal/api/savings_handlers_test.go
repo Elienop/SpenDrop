@@ -17,15 +17,15 @@ func TestHandleGetSavingsGoals_ReturnsAll(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Seed savings goals
+	// Seed savings goals. Phase 3.1a: dual-write target_amount_cents.
 	err := q.UpsertSavingsGoal(context.Background(), database.UpsertSavingsGoalParams{
-		Year: 2026, TargetAmount: 12000,
+		Year: 2026, TargetAmount: 12000, TargetAmountCents: dollarsToCents(12000),
 	})
 	if err != nil {
 		t.Fatalf("seed savings goal: %v", err)
 	}
 	err = q.UpsertSavingsGoal(context.Background(), database.UpsertSavingsGoalParams{
-		Year: 2025, TargetAmount: 10000,
+		Year: 2025, TargetAmount: 10000, TargetAmountCents: dollarsToCents(10000),
 	})
 	if err != nil {
 		t.Fatalf("seed savings goal: %v", err)
