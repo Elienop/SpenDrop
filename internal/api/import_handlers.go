@@ -231,9 +231,18 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 					ir.Description = val
 				case "amount":
 					if val != "" {
-						cleaned := stripCurrencyFormat(val)
-						if parsed, err := strconv.ParseFloat(cleaned, 64); err == nil {
-							ir.Amount = parsed
+						// parseImportAmount normalizes to cents and
+						// rejects NaN/Inf/out-of-range values; on any
+						// error ir.Amount stays zero and the row is
+						// skipped downstream as zero-amount — same
+						// bucket as the pre-extraction silent-fallthrough
+						// behavior for unparseable inputs. The round
+						// trip through centsToDollars is lossless for
+						// any legal value and normalizes 3+ decimal
+						// inputs to the cents grid that the DB and
+						// downstream content hash both use.
+						if cents, err := parseImportAmount(val); err == nil {
+							ir.Amount = centsToDollars(cents)
 						}
 					}
 				case "category":
@@ -244,9 +253,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 					ir.Notes = val
 				case "original_amount":
 					if val != "" {
-						cleaned := stripCurrencyFormat(val)
-						if parsed, err := strconv.ParseFloat(cleaned, 64); err == nil {
-							ir.OriginalAmount = parsed
+						if cents, err := parseImportAmount(val); err == nil {
+							ir.OriginalAmount = centsToDollars(cents)
 						}
 					}
 				case "original_currency":
@@ -786,21 +794,18 @@ func processImportRows(
 		// defects; the order here matches the pre-refactor behaviour
 		// so no existing test changes its outcome label.
 		//
-		// Phase 3.5 tightens the acceptable date range to the realistic
-		// household ledger window [1900-01-01, 2100-12-31]. parseImportDate
-		// itself still accepts Excel serials up to 9999, but a year outside
-		// the ledger window is almost always a data-entry bug or a
-		// mislabelled cell (someone put an amount into the Date column
-		// and got a 5-digit year out of excelize). The check routes such
-		// rows to `skipReasonUnparseableDate` — the same bucket as a
-		// genuinely garbled string — because the closed reason set
-		// deliberately does not include a separate "out_of_range" code
-		// and downstream UI messaging ("this row has an unusable date")
-		// applies to both paths. Property test
-		// `TestImportProperty_DateSanity` asserts every inserted row
-		// lands in this window.
+		// Phase 3.5 introduced the realistic household ledger window
+		// [1900-01-01, 2100-12-31] as a caller-side guard after
+		// parseImportDate returned. Phase 3.7 pushed that check into
+		// parseImportDate itself (see validateImportYear) so the
+		// [1900, 2100] contract is enforced in one place and every
+		// future caller — including the fuzz target — inherits it for
+		// free. An out-of-window date now returns an error from the
+		// parser and routes here as skipReasonUnparseableDate via the
+		// dateErr branch. Property test `TestImportProperty_DateSanity`
+		// asserts every inserted row lands in this window.
 		date, dateErr := parseImportDate(row.Date)
-		if dateErr != nil || date.Year() < 1900 || date.Year() > 2100 {
+		if dateErr != nil {
 			result.Skipped = append(result.Skipped, importSkipped{
 				RowIndex: i,
 				Reason:   skipReasonUnparseableDate,
@@ -983,6 +988,58 @@ func stripCurrencyFormat(s string) string {
 	return s
 }
 
+// parseImportAmount converts a string from an imported xlsx Amount cell
+// (or Original Amount cell) into an int64 cents value. It strips
+// currency formatting via stripCurrencyFormat, parses the remainder as
+// a float64, and rounds to cents via dollarsToCents.
+//
+// Extracted for two reasons:
+//
+//  1. It is the fuzz target for FuzzParseImportAmount
+//     (import_handlers_fuzz_test.go). Having a single named function
+//     for the parse-and-round step lets the fuzzer hit the exact code
+//     that handles untrusted string input without needing to drive the
+//     whole xlsx→row plumbing.
+//
+//  2. Phase 3.1 cents-normalization hygiene. Callers that previously
+//     ran `stripCurrencyFormat + ParseFloat` inline now route through
+//     one place that also validates NaN/Inf and magnitude. Previously
+//     an xlsx cell containing "NaN" or "1e20" would parse to a garbage
+//     float and flow silently into dollarsToCents, producing an
+//     unpredictable int64 bit pattern in the DB; we now reject those
+//     up front and the caller counts the row as zero-amount (same
+//     bucket as the existing "unparseable" silent-skip behavior).
+//
+// Returns an error (and zero cents) on:
+//   - empty string (after stripping)
+//   - unparseable float after stripping
+//   - NaN or infinite values
+//   - magnitude above MaxTransactionAmount — anything larger is either
+//     a currency-entry mistake or would overflow int64 cents after the
+//     dollarsToCents multiplication
+//
+// Negative values are accepted. Expense spreadsheets frequently encode
+// expenses as negatives and the confirm-side insert path flips signs
+// based on category type via math.Abs, so rejecting negatives here
+// would break that flow.
+func parseImportAmount(s string) (int64, error) {
+	cleaned := stripCurrencyFormat(s)
+	if cleaned == "" {
+		return 0, fmt.Errorf("empty amount")
+	}
+	parsed, err := strconv.ParseFloat(cleaned, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse amount %q: %w", s, err)
+	}
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return 0, fmt.Errorf("non-finite amount: %q", s)
+	}
+	if math.Abs(parsed) > MaxTransactionAmount {
+		return 0, fmt.Errorf("amount out of range: %q", s)
+	}
+	return dollarsToCents(parsed), nil
+}
+
 // parseImportDate converts a string from an imported xlsx Date cell into a
 // time.Time. It tries two strategies in order:
 //
@@ -994,6 +1051,17 @@ func stripCurrencyFormat(s string) string {
 //  2. Text date formats. Covers files where the Date column was typed as
 //     plain text rather than a date-formatted cell.
 //
+// A successful parse must then fall inside the household ledger window
+// [minImportYear, maxImportYear]. That bound exists because Phase 3.7's
+// fuzz target (FuzzParseImportDate) caught a class of edge-case inputs
+// that parse cleanly but produce dates no household spreadsheet would
+// actually contain: Excel serial 1 → 1899-12-31, 2958465 → 9999-12-31,
+// stray misaligned integers like "1234" → 1903-05-18. Before the check
+// these would flow silently into the DB and be noticed only when a user
+// spotted a row from 1899. The check rejects them up front and the
+// caller counts the row as skipped — same bucket as any other
+// unparseable date.
+//
 // An unparseable date returns an error; the caller counts it as skipped.
 //
 // Note: the serial-date path assumes the 1900 date system (the default in
@@ -1001,6 +1069,12 @@ func stripCurrencyFormat(s string) string {
 // date system flag are not detected here — their dates will be off by ~4
 // years. In practice this is a non-issue for SpenDrop because modern Excel
 // and Google Sheets both write 1900-based workbooks.
+//
+// The [1900, 2100] window is intentionally wider than the year picker's
+// [MinYear, MaxYear] = [2000, 2100] from limits.go. Import needs to
+// accept historic bank statements going back to the 20th century, while
+// the picker only drives budget/savings UI. Tightening import to MinYear
+// would break users loading 1990s statements.
 func parseImportDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1013,17 +1087,40 @@ func parseImportDate(s string) (time.Time, error) {
 	if serial, err := strconv.ParseFloat(s, 64); err == nil {
 		if serial >= 1 && serial <= 2958465 {
 			if t, err := excelize.ExcelDateToTime(serial, false); err == nil {
-				return t, nil
+				return validateImportYear(t, s)
 			}
 		}
 	}
 	// Strategy 2: text formats.
 	for _, layout := range dateFormats {
 		if t, err := time.Parse(layout, s); err == nil {
-			return t, nil
+			return validateImportYear(t, s)
 		}
 	}
 	return time.Time{}, fmt.Errorf("unparseable date: %q", s)
+}
+
+// minImportYear / maxImportYear bound the household ledger window that
+// parseImportDate accepts. Declared as function-local-ish constants
+// (package-level for the fuzz test to reference) rather than inline
+// literals so every reader sees the same numbers when investigating a
+// "why did my 1990 import row get skipped?" question. See
+// parseImportDate's doc comment for the full rationale.
+const (
+	minImportYear = 1900
+	maxImportYear = 2100
+)
+
+// validateImportYear enforces the household ledger window on a
+// freshly-parsed import date. Split out so both the Excel serial path
+// and the text-format path share exactly one range check — there is
+// only one place to update if the window ever changes.
+func validateImportYear(t time.Time, raw string) (time.Time, error) {
+	if y := t.Year(); y < minImportYear || y > maxImportYear {
+		return time.Time{}, fmt.Errorf("date out of range: %q parsed to year %d, expected [%d, %d]",
+			raw, y, minImportYear, maxImportYear)
+	}
+	return t, nil
 }
 
 // forceAddSuffixCap is the ceiling on how many " (N)" suffixes
