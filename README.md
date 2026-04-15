@@ -486,6 +486,70 @@ docker volume inspect spendrop-data --format '{{ .Mountpoint }}'
 
 Then point your tool of choice at `<mountpoint>/backups/`. **Don't forget to also copy the `.sha256` sidecars** — they're how the restore drill decides which backup is trustworthy when you pull one back from off-host storage.
 
+### Threat model and encryption at rest
+
+SpenDrop stores everything in a single SQLite file at `/app/data/spendrop.db`. Encrypting that file at rest is a good idea — but only if you are clear about *what* it protects.
+
+**What disk-level encryption protects:**
+- A stolen laptop, NAS drive, or decommissioned hard disk that is powered off when stolen.
+- Backups copied off the host (provided the backup is also encrypted, which is a separate problem).
+- An attacker with physical access to the storage medium but not to a running, unlocked system.
+
+**What it does NOT protect:**
+- A running container. Anyone with `root` on the host machine can `sqlite3 /app/data/spendrop.db .dump` because the kernel has already decrypted it for the running process.
+- Live memory dumps. The encryption key and SQLite's cached database pages (page cache plus any uncheckpointed WAL frames) sit in RAM in plaintext.
+- Application-level attacks: a compromised SpenDrop binary, a stolen session cookie, an SQL-injection bug — encryption at rest is invisible to all of these.
+- Network traffic. That is what TLS via the Caddy reverse proxy (above) is for. Encryption at rest and encryption in transit are *different problems*.
+
+If your threat model is "my landlord might unplug the NAS and walk off with it," disk encryption is exactly right. If it is "my roommate has shell access to the box," disk encryption does nothing — you need OS user separation and TLS instead.
+
+**Why SpenDrop does not integrate SQLCipher:** SQLCipher requires CGO with a custom build of SQLite, has no upstream support in `mattn/go-sqlite3`, complicates key management (where do you store the key? how do you rotate it? what happens during a migration?), and adds per-query overhead — all to solve a problem that the operating system already solves better, with hardware acceleration, with a key hierarchy your distro already understands. The honest recommendation is: encrypt the volume that holds `/app/data`, not the SQLite file itself.
+
+**Recommended approaches by platform:**
+
+| OS / filesystem | Tool | When to pick it |
+| --- | --- | --- |
+| Linux, single disk | LUKS (dm-crypt) | The default. Use whatever your distro installer offered. |
+| Linux, ZFS pool | ZFS native encryption | If you already run ZFS, do not bolt LUKS on top — use the built-in. |
+| Linux, container volume only | LUKS on a loopback file (via `losetup`) | When you only want to encrypt SpenDrop's data, not the whole host. |
+| Cross-platform / portable | VeraCrypt | Removable disks, NAS drives shared between OSes. |
+| Windows | BitLocker | The Windows-native answer. Hardware-accelerated, manageable. |
+| macOS | FileVault | The macOS-native answer. Opt-in — enable it in System Settings → Privacy & Security. |
+
+**LUKS — encrypt a dedicated volume for SpenDrop:**
+
+```bash
+# WARNING: cryptsetup luksFormat is destructive. /dev/sdX is the device
+# holding ONLY SpenDrop data — never your boot disk.
+sudo cryptsetup luksFormat /dev/sdX
+sudo cryptsetup open /dev/sdX spendrop-data
+sudo mkfs.ext4 /dev/mapper/spendrop-data
+sudo mkdir -p /srv/spendrop
+sudo mount /dev/mapper/spendrop-data /srv/spendrop
+
+# Then in docker-compose.yml, point the bind mount at /srv/spendrop:
+#   volumes:
+#     - /srv/spendrop:/app/data
+```
+
+To unlock at boot without typing a passphrase, add an entry to `/etc/crypttab` with a keyfile stored on the (also-encrypted) root filesystem. Document the recovery passphrase somewhere offline — *if you lose it, your data is gone, full stop*. That is the deal disk encryption makes with you.
+
+**ZFS native encryption — encrypt a dataset for SpenDrop:**
+
+```bash
+# Create an encrypted dataset using a passphrase (interactive prompt).
+sudo zfs create -o encryption=on -o keyformat=passphrase \
+    -o mountpoint=/srv/spendrop tank/spendrop
+
+# On reboot you must unlock and mount it before starting SpenDrop:
+sudo zfs load-key tank/spendrop
+sudo zfs mount tank/spendrop
+```
+
+Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS example. The advantage of ZFS encryption is that `zfs send -w` (raw send) ships the dataset *still encrypted* to a backup target — perfect for offsite backups to a host you do not fully trust. Plain `zfs send` without `-w` decrypts before streaming, which defeats the point.
+
+**A reminder.** None of the above protects you against the running SpenDrop process being compromised. Encryption at rest is the lock on the front door of the building. TLS is the lock on the apartment door. Application-level auth is the lock on the diary inside. You need all three, and they are sold separately.
+
 ## API Reference
 
 SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) require authentication via session cookie.
