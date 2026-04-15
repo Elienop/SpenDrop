@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"mime/multipart"
@@ -1364,5 +1365,149 @@ func TestHandleImport_ReimportAfterTombstone_SucceedsOnConfirm(t *testing.T) {
 	}
 	if tombstoned != 1 {
 		t.Errorf("expected 1 tombstoned row after reimport, got %d", tombstoned)
+	}
+}
+
+// TestHandleImportUpload_IntraFileCollisionGroup is spec test #9 (baseline):
+// uploading three identical rows produces exactly one collision_group of
+// size 3 with reason intra_file. The initial grouping is the foundation
+// every PATCH test depends on — if this breaks, nothing else works.
+func TestHandleImportUpload_IntraFileCollisionGroup(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "grouping", "member")
+
+	// Migration 001 already seeds "Food", so buildCollisionGroups can
+	// resolve the category name at upload-time grouping without any
+	// extra setup here.
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-07", "Starbucks", "5.00", "Food"},
+		{"2026-01-07", "Starbucks", "5.00", "Food"},
+		{"2026-01-07", "Starbucks", "5.00", "Food"},
+	})
+
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleImportUpload(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+
+	rawGroups, ok := resp["collision_groups"].([]any)
+	if !ok {
+		t.Fatalf("collision_groups missing or wrong type: %v", resp["collision_groups"])
+	}
+	if len(rawGroups) != 1 {
+		t.Fatalf("expected 1 collision_group, got %d", len(rawGroups))
+	}
+	g := rawGroups[0].(map[string]any)
+	if g["reason"].(string) != "intra_file" {
+		t.Errorf("expected reason intra_file, got %v", g["reason"])
+	}
+	members := g["member_row_ids"].([]any)
+	if len(members) != 3 {
+		t.Errorf("expected 3 member_row_ids, got %d", len(members))
+	}
+	// Rows must carry row_id and it must equal their slice index.
+	rows := resp["rows"].([]any)
+	for i, r := range rows {
+		m := r.(map[string]any)
+		if int(m["row_id"].(float64)) != i {
+			t.Errorf("row %d has row_id %v, want %d", i, m["row_id"], i)
+		}
+	}
+}
+
+// TestHandleImportUpload_HidesTombstonedFromDbMatch is spec test #8 Part A:
+// a tombstoned DB row with the same content_hash as an uploaded row must
+// NOT be flagged as a db_match collision. The partial unique index already
+// filters out tombstoned rows (WHERE deleted_at IS NULL), so
+// GetTransactionByContentHash returns sql.ErrNoRows and the uploaded row
+// stays clean. This test pins that invariant so a future "performance"
+// rewrite can't silently drop the filter.
+//
+// Seeds use amount=999 as a sentinel so a regression is easy to read in
+// the failure message — any production row with that exact amount in a
+// household DB is vanishingly unlikely.
+func TestHandleImportUpload_HidesTombstonedFromDbMatch(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "tombstoned", "member")
+
+	// Resolve the default "Food" category (seeded by migration 001) so
+	// the insert below can reference its ID.
+	cats, err := q.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	var foodID int64
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+			break
+		}
+	}
+	if foodID == 0 {
+		t.Fatalf("default Food category not found")
+	}
+
+	date := time.Date(2026, 1, 7, 0, 0, 0, 0, time.UTC)
+	hash := database.ComputeContentHash(date, 99900, "Starbucks", "Food")
+
+	// Insert a tombstoned row with this hash. It must not be discoverable
+	// by GetTransactionByContentHash (the query filters deleted_at IS NULL)
+	// which is what buildCollisionGroups relies on.
+	created, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		Amount:      999.00,
+		AmountCents: 99900,
+		Description: "Starbucks",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{String: hash, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create tombstone row: %v", err)
+	}
+	// Tombstone via raw UPDATE on purpose: we need the deleted_at shape
+	// without the audit side-effect of a real soft-delete, so this
+	// deliberately bypasses TransactionStore. The test asserts on the
+	// query layer (content-hash lookup respecting deleted_at IS NULL),
+	// not on the store layer's audit contract.
+	if _, err := db.Exec("UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", created.ID); err != nil {
+		t.Fatalf("tombstone row: %v", err)
+	}
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-07", "Starbucks", "999.00", "Food"},
+	})
+
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+
+	h.handleImportUpload(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	groups := resp["collision_groups"].([]any)
+	if len(groups) != 0 {
+		t.Errorf("expected 0 collision_groups (tombstoned row should not match), got %d: %v", len(groups), groups)
 	}
 }
