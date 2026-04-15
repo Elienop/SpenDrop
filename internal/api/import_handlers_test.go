@@ -1835,3 +1835,244 @@ func TestHandleImportPatchRow_WhitespaceCasePreservesCollision(t *testing.T) {
 		t.Fatalf("expected 2 members (hash parity preserved), got %d: %v", len(members), members)
 	}
 }
+
+// TestHandleImportPatchRow_HidesTombstonedFromDbMatch owns the second
+// half of the soft-delete leak guard (Part A lives in
+// TestHandleImportUpload_HidesTombstonedFromDbMatch from Chunk 1 Task 6).
+//
+// Setup: seed one LIVE row and one TOMBSTONED row that share the same
+// content hash. The amount=999 sentinel on the tombstoned row is the
+// SpenDrop project convention for "this should not appear in any
+// aggregate" — if a reader forgets the deleted_at filter, the test will
+// fail loudly with 999 somewhere in the db_match payload.
+//
+// Upload a single row whose content matches NEITHER seeded row. The upload
+// response shows zero collision groups. Then PATCH the uploaded row's
+// DATE so that after re-hashing it matches the tombstoned row's content
+// hash. A correct handler runs the hash lookup through
+// GetTransactionByContentHash at queries.sql:182-197 (which filters
+// t.deleted_at IS NULL) and returns zero collision groups. A bug that
+// reads hashes without the soft-delete filter would flag the row as a
+// db_match against the tombstoned transaction.
+//
+// Important: this test does NOT assert on any collision group containing
+// amount=999. The correct response has no matching group at all; we
+// verify absence, not presence. Asserting presence-with-sentinel would
+// be a "test of the bug" (only passes if the leak exists), which is
+// exactly the anti-pattern the CLAUDE.md soft-delete discipline warns
+// against.
+func TestHandleImportPatchRow_HidesTombstonedFromDbMatch(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "tombstoner", "member")
+	cat := seedTestCategory(t, q, "Coffee", "expense")
+
+	// Seed one live + one tombstoned row that would share a content hash
+	// if the import row's date were shifted to 2025-08-15. The live row
+	// sits on a DIFFERENT hash (different date), so the import row does
+	// not collide with it at upload time. The tombstoned row IS on the
+	// hash space the PATCH will move into.
+	liveDate := time.Date(2025, 7, 1, 0, 0, 0, 0, time.UTC)
+	tombstoneDate := time.Date(2025, 8, 15, 0, 0, 0, 0, time.UTC)
+
+	liveHash := database.ComputeContentHash(liveDate, 500, "Starbucks", "Coffee")
+	_, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      user.ID,
+		CategoryID:  cat.ID,
+		Date:        liveDate,
+		Amount:      5.00,
+		AmountCents: 500,
+		Description: "Starbucks",
+		ContentHash: sql.NullString{String: liveHash, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("seed live row: %v", err)
+	}
+
+	// Tombstoned row uses amount=999 as the sentinel so a soft-delete
+	// leak would be trivially visible in any assertion that touched its
+	// amount. Its hash is computed against amount=99900 cents.
+	tombstoneHash := database.ComputeContentHash(tombstoneDate, 99900, "Starbucks", "Coffee")
+	tombstoned, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      user.ID,
+		CategoryID:  cat.ID,
+		Date:        tombstoneDate,
+		Amount:      999.00,
+		AmountCents: 99900,
+		Description: "Starbucks",
+		ContentHash: sql.NullString{String: tombstoneHash, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("seed tombstoned row: %v", err)
+	}
+	// Tombstone via raw UPDATE on purpose: we need the deleted_at shape
+	// without the audit side-effect of a real soft-delete, so this
+	// deliberately bypasses TransactionStore. The test asserts on the
+	// query layer (content-hash lookup respecting deleted_at IS NULL),
+	// not on the store layer's audit contract. Matches the Chunk 1 Test
+	// #8A pattern so both halves of the soft-delete guard use the same
+	// tombstoning mechanism.
+	if _, err := db.Exec("UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?", tombstoned.ID); err != nil {
+		t.Fatalf("tombstone row: %v", err)
+	}
+
+	// Upload a row whose content is "Starbucks $999.00 Coffee" but on
+	// date 2025-07-15 — a third date that collides with NEITHER seeded
+	// row's hash space. At upload time, the row is clean.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-15", "Starbucks", "999.00", "Coffee"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+	if uploadGroups := upload["collision_groups"].([]any); len(uploadGroups) != 0 {
+		t.Fatalf("expected 0 collision groups at upload (baseline is clean), got %d: %v", len(uploadGroups), uploadGroups)
+	}
+
+	// PATCH the uploaded row's date to 2025-08-15, which re-hashes the row
+	// into the tombstoned row's hash space. The correct response still has
+	// zero collision groups because the DB match is filtered by the
+	// soft-delete predicate inside GetTransactionByContentHash.
+	patchRec := patchImportRow(t, h, user, importID, 0, "date", "2025-08-15")
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal patch response: %v", err)
+	}
+	groups := resp["collision_groups"].([]any)
+	if len(groups) != 0 {
+		t.Fatalf("expected 0 collision groups after PATCH (tombstoned row must not match), got %d: %v", len(groups), groups)
+	}
+
+	// Extra sanity: the tombstoned row really is tombstoned. If this
+	// assertion fails the test setup is broken and the primary assertion
+	// above is meaningless.
+	var tombstonedDeletedAt sql.NullTime
+	if err := db.QueryRow("SELECT deleted_at FROM transactions WHERE id = ?", tombstoned.ID).Scan(&tombstonedDeletedAt); err != nil {
+		t.Fatalf("re-read tombstoned row: %v", err)
+	}
+	if !tombstonedDeletedAt.Valid {
+		t.Fatalf("seeded tombstoned row still has deleted_at=NULL — test setup is broken")
+	}
+}
+
+// TestHandleImportPatchRow_AmountFieldModeParity owns the edit-mode half of
+// the amount-field parity rule in the spec's Validation field rules table:
+//
+//	Upload mode: empty cell → 0 (existing silent behavior)
+//	Edit mode:   empty PATCH → 400 INVALID_AMOUNT
+//
+// The asymmetry is intentional. An empty cell in a freshly-uploaded file
+// is usually a parse failure upstream (blank row, header misalignment)
+// and silent-zero has been the behavior since Phase 3.1; changing that
+// now would regress every uploader's file. But an empty string sent via
+// PATCH is the user actively editing a value — they saw a number, they
+// deleted it, they Tab'd away. Silent-zero there would make the Import
+// button deceptively enable while the row is effectively broken. Hard
+// 400 forces the inline cell error so the user knows the edit did not
+// take effect.
+//
+// Test shape: upload a row with an explicit amount to establish the
+// baseline, then PATCH that row's amount to "" and assert the response
+// status is 400 and the body carries {code:"INVALID_AMOUNT", field:"amount"}.
+// A second assertion checks that the upload-mode silent-zero path is NOT
+// regressed by the PATCH-side change: we upload a separate row with
+// amount="" and assert that upload responds 200 and includes the row
+// (silent coerce to 0.00). This second assertion lives in the same test
+// because the invariant — "upload and PATCH handle empty amounts
+// differently, and BOTH behaviors must stay stable together" — is a
+// single bug owner, not two separate ones.
+func TestHandleImportPatchRow_AmountFieldModeParity(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "amountparity", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	// Upload mode: empty amount cell must coerce to 0 and the row must
+	// still appear in the preview. This is the existing silent-zero
+	// behavior — it is inherited from parseImportAmount returning an
+	// error for empty strings but the calling loop in handleImportUpload
+	// treating that as zero. The PATCH change in Task 7 adds an extra
+	// non-empty check that does NOT apply here (it is in
+	// validateImportField, not handleImportUpload's parse loop).
+	uploadXlsx := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-02", "Blank Row", "", "Coffee"},
+		},
+	)
+	uploadReq := postMultipartFile(t, "/api/import/upload", uploadXlsx)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200 (silent-zero for empty amount), got %d: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(uploadRec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+	rows := upload["rows"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows in upload response (silent-zero keeps blank-amount row), got %d", len(rows))
+	}
+	// The row with empty amount parses to 0.0 at upload time.
+	row1 := rows[1].(map[string]any)
+	if amt, ok := row1["amount"].(float64); !ok || amt != 0 {
+		t.Errorf("expected row 1 amount=0 (silent-zero), got %v (%T)", row1["amount"], row1["amount"])
+	}
+
+	// Edit mode: PATCH the FIRST row's amount to the empty string. The
+	// response must be 400 with the INVALID_AMOUNT error body. We target
+	// row 0 (which has a valid 5.00 at upload time) so the test exercises
+	// "user is actively clearing a valid amount", not "we already had a
+	// zero-amount row and the PATCH no-ops".
+	patchRec := patchImportRow(t, h, user, importID, 0, "amount", "")
+	if patchRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on PATCH with empty amount, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	var patchErr map[string]any
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &patchErr); err != nil {
+		t.Fatalf("unmarshal patch error: %v", err)
+	}
+	if patchErr["code"] != "INVALID_AMOUNT" {
+		t.Errorf("expected code=INVALID_AMOUNT, got %v", patchErr["code"])
+	}
+	if patchErr["field"] != "amount" {
+		t.Errorf("expected field=amount, got %v", patchErr["field"])
+	}
+	if msg, ok := patchErr["message"].(string); !ok || msg == "" {
+		t.Errorf("expected non-empty message string, got %v (%T)", patchErr["message"], patchErr["message"])
+	}
+
+	// Extra guard: the rejected PATCH must NOT have mutated the session
+	// state. Re-read the store directly and confirm row 0 still has
+	// amount=5.00. A handler that writes BEFORE validating would leave
+	// the row at amount=0 even though the response was 400.
+	val, ok := importStore.Load(importID)
+	if !ok {
+		t.Fatalf("importStore.Load returned !ok for import_id=%s", importID)
+	}
+	entry := val.(*importEntry)
+	if got := entry.Rows[0].Amount; got != 5.0 {
+		t.Errorf("rejected PATCH must leave row 0 amount unchanged, got %v", got)
+	}
+}
