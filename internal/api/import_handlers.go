@@ -31,8 +31,13 @@ type importEntry struct {
 	CreatedAt time.Time
 }
 
-// importRow represents a single parsed row from the Excel file.
+// importRow represents a single parsed row from the Excel file. RowID is
+// a stable 0-based positional index assigned at upload time by the preview
+// builder; it never renumbers, and the PATCH endpoint uses it as the merge
+// key so the frontend can address a row unambiguously after edits. Skip
+// marks a row as excluded from the confirm-time insert loop.
 type importRow struct {
+	RowID            int     `json:"row_id"`
 	Date             string  `json:"date"`
 	Description      string  `json:"description"`
 	Amount           float64 `json:"amount"`
@@ -41,13 +46,16 @@ type importRow struct {
 	Notes            string  `json:"notes,omitempty"`
 	OriginalAmount   float64 `json:"original_amount,omitempty"`
 	OriginalCurrency string  `json:"original_currency,omitempty"`
+	Skip             bool    `json:"skip"`
 }
 
 // importStore holds pending imports in memory with TTL-based expiry.
 var importStore sync.Map
 
-// importTTL is how long an import entry stays valid before expiry.
-const importTTL = 30 * time.Minute
+// importTTL is how long an import entry stays valid before expiry. A full
+// hour is fixed (not activity-based) to avoid a memory-leak class where an
+// idle tab holds a session alive forever.
+const importTTL = 60 * time.Minute
 
 // startCleanupOnce ensures the background cleanup goroutine starts only once.
 var startCleanupOnce sync.Once
@@ -265,6 +273,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 			if !hasAnyValue {
 				continue
 			}
+			ir.RowID = len(parsedRows)
 			parsedRows = append(parsedRows, ir)
 		}
 	}
