@@ -206,6 +206,105 @@ func buildCollisionGroups(
 	return groups, nil
 }
 
+// validateImportField normalizes and validates one field of an import row for
+// the PATCH endpoint. Returns the parsed canonical value (type varies by
+// field: time.Time for date, string for description, float64 dollars for
+// amount, bool for skip), plus an error code + user-facing message on
+// failure. A non-empty errCode means the caller should write HTTP 400 with
+// the error body {code, field, message}. An empty errCode means validation
+// passed and normalized is safe to assign.
+//
+// Per-field rules (matches the spec's Validation field rules table):
+//
+//	date: non-empty, parseable via parseImportDate (both Excel serial and
+//	      the text layouts), in [minImportYear, maxImportYear]. Empty or
+//	      unparseable → INVALID_DATE. Reuses the exact parse path that
+//	      handleImportUpload uses so the normalize-then-hash step lands on
+//	      the same canonical date both at upload and PATCH time.
+//
+//	description: non-empty after TrimSpace, length ≤ MaxDescriptionLength
+//	      (500, defined in limits.go). Trimmed string is returned as the
+//	      normalized value — the caller assigns it directly to row.Description
+//	      so subsequent re-hashes see the canonical form. The trim happens
+//	      here (not only inside ComputeContentHash) because the stored row
+//	      value is also what the frontend displays: we want "Starbucks" in
+//	      the UI after a user types " Starbucks ", not the raw input.
+//
+//	amount: non-empty, parseable via parseImportAmount (strips currency
+//	      formatting, rejects NaN/Inf, enforces MaxTransactionAmount
+//	      magnitude). An empty amount at PATCH time is a HARD error
+//	      (INVALID_AMOUNT) — this is the edit-mode parity case from test
+//	      #9: upload silently coerces empty → 0 so the row lands in the
+//	      preview (skipped from confirm as "negative amount"), but PATCH
+//	      does not get to silently zero a cell the user is actively
+//	      editing. Returning 400 forces the frontend to surface an inline
+//	      error so the user knows the edit did not take effect.
+//
+//	skip: strict bool. Any non-bool JSON value → INVALID_FIELD. No
+//	      normalization — the value is passed through untouched.
+//
+// Unknown field names → INVALID_FIELD with a message naming the field.
+// This is the only path that returns INVALID_FIELD; every other failure
+// has a field-specific code so the frontend can color-code the originating
+// cell without parsing the message.
+func validateImportField(field string, value any) (normalized any, errCode string, message string) {
+	switch field {
+	case "date":
+		s, ok := value.(string)
+		if !ok {
+			return nil, "INVALID_DATE", "date must be a string"
+		}
+		t, err := parseImportDate(s)
+		if err != nil {
+			return nil, "INVALID_DATE", "date is not parseable or out of range [1900, 2100]"
+		}
+		return t, "", ""
+
+	case "description":
+		s, ok := value.(string)
+		if !ok {
+			return nil, "INVALID_DESCRIPTION", "description must be a string"
+		}
+		trimmed := strings.TrimSpace(s)
+		if trimmed == "" {
+			return nil, "INVALID_DESCRIPTION", "description cannot be empty"
+		}
+		if len(trimmed) > MaxDescriptionLength {
+			return nil, "INVALID_DESCRIPTION", fmt.Sprintf("description exceeds %d characters", MaxDescriptionLength)
+		}
+		return trimmed, "", ""
+
+	case "amount":
+		s, ok := value.(string)
+		if !ok {
+			return nil, "INVALID_AMOUNT", "amount must be a string"
+		}
+		if strings.TrimSpace(s) == "" {
+			return nil, "INVALID_AMOUNT", "amount cannot be empty"
+		}
+		cents, err := parseImportAmount(s)
+		if err != nil {
+			return nil, "INVALID_AMOUNT", "amount is not a valid number"
+		}
+		// Return dollars so the caller can assign directly to row.Amount
+		// (which is declared as float64 dollars, not int64 cents). The
+		// ComputeContentHash caller inside buildCollisionGroups multiplies
+		// back to cents via dollarsToCents(math.Abs(row.Amount)), so the
+		// round-trip is lossless for the values that parseImportAmount
+		// accepts (it already rejects magnitudes above MaxTransactionAmount
+		// and NaN/Inf).
+		return float64(cents) / 100.0, "", ""
+
+	case "skip":
+		b, ok := value.(bool)
+		if !ok {
+			return nil, "INVALID_FIELD", "skip must be a boolean"
+		}
+		return b, "", ""
+	}
+	return nil, "INVALID_FIELD", fmt.Sprintf("unknown field: %q", field)
+}
+
 // importStore holds pending imports in memory with TTL-based expiry.
 var importStore sync.Map
 
