@@ -500,20 +500,10 @@ type predictedSkip struct {
 }
 
 // importConfirmRequest is the JSON body for confirming an import.
-//
-// ForceAdd lists the RowIndex values of predicted duplicates that the
-// user has explicitly ticked "import anyway" on. Rows listed here skip
-// the duplicate check and instead append a " (N)" suffix to their
-// description until the resulting content hash no longer collides. The
-// UI renders this mutation loudly so the user knows what they're
-// agreeing to — a forced duplicate is a legitimate-but-distinct row
-// (e.g. two identical coffees on the same day) and the suffix is what
-// disambiguates them in charts and totals.
 type importConfirmRequest struct {
 	ImportID          string           `json:"import_id"`
 	DefaultCategoryID int64            `json:"default_category_id"`
 	CategoryMap       map[string]int64 `json:"category_map"`
-	ForceAdd          []int            `json:"force_add"`
 }
 
 // importSkipReason enumerates the closed set of reasons a row can be
@@ -532,12 +522,11 @@ type importConfirmRequest struct {
 type importSkipReason string
 
 const (
-	skipReasonEmptyDescription  importSkipReason = "empty_description"
-	skipReasonZeroAmount        importSkipReason = "zero_amount"
-	skipReasonUnparseableDate   importSkipReason = "unparseable_date"
-	skipReasonMissingCategory   importSkipReason = "missing_category"
-	skipReasonDuplicate         importSkipReason = "duplicate"
-	skipReasonForceAddCollision importSkipReason = "force_add_collision"
+	skipReasonEmptyDescription importSkipReason = "empty_description"
+	skipReasonZeroAmount       importSkipReason = "zero_amount"
+	skipReasonUnparseableDate  importSkipReason = "unparseable_date"
+	skipReasonMissingCategory  importSkipReason = "missing_category"
+	skipReasonDuplicate        importSkipReason = "duplicate"
 )
 
 // importInserted records a row that made it into the transactions table.
@@ -611,18 +600,9 @@ type importProcessInput struct {
 	Rows              []importRow
 	CategoryMap       map[string]int64
 	DefaultCategoryID int64
-	ForceAddSet       map[int]struct{}
 	CatNameToID       map[string]int64
 	CatIDToName       map[int64]string
 }
-
-// errForceAddExhausted is the sentinel returned by resolveForceAddSuffix
-// when no free " (N)" suffix exists within [2, forceAddSuffixCap]. The
-// processor maps this to skipReasonForceAddCollision, while any other
-// error from the suffix loop is treated as a DB fault and flows into
-// the Errored bucket. Separating the two reasons prevents a DB blip
-// from silently burning a force-add slot.
-var errForceAddExhausted = errors.New("force-add suffix exhausted")
 
 // handleImportConfirm inserts all rows from a previously uploaded import
 // into the transactions table.
@@ -655,16 +635,6 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
-	// Phase 3.4: materialize force-add row indices into a set for
-	// O(1) lookup. The request ships them as a slice for ergonomics;
-	// we flip them into a map once rather than doing a linear scan
-	// inside the per-row hot path. Empty slice → empty map → every
-	// row flows through the ordinary duplicate check.
-	forceAddSet := make(map[int]struct{}, len(req.ForceAdd))
-	for _, idx := range req.ForceAdd {
-		forceAddSet[idx] = struct{}{}
-	}
-
 	// Start a database transaction for all inserts
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -686,7 +656,6 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		Rows:              entry.Rows,
 		CategoryMap:       req.CategoryMap,
 		DefaultCategoryID: req.DefaultCategoryID,
-		ForceAddSet:       forceAddSet,
 		CatNameToID:       catNameToID,
 		CatIDToName:       catIDToName,
 	})
@@ -855,64 +824,36 @@ func processImportRows(
 		}
 
 		// Phase 3.4: compute the content hash from the resolved row
-		// identity and check the live index before inserting. Rows
-		// listed in ForceAddSet bypass the skip and instead mutate the
-		// description until a non-colliding hash is found.
+		// identity and check the live index before inserting. A hit
+		// skips the row as a duplicate — the Phase 3.4b collision
+		// editor surfaces those predictions in the upload preview so
+		// the user can resolve them by editing fields instead of
+		// appending blunt " (N)" suffixes.
 		description := row.Description
 		amountCents := dollarsToCents(amount)
 		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
-		_, forceAdd := in.ForceAddSet[i]
 
-		if !forceAdd {
-			// Ordinary path: look up the hash and skip on a hit. The
-			// lookup runs on qtx so it observes any rows inserted
-			// earlier in this very batch — importing a spreadsheet
-			// that contains the same row twice detects the second
-			// occurrence as a duplicate of the first within the same
-			// commit.
-			_, lookupErr := qtx.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
-			if lookupErr == nil {
-				result.Skipped = append(result.Skipped, importSkipped{
-					RowIndex: i,
-					Reason:   skipReasonDuplicate,
-				})
-				continue
-			}
-			if !errors.Is(lookupErr, sql.ErrNoRows) {
-				log.Printf("import: content hash lookup failed (row=%d): %v", i, lookupErr)
-				result.Errored = append(result.Errored, importErrored{
-					RowIndex: i,
-					Reason:   sanitizeLogValue(lookupErr.Error()),
-				})
-				continue
-			}
-		} else {
-			// Force-add path: append " (N)" to the description and
-			// loop until the resulting hash does not collide. An
-			// exhausted suffix cap maps to skipReasonForceAddCollision;
-			// any other error is a DB fault and goes to Errored. The
-			// split is why resolveForceAddSuffix wraps its exhaustion
-			// error with the errForceAddExhausted sentinel.
-			suffixed, suffixedHash, suffixErr := resolveForceAddSuffix(
-				ctx, qtx, description, date, amountCents, canonicalCategoryName,
-			)
-			if suffixErr != nil {
-				if errors.Is(suffixErr, errForceAddExhausted) {
-					result.Skipped = append(result.Skipped, importSkipped{
-						RowIndex: i,
-						Reason:   skipReasonForceAddCollision,
-					})
-				} else {
-					log.Printf("import: force-add suffix failed (row=%d): %v", i, suffixErr)
-					result.Errored = append(result.Errored, importErrored{
-						RowIndex: i,
-						Reason:   sanitizeLogValue(suffixErr.Error()),
-					})
-				}
-				continue
-			}
-			description = suffixed
-			hash = suffixedHash
+		// Ordinary path: look up the hash and skip on a hit. The
+		// lookup runs on qtx so it observes any rows inserted
+		// earlier in this very batch — importing a spreadsheet
+		// that contains the same row twice detects the second
+		// occurrence as a duplicate of the first within the same
+		// commit.
+		_, lookupErr := qtx.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
+		if lookupErr == nil {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonDuplicate,
+			})
+			continue
+		}
+		if !errors.Is(lookupErr, sql.ErrNoRows) {
+			log.Printf("import: content hash lookup failed (row=%d): %v", i, lookupErr)
+			result.Errored = append(result.Errored, importErrored{
+				RowIndex: i,
+				Reason:   sanitizeLogValue(lookupErr.Error()),
+			})
+			continue
 		}
 
 		// Build params. Amount is expected to already be in base currency
@@ -1115,49 +1056,6 @@ func validateImportYear(t time.Time, raw string) (time.Time, error) {
 			raw, y, minImportYear, maxImportYear)
 	}
 	return t, nil
-}
-
-// forceAddSuffixCap is the ceiling on how many " (N)" suffixes
-// resolveForceAddSuffix will try before giving up. Under realistic
-// household data the loop terminates at n=2 or n=3; the cap is defensive
-// against a pathological input (say, a merchant that is legitimately
-// charged 500+ times on the same day for the same amount, which we
-// never see, but which would otherwise spin forever).
-const forceAddSuffixCap = 1000
-
-// resolveForceAddSuffix finds the smallest " (N)" suffix (starting at
-// N=2) such that the content hash of the suffixed description does not
-// collide with an existing live row. It returns the suffixed description
-// and its hash.
-//
-// The function runs inside the same sqlc transaction as the surrounding
-// import so an earlier row in this batch that landed with "(2)" is
-// visible to a later row looking for "(3)". If the cap is exhausted
-// without finding a non-colliding suffix, the error is surfaced to the
-// caller — the import handler logs it and counts the row as skipped,
-// preserving the "no silent doubles" invariant at the cost of the
-// legitimate-but-pathological row.
-func resolveForceAddSuffix(
-	ctx context.Context,
-	qtx *database.Queries,
-	description string,
-	date time.Time,
-	amountCents int64,
-	categoryName string,
-) (string, string, error) {
-	for n := 2; n <= forceAddSuffixCap; n++ {
-		candidate := fmt.Sprintf("%s (%d)", description, n)
-		hash := database.ComputeContentHash(date, amountCents, candidate, categoryName)
-		_, err := qtx.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
-		if errors.Is(err, sql.ErrNoRows) {
-			return candidate, hash, nil
-		}
-		if err != nil {
-			return "", "", fmt.Errorf("lookup suffix %q: %w", candidate, err)
-		}
-		// err == nil → hash hit, try the next suffix.
-	}
-	return "", "", fmt.Errorf("no free suffix in [2, %d]: %w", forceAddSuffixCap, errForceAddExhausted)
 }
 
 // resolveCategoryID determines the category ID for an imported row.

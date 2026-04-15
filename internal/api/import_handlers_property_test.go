@@ -109,9 +109,9 @@ func newPropertyFixture(t *testing.T) *propertyFixture {
 //
 // DefaultCategoryID is intentionally 0 so the "missing category" skip
 // branch can fire for rows whose spreadsheet category is empty or
-// unrecognized. CategoryMap and ForceAddSet are nil because the
-// properties do not need to exercise the explicit mapping or
-// force-add paths to assert conservation and reason discipline.
+// unrecognized. CategoryMap is nil because the properties do not need
+// to exercise the explicit mapping path to assert conservation and
+// reason discipline.
 func (f *propertyFixture) runProcess(t *rapid.T, rows []importRow) importResult {
 	tx, err := f.db.BeginTx(context.Background(), nil)
 	if err != nil {
@@ -125,7 +125,6 @@ func (f *propertyFixture) runProcess(t *rapid.T, rows []importRow) importResult 
 		Rows:              rows,
 		CategoryMap:       nil,
 		DefaultCategoryID: 0,
-		ForceAddSet:       nil,
 		CatNameToID:       f.catNameToID,
 		CatIDToName:       f.catIDToName,
 	})
@@ -210,10 +209,10 @@ func genNonZeroAmount() *rapid.Generator[float64] {
 // generator and are instead covered by the companion deterministic
 // test `TestProcessImportRows_AllReasonsReachable`:
 //
-//   - `skipReasonDuplicate` and `skipReasonForceAddCollision` would
-//     require either a pre-seeded row or an in-batch collision that
-//     rapid's random input is extraordinarily unlikely to produce
-//     with a 1e8-cent amount space and 1-30 char descriptions.
+//   - `skipReasonDuplicate` would require either a pre-seeded row or
+//     an in-batch collision that rapid's random input is extraordinarily
+//     unlikely to produce with a 1e8-cent amount space and 1-30 char
+//     descriptions.
 //   - `importErrored` (entire bucket) requires a DB fault or a
 //     client-supplied category_id that is missing from the lookup
 //     map — neither of which the generator can plausibly synthesize.
@@ -357,12 +356,11 @@ func TestImportProperty_NoSilentDrops(t *testing.T) {
 	// import_handlers.go AND add it here — otherwise the property
 	// fails immediately, which is the point.
 	validReasons := map[importSkipReason]struct{}{
-		skipReasonEmptyDescription:  {},
-		skipReasonZeroAmount:        {},
-		skipReasonUnparseableDate:   {},
-		skipReasonMissingCategory:   {},
-		skipReasonDuplicate:         {},
-		skipReasonForceAddCollision: {},
+		skipReasonEmptyDescription: {},
+		skipReasonZeroAmount:       {},
+		skipReasonUnparseableDate:  {},
+		skipReasonMissingCategory:  {},
+		skipReasonDuplicate:        {},
 	}
 	rapid.Check(t, func(t *rapid.T) {
 		rows := genImportRows(fix.knownCats).Draw(t, "rows")
@@ -434,10 +432,9 @@ func TestImportProperty_AmountSanity(t *testing.T) {
 // companion to the rapid-driven properties above. Its job is to close
 // the coverage gap that the random generator structurally cannot
 // reach: `skipReasonDuplicate` (requires a pre-seeded row or in-batch
-// collision that random inputs virtually never produce),
-// `skipReasonForceAddCollision` (requires 999 pre-seeded suffix
-// variants), and the entire `Errored` bucket (requires a client-
-// supplied category_id missing from the lookup map).
+// collision that random inputs virtually never produce) and the
+// entire `Errored` bucket (requires a client-supplied category_id
+// missing from the lookup map).
 //
 // The test makes the reachability of each reason checkable in CI: a
 // future refactor that renames or removes a rejection branch cannot
@@ -458,8 +455,8 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 
 	// Helper: run processImportRows on a fresh tx and roll back.
 	// Separate from propertyFixture.runProcess because this test
-	// sometimes passes a custom catIDToName / catNameToID / forceAddSet
-	// / defaultCategoryID per subtest.
+	// sometimes passes a custom catIDToName / catNameToID /
+	// defaultCategoryID per subtest.
 	run := func(t *testing.T, in importProcessInput) importResult {
 		t.Helper()
 		tx, err := fix.db.BeginTx(ctx, nil)
@@ -558,62 +555,6 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 		if got := result.Skipped[0].Reason; got != skipReasonDuplicate {
 			t.Fatalf("expected reason %q, got %q", skipReasonDuplicate, got)
-		}
-	})
-
-	t.Run("force_add_collision_cap_exhausted", func(t *testing.T) {
-		// Force-add collision exhaustion at forceAddSuffixCap=1000 is
-		// too expensive to simulate with 999 real pre-seeded rows, so
-		// we monkey-patch resolveForceAddSuffix through the
-		// force-add request path with a tight cap would require a
-		// code change. Instead, this subtest verifies that the
-		// force-add path is wired correctly by feeding a row that
-		// has a pre-seeded hash collision — the resolver should
-		// find the `(2)` suffix, insert successfully, and NOT emit
-		// a skipReasonForceAddCollision row.
-		//
-		// Exhaustion coverage happens at the boundary: the real
-		// `forceAddSuffixCap` is 1000, and the ordinary property
-		// suite already cycles through enough force-add-free
-		// insertions that the cap code path is exercised indirectly.
-		// A dedicated exhaustion test would require exposing an
-		// internal cap override, which adds test-only code to a
-		// production type for a branch that is defensive-only (no
-		// real household data reaches 1000 identical same-day
-		// transactions).
-		//
-		// The property-level assertion `NoSilentDrops` still covers
-		// the reason-set slot: if a refactor renames the constant,
-		// the string comparison in the property fires regardless of
-		// whether the branch actually fires at runtime.
-		row := validBase
-		// Seed a colliding row first
-		seeded := run(t, importProcessInput{
-			Rows:        []importRow{row},
-			CatNameToID: fix.catNameToID,
-			CatIDToName: fix.catIDToName,
-		})
-		if len(seeded.Inserted) != 1 {
-			t.Fatalf("seed insert failed: %+v", seeded)
-		}
-		// Now run a second import with the same row marked for
-		// force-add. Because run() uses a fresh tx each call and
-		// rolls back, the first call's seed is gone by the time
-		// the second call starts — so this second call should also
-		// hit the "not colliding" path and insert at the bare
-		// description. The value of this subtest is that it proves
-		// the force-add dispatch path executes without panicking
-		// or misrouting the result; the exhaustion branch is
-		// covered by the resolver's own unit tests in
-		// import_handlers_test.go.
-		forceResult := run(t, importProcessInput{
-			Rows:        []importRow{row},
-			ForceAddSet: map[int]struct{}{0: {}},
-			CatNameToID: fix.catNameToID,
-			CatIDToName: fix.catIDToName,
-		})
-		if len(forceResult.Inserted) != 1 {
-			t.Fatalf("force-add dispatch failed: %+v", forceResult)
 		}
 	})
 
