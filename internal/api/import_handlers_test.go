@@ -1030,7 +1030,7 @@ func TestHandleImportCancel_OwnerCanCancel(t *testing.T) {
 
 	// Cancel the import using chi URL param
 	req := httptest.NewRequest(http.MethodDelete, "/api/import/"+importID, nil)
-	req = withUserAndURLParam(req, user, "id", importID)
+	req = withUserAndURLParam(req, user, "importID", importID)
 	rec := httptest.NewRecorder()
 
 	h.handleImportCancel(rec, req)
@@ -1069,7 +1069,7 @@ func TestHandleImportCancel_WrongUser_Returns403(t *testing.T) {
 
 	// User2 tries to cancel user1's import
 	req := httptest.NewRequest(http.MethodDelete, "/api/import/"+importID, nil)
-	req = withUserAndURLParam(req, user2, "id", importID)
+	req = withUserAndURLParam(req, user2, "importID", importID)
 	rec := httptest.NewRecorder()
 
 	h.handleImportCancel(rec, req)

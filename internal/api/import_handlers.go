@@ -104,6 +104,40 @@ var dateFormats = []string{
 	"2006/01/02",
 }
 
+// loadImportEntryForUser fetches an import entry from importStore, enforces
+// ownership, and checks TTL expiry. On any failure it writes the
+// appropriate HTTP error and returns ok=false — the caller must return
+// immediately. Used by every handler that touches a specific import
+// session (confirm, cancel, GET, PATCH) so the ownership/expiry contract
+// lives in exactly one place.
+func loadImportEntryForUser(w http.ResponseWriter, r *http.Request, importID string) (*importEntry, bool) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return nil, false
+	}
+	if len(importID) != 32 {
+		writeError(w, http.StatusBadRequest, "invalid import_id")
+		return nil, false
+	}
+	val, found := importStore.Load(importID)
+	if !found {
+		writeError(w, http.StatusNotFound, "import not found or expired")
+		return nil, false
+	}
+	entry := val.(*importEntry)
+	if entry.UserID != user.ID {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return nil, false
+	}
+	if time.Since(entry.CreatedAt) > importTTL {
+		importStore.Delete(importID)
+		writeError(w, http.StatusNotFound, "import not found or expired")
+		return nil, false
+	}
+	return entry, true
+}
+
 // handleImportUpload accepts a multipart xlsx file upload, parses it, stores
 // the rows in memory, and returns a preview.
 func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
@@ -593,41 +627,13 @@ var errForceAddExhausted = errors.New("force-add suffix exhausted")
 // handleImportConfirm inserts all rows from a previously uploaded import
 // into the transactions table.
 func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
-	user, ok := auth.GetUser(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
 	var req importConfirmRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
-	if len(req.ImportID) != 32 {
-		writeError(w, http.StatusBadRequest, "invalid import_id")
-		return
-	}
-
-	// Look up import entry
-	val, found := importStore.Load(req.ImportID)
-	if !found {
-		writeError(w, http.StatusNotFound, "import not found or expired")
-		return
-	}
-	entry := val.(*importEntry)
-
-	// Verify ownership
-	if entry.UserID != user.ID {
-		writeError(w, http.StatusForbidden, "forbidden")
-		return
-	}
-
-	// Check expiry
-	if time.Since(entry.CreatedAt) > importTTL {
-		importStore.Delete(req.ImportID)
-		writeError(w, http.StatusGone, "import has expired")
+	entry, ok := loadImportEntryForUser(w, r, req.ImportID)
+	if !ok {
 		return
 	}
 
@@ -676,7 +682,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// transaction lifecycle — processImportRows only runs the policy
 	// loop.
 	result, minImportDate := processImportRows(r.Context(), qtx, importProcessInput{
-		UserID:            user.ID,
+		UserID:            entry.UserID,
 		Rows:              entry.Rows,
 		CategoryMap:       req.CategoryMap,
 		DefaultCategoryID: req.DefaultCategoryID,
@@ -721,31 +727,10 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 // handleImportCancel removes a pending import entry from memory so the
 // per-user slot is freed immediately (instead of waiting for TTL expiry).
 func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
-	user, ok := auth.GetUser(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	importID := chi.URLParam(r, "importID")
+	if _, ok := loadImportEntryForUser(w, r, importID); !ok {
 		return
 	}
-
-	importID := chi.URLParam(r, "id")
-	if len(importID) != 32 {
-		writeError(w, http.StatusBadRequest, "invalid import_id")
-		return
-	}
-
-	val, found := importStore.Load(importID)
-	if !found {
-		// Already gone — treat as success
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
-	entry := val.(*importEntry)
-	if entry.UserID != user.ID {
-		writeError(w, http.StatusForbidden, "forbidden")
-		return
-	}
-
 	importStore.Delete(importID)
 	w.WriteHeader(http.StatusNoContent)
 }
