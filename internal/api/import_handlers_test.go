@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -147,6 +148,28 @@ func postMultipartFile(t *testing.T, url string, xlsxData []byte) *http.Request 
 	req := httptest.NewRequest(http.MethodPost, url, body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+// patchImportRow builds a PATCH request for the PATCH /api/import/{importID}/rows/{rowID}
+// endpoint and wires the chi URL params through withUserAndURLParams. Returns
+// an httptest.ResponseRecorder so the caller can assert on status and body.
+// Keeping this helper in the test file (not production) avoids coupling
+// production code to the chi router's mock helpers.
+func patchImportRow(t *testing.T, h *Handler, user database.User, importID string, rowID int, field string, value any) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"field": field, "value": value})
+	if err != nil {
+		t.Fatalf("marshal patch body: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodPatch, "/api/import/"+importID+"/rows/"+strconv.Itoa(rowID), bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUserAndURLParams(req, user, map[string]string{
+		"importID": importID,
+		"rowID":    strconv.Itoa(rowID),
+	})
+	rec := httptest.NewRecorder()
+	h.handleImportPatchRow(rec, req)
+	return rec
 }
 
 // --- handleImportUpload ---
@@ -1509,5 +1532,306 @@ func TestHandleImportUpload_HidesTombstonedFromDbMatch(t *testing.T) {
 	groups := resp["collision_groups"].([]any)
 	if len(groups) != 0 {
 		t.Errorf("expected 0 collision_groups (tombstoned row should not match), got %d: %v", len(groups), groups)
+	}
+}
+
+// TestHandleImportPatchRow_HappyPath_UnbreaksRowFromGroupOfThree verifies the
+// core PATCH contract: an edit that changes a field feeding the content hash
+// causes the edited row to flip clean and the remaining two rows to stay
+// grouped (now as a pair, not a triple). Owns the "stale group_id after
+// re-hash" bug class — if the handler fails to rebuild groups from scratch
+// and instead mutates-in-place the old group list, the departing row's
+// row_id will linger in the old group members slice.
+func TestHandleImportPatchRow_HappyPath_UnbreaksRowFromGroupOfThree(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "patcher", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	// Three identical rows — same date, description, amount, category.
+	// At upload time, buildCollisionGroups groups them into one intra_file
+	// group of 3 members.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+	uploadGroups := upload["collision_groups"].([]any)
+	if len(uploadGroups) != 1 {
+		t.Fatalf("expected 1 collision group at upload, got %d: %v", len(uploadGroups), uploadGroups)
+	}
+	uploadMembers := uploadGroups[0].(map[string]any)["member_row_ids"].([]any)
+	if len(uploadMembers) != 3 {
+		t.Fatalf("expected 3 members in upload group, got %d", len(uploadMembers))
+	}
+
+	// PATCH row 0's date to something unique. The edit should flip row 0 to
+	// clean and leave rows 1 and 2 still grouped together.
+	patchRec := patchImportRow(t, h, user, importID, 0, "date", "2025-08-15")
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal patch response: %v", err)
+	}
+
+	// Assert the response shape: rows list still has 3 entries, and the
+	// collision_groups list now has exactly one group with 2 members
+	// (row_ids 1 and 2).
+	rows := resp["rows"].([]any)
+	if len(rows) != 3 {
+		t.Fatalf("expected 3 rows in response, got %d", len(rows))
+	}
+	row0 := rows[0].(map[string]any)
+	if row0["date"].(string) != "2025-08-15" {
+		t.Errorf("expected row 0 date=2025-08-15 after PATCH, got %v", row0["date"])
+	}
+
+	groups := resp["collision_groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 remaining collision group after PATCH, got %d: %v", len(groups), groups)
+	}
+	members := groups[0].(map[string]any)["member_row_ids"].([]any)
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members in remaining group, got %d: %v", len(members), members)
+	}
+	seen := map[int]bool{}
+	for _, m := range members {
+		seen[int(m.(float64))] = true
+	}
+	if !seen[1] || !seen[2] {
+		t.Errorf("expected members to be {1, 2}, got %v", members)
+	}
+	if seen[0] {
+		t.Errorf("row 0 should have left the group after PATCH, but is still listed: %v", members)
+	}
+}
+
+// TestHandleImportPatchRow_ReCollision_PreservesSkip owns the skip-sticky
+// invariant from the spec's Edge Cases table: once a row is marked skip=true,
+// no subsequent edit ever clears that flag. Here we mark a colliding row as
+// skipped, then PATCH its date so it STOPS colliding — the response must
+// still carry skip=true on the row and must NOT include the row in
+// collision_groups (because skipped rows are excluded from grouping entirely).
+//
+// Also owns the stateful-regrouping invariant: the server holds session
+// state across PATCHes, so a second PATCH's group view must reflect the
+// first PATCH's mutation.
+func TestHandleImportPatchRow_ReCollision_PreservesSkip(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "stickyskipper", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+
+	// Mark row 0 as skipped. The response should drop the collision group
+	// entirely (1 remaining member cannot form a collision with itself).
+	skipRec := patchImportRow(t, h, user, importID, 0, "skip", true)
+	if skipRec.Code != http.StatusOK {
+		t.Fatalf("patch skip: expected 200, got %d: %s", skipRec.Code, skipRec.Body.String())
+	}
+	var skipResp map[string]any
+	if err := json.Unmarshal(skipRec.Body.Bytes(), &skipResp); err != nil {
+		t.Fatalf("unmarshal skip response: %v", err)
+	}
+	if groups := skipResp["collision_groups"].([]any); len(groups) != 0 {
+		t.Fatalf("expected 0 collision groups after skipping row 0, got %d: %v", len(groups), groups)
+	}
+	skipRow0 := skipResp["rows"].([]any)[0].(map[string]any)
+	if skipRow0["skip"] != true {
+		t.Fatalf("expected row 0 skip=true after skip PATCH, got %v", skipRow0["skip"])
+	}
+
+	// Now PATCH the skipped row's date to a unique value. The row is
+	// already skipped, so this edit does not change group membership
+	// (skipped rows are excluded from grouping). The critical invariant:
+	// skip MUST stay true. A handler bug that resets fields-other-than-
+	// edited to their zero values would silently un-skip the row.
+	datePatch := patchImportRow(t, h, user, importID, 0, "date", "2025-08-15")
+	if datePatch.Code != http.StatusOK {
+		t.Fatalf("patch date: expected 200, got %d: %s", datePatch.Code, datePatch.Body.String())
+	}
+	var dateResp map[string]any
+	if err := json.Unmarshal(datePatch.Body.Bytes(), &dateResp); err != nil {
+		t.Fatalf("unmarshal date response: %v", err)
+	}
+	dateRow0 := dateResp["rows"].([]any)[0].(map[string]any)
+	if dateRow0["skip"] != true {
+		t.Errorf("expected skip=true to persist after date PATCH, got %v", dateRow0["skip"])
+	}
+	if dateRow0["date"].(string) != "2025-08-15" {
+		t.Errorf("expected date=2025-08-15 after PATCH, got %v", dateRow0["date"])
+	}
+	if groups := dateResp["collision_groups"].([]any); len(groups) != 0 {
+		t.Fatalf("expected 0 collision groups (row 0 still skipped), got %d: %v", len(groups), groups)
+	}
+}
+
+// TestHandleImportPatchRow_ExpiredSession_Returns404 owns the session
+// expiry backend half. We upload normally, reach into the importStore to
+// rewind CreatedAt past the importTTL (60 minutes after Chunk 1 Task 1
+// bumps it), then PATCH. The shared loadImportEntryForUser helper from
+// Chunk 1 Task 2 evicts the expired entry and returns 404.
+//
+// Rewinding CreatedAt is the canonical way to test TTL expiry without
+// fake-clock machinery — the helper uses time.Since(entry.CreatedAt), so
+// mutating CreatedAt backwards is equivalent to fast-forwarding the wall
+// clock. The store lookup still works (we wrote into the sync.Map directly
+// by import_id) and the mutation is safe because we're the only goroutine
+// reading it in this test.
+func TestHandleImportPatchRow_ExpiredSession_Returns404(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "expirysub", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+
+	// Rewind the entry's CreatedAt by 2 hours. importTTL is 60 minutes, so
+	// time.Since(entry.CreatedAt) now exceeds the limit and the helper
+	// returns 404.
+	val, ok := importStore.Load(importID)
+	if !ok {
+		t.Fatalf("importStore.Load returned !ok for import_id=%s", importID)
+	}
+	entry := val.(*importEntry)
+	entry.CreatedAt = time.Now().Add(-2 * time.Hour)
+
+	patchRec := patchImportRow(t, h, user, importID, 0, "description", "Starbucks Reserve")
+	if patchRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 on expired session, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+}
+
+// TestHandleImportPatchRow_WhitespaceCasePreservesCollision owns the
+// hash-normalization parity bug class: upload-time hash and PATCH-time
+// re-hash MUST use the same code path inside ComputeContentHash. A
+// whitespace+case variation on description is the canonical canary —
+// if either path normalizes differently, the groups diverge and the
+// edited row spuriously flips clean.
+//
+// Setup: two rows with exactly matching description "Starbucks" form an
+// intra_file group of 2. PATCH row 0's description to " STARBUCKS " (with
+// wrapping whitespace and uppercased). After re-hash, the normalized form
+// is still "starbucks" — ComputeContentHash lowercases and trims — so the
+// group membership must be preserved.
+func TestHandleImportPatchRow_WhitespaceCasePreservesCollision(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "hashparity", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+	uploadGroups := upload["collision_groups"].([]any)
+	if len(uploadGroups) != 1 {
+		t.Fatalf("expected 1 collision group at upload, got %d", len(uploadGroups))
+	}
+
+	// PATCH row 0's description to a whitespace+case variant. Post-trim
+	// the stored value is "STARBUCKS" (trim happens in validateImportField
+	// but case is preserved in the row value — only the hash normalizes
+	// case). The hash must still equal row 1's hash, so the group
+	// stays intact.
+	patchRec := patchImportRow(t, h, user, importID, 0, "description", " STARBUCKS ")
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal patch response: %v", err)
+	}
+
+	// The displayed row value is "STARBUCKS" (trimmed, case preserved) —
+	// this asserts that validateImportField stores the trimmed form, which
+	// is what the frontend will render.
+	row0 := resp["rows"].([]any)[0].(map[string]any)
+	if row0["description"].(string) != "STARBUCKS" {
+		t.Errorf("expected row 0 description=STARBUCKS after trim, got %q", row0["description"])
+	}
+
+	// The group must still exist with both members. If the hash diverged
+	// due to a normalization mismatch, this would collapse to zero groups
+	// and the test would catch the regression.
+	groups := resp["collision_groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 collision group after whitespace+case PATCH, got %d: %v", len(groups), groups)
+	}
+	members := groups[0].(map[string]any)["member_row_ids"].([]any)
+	if len(members) != 2 {
+		t.Fatalf("expected 2 members (hash parity preserved), got %d: %v", len(members), members)
 	}
 }
