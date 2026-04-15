@@ -109,7 +109,7 @@ Phase 3.4b extends the Settings → Import flow so users can resolve SHA-256 con
 
 **Error responses:**
 - `400` — validation error (bad date format, NaN amount, empty description, empty amount). Body: `{ code, field, message }`. Session state unchanged.
-- `403` — import_id owned by another user. Reuses existing ownership helper at `import_handlers.go:47-74`.
+- `403` — import_id owned by another user. Uses the ownership check currently inlined in confirm/cancel (`import_handlers.go:612-616`, `:734-738`), extracted into a shared helper as part of this feature.
 - `404` — session expired or import_id not found.
 
 ### Modified endpoint: `POST /api/import/:import_id/confirm`
@@ -139,6 +139,8 @@ Frontend calls this on mount if `localStorage.spendrop_import_id` is set.
 - **No new persistence layer.** Lost on server restart = re-upload. Correct tradeoff for a hobby tool.
 
 **Concurrency shape:** `importStore` entries are accessed only by the HTTP handler goroutine currently processing a request for that import_id. The sync.Map guards lookup-by-key; concurrent access to a single entry's contents is avoided because (a) the frontend is a single tab per user session, (b) upload creates the entry, PATCH and confirm mutate it, and (c) the frontend serializes its own requests (sequence number prevents out-of-order responses but does not fire PATCHes concurrently — they queue on the React state lifecycle). A second tab hitting the same entry would race at the Go level; the per-user slot cap on upload plus the ownership check at PATCH/confirm time mean this can only happen if the user explicitly deep-links an import_id from one tab to another, which is not a supported flow.
+
+**Implementation note:** this invariant — "PATCH handler goroutines never overlap for a given import_id" — is load-bearing but not enforced by a mutex. It MUST be called out in a code comment on `handlePatchImportRow` so future maintainers who consider optimistic fire-and-forget patterns on the frontend see the assumption they would be breaking. If this invariant ever needs to change (e.g., true multi-tab support), the entry needs a per-import_id mutex or the mutation path needs to move into a single goroutine loop.
 
 ### Validation + hashing reuse (critical)
 
@@ -301,7 +303,7 @@ interface PatchRowRequest {  // NEW
 
 ### Tombstoned rows in DB-match detection
 
-**Rule:** Both the initial upload preview AND the PATCH re-check must filter `t.deleted_at IS NULL`. Reuse the existing `GetTransactionByContentHash` query at `internal/database/queries.sql:182-187` — do NOT write a fresh SELECT in the handler.
+**Rule:** Both the initial upload preview AND the PATCH re-check must filter `t.deleted_at IS NULL`. Reuse the existing `GetTransactionByContentHash` query at `internal/database/queries.sql:182-197` — do NOT write a fresh SELECT in the handler.
 
 **Guards (two tests):**
 - Upload preview: `*_HidesTombstoned` seeds a live row + a tombstoned row (`amount=999` sentinel) with the same content hash as an uploaded row, asserts the import row is NOT flagged as a DB collision at upload time (test #8).
@@ -341,6 +343,8 @@ interface PatchRowRequest {  // NEW
 | Collision row | Edit into a value that matches a DIFFERENT group | Row moves from group A → group B |
 | Skipped collision row | Edit into unique value | Skip flag cleared, row becomes clean |
 | Clean row | Mark skip = true | Row is excluded from import but still displays |
+
+**Surprise rule — skip flag cleared on un-collide:** when a previously-skipped collision row is edited into a unique value, the backend automatically clears the `skip` flag. Rationale: the reason the user marked it `skip` (to work around the collision) no longer applies; leaving the row hidden-by-skip would silently drop data the user just went to the trouble of un-colliding. This is the only transition where an edit to one field (date/description/amount) mutates another field (skip) as a side effect. Tested explicitly in test #2; called out here because it is the least obvious rule in the table above.
 
 ### Skipped ≠ unresolved
 
@@ -454,7 +458,7 @@ Things that are reasonable follow-ups but explicitly NOT part of 3.4b:
 ## File Impact Summary
 
 **Modified:**
-- `internal/api/import_handlers.go` — add PATCH handler + GET handler, assign `row_id` to each row at upload time, add new `buildCollisionGroups` function, wire it into upload preview + PATCH re-check paths, tighten `/confirm` to reject unresolved collisions, bump TTL to 60min, **remove `resolveForceAddSuffix` and all force-add logic**
+- `internal/api/import_handlers.go` — add PATCH handler + GET handler, assign `row_id` to each row at upload time, add new `buildCollisionGroups` function, wire it into upload preview + PATCH re-check paths, tighten `/confirm` to reject unresolved collisions, bump TTL to 60min, **extract the ownership check currently inline at `:612-616` (confirm) and `:734-738` (cancel) into a shared helper used by PATCH/GET/confirm/cancel**, **remove `resolveForceAddSuffix` and all force-add logic**
 - `internal/api/router.go` — register new PATCH (`/api/import/{importID}/rows/{rowID}`) and GET (`/api/import/{importID}`) routes
 - `internal/api/import_handlers_test.go` — remove force-add tests, update `predicted_skips` assertions to `collision_groups`, add new test cases per Testing Strategy
 - `web/src/api/types.ts` — add `CollisionGroup`, `PatchRowRequest`, extend `ImportPreview` with `collision_groups`, remove `predicted_skips`
