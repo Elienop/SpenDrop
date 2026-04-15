@@ -25,6 +25,24 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Schema docs up-to-date
+        run: |
+          # The drift check runs before `go test` so a stale docs/SCHEMA.md
+          # fails fast (~1s) instead of waiting out the race-enabled test
+          # suite. The `git ls-files` guard is a defense against the
+          # docs/SCHEMA.md file being removed from the tree entirely —
+          # `git diff --exit-code` silently passes on an untracked file,
+          # which would let a drifted file sneak through on its own.
+          make docs
+          if ! git diff --exit-code docs/SCHEMA.md; then
+            echo '::error::docs/SCHEMA.md is stale — run `make docs` and commit the result'
+            exit 1
+          fi
+          if ! git ls-files --error-unmatch docs/SCHEMA.md >/dev/null 2>&1; then
+            echo '::error::docs/SCHEMA.md is not tracked — commit it'
+            exit 1
+          fi
+
       - name: Test
         run: go test -race -count=1 ./...
 
