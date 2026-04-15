@@ -394,6 +394,33 @@ func loadImportEntryForUser(w http.ResponseWriter, r *http.Request, importID str
 	return entry, true
 }
 
+// uniqueCategoriesFromRows returns the sorted-distinct Category values
+// from a slice of importRows, skipping empties. Used by
+// handleImportUpload and handleImportGetSession so both the initial
+// upload response and the F5/resume response seed the category-mapping
+// dropdowns from the same source. Case-insensitive dedup keyed on the
+// lowercased name, but the returned slice preserves the first-seen
+// casing of each category.
+func uniqueCategoriesFromRows(rows []importRow) []string {
+	seen := make(map[string]string)
+	for _, row := range rows {
+		cat := strings.TrimSpace(row.Category)
+		if cat == "" {
+			continue
+		}
+		key := strings.ToLower(cat)
+		if _, ok := seen[key]; !ok {
+			seen[key] = cat
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for _, v := range seen {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // handleImportUpload accepts a multipart xlsx file upload, parses it, stores
 // the rows in memory, and returns a preview.
 func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
@@ -609,16 +636,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	})
 
 	// Collect unique category names from all rows for the mapping UI.
-	seen := make(map[string]struct{})
-	uniqueCategories := make([]string, 0)
-	for _, row := range parsedRows {
-		if row.Category != "" {
-			if _, ok := seen[row.Category]; !ok {
-				seen[row.Category] = struct{}{}
-				uniqueCategories = append(uniqueCategories, row.Category)
-			}
-		}
-	}
+	uniqueCategories := uniqueCategoriesFromRows(parsedRows)
 
 	// Phase 3.4b: the upload preview computes collision_groups via
 	// buildCollisionGroups. Unlike the previous upload-time prediction,
@@ -1029,6 +1047,95 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"rows":             entry.Rows,
 		"collision_groups": groups,
+	})
+}
+
+// handleImportGetSession returns the full current snapshot of an import
+// session — rows, columns, unique_categories, and freshly-computed
+// collision_groups — via the shared loadImportEntryForUser gate. This
+// is the F5/tab-refresh resume path: the frontend persists import_id in
+// localStorage on upload and calls GET on mount to rehydrate preview
+// state without re-uploading the file.
+//
+// Why recompute collision_groups on every GET instead of caching:
+// after Chunk 2, every PATCH mutates entry.Rows in place and the
+// collision_groups field on the response is always a function of the
+// current Rows slice. Caching the groups would require invalidation
+// plumbing on every PATCH, and the DB cost is identical to a PATCH
+// rebuild (one GetTransactionByContentHash per hashable row).
+// Recomputing on read is the cheaper invariant to maintain.
+//
+// Category resolution:
+// At upload time we don't know which category_map / default_category_id
+// the user will pick — those are confirm-time arguments. So the GET
+// handler, like handleImportUpload and handleImportPatchRow, passes
+// nil/0 for the user-choice args. buildCollisionGroups still uses the
+// canonical DB category name for the hash formula (via catIDToName),
+// so a category rename between upload and GET would correctly mutate
+// the preview-time hash and potentially collapse or expand a collision.
+//
+// Errors:
+//
+//	401/403/404                    — via loadImportEntryForUser (unauthorized,
+//	                                 wrong user, missing/expired session)
+//	500 failed to load categories  — ListAllCategories returned a DB fault
+//	500 failed to rebuild groups   — buildCollisionGroups returned a DB fault
+func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request) {
+	importID := chi.URLParam(r, "importID")
+
+	entry, ok := loadImportEntryForUser(w, r, importID)
+	if !ok {
+		return
+	}
+
+	// Load categories for the canonical hash resolution.
+	// buildCollisionGroups needs catNameToID (upload-time name match)
+	// and catIDToName (canonical name for the hash formula). Same
+	// pattern as the Chunk 1 upload call site and the Chunk 2 PATCH
+	// call site — keeping the three sites byte-identical makes future
+	// refactors easier to audit.
+	existingCats, err := h.queries.ListAllCategories(r.Context())
+	if err != nil {
+		log.Printf("import get: list categories: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load categories")
+		return
+	}
+	catNameToID := make(map[string]int64, len(existingCats))
+	catIDToName := make(map[int64]string, len(existingCats))
+	for _, c := range existingCats {
+		catNameToID[strings.ToLower(c.Name)] = c.ID
+		catIDToName[c.ID] = c.Name
+	}
+
+	groups, err := buildCollisionGroups(
+		r.Context(),
+		h.queries,
+		entry.Rows,
+		nil, // categoryMap not chosen yet at resume time
+		0,   // defaultCategoryID not chosen yet either
+		catNameToID,
+		catIDToName,
+	)
+	if err != nil {
+		log.Printf("import get: build collision groups: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
+		return
+	}
+
+	// unique_categories is the sorted-distinct set of category strings
+	// seen in entry.Rows. The frontend uses it to seed the
+	// category-mapping dropdowns — same as the upload response.
+	// Recompute from the current rows (not a cached field) so edits
+	// that rename a category cell are reflected in the resume snapshot.
+	uniqueCats := uniqueCategoriesFromRows(entry.Rows)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"import_id":         importID,
+		"row_count":         len(entry.Rows),
+		"rows":              entry.Rows,
+		"columns":           entry.Columns,
+		"unique_categories": uniqueCats,
+		"collision_groups":  groups,
 	})
 }
 

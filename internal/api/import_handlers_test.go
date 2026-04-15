@@ -2076,3 +2076,124 @@ func TestHandleImportPatchRow_AmountFieldModeParity(t *testing.T) {
 		t.Errorf("rejected PATCH must leave row 0 amount unchanged, got %v", got)
 	}
 }
+
+// TestHandleImportGetSession_HappyPath verifies that after an upload, a
+// GET on /api/import/{importID} returns the same shape as the upload
+// response (rows, columns, unique_categories, collision_groups,
+// import_id, row_count). This is the F5/tab-refresh resume path — the
+// frontend mounts with a localStorage import_id and calls GET to
+// rehydrate preview state without re-uploading the file.
+func TestHandleImportGetSession_HappyPath(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "getter", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2025-01-07", "Starbucks", "5.00", "Food"},
+		{"2025-01-08", "Trader Joe's", "42.10", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Now GET the session.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/import/"+importID, nil)
+	getReq = withUserAndURLParam(getReq, user, "importID", importID)
+	getRec := httptest.NewRecorder()
+	h.handleImportGetSession(getRec, getReq)
+
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+
+	var getResp map[string]any
+	decodeResponse(t, getRec, &getResp)
+
+	// Shape parity: every top-level key present in the upload response
+	// must also appear in the GET response. This is the F5-refresh
+	// contract — frontend code paths that consume upload-shaped JSON
+	// keep working when they consume GET-shaped JSON.
+	for _, key := range []string{"import_id", "row_count", "rows", "columns", "unique_categories", "collision_groups"} {
+		if _, ok := getResp[key]; !ok {
+			t.Errorf("GET response missing top-level key %q", key)
+		}
+	}
+
+	if gotID, _ := getResp["import_id"].(string); gotID != importID {
+		t.Errorf("import_id: want %q, got %q", importID, gotID)
+	}
+	if rc, _ := getResp["row_count"].(float64); int(rc) != 2 {
+		t.Errorf("row_count: want 2, got %v", getResp["row_count"])
+	}
+	rowsResp, ok := getResp["rows"].([]any)
+	if !ok || len(rowsResp) != 2 {
+		t.Fatalf("rows: want slice of 2, got %T len %d", getResp["rows"], len(rowsResp))
+	}
+
+	// Two distinct rows with no DB matches → zero collision groups.
+	groups, _ := getResp["collision_groups"].([]any)
+	if len(groups) != 0 {
+		t.Errorf("collision_groups: want 0 for two distinct rows, got %d", len(groups))
+	}
+}
+
+// TestHandleImportGetSession_ExpiredSession_Returns404 verifies that a
+// GET for an import whose CreatedAt is older than importTTL returns 404
+// and reaps the entry. Uses the same direct-store mutation pattern as
+// TestHandleImportPatchRow_ExpiredSession_Returns404 from Chunk 2:
+// upload normally, then rewind CreatedAt to 2h ago via importStore.
+func TestHandleImportGetSession_ExpiredSession_Returns404(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "expirer", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2025-01-07", "Starbucks", "5.00"},
+	})
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Rewind CreatedAt so the entry is expired per importTTL (60m).
+	val, ok := importStore.Load(importID)
+	if !ok {
+		t.Fatalf("store lookup: entry missing immediately after upload")
+	}
+	entry := val.(*importEntry)
+	entry.CreatedAt = time.Now().Add(-2 * time.Hour)
+
+	// GET should now 404 and the helper should reap the entry from
+	// the store (same contract as the Chunk 2 PATCH expiry test).
+	getReq := httptest.NewRequest(http.MethodGet, "/api/import/"+importID, nil)
+	getReq = withUserAndURLParam(getReq, user, "importID", importID)
+	getRec := httptest.NewRecorder()
+	h.handleImportGetSession(getRec, getReq)
+
+	if getRec.Code != http.StatusNotFound {
+		t.Errorf("expected 404 for expired session, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+	if _, still := importStore.Load(importID); still {
+		t.Error("expected loadImportEntryForUser to delete the expired entry; it is still in the store")
+	}
+}
