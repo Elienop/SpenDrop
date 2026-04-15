@@ -817,16 +817,26 @@ func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
 // don't silently alter how the importer interprets Date cells. Covers:
 //   - whitespace and empty input
 //   - Excel serial date range boundaries [1, 2958465]
+//   - household-ledger-year window [1900, 2100]
 //   - fractional serials (date + time-of-day)
 //   - all five text date formats
 //   - obviously-bad inputs
 //
-// Note: the "stray small integer" case ("1234" → 1903-05-18) is a known
-// quirk of the serial-first order. Any integer in [1, 2958465] is treated
-// as a valid serial, which means a non-date column misplaced into the date
-// position may parse as a very early Excel date. In practice the user would
-// notice the resulting transaction landing in the year 1903, and the
-// alternative (text-first) would break the July/August 2025 mm-dd-yy fix.
+// Phase 3.7 note: the FuzzParseImportDate corpus surfaced two serial
+// boundary cases — serial 1 (→ 1899-12-31) and serial 2958465 (→ 9999-
+// 12-31) — that satisfy the Excel serial range check but fall outside
+// any plausible household ledger window. parseImportDate now enforces
+// a [1900, 2100] year bound after successful parse via
+// validateImportYear; these cases moved from "success" to
+// "expected error" below.
+//
+// The "stray small integer" quirk for mid-range serials is partially
+// mitigated but not eliminated. "1234" still parses to 1903-05-18
+// (year 1903 is inside [1900, 2100]), so a misaligned integer column
+// can still produce a very early Excel date — the user would notice
+// it landing in the 1903 bucket. Tightening further would break
+// legitimate imports of pre-2000 bank statements; the [1900, 2100]
+// window is the compromise.
 func TestParseImportDate(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -834,14 +844,26 @@ func TestParseImportDate(t *testing.T) {
 		wantErr bool
 		wantStr string // "2006-01-02" format; ignored if wantErr
 	}{
-		// Serial date boundaries
-		{"serial 1 (1899-12-31 or 1900-01-01 quirk)", "1", false, "1899-12-31"},
+		// Serial date boundaries — pre-Phase-3.7 these returned the
+		// boundary dates (1899-12-31 / 9999-12-31); now rejected by
+		// the [1900, 2100] household ledger guard.
+		{"serial 1 maps to 1899-12-31, below year window", "1", true, ""},
 		{"serial 45859 (2025-07-21)", "45859", false, "2025-07-21"},
-		{"serial max 2958465 (9999-12-31)", "2958465", false, "9999-12-31"},
+		{"serial max 2958465 maps to 9999-12-31, above year window", "2958465", true, ""},
 		{"serial above max falls through to text and fails", "2958466", true, ""},
 		{"serial 0 below range falls through and fails", "0", true, ""},
 		{"negative number falls through and fails", "-5", true, ""},
 		{"fractional serial with time component", "45859.5", false, "2025-07-21"},
+
+		// Year-window boundaries via ISO text. These pin both ends of
+		// the accepted window so a future window adjustment shows up
+		// as a failing case here rather than as a silent semantic
+		// drift. Using ISO text (not Excel serials) keeps the test
+		// independent of excelize's leap-year arithmetic.
+		{"iso 1899-12-31 below window", "1899-12-31", true, ""},
+		{"iso 1900-01-01 at lower bound", "1900-01-01", false, "1900-01-01"},
+		{"iso 2100-12-31 at upper bound", "2100-12-31", false, "2100-12-31"},
+		{"iso 2101-01-01 above window", "2101-01-01", true, ""},
 
 		// Text formats
 		{"iso yyyy-mm-dd", "2025-07-21", false, "2025-07-21"},
