@@ -38,15 +38,15 @@ Phase 3.4b extends the Settings → Import flow so users can resolve SHA-256 con
        ↓
 [5] User double-clicks an editable cell (date / description / amount / skip)
        ↓
-[6] Frontend fires PATCH /api/import/:import_id/rows/:row_id
-       { field, value, patch_id }
+[6] Frontend enqueues PATCH through a single promise chain → fires
+     PATCH /api/import/:import_id/rows/:row_id { field, value }
+     (chain guarantees the previous PATCH has resolved before this one fires)
        ↓
 [7] Backend re-runs single-row validator → re-computes content_hash via
      the single path in content_hash.go → re-groups across the session →
-     returns full response: { rows, collision_groups, patch_id }
+     returns full response: { rows, collision_groups }
        ↓
-[8] Frontend drops stale responses (patch_id < latestPatchIdRef), merges
-     fresh response into table state keyed by row_id, re-renders
+[8] Frontend merges response into table state keyed by row_id, re-renders
        ↓
 [9] When unresolved_non_skipped_collisions == 0 AND pendingPatchCount == 0:
      "Import N" button enables
@@ -67,11 +67,7 @@ Phase 3.4b extends the Settings → Import flow so users can resolve SHA-256 con
 
 ### Row identifier (`row_id`)
 
-**Definition:** stable 0-based positional index into the upload row slice, assigned once at upload time by the preview builder. Does NOT renumber across PATCH calls. Survives re-hash and re-grouping passes. Unique within a single `import_id` session.
-
-**Where it lives:** added as a new field on `importRow` struct at `internal/api/import_handlers.go:35`. The existing `predictedSkip.RowIndex` uses the same positional-index semantics, so `row_id` is named differently only to make the PATCH URL path explicit.
-
-**Frontend key:** used as the React list key for the table, as the PATCH URL path parameter, and as the merge key when applying PATCH responses.
+Stable 0-based positional index into the upload row slice, assigned once at upload time by the preview builder and never renumbered. Added as a new field on `importRow` at `import_handlers.go:35`. Used as the React list key, the PATCH URL path parameter, and the merge key for PATCH responses. Unique within a single `import_id` session.
 
 ### New endpoint: `PATCH /api/import/:import_id/rows/:row_id`
 
@@ -79,8 +75,7 @@ Phase 3.4b extends the Settings → Import flow so users can resolve SHA-256 con
 ```json
 {
   "field": "date" | "description" | "amount" | "skip",
-  "value": "2025-01-08",
-  "patch_id": 42
+  "value": "2025-01-08"
 }
 ```
 
@@ -95,17 +90,20 @@ Phase 3.4b extends the Settings → Import flow so users can resolve SHA-256 con
       "group_id": "g_abc123",
       "reason": "intra_file" | "db_match",
       "member_row_ids": [3, 7, 12],
-      "db_match_id": 8421
+      "db_match": {
+        "id": 8421,
+        "date": "2025-01-07",
+        "description": "Starbucks",
+        "amount_cents": 500,
+        "category_name": "Coffee"
+      }
     }
-  ],
-  "patch_id": 42
+  ]
 }
 ```
 
-- `db_match_id` only present when `reason == "db_match"`.
-- Response shape is always the full current snapshot, not a sparse diff. Simpler frontend merge, deterministic behavior under races, cheap for the session sizes we target (50–500 rows).
-
-**Protocol contract on `patch_id`:** the backend MUST echo the exact `patch_id` from the request body in the response, unchanged. No transformation, no regeneration. Any violation is treated as a protocol bug; handler has a single assertion that the response `patch_id` matches the request `patch_id` before writing JSON.
+- `db_match` only present when `reason == "db_match"`. It carries the matched DB row's displayable fields so the frontend can render an inline "existing transaction" preview without a second round-trip. Populated in the upload preview builder and in the PATCH handler's re-check loop via the existing `GetTransactionByContentHash` query (just the fields it already returns).
+- Response shape is always the full current snapshot, not a sparse diff. Simpler frontend merge, cheap for the session sizes we target (50-500 rows).
 
 **Error responses:**
 - `400` — validation error (bad date format, NaN amount, empty description, empty amount). Body: `{ code, field, message }`. Session state unchanged.
@@ -138,9 +136,7 @@ Frontend calls this on mount if `localStorage.spendrop_import_id` is set.
 - Existing cleanup goroutine already reaps stale sessions
 - **No new persistence layer.** Lost on server restart = re-upload. Correct tradeoff for a hobby tool.
 
-**Concurrency shape:** `importStore` entries are accessed only by the HTTP handler goroutine currently processing a request for that import_id. The sync.Map guards lookup-by-key; concurrent access to a single entry's contents is avoided because (a) the frontend is a single tab per user session, (b) upload creates the entry, PATCH and confirm mutate it, and (c) the frontend serializes its own requests (sequence number prevents out-of-order responses but does not fire PATCHes concurrently — they queue on the React state lifecycle). A second tab hitting the same entry would race at the Go level; the per-user slot cap on upload plus the ownership check at PATCH/confirm time mean this can only happen if the user explicitly deep-links an import_id from one tab to another, which is not a supported flow.
-
-**Implementation note:** this invariant — "PATCH handler goroutines never overlap for a given import_id" — is load-bearing but not enforced by a mutex. It MUST be called out in a code comment on `handlePatchImportRow` so future maintainers who consider optimistic fire-and-forget patterns on the frontend see the assumption they would be breaking. If this invariant ever needs to change (e.g., true multi-tab support), the entry needs a per-import_id mutex or the mutation path needs to move into a single goroutine loop.
+**Concurrency shape:** the frontend serializes its own PATCHes through a single promise chain (see Frontend § Race prevention), so the backend sees at most one PATCH goroutine at a time for a given `import_id`. No per-entry mutex needed. The per-user slot cap and ownership check already block the only multi-goroutine race source (a second tab deep-linking the same `import_id`).
 
 ### Validation + hashing reuse (critical)
 
@@ -169,12 +165,6 @@ The existing preview response carries `predicted_skips []predictedSkip`. In 3.4b
 
 Existing tests that assert on `predicted_skips` shape (`TestHandleImport_…` in `internal/api/import_handlers_test.go`) are updated to assert on `collision_groups` instead. No dual-shape / backwards-compat layer — the frontend is updated in the same commit.
 
-### Request sequence number
-
-`patch_id` is a client-provided monotonic counter per import session. Backend echoes it unchanged in the response (see contract above). Frontend uses it to drop stale out-of-order responses (see Frontend § Race Prevention).
-
-Backend has no logic on it beyond echo + assert-echo-matches-request. Zero server-side complexity.
-
 ---
 
 ## Frontend Design
@@ -188,6 +178,10 @@ Single table, collision rows sorted to the top with amber highlight. No separate
 `Category` column is display-only (shows the resolved DB category from the category-mapping step). To re-map categories, users go back to the category-mapping section above the table. Keeping category read-only here avoids the "is the user editing the Excel string or the mapped DB category" ambiguity.
 
 **Sort policy for MVP:** collision rows frozen at top, ordering stable after edits (a row that resolves stays in place, does NOT re-sort mid-flow). Avoids row-jumping during bulk Tab-burst editing. Re-sort happens only on new upload or explicit refresh.
+
+**Collision group header row:** each collision group renders a non-data header row immediately above its member rows containing `⚠ N rows collide` and a `Skip all in group` button. Clicking the button fires a sequenced batch of `{field: "skip", value: true}` PATCHes (one per member row) through the same promise chain used for individual edits. Handles the "I imported the wrong file and every row collides" case — one click marks the whole group skipped instead of checking 20 boxes. No force-add / bulk-add counterpart: the `content_hash` unique index means adding N identical rows would violate the constraint, so there is no meaningful "keep all" path without first mutating a field.
+
+**Inline DB-match preview:** for groups where `reason == "db_match"`, the group header row expands a muted sub-row beneath it showing the matched DB transaction's `date | description | amount | category_name` from the `db_match` payload. Gives users immediate context for "which existing transaction is this colliding with" without a second round-trip or a navigation jump to the transactions page.
 
 ### Cell editing
 
@@ -220,12 +214,17 @@ Date format: free-text input, parsed server-side via existing `parseImportDate`.
 - **Collision row:** amber background (`bg-amber-500/9`), left border accent, warning icon in first column
 - **Skipped row:** strikethrough text + muted gray (`text-muted-foreground line-through`)
 - **Editing cell:** focused input with ring, cursor visible
+- **Cell with 400 error:** red ring + inline error message below the cell showing the server-returned message (`INVALID_DATE: date not parseable` etc.); cleared on the next successful PATCH response for that row
 - **After PATCH response:** styling is re-derived from the fresh server response, NEVER stale-local-state
+
+**Focus preservation across PATCH:** when merging the fresh `rows` response into component state, use `Array.map` preserving object identity for unchanged rows (only return a new object for the row whose `row_id` matches the edit). React's reconciliation keeps the just-edited input mounted so Tab/Shift-Tab focus does not jump back to the document root during bulk editing.
+
+**Screen reader feedback:** a visually-hidden `<div aria-live="polite">` under the footer announces "N collisions remaining" after each PATCH response, so NVDA/VoiceOver users hear the resolution count tick down without a focus change or a toast.
 
 ### Footer
 
-- **Left:** status message — "⚠ Fix or skip N collisions to enable import" | "✓ Ready to import N rows"
-- **Right:** `Import N` button — disabled when `unresolved_non_skipped_collisions > 0`, disabled while `pendingPatchCount > 0`, enabled when both are zero (including the all-skipped case)
+- **Left:** progress-aware status message — `⚠ Fix or skip N of M collisions to enable import` where `M` is the original collision count at upload time and `N` is the current unresolved-non-skipped count; flips to `✓ Ready to import K rows` once `N == 0`. Shows users their progress ticking down through a long Tab-burst session.
+- **Right:** `Import K` button — disabled when `unresolved_non_skipped_collisions > 0`, disabled while `pendingPatchCount > 0`, enabled when both are zero (including the all-skipped case where K = 0 is still a valid no-op import that clears the session)
 
 ### localStorage resume
 
@@ -243,24 +242,35 @@ Survives tab refresh (the real vulnerability); does NOT survive server restart (
 
 ### Race prevention (cross-row PATCH ordering)
 
-Frontend tracks `const latestPatchIdRef = useRef(0)`. Before each PATCH:
+Frontend serializes all PATCHes through a single promise chain held in a ref. Each new PATCH awaits the previous one's settlement before firing, so the backend never sees two PATCHes concurrently for the same `import_id`:
 
 ```ts
-const patchId = ++latestPatchIdRef.current;
-const response = await patchRow({ ..., patch_id: patchId });
-if (response.patch_id < latestPatchIdRef.current) return; // stale, drop
-applyResponse(response);
+const patchQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+function enqueuePatch(body: PatchRowRequest): Promise<void> {
+  const next = patchQueueRef.current.then(async () => {
+    const response = await patchRow(body);
+    applyResponse(response);
+  });
+  // Swallow rejections on the queue tail so a single failing PATCH
+  // does not freeze every subsequent edit. The returned promise still
+  // rejects, so the caller can surface an inline 400 error on the cell.
+  patchQueueRef.current = next.catch(() => {});
+  return next;
+}
 ```
 
-Handles the "user Tabs from row 1 → row 2 faster than round-trip, response 1 arrives after response 2" case. Response 1's stale `collision_groups` would otherwise clobber response 2's merged state. Strict `<` is correct: the most-recently-issued patch has `patch_id == ref.current` at response time and must be applied.
+Handles the "user Tabs from row 1 → row 2 faster than round-trip" case: PATCH B cannot fire until PATCH A has settled, so there is no ordering ambiguity and no stale-response merge. It also protects the backend session state from concurrent writes without any per-entry mutex.
 
-**Why not AbortController:** abort-per-row doesn't protect cross-row races. Sequence number is simpler and correct.
+**Why serialization instead of a response sequence number:** a sequence number only guards the merge step on the client — two PATCHes can still hit the server at the same time and race session-state writes with last-write-wins semantics. Serialization prevents that race entirely AND the client code is simpler (no sequence field to thread through the API contract).
+
+**Why not AbortController:** abort-per-row does not protect cross-row races, and canceling an in-flight PATCH mid-wire would leave the server's session state ahead of the client's view.
 
 ### Confirm button lockout during pending PATCH
 
-`pendingPatchCount` state increments before fetch, decrements in `finally`. Import button disables while `pendingPatchCount > 0`. Prevents the "/confirm runs while PATCH in flight, sees stale session" race at the frontend layer — no backend locking required.
+`pendingPatchCount` state increments inside `enqueuePatch` before the fetch fires, decrements in the chained `.finally()`. Import button disables while `pendingPatchCount > 0`. Combined with the promise-chain serialization, this means `/confirm` cannot run while any PATCH is in flight — no backend locking required.
 
-**Soft-edge UX caveat:** if a PATCH returns 400 (validation error), `pendingPatchCount` still decrements and the button re-enables. The row's state is whatever the last successful PATCH left it at. If the user then clicks Import expecting their failed edit to have taken effect, `/confirm` sees the stale (pre-edit) session state and may succeed or 409 depending on that state. This is acceptable: the 400 response shows an inline error on the failed cell, so a user who clicks Import past that error is doing so deliberately. Tests explicitly assert the error-stays-visible behavior (see Testing Strategy #11).
+A PATCH that returns 400 still decrements the counter and surfaces an inline cell error (see Visual States § Cell with 400 error). If the user clicks Import past a visible error, `/confirm` runs against the last-good session state — that is a deliberate override by the user, not a race condition.
 
 ### API contract additions
 
@@ -279,13 +289,20 @@ interface CollisionGroup {  // NEW
   group_id: string;
   reason: 'intra_file' | 'db_match';
   member_row_ids: number[];
-  db_match_id?: number;
+  db_match?: DbMatchPreview;  // present only when reason == "db_match"
+}
+
+interface DbMatchPreview {  // NEW
+  id: number;
+  date: string;          // ISO date
+  description: string;
+  amount_cents: number;
+  category_name: string;
 }
 
 interface PatchRowRequest {  // NEW
   field: 'date' | 'description' | 'amount' | 'skip';
   value: string | boolean;
-  patch_id: number;
 }
 ```
 
@@ -330,8 +347,6 @@ interface PatchRowRequest {  // NEW
 | `amount` | Parseable via `parseImportAmount`, not NaN/Inf. **Upload mode: empty → 0 (existing silent behavior). Edit mode: empty → 400 `INVALID_AMOUNT`.** | `INVALID_AMOUNT` |
 | `skip` | Boolean, no validation | — |
 
-**Error precedence ranking** (when multiple errors could apply): field-presence > field-shape. The first failing rule wins; downstream rules are not evaluated. Deterministic user experience.
-
 ### Collision state transitions
 
 | Before | Edit | After |
@@ -341,10 +356,10 @@ interface PatchRowRequest {  // NEW
 | Clean row | Edit amount/date into existing group's space | Row joins the existing group; group enlarges |
 | Clean row | Edit into a value that matches another clean row | New 2-member group forms |
 | Collision row | Edit into a value that matches a DIFFERENT group | Row moves from group A → group B |
-| Skipped collision row | Edit into unique value | Skip flag cleared, row becomes clean |
+| Skipped collision row | Edit into unique value | Row becomes clean; skip flag **stays set** (sticky) |
 | Clean row | Mark skip = true | Row is excluded from import but still displays |
 
-**Surprise rule — skip flag cleared on un-collide:** when a previously-skipped collision row is edited into a unique value, the backend automatically clears the `skip` flag. Rationale: the reason the user marked it `skip` (to work around the collision) no longer applies; leaving the row hidden-by-skip would silently drop data the user just went to the trouble of un-colliding. This is the only transition where an edit to one field (date/description/amount) mutates another field (skip) as a side effect. Tested explicitly in test #2; called out here because it is the least obvious rule in the table above.
+**Skip is sticky:** once a row is marked `skip=true`, no other edit ever clears that flag. Only an explicit un-check of the Skip checkbox unsets it. Rationale: treating skip as an independent user intent ("exclude this row from the import, full stop") is simpler and more predictable than auto-clearing it on un-collide. If the user un-skips later, they do it deliberately.
 
 ### Skipped ≠ unresolved
 
@@ -361,13 +376,15 @@ interface PatchRowRequest {  // NEW
 
 ### Stale error-styling bug (importcsv #16 anti-pattern)
 
-**Rule:** styling is always derived from the latest server response, never from stale local state. A row that transitions collision → clean loses amber background on the very next render. A cell that had an error loses the error ring on the next successful PATCH response.
+**Rule:** styling is always derived from the latest server response, never from stale local state. A row that transitions collision → clean loses amber background on the very next render. A cell that had an error loses the error ring on the next successful PATCH response for that row.
 
-**Implementation:** no "sticky error" state in component. Each render reads from `rows[row_id]` in the canonical server-shaped state.
+**Implementation:** no "sticky error" state in component. Row-level collision styling reads from `rows[row_id]` in the canonical server-shaped state. Per-cell 400 errors live in a small `cellErrors: Record<string, { field, message }>` map keyed by `row_id:field`, set when a PATCH rejects with 400 and cleared when a subsequent PATCH for that same `row_id:field` resolves 200. The clear happens on response, not on input-change, so a user who types a new value still sees the previous error until their edit commits — prevents the "oh I fixed it" false-positive.
+
+**Inline 400 UX:** a rejected PATCH shows a red ring on the originating cell + a one-line error message directly beneath it (`<p class="text-xs text-destructive mt-0.5">`). No toast. No modal. The error disappears when the next successful PATCH for that cell returns 200. This keeps the error contextual to the cell that caused it and does not interrupt a Tab-burst flow.
 
 ### Cross-row PATCH race
 
-See Frontend § Race Prevention. `patch_id` sequence number guards against out-of-order responses. Backend contract: echo `patch_id` unchanged.
+See Frontend § Race prevention. Promise-chain serialization on the client guarantees at-most-one in-flight PATCH per `import_id` at any time, so there is no cross-row race for the backend to resolve. No sequence-number echo in the API contract.
 
 ### Confirm + pending PATCH race
 
@@ -384,14 +401,9 @@ See Frontend § Confirm button lockout. Import button disabled while any PATCH i
 All in `internal/api/import_handlers_test.go`, following existing pattern (direct handler invocation via `httptest.NewRecorder()`, see `import_handlers_test.go:167-171`).
 
 1. **PATCH happy path (group of 3):** upload 3 identical rows, PATCH row 1's date, assert row 1 clean + remaining 2 still grouped together. Owns: core regrouping + stale group_id in untouched rows.
-2. **PATCH re-collision:** PATCH moves row from group A → group B; if row had `skip=true`, skip flag cleared on un-collide. Owns: stateful regrouping, skip-persistence rule.
+2. **PATCH re-collision + skip stickiness:** PATCH moves row from group A → group B; if row had `skip=true`, skip flag **stays set** after the re-collision resolves (owns the sticky-skip invariant from Edge Cases). Owns: stateful regrouping + skip stickiness.
 3. **PATCH 404 on expired session.** Owns: session expiry backend half.
-4. **PATCH content-hash parity (table-driven, 3 cases):**
-   - Whitespace: `" Starbucks "` → `"Starbucks"` → same hash via PATCH re-hash
-   - Case: `"STARBUCKS"` → `"Starbucks"` → same hash via PATCH re-hash
-   - Baseline: different strings → different hashes
-   - **Each case covers both description and category normalization paths.**
-   Owns: whitespace/case hash-mismatch bug class.
+4. **PATCH content-hash parity:** one table-driven test with a whitespace+case case (`" STARBUCKS "` → `"Starbucks"` via PATCH re-hash gives the same `content_hash`). Owns: whitespace/case hash-mismatch bug class; a single case catches any divergence because the bug is "the two code paths call normalize differently", not "one specific input".
 5. **Confirm 409 with full `collision_groups`** when any unresolved non-skipped collision remains. Owns: partial-import rejection invariant.
 6. **Confirm happy path:** all resolved → `CreateTransaction` called per row, `content_hash` persisted. Owns: end-to-end wiring.
 7. **Confirm skipped rows excluded** from inserts. Owns: skip ≠ unresolved distinction.
@@ -406,8 +418,8 @@ All in `web/src/components/ImportPreviewTable.test.tsx`, using Vitest + happy-do
 11. **Stale-style regression:** row flips collision → clean on PATCH response, amber background removed on next render. Owns: importcsv #16 bug class — single most important frontend test.
 12. **Import button state:** disabled `unresolved > 0`, enabled at 0 (including all-skipped case), **disabled while `pendingPatchCount > 0`**. Owns: enable/disable logic + /confirm + PATCH race.
 13. **localStorage resume:** GET 200 → rehydrates rows/groups; GET 404 → shows "session expired" message + clears storage + returns to file-drop (NOT silent blank grid). Owns: session expiry frontend half + resume path.
-14. **PATCH wiring:** edit cell → correct `{row_id, field, value, patch_id}` payload → response merged into table state. Owns: the integration seam where most real bugs live.
-15. **Stale PATCH response race:** MSW + two `deferred()` promises, fire PATCH A (patch_id=1) then PATCH B (patch_id=2), resolve B first then A, assert A's stale response is dropped and B's state wins. Owns: cross-row response ordering bug.
+14. **PATCH wiring + inline 400 error:** edit cell → correct `{row_id, field, value}` payload → 200 merges into table state (happy path); separate case within the same test fires an edit that returns 400 → assert the cell shows a red ring + inline error message, the row state is unchanged, the error clears on the next successful PATCH for that cell. Owns: the integration seam where most real bugs live + the 400-UX contract.
+15. **Promise-chain serialization + bulk skip:** MSW + two `deferred()` promises, fire `enqueuePatch(A)` then `enqueuePatch(B)` back-to-back, assert B does not hit the network until A has resolved; then test the "Skip all in group" button fires N sequential PATCHes through the same chain in order. Owns: cross-row serialization invariant + bulk-skip wiring.
 
 ### Manual acceptance scripts (2)
 
@@ -427,7 +439,7 @@ Automated Playwright coverage for these scenarios is listed in **Out of Scope** 
 | Paste-into-cell, undo/redo | Not shipping these |
 | Turkish locale hash handling | `strings.ToLower` locale quirk, documented as known limitation |
 | Unicode NFC normalization in hash | Deferred — invalidates existing DB hashes, requires backfill migration, low user exposure |
-| EditableCell primitive unit tests (double-click, Esc, Enter, Tab) | shadcn Input + native focus/blur is library behavior, not our logic |
+| Double-click / Esc / Enter / Tab primitive tests | shadcn Input + native focus/blur is library behavior, not our logic — covered via the PATCH-wiring integration test (#14) |
 | `buildCollisionGroups` / `validateImportCell` extracted function unit tests | Duplicate PATCH handler coverage |
 | Session 60min TTL simulated-clock test | Flaky, caught by code review — one-line constant change |
 | Playwright E2E harness + tests 16/17 automated | Several hours of harness setup, out of scope for 3.4b |
@@ -466,9 +478,8 @@ Things that are reasonable follow-ups but explicitly NOT part of 3.4b:
 - `web/src/api/import.ts` — add `patchImportRow`, `getImportSession` clients
 
 **New:**
-- `web/src/components/ImportPreviewTable.tsx` — editable table component with cell-level editing
-- `web/src/components/EditableCell.tsx` — cell wrapper handling double-click/Escape/Enter/Tab and PATCH wiring (no unit tests — tested via table integration)
-- `web/src/hooks/useImportSession.ts` — localStorage resume + PATCH race prevention hook
+- `web/src/components/ImportPreviewTable.tsx` — editable table component with cell-level editing inlined (no separate `EditableCell` wrapper — the double-click/Escape/Enter/Tab handling is small enough to live in the table row render and its PATCH wiring lives in the hook below)
+- `web/src/hooks/useImportSession.ts` — houses the `patchQueueRef` promise chain, `pendingPatchCount`, `cellErrors` map, localStorage rehydration on mount, and the `enqueuePatch` / `enqueueBulkSkip` APIs consumed by the table
 - `web/src/components/ImportPreviewTable.test.tsx` — new test file
 
 **No changes:**
