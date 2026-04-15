@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,163 @@ type importRow struct {
 	OriginalAmount   float64 `json:"original_amount,omitempty"`
 	OriginalCurrency string  `json:"original_currency,omitempty"`
 	Skip             bool    `json:"skip"`
+}
+
+// dbMatchPreview carries the displayable fields of a live DB row that
+// collides with an import row's content hash. Sent inline inside a
+// collisionGroup so the frontend can render "you're about to re-import
+// this existing transaction" context without a second round-trip. Populated
+// only for groups whose reason is "db_match".
+type dbMatchPreview struct {
+	ID           int64  `json:"id"`
+	Date         string `json:"date"`
+	Description  string `json:"description"`
+	AmountCents  int64  `json:"amount_cents"`
+	CategoryName string `json:"category_name"`
+}
+
+// collisionGroup is a set of row_ids within one import session that share
+// the same content hash. Reason is "intra_file" when the group is composed
+// entirely of preview rows; "db_match" when at least one member row's hash
+// also matches a live DB transaction (in which case DBMatch is populated).
+// Groups of size 1 are never emitted — a single clean row is not a
+// collision.
+type collisionGroup struct {
+	GroupID      string          `json:"group_id"`
+	Reason       string          `json:"reason"`
+	MemberRowIDs []int           `json:"member_row_ids"`
+	DBMatch      *dbMatchPreview `json:"db_match,omitempty"`
+}
+
+// buildCollisionGroups computes the collision view for a preview session.
+// It groups rows by their resolved content hash, then flags each group as
+// intra_file (multiple preview rows sharing a hash with no DB match) or
+// db_match (at least one preview row whose hash also matches a live DB
+// transaction). Rows marked Skip are EXCLUDED from group membership: a
+// skipped row can't collide with anyone because it isn't going to be
+// inserted, so counting it would make the progress meter lie.
+//
+// Rows that fail to resolve to a valid hash — unparseable date, empty
+// description, zero amount, unresolved category — are silently omitted
+// from grouping. They'll still be rejected at confirm time by
+// processImportRows; the preview's job here is to flag collisions, not
+// to re-implement the full row validator.
+//
+// Called from two places:
+//  1. handleImportUpload, once at upload time, to seed the initial
+//     collision_groups field on the preview response.
+//  2. handleImportPatchRow, once per PATCH, to recompute groups after any
+//     field edit. The PATCH handler passes the session's mutated row slice.
+//
+// The DB lookup is O(rows) — one GetTransactionByContentHash call per
+// hash-resolvable row. This is the same cost as the old predictDuplicateSkips,
+// just producing a richer output shape. Callers MUST pass the already-loaded
+// category lookups so the hash formula uses the canonical DB category name
+// (matching handleImportConfirm exactly).
+func buildCollisionGroups(
+	ctx context.Context,
+	queries *database.Queries,
+	rows []importRow,
+	categoryMap map[string]int64, // optional: user's resolved name->id map from confirm flow; nil at upload time
+	defaultCategoryID int64, // optional: user's chosen default at confirm time; 0 at upload time
+	catNameToID map[string]int64,
+	catIDToName map[int64]string,
+) ([]collisionGroup, error) {
+	byHash := make(map[string][]int) // hash -> member row_ids
+
+	// Hashable rows keep their row_id; non-hashable rows are skipped.
+	for _, row := range rows {
+		if row.Skip {
+			continue
+		}
+		if row.Description == "" || row.Amount == 0 {
+			continue
+		}
+		date, err := parseImportDate(row.Date)
+		if err != nil {
+			continue
+		}
+		categoryID := resolveCategoryID(row.Category, categoryMap, catNameToID, defaultCategoryID)
+		if categoryID == 0 {
+			continue
+		}
+		canonical, ok := catIDToName[categoryID]
+		if !ok {
+			continue
+		}
+		hash := database.ComputeContentHash(
+			date,
+			dollarsToCents(math.Abs(row.Amount)),
+			row.Description,
+			canonical,
+		)
+		byHash[hash] = append(byHash[hash], row.RowID)
+	}
+
+	// Emit groups. For each hash with ≥2 members, it's at minimum intra_file.
+	// For any hash that also matches a live DB row, we upgrade to db_match
+	// and attach the DB row's displayable fields.
+	groups := []collisionGroup{}
+	for hash, members := range byHash {
+		// Look up DB match first (single row by hash). Even a size-1 group
+		// graduates to a collision if it matches an existing DB row.
+		var dbMatch *dbMatchPreview
+		existing, err := queries.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			// A DB fault during hash lookup is a systemic error — return it
+			// to the caller so the HTTP handler can 500. Silently dropping
+			// the row (the predictDuplicateSkips behavior) was fine when
+			// the only consequence was a missing UI hint, but now the
+			// collision grouping is load-bearing for blocking /confirm.
+			return nil, fmt.Errorf("lookup content hash during grouping: %w", err)
+		}
+		if err == nil {
+			// DB category name is carried forward from catIDToName so the
+			// frontend's inline preview matches what the transactions page
+			// would show. CategoryID is non-nullable in the live schema
+			// (the partial unique index filters content_hash IS NOT NULL,
+			// and every hashable live row has a category), so the lookup
+			// uses a plain int64 key — no sql.NullInt64 unwrapping.
+			dbCatName := ""
+			if name, ok := catIDToName[existing.CategoryID]; ok {
+				dbCatName = name
+			}
+			dbMatch = &dbMatchPreview{
+				ID:           existing.ID,
+				Date:         existing.Date.Format("2006-01-02"),
+				Description:  existing.Description,
+				AmountCents:  existing.AmountCents,
+				CategoryName: dbCatName,
+			}
+		}
+
+		// A size-1 group is only a collision if it db_matches. Size-≥2 is
+		// always a collision.
+		if len(members) < 2 && dbMatch == nil {
+			continue
+		}
+
+		reason := "intra_file"
+		if dbMatch != nil {
+			reason = "db_match"
+		}
+
+		groups = append(groups, collisionGroup{
+			GroupID:      "g_" + hash[:8],
+			Reason:       reason,
+			MemberRowIDs: append([]int(nil), members...), // defensive copy
+			DBMatch:      dbMatch,
+		})
+	}
+
+	// Stable-ish ordering for determinism in tests: sort by the smallest
+	// member row_id so the first collision group in the response is always
+	// the one whose first row appears earliest in the sheet.
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].MemberRowIDs[0] < groups[j].MemberRowIDs[0]
+	})
+
+	return groups, nil
 }
 
 // importStore holds pending imports in memory with TTL-based expiry.
