@@ -196,6 +196,7 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/import/upload", h.handleImportUpload)
 		r.Post("/import/confirm", h.handleImportConfirm)
 		r.Delete("/import/{importID}", h.handleImportCancel)
+		r.Patch("/import/{importID}/rows/{rowID}", h.handleImportPatchRow)
 
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)

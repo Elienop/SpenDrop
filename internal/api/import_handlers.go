@@ -872,6 +872,166 @@ func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// patchImportRowRequest is the JSON body shape for PATCH /api/import/{importID}/rows/{rowID}.
+// Field is one of "date", "description", "amount", "skip" — validated by
+// validateImportField. Value is typed as any so the JSON decoder accepts
+// both string (for date/description/amount) and bool (for skip) without
+// a second layer of per-field request structs.
+type patchImportRowRequest struct {
+	Field string `json:"field"`
+	Value any    `json:"value"`
+}
+
+// patchImportRowErrorBody is the 400 response shape. Code is a stable
+// machine-readable constant (INVALID_DATE, INVALID_DESCRIPTION,
+// INVALID_AMOUNT, INVALID_FIELD) so the frontend can color-code the
+// originating cell without parsing the message. Field echoes back the
+// request field so the frontend cellErrors map can key on row_id:field
+// without a second round-trip.
+type patchImportRowErrorBody struct {
+	Code    string `json:"code"`
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// handleImportPatchRow applies one field edit to one row in a pending
+// import session, rebuilds the collision_groups view, and returns a full
+// snapshot of {rows, collision_groups}. The endpoint is PATCH (not PUT)
+// because it takes exactly one field at a time — the frontend debounces
+// multi-field edits into sequential PATCHes via its enqueuePatch promise
+// chain, so there is no "edit several fields atomically" need.
+//
+// Response shape is intentionally NOT a sparse diff: even a single-field
+// edit returns the full row list plus the full groups list. Sparse diffs
+// would require the frontend to reconcile a partial update into component
+// state, which is the class of bug the "styling is always derived from the
+// latest server response, never from stale local state" rule is designed
+// to prevent. Full snapshots are trivially mergeable via Array.map
+// preserving object identity for unchanged rows (see the frontend hook in
+// Chunks 4–5).
+//
+// The re-hash + re-group happens on EVERY edit, even for field="skip",
+// because a skip flip changes which rows participate in collision
+// grouping (skipped rows are excluded from buildCollisionGroups, so
+// toggling skip can collapse or expand a group). Computing a "this field
+// does not affect grouping, skip the rebuild" optimization would add a
+// branch for one saved DB lookup per skip toggle, which is not worth the
+// surface area.
+//
+// Errors:
+//
+//	400 invalid request body       — JSON decode failed or field/value missing
+//	400 {code, field, message}     — validateImportField rejected the input
+//	400 invalid row_id             — rowID URL param not parseable as an int
+//	400 row_id out of range        — rowID outside [0, len(entry.Rows))
+//	401/403/404                    — via loadImportEntryForUser (unauthorized,
+//	                                 wrong user, missing/expired session)
+//	500 failed to rebuild groups   — buildCollisionGroups returned a DB fault
+func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
+	importID := chi.URLParam(r, "importID")
+	rowIDStr := chi.URLParam(r, "rowID")
+	rowID, err := strconv.Atoi(rowIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid row_id")
+		return
+	}
+
+	entry, ok := loadImportEntryForUser(w, r, importID)
+	if !ok {
+		return
+	}
+
+	if rowID < 0 || rowID >= len(entry.Rows) {
+		writeError(w, http.StatusBadRequest, "row_id out of range")
+		return
+	}
+
+	var req patchImportRowRequest
+	if decodeErr := decodeJSON(w, r, &req); decodeErr != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Field == "" {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	normalized, errCode, message := validateImportField(req.Field, req.Value)
+	if errCode != "" {
+		writeJSON(w, http.StatusBadRequest, patchImportRowErrorBody{
+			Code:    errCode,
+			Field:   req.Field,
+			Message: message,
+		})
+		return
+	}
+
+	// Mutate the row in place via a pointer into entry.Rows. We do NOT
+	// take a copy, edit the copy, and re-assign by index — that pattern
+	// works but reads as "two writes where there is really one", which
+	// makes the locking/concurrency story harder to review. The PATCH
+	// serialization story (spec § Cross-row PATCH race) is "the frontend
+	// promise chain guarantees at-most-one in-flight PATCH per import_id",
+	// so we do not need a mutex around entry.Rows inside the handler.
+	row := &entry.Rows[rowID]
+	switch req.Field {
+	case "date":
+		// Store the date as the canonical ISO string so downstream
+		// re-hashes via parseImportDate + ComputeContentHash produce the
+		// same hash they would have at upload time if the user had typed
+		// this value originally. Without normalization, "7/1/25" and
+		// "2025-07-01" would disagree at the hash step even though they
+		// represent the same day.
+		t := normalized.(time.Time)
+		row.Date = t.Format("2006-01-02")
+	case "description":
+		row.Description = normalized.(string)
+	case "amount":
+		row.Amount = normalized.(float64)
+	case "skip":
+		row.Skip = normalized.(bool)
+	}
+
+	// Rebuild the collision view against the just-edited session slice.
+	// categoryMap and defaultCategoryID are nil/0 — the upload-time path
+	// uses those too (see Chunk 1 Task 5 Step 5.2), so the preview-time
+	// grouping contract is identical before and after an edit. The
+	// canonical category lookups come from the live DB via
+	// ListAllCategories.
+	existingCats, listErr := h.queries.ListAllCategories(r.Context())
+	if listErr != nil {
+		log.Printf("import patch: list categories: %v", listErr)
+		writeError(w, http.StatusInternalServerError, "failed to load categories")
+		return
+	}
+	catNameToID := make(map[string]int64, len(existingCats))
+	catIDToName := make(map[int64]string, len(existingCats))
+	for _, c := range existingCats {
+		catNameToID[strings.ToLower(c.Name)] = c.ID
+		catIDToName[c.ID] = c.Name
+	}
+
+	groups, groupErr := buildCollisionGroups(
+		r.Context(),
+		h.queries,
+		entry.Rows,
+		nil,
+		0,
+		catNameToID,
+		catIDToName,
+	)
+	if groupErr != nil {
+		log.Printf("import patch: build collision groups: %v", groupErr)
+		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"rows":             entry.Rows,
+		"collision_groups": groups,
+	})
+}
+
 // processImportRows is the pure-processing core of handleImportConfirm.
 // Given an already-open sqlc transaction (qtx), a set of preview rows,
 // and the resolved category lookups, it walks the rows and returns a
