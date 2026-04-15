@@ -1209,16 +1209,16 @@ func TestHandleImport_DoubleImport_SkipsDuplicates(t *testing.T) {
 	}
 }
 
-// TestHandleImportUpload_PredictedSkips_ReflectsExistingRow verifies that
-// the upload-time preview surfaces duplicate predictions for rows that
-// would collide at confirm time, so the UI can pre-grey the row and offer
-// the force-add checkbox without a round-trip. We seed the DB via the
-// real import flow (rather than a synthetic CreateTransaction with a
-// hand-computed hash) so the test exercises the same path an operator
-// hits in production, and so a drift between predictDuplicateSkips and
-// handleImportConfirm's hash formula shows up here instead of hiding
-// behind a test fixture that matches only one of the two.
-func TestHandleImportUpload_PredictedSkips_ReflectsExistingRow(t *testing.T) {
+// TestHandleImportUpload_CollisionGroups_ReflectsExistingRows verifies that
+// the upload-time preview surfaces db_match collision groups for rows that
+// would collide at confirm time, so the inline editor can pre-flag the row
+// without a round-trip. We seed the DB via the real import flow (rather
+// than a synthetic CreateTransaction with a hand-computed hash) so the
+// test exercises the same path an operator hits in production, and so a
+// drift between buildCollisionGroups and handleImportConfirm's hash formula
+// shows up here instead of hiding behind a test fixture that matches only
+// one of the two.
+func TestHandleImportUpload_CollisionGroups_ReflectsExistingRows(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -1232,13 +1232,13 @@ func TestHandleImportUpload_PredictedSkips_ReflectsExistingRow(t *testing.T) {
 	})
 
 	// Seed by running a first upload+confirm. After this the DB has the
-	// two hashes; a second upload should predict both as duplicates.
+	// two hashes; a second upload should surface both as db_match groups.
 	if resp := uploadAndConfirmImport(t, h, user, xlsxData); int(resp["imported"].(float64)) != 2 {
 		t.Fatalf("seed import: expected imported=2, got %v", resp["imported"])
 	}
 
 	// Second upload: preview only — don't confirm. We want to inspect
-	// predicted_skips in the upload response body.
+	// collision_groups in the upload response body.
 	req := postMultipartFile(t, "/api/import/upload", xlsxData)
 	req = withUser(req, user)
 	rec := httptest.NewRecorder()
@@ -1249,34 +1249,33 @@ func TestHandleImportUpload_PredictedSkips_ReflectsExistingRow(t *testing.T) {
 	var resp map[string]any
 	decodeResponse(t, rec, &resp)
 
-	raw, ok := resp["predicted_skips"].([]any)
+	rawGroups, ok := resp["collision_groups"].([]any)
 	if !ok {
-		t.Fatalf("expected predicted_skips in response, got %T", resp["predicted_skips"])
+		t.Fatalf("expected collision_groups in response, got %T", resp["collision_groups"])
 	}
-	if len(raw) != 2 {
-		t.Fatalf("expected 2 predicted skips, got %d: %v", len(raw), raw)
+	if len(rawGroups) != 2 {
+		t.Fatalf("expected 2 collision_groups (one per seeded row), got %d: %v", len(rawGroups), rawGroups)
 	}
-	seen := make(map[int]bool, 2)
-	for _, r := range raw {
-		skip := r.(map[string]any)
-		idx := int(skip["row_index"].(float64))
-		seen[idx] = true
-		if skip["reason"] != "duplicate" {
-			t.Errorf("row %d: expected reason=duplicate, got %v", idx, skip["reason"])
+	for _, rg := range rawGroups {
+		g := rg.(map[string]any)
+		if g["reason"].(string) != "db_match" {
+			t.Errorf("expected reason=db_match, got %v", g["reason"])
 		}
-		if int64(skip["existing_id"].(float64)) == 0 {
-			t.Errorf("row %d: expected non-zero existing_id", idx)
+		members := g["member_row_ids"].([]any)
+		if len(members) != 1 {
+			t.Errorf("expected 1 member_row_id (single preview row matching a live DB row), got %d", len(members))
 		}
-	}
-	for _, want := range []int{0, 1} {
-		if !seen[want] {
-			t.Errorf("expected row_index %d in predicted_skips, not found", want)
+		dbMatch, ok := g["db_match"].(map[string]any)
+		if !ok {
+			t.Fatalf("expected db_match payload, got %T", g["db_match"])
+		}
+		if int64(dbMatch["id"].(float64)) == 0 {
+			t.Errorf("expected non-zero db_match.id (preserves the existing_id invariant)")
 		}
 	}
 
-	// Verify the predicted existing_ids actually point at the seeded live
-	// rows (guards against a bug where the handler returns the wrong
-	// foreign key from GetTransactionByContentHash).
+	// Verify the live DB state is what we expect (guards against a bug
+	// where the handler accidentally mutates the seed rows).
 	var count int64
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
@@ -1288,70 +1287,17 @@ func TestHandleImportUpload_PredictedSkips_ReflectsExistingRow(t *testing.T) {
 	}
 }
 
-// TestHandleImportUpload_PredictedSkips_IgnoresTombstoned guards the
-// interaction between Phase 3.4's hash lookup and Phase 2.1's soft-delete
-// discipline. GetTransactionByContentHash filters deleted_at IS NULL, so
-// a row that the user trashed and then re-imports must NOT come back as
-// a predicted duplicate — otherwise the UI greys a row the user actively
-// wants back, and the confirm path would silently skip it. Seed a row,
-// tombstone it, then upload a matching file and assert predicted_skips
-// is empty.
-func TestHandleImportUpload_PredictedSkips_IgnoresTombstoned(t *testing.T) {
-	clearImportStore()
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "ghosts", "member")
-
-	xlsxData := createTestXLSX(t, "Transactions", []string{
-		"Date", "Description", "Amount", "Category",
-	}, [][]string{
-		{"2026-01-15", "Groceries", "42.50", "Food"},
-	})
-
-	// Seed via the real import path, then tombstone the inserted row.
-	// Using the handler path here means the seeded row lands with a real
-	// content_hash — if we inserted via CreateTransaction directly we'd
-	// have to compute the hash by hand and risk drifting from the actual
-	// formula.
-	if resp := uploadAndConfirmImport(t, h, user, xlsxData); int(resp["imported"].(float64)) != 1 {
-		t.Fatalf("seed import: expected imported=1, got %v", resp["imported"])
-	}
-	if _, err := db.ExecContext(context.Background(),
-		`UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP`,
-	); err != nil {
-		t.Fatalf("tombstone row: %v", err)
-	}
-
-	// Re-upload the same file: the tombstoned row must not appear in the
-	// predicted_skips set.
-	req := postMultipartFile(t, "/api/import/upload", xlsxData)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-	h.handleImportUpload(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("upload: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-
-	raw, ok := resp["predicted_skips"].([]any)
-	if !ok {
-		t.Fatalf("expected predicted_skips array in response, got %T", resp["predicted_skips"])
-	}
-	if len(raw) != 0 {
-		t.Errorf("expected 0 predicted skips against tombstoned row, got %d: %v", len(raw), raw)
-	}
-}
+// TestHandleImportUpload_PredictedSkips_IgnoresTombstoned was deleted in 3.4b — superseded by TestHandleImportUpload_HidesTombstonedFromDbMatch which asserts the same tombstone invariant against collision_groups.
 
 // TestHandleImport_ReimportAfterTombstone_SucceedsOnConfirm is the
-// confirm-path sibling of PredictedSkips_IgnoresTombstoned. The upload
-// preview correctly reports no predicted duplicates against a tombstoned
-// row — but that is only half the contract. The confirm call also has
-// to actually land the re-insert. This test fails under a partial
-// unique index that does not filter deleted_at (the INSERT hits UNIQUE
-// on the tombstoned row's hash and is counted as skipped), and passes
-// once the migration includes AND deleted_at IS NULL in the index WHERE
-// clause.
+// confirm-path sibling of HidesTombstonedFromDbMatch (the upload-path
+// counterpart, Phase 3.4b). The upload preview correctly reports no
+// collision groups against a tombstoned row — but that is only half the
+// contract. The confirm call also has to actually land the re-insert.
+// This test fails under a partial unique index that does not filter
+// deleted_at (the INSERT hits UNIQUE on the tombstoned row's hash and is
+// counted as skipped), and passes once the migration includes AND
+// deleted_at IS NULL in the index WHERE clause.
 //
 // Regression for: "user trashes a row, re-imports the spreadsheet, row
 // silently does not come back." The Phase 2.1 trash-then-reimport UX

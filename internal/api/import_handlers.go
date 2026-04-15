@@ -97,9 +97,8 @@ type collisionGroup struct {
 //     field edit. The PATCH handler passes the session's mutated row slice.
 //
 // The DB lookup is O(rows) — one GetTransactionByContentHash call per
-// hash-resolvable row. This is the same cost as the old predictDuplicateSkips,
-// just producing a richer output shape. Callers MUST pass the already-loaded
-// category lookups so the hash formula uses the canonical DB category name
+// hash-resolvable row. Callers MUST pass the already-loaded category
+// lookups so the hash formula uses the canonical DB category name
 // (matching handleImportConfirm exactly).
 func buildCollisionGroups(
 	ctx context.Context,
@@ -151,11 +150,11 @@ func buildCollisionGroups(
 		var dbMatch *dbMatchPreview
 		existing, err := queries.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			// A DB fault during hash lookup is a systemic error — return it
-			// to the caller so the HTTP handler can 500. Silently dropping
-			// the row (the predictDuplicateSkips behavior) was fine when
-			// the only consequence was a missing UI hint, but now the
-			// collision grouping is load-bearing for blocking /confirm.
+			// A DB fault during hash lookup is a systemic error — return
+			// it to the caller so the HTTP handler can 500. Silently
+			// dropping the row would be fine if this were only a UI hint,
+			// but the collision grouping is load-bearing for blocking
+			// /confirm, so we surface the fault.
 			return nil, fmt.Errorf("lookup content hash during grouping: %w", err)
 		}
 		if err == nil {
@@ -510,9 +509,6 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now(),
 	})
 
-	// Start background cleanup (idempotent via sync.Once)
-	startImportCleanup()
-
 	// Collect unique category names from all rows for the mapping UI.
 	seen := make(map[string]struct{})
 	uniqueCategories := make([]string, 0)
@@ -525,16 +521,42 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Phase 3.4 upload-time duplicate prediction. Best-effort: we don't
-	// have the user's category_map yet (that's on the confirm request),
-	// so we predict using only the case-insensitive name match against
-	// existing DB categories. Rows whose category doesn't resolve here
-	// are omitted from the prediction — they'll either be mapped
-	// explicitly at confirm time (and checked there) or fall to the
-	// default category (and checked there). A false-negative from the
-	// preview is acceptable because handleImportConfirm runs the
-	// authoritative check against the live index before every insert.
-	predictedSkips := predictDuplicateSkips(r.Context(), h.queries, parsedRows)
+	// Phase 3.4b: the upload preview computes collision_groups via
+	// buildCollisionGroups. Unlike the previous upload-time prediction,
+	// this pass detects intra-file collisions (the 20-identical-Starbucks
+	// case) in addition to DB matches, and returns them in a shape the
+	// editable preview table can consume directly. Categories are loaded
+	// here so buildCollisionGroups uses the same canonical name resolution
+	// as the confirm path.
+	existingCats, err := h.queries.ListAllCategories(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to load categories")
+		return
+	}
+	catNameToID := make(map[string]int64, len(existingCats))
+	catIDToName := make(map[int64]string, len(existingCats))
+	for _, c := range existingCats {
+		catNameToID[strings.ToLower(c.Name)] = c.ID
+		catIDToName[c.ID] = c.Name
+	}
+
+	groups, err := buildCollisionGroups(
+		r.Context(),
+		h.queries,
+		parsedRows,
+		nil, // categoryMap not chosen yet at upload time
+		0,   // defaultCategoryID not chosen yet either
+		catNameToID,
+		catIDToName,
+	)
+	if err != nil {
+		log.Printf("import upload: build collision groups: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to compute collision groups")
+		return
+	}
+
+	// Start background cleanup (idempotent via sync.Once)
+	startImportCleanup()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"import_id":         importID,
@@ -542,119 +564,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		"rows":              parsedRows,
 		"columns":           detectedColumns,
 		"unique_categories": uniqueCategories,
-		"predicted_skips":   predictedSkips,
+		"collision_groups":  groups,
 	})
-}
-
-// predictDuplicateSkips walks the parsed preview rows and returns the
-// subset that would collide with an existing live transaction's content
-// hash if imported as-is. The check mirrors the confirm-time path exactly
-// except for category resolution: because the upload endpoint fires
-// before the user picks a category_map or default_category_id, this
-// function only predicts for rows whose spreadsheet category name has an
-// unambiguous case-insensitive match against an existing DB category.
-// Rows that don't match are silently skipped in the prediction — the
-// authoritative check still runs in handleImportConfirm, so a
-// false-negative here just means the UI doesn't grey the row out
-// ahead of time.
-//
-// The hash formula and DB lookup MUST agree with the confirm path. We
-// delegate to database.ComputeContentHash and
-// queries.GetTransactionByContentHash so there is no chance of drift.
-//
-// A DB error on any single row is logged and the row is dropped from
-// the prediction set — we do not abort the upload. The prediction is a
-// UX nicety, not a correctness gate; the worst case of a DB outage
-// here is that the user sees a less-informative preview, then hits
-// the real check at confirm time.
-func predictDuplicateSkips(ctx context.Context, queries *database.Queries, rows []importRow) []predictedSkip {
-	// Materialize the category lookups in one query. Upload payloads
-	// are capped at MaxImportRows so the memory cost is bounded, and
-	// loading categories once keeps the hash-prediction loop DB-free
-	// until the actual GetTransactionByContentHash call.
-	cats, err := queries.ListAllCategories(ctx)
-	if err != nil {
-		log.Printf("import preview: list categories: %v", err)
-		return []predictedSkip{}
-	}
-	nameToID := make(map[string]int64, len(cats))
-	idToName := make(map[int64]string, len(cats))
-	for _, c := range cats {
-		nameToID[strings.ToLower(c.Name)] = c.ID
-		idToName[c.ID] = c.Name
-	}
-
-	skips := []predictedSkip{}
-	for i, row := range rows {
-		// Short-circuit rows that will never produce a valid hash.
-		// These mirror the confirm-time "skip" reasons so the preview
-		// stays consistent with the eventual outcome.
-		if row.Description == "" || row.Amount == 0 {
-			continue
-		}
-		date, err := parseImportDate(row.Date)
-		if err != nil {
-			continue
-		}
-		// Case-insensitive match against the existing DB categories.
-		// Rows whose spreadsheet category doesn't land on an existing
-		// category (or whose category cell is empty) can't be hashed
-		// with the DB name, so we skip them from the prediction.
-		name := strings.TrimSpace(row.Category)
-		if name == "" {
-			continue
-		}
-		catID, ok := nameToID[strings.ToLower(name)]
-		if !ok {
-			continue
-		}
-		canonical := idToName[catID]
-
-		hash := database.ComputeContentHash(
-			date,
-			dollarsToCents(math.Abs(row.Amount)),
-			row.Description,
-			canonical,
-		)
-		existing, err := queries.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
-		if err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				log.Printf("import preview: lookup hash for row %d: %v", i, err)
-			}
-			continue
-		}
-		skips = append(skips, predictedSkip{
-			RowIndex:   i,
-			Reason:     "duplicate",
-			ExistingID: existing.ID,
-		})
-	}
-	return skips
-}
-
-// predictedSkip describes one row that the upload-time duplicate check
-// believes will be rejected at confirm time because its content hash
-// collides with an already-imported live row. The frontend uses this to
-// grey out the row in the preview and offer a "force-add" checkbox; the
-// authoritative check still happens in handleImportConfirm.
-//
-// RowIndex is the 0-based position of the row in the parsed preview (the
-// same index the frontend uses to render the row list), so the force-add
-// opt-in can refer back to the row by index without round-tripping the
-// entire row payload.
-//
-// ExistingID is the id of the live DB row that collides. It is exposed so
-// the frontend can deep-link to the duplicate in the transactions list
-// ("this row was first imported on 2026-01-17; open it"), and so operators
-// reading the JSON response can trace a false-positive back to the data.
-//
-// Reason is always "duplicate" for this phase — the field exists as a
-// discriminator so later phases can add reasons like "archived" or
-// "locked_period" without breaking the shape.
-type predictedSkip struct {
-	RowIndex   int    `json:"row_index"`
-	Reason     string `json:"reason"`
-	ExistingID int64  `json:"existing_id"`
 }
 
 // importConfirmRequest is the JSON body for confirming an import.
@@ -674,7 +585,7 @@ type importConfirmRequest struct {
 // the regression loudly instead of letting a row vanish from the count.
 //
 // The reasons are lowercase_snake_case to match the JSON wire format
-// used by predictedSkip on the upload preview path, so a frontend that
+// used by collisionGroup on the upload preview path, so a frontend that
 // renders both preview skips and confirm-time outcomes can match
 // strings byte-for-byte without a translation table.
 type importSkipReason string
