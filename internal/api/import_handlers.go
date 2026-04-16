@@ -821,6 +821,56 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
+	// Phase 3.4b: re-run buildCollisionGroups against the current
+	// session rows with the confirm-time category choices applied.
+	// This is the all-or-nothing gate — if ANY non-skipped row is
+	// still a member of a collision group (intra_file or db_match)
+	// after the user has finished editing, the entire import is
+	// rejected with 409 and the full groups array, and the session
+	// state is left untouched so the frontend can re-render the same
+	// preview with updated hints.
+	//
+	// Unlike upload and PATCH (which pass nil/0 for categoryMap and
+	// defaultCategoryID), confirm passes the user's chosen CategoryMap
+	// and DefaultCategoryID. This covers the category-resolution-only
+	// collision case: a row whose category cell was empty (and now
+	// resolves to the user's default) could produce a hash that
+	// matches a live DB row that wouldn't have matched at upload
+	// time. Re-checking at confirm with the real resolved categories
+	// is how we catch it.
+	//
+	// buildCollisionGroups already excludes Skip==true rows from
+	// grouping (see Chunk 1 Task 4 — the `if row.Skip { continue }`
+	// guard is first in the loop), so `len(groups) > 0` is equivalent
+	// to "at least one non-skipped row is still colliding". No separate
+	// non-skipped filter is needed here.
+	groups, err := buildCollisionGroups(
+		r.Context(),
+		h.queries,
+		entry.Rows,
+		req.CategoryMap,
+		req.DefaultCategoryID,
+		catNameToID,
+		catIDToName,
+	)
+	if err != nil {
+		log.Printf("import confirm: build collision groups: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
+		return
+	}
+	if len(groups) > 0 {
+		// 409 body shape mirrors the Chunk 2 PATCH 400 body: {code, ...}
+		// with a machine-readable code so the frontend can switch on it.
+		// The full collision_groups array is included so the preview can
+		// re-render without a second round-trip — the frontend never has
+		// to ask "which rows are still colliding?" after a 409.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":             "UNRESOLVED_COLLISIONS",
+			"collision_groups": groups,
+		})
+		return
+	}
+
 	// Start a database transaction for all inserts
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -831,6 +881,28 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 
 	qtx := h.queries.WithTx(tx)
 
+	// Phase 3.4b: filter user-skipped rows out of the slice passed to
+	// processImportRows. The filter lives at the handler level (not
+	// inside processImportRows) so the processor's conservation
+	// invariant `len(Rows) == len(Inserted) + len(Skipped) + len(Errored)`
+	// — which property tests in import_handlers_property_test.go
+	// depend on — stays true for the rows that actually reach it.
+	// From the handler's POV, user-skipped rows are "never in the
+	// batch"; from the processor's POV, the batch simply never
+	// contained them.
+	//
+	// We iterate entry.Rows (not a copy) and accumulate into a fresh
+	// slice pre-sized to the upper bound, so there is no reallocation
+	// on typical inputs. Over-allocation for a heavily-skipped session
+	// is negligible (len(importRow) * number_skipped bytes).
+	filteredRows := make([]importRow, 0, len(entry.Rows))
+	for _, row := range entry.Rows {
+		if row.Skip {
+			continue
+		}
+		filteredRows = append(filteredRows, row)
+	}
+
 	// Phase 3.5: the per-row loop moved into processImportRows so
 	// property tests can observe structured outcomes (inserted/
 	// skipped/errored) without an HTTP round-trip. The handler still
@@ -839,7 +911,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// loop.
 	result, minImportDate := processImportRows(r.Context(), qtx, importProcessInput{
 		UserID:            entry.UserID,
-		Rows:              entry.Rows,
+		Rows:              filteredRows,
 		CategoryMap:       req.CategoryMap,
 		DefaultCategoryID: req.DefaultCategoryID,
 		CatNameToID:       catNameToID,
@@ -865,16 +937,33 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		h.verifyAffectedCheckpoints(r.Context(), minImportDate)
 	}
 
-	// The HTTP response still reports the two-way split (imported vs
-	// skipped) for backwards compatibility with the existing frontend
-	// and the Phase 3.4 regression tests. Errored rows — DB faults, bad
-	// category_ids — are folded into the `skipped` count because from
-	// the user's perspective they are indistinguishable ("this row did
-	// not land"). The structured importResult is only observed by
-	// property tests that call processImportRows directly.
+	// Phase 3.4b: the user-visible `skipped` field rolls up three
+	// reasons into one bucket, because from the user's perspective a
+	// row that "did not land" is a row that did not land, regardless
+	// of the category:
+	//   1. User-skipped rows (row.Skip==true, filtered above before
+	//      processImportRows sees them) — still appear in entry.Rows
+	//      so they count toward total but not toward inserted.
+	//   2. Processor-skipped rows (content-hash duplicate, zero
+	//      amount, negative amount, etc. — see skipReason* in
+	//      processImportRows).
+	//   3. Errored rows (DB faults, bad category_ids — a tiny bucket
+	//      that the user can't distinguish from category 2 without
+	//      log access).
+	//
+	// The arithmetic `len(entry.Rows) - len(result.Inserted)` captures
+	// all three without needing to sum the process result's Skipped
+	// and Errored slices AND add the user-skipped count separately.
+	// It works because:
+	//   total        = len(entry.Rows)
+	//   processed    = len(filteredRows)            (= total - user_skipped)
+	//   inserted     = len(result.Inserted)         (≤ processed)
+	//   not_inserted = total - inserted
+	//                = user_skipped + (processed - inserted)
+	//                = user_skipped + processor_skipped + errored
 	writeJSON(w, http.StatusOK, map[string]any{
 		"imported": len(result.Inserted),
-		"skipped":  len(result.Skipped) + len(result.Errored),
+		"skipped":  len(entry.Rows) - len(result.Inserted),
 		"total":    len(entry.Rows),
 	})
 }

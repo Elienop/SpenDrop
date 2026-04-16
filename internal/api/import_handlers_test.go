@@ -1181,14 +1181,19 @@ func uploadAndConfirmImport(t *testing.T, h *Handler, user database.User, xlsxDa
 	return confirmResp
 }
 
-// TestHandleImport_DoubleImport_SkipsDuplicates locks in the Phase 3.4
-// acceptance criterion that importing the same file twice produces zero
-// new rows. The first confirm inserts two rows with content_hash set; the
-// second confirm recomputes the same hashes, finds them via
-// GetTransactionByContentHash in qtx, and skips each one. A regression
-// that reverted the dedup check (or broke hash parity between the import
-// path and the backfill) would surface here as imported=2/skipped=0 on
-// the second pass.
+// TestHandleImport_DoubleImport_SkipsDuplicates locks in the Phase 3.4b
+// acceptance criterion that importing the same file twice is now
+// rejected, not silently deduped. The first confirm inserts two rows
+// with content_hash set; the second upload surfaces both rows as
+// db_match collision groups in the preview, and the second confirm —
+// with no PATCH to resolve the collisions — returns 409
+// UNRESOLVED_COLLISIONS with the full groups array. No partial insert.
+//
+// This supersedes the Phase 3.4 "silent skip" behavior: Phase 3.4
+// would have returned 200 with imported=0/skipped=2 and a dedup log
+// line in processImportRows. After Chunk 3 the re-check inside
+// handleImportConfirm catches the duplicates first and the transaction
+// is never even opened.
 func TestHandleImport_DoubleImport_SkipsDuplicates(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
@@ -1210,18 +1215,74 @@ func TestHandleImport_DoubleImport_SkipsDuplicates(t *testing.T) {
 		t.Errorf("first import: expected skipped=0, got %v", first["skipped"])
 	}
 
-	second := uploadAndConfirmImport(t, h, user, xlsxData)
-	if int(second["imported"].(float64)) != 0 {
-		t.Errorf("second import: expected imported=0, got %v", second["imported"])
+	// Second upload: both rows should surface as db_match collision
+	// groups in the preview. The upload itself still returns 200 —
+	// only the confirm is rejected.
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("second upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
 	}
-	if int(second["skipped"].(float64)) != 2 {
-		t.Errorf("second import: expected skipped=2, got %v", second["skipped"])
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Second confirm: no PATCH was performed to resolve the
+	// collisions, so the handler-level re-check must fire a 409.
+	cats, err := h.queries.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
 	}
-	if int(second["total"].(float64)) != 2 {
-		t.Errorf("second import: expected total=2, got %v", second["total"])
+	catMap := make(map[string]float64, len(cats))
+	var defaultID int64
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+		if c.Name == "Food" {
+			defaultID = c.ID
+		}
+	}
+	if defaultID == 0 {
+		defaultID = cats[0].ID
 	}
 
-	// DB sanity: still only two live rows, no silent doubling.
+	confirmBodyMap := map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultID,
+		"category_map":        catMap,
+	}
+	confirmBody, _ := json.Marshal(confirmBodyMap)
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusConflict {
+		t.Fatalf("second confirm: expected 409 UNRESOLVED_COLLISIONS, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var confirmErr map[string]any
+	decodeResponse(t, confirmRec, &confirmErr)
+	if code, _ := confirmErr["code"].(string); code != "UNRESOLVED_COLLISIONS" {
+		t.Errorf("expected code=UNRESOLVED_COLLISIONS, got %v", confirmErr["code"])
+	}
+	groups, ok := confirmErr["collision_groups"].([]any)
+	if !ok || len(groups) != 2 {
+		t.Fatalf("expected 2 collision_groups, got %T len %d", confirmErr["collision_groups"], len(groups))
+	}
+	for i, g := range groups {
+		gm, ok := g.(map[string]any)
+		if !ok {
+			t.Errorf("group %d: not a map, got %T", i, g)
+			continue
+		}
+		if reason, _ := gm["reason"].(string); reason != "db_match" {
+			t.Errorf("group %d: expected reason=db_match, got %v", i, gm["reason"])
+		}
+	}
+
+	// DB sanity: still only two live rows — the rejected second
+	// confirm must not have inserted anything partially.
 	var live int64
 	if err := db.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM transactions WHERE deleted_at IS NULL`,
