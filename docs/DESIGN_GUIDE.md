@@ -429,13 +429,14 @@ Introduced on collision group headers in `components/ImportPreviewTable.tsx`. Us
 
 ### Bulk irreversible-destructive actions
 
-Introduced on the Trash page header in `pages/Trash.tsx` (`Restore all N` / `Purge all N`). Use this when a page-level button hits a whole-surface endpoint where at least one action (purge) is irreversible.
+Introduced on the Trash page in `pages/Trash.tsx` (`Restore all N` / `Purge all N`, rendered into the table toolbar via `PaginationBar`'s `leadingActions` slot). Use this when a page-level button hits a whole-surface endpoint where at least one action (purge) is irreversible.
 
 - **Pair the reversible twin with the destructive trigger.** A page that can wipe itself should also be able to undo that wipe in one click. Ship `Restore all` and `Purge all` as siblings so the operator never feels cornered.
 - **Embed the total in both labels.** Write `Restore all 42` and `Purge all 42`, not `Restore all` / `Purge all`. The count is a commitment device — the operator reads the scope as part of the click.
+- **Co-locate with the table's other scope controls.** The pair lives inline with `Rows per page` in the table toolbar (separated by a `border-l pl-3` divider), not above the card. "How many rows am I looking at?" and "act on all of them" are the same conceptual question, and keeping them in one strip avoids a second header competing for attention.
 - **Reversible fires directly; irreversible always walks through a dialog.** `Restore all` has no confirm (you can always re-delete), but `Purge all` always routes through `ConfirmPurgeAllDialog` which echoes the count a second time in the body copy and a third in the confirm button. Three surfaces showing the same number is not redundant — it's the only reliable defense against "muscle-memory clicked the wrong button".
 - **Variant matches consequence, not aesthetics.** `Restore all` is `variant="outline"` with `RotateCcw`; `Purge all` is `variant="destructive"` with `Trash2`. The visual weight is not decorative — it is the system's signal about which click you can survive.
-- **Distinct accessible names for trigger vs. confirm.** The header button and the dialog's confirm button must NOT share a label. Use `Purge all N` on the trigger and `Purge all permanently` in the dialog — screen readers and integration tests both need to disambiguate "open the dialog" from "execute the destructive action".
+- **Distinct accessible names for trigger vs. confirm.** The toolbar button and the dialog's confirm button must NOT share a label. Use `Purge all N` on the trigger and `Purge all permanently` in the dialog — screen readers and integration tests both need to disambiguate "open the dialog" from "execute the destructive action".
 - **Hide the buttons when the surface is empty.** No trash, no buttons. The empty state is the signal; a disabled button next to "Trash is empty" is visual noise and an accessibility hazard.
 - **Cross-disable the pair.** `disabled={restoringAll || purgingAll}` on both buttons so the operator can't stack a restore and a purge into a race where the purge observes rows the restore was trying to save.
 
