@@ -2770,3 +2770,89 @@ func TestHandleImportUpload_PreviewCanonicalizesSerialDate(t *testing.T) {
 		}
 	}
 }
+
+// TestHandleImportPatchRow_WrongUser_Returns403 verifies that PATCHing a
+// row on another user's import session is rejected with 403 Forbidden
+// before any row-bounds or field-validation work happens. Owns the "one
+// user's PATCH cannot mutate another user's session" invariant alongside
+// the sibling Confirm/Cancel/GET 403 tests. A regression that forgets to
+// route through loadImportEntryForUser (or swaps the ownership check for
+// a weaker "session exists" check) will fail here.
+func TestHandleImportPatchRow_WrongUser_Returns403(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user1 := seedTestUser(t, q, "patchowner", "member")
+	user2 := seedTestUser(t, q, "patchattacker", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50"},
+	})
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user1)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// User2 tries to PATCH row 0 on user1's session.
+	rec := patchImportRow(t, h, user2, importID, 0, "description", "hijacked")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Confirm the row was not mutated.
+	val, ok := importStore.Load(importID)
+	if !ok {
+		t.Fatalf("store lookup: entry missing after 403")
+	}
+	entry := val.(*importEntry)
+	if len(entry.Rows) != 1 || entry.Rows[0].Description != "Groceries" {
+		t.Errorf("row was mutated despite 403: got description=%q", entry.Rows[0].Description)
+	}
+}
+
+// TestHandleImportGetSession_WrongUser_Returns403 verifies that GETting
+// another user's import session is rejected with 403 Forbidden before
+// the groups-rebuild work runs. Paired with the PATCH 403 test above so
+// both read and write paths share the invariant: a valid importID from
+// another user's upload is indistinguishable from a nonexistent one.
+func TestHandleImportGetSession_WrongUser_Returns403(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user1 := seedTestUser(t, q, "getowner", "member")
+	user2 := seedTestUser(t, q, "getattacker", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50"},
+	})
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user1)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// User2 tries to GET user1's session.
+	getReq := httptest.NewRequest(http.MethodGet, "/api/import/"+importID, nil)
+	getReq = withUserAndURLParam(getReq, user2, "importID", importID)
+	getRec := httptest.NewRecorder()
+	h.handleImportGetSession(getRec, getReq)
+
+	if getRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+}

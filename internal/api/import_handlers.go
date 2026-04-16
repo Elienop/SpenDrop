@@ -24,12 +24,19 @@ import (
 )
 
 // importEntry holds parsed rows from an uploaded Excel file, kept in memory
-// until the user confirms the import.
+// until the user confirms the import. The mu mutex guards Rows against
+// concurrent handlers — the realistic race is two browser tabs on the same
+// import session, where one tab's PATCH mutation can interleave with
+// another tab's PATCH/Confirm/GET read of the same slice. Every handler
+// that touches Rows must Lock/defer Unlock before doing so; the mutex is
+// held across buildCollisionGroups calls so the returned groups snapshot
+// is consistent with the Rows snapshot returned in the same response.
 type importEntry struct {
 	UserID    int64
 	Rows      []importRow
 	Columns   []string
 	CreatedAt time.Time
+	mu        sync.Mutex
 }
 
 // importRow represents a single parsed row from the Excel file. RowID is
@@ -188,8 +195,21 @@ func buildCollisionGroups(
 			reason = "db_match"
 		}
 
+		// GroupID: 8 random bytes (hex) per session so the value is opaque
+		// from the client's POV — deriving it from hash[:8] leaked hash
+		// fragments to the frontend and invited "reverse the hash from the
+		// group_id" thinking. 4 bytes of entropy is enough for a preview
+		// session (max MaxImportRows groups); a collision would only cost
+		// a UI glitch, not security. rand.Read failures here are handled
+		// as a DB-level fault — the grouping response is load-bearing for
+		// blocking /confirm, so propagating the error to a 500 is safer
+		// than emitting a group with a blank ID.
+		idBytes := make([]byte, 4)
+		if _, err := rand.Read(idBytes); err != nil {
+			return nil, fmt.Errorf("generate group_id: %w", err)
+		}
 		groups = append(groups, collisionGroup{
-			GroupID:      "g_" + hash[:8],
+			GroupID:      "g_" + hex.EncodeToString(idBytes),
 			Reason:       reason,
 			MemberRowIDs: append([]int(nil), members...), // defensive copy
 			DBMatch:      dbMatch,
@@ -631,7 +651,15 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	importID := hex.EncodeToString(idBytes)
 
-	// Limit pending imports per user (max 3 concurrent)
+	// Limit pending imports per user (max 3 concurrent). The check is
+	// advisory, not a security invariant — there is a TOCTOU window
+	// between the Range count and the Store below, so two concurrent
+	// uploads from the same user at userPending=2 can both pass the gate
+	// and end up with 4 pending slots. Tightening the race would require
+	// a per-user mutex, which is overkill for a cap whose purpose is
+	// memory-pressure back-pressure, not per-user fairness. A user who
+	// beats the race by one slot is within 33% of the intended limit
+	// and the oldest entries still expire via the TTL reaper.
 	userPending := 0
 	importStore.Range(func(key, value any) bool {
 		entry := value.(*importEntry)
@@ -862,6 +890,13 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// guard is first in the loop), so `len(groups) > 0` is equivalent
 	// to "at least one non-skipped row is still colliding". No separate
 	// non-skipped filter is needed here.
+	//
+	// Serialize entry.Rows access across concurrent handlers — a PATCH
+	// from another tab could mutate entry.Rows mid-read otherwise. Hold
+	// the mutex only until we've computed groups and the filtered copy;
+	// the SQL transaction that follows runs on the local filteredRows
+	// slice, so there is no need to keep entry locked during DB inserts.
+	entry.mu.Lock()
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -872,11 +907,13 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		catIDToName,
 	)
 	if err != nil {
+		entry.mu.Unlock()
 		log.Printf("import confirm: build collision groups: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
 		return
 	}
 	if len(groups) > 0 {
+		entry.mu.Unlock()
 		// 409 body shape mirrors the Chunk 2 PATCH 400 body: {code, ...}
 		// with a machine-readable code so the frontend can switch on it.
 		// The full collision_groups array is included so the preview can
@@ -888,16 +925,6 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-
-	// Start a database transaction for all inserts
-	tx, err := h.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
-		return
-	}
-	defer tx.Rollback()
-
-	qtx := h.queries.WithTx(tx)
 
 	// Phase 3.4b: filter user-skipped rows out of the slice passed to
 	// processImportRows. The filter lives at the handler level (not
@@ -920,6 +947,18 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		}
 		filteredRows = append(filteredRows, row)
 	}
+	totalRowCount := len(entry.Rows)
+	entry.mu.Unlock()
+
+	// Start a database transaction for all inserts
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
+	qtx := h.queries.WithTx(tx)
 
 	// Phase 3.5: the per-row loop moved into processImportRows so
 	// property tests can observe structured outcomes (inserted/
@@ -981,8 +1020,8 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	//                = user_skipped + processor_skipped + errored
 	writeJSON(w, http.StatusOK, map[string]any{
 		"imported": len(result.Inserted),
-		"skipped":  len(entry.Rows) - len(result.Inserted),
-		"total":    len(entry.Rows),
+		"skipped":  totalRowCount - len(result.Inserted),
+		"total":    totalRowCount,
 	})
 }
 
@@ -1055,19 +1094,19 @@ type patchImportRowErrorBody struct {
 func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 	importID := chi.URLParam(r, "importID")
 	rowIDStr := chi.URLParam(r, "rowID")
-	rowID, err := strconv.Atoi(rowIDStr)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid row_id")
-		return
-	}
 
+	// Auth/ownership check first so an unauthenticated caller can't probe
+	// rowID validity (or leak the absence-of-session) by sending a malformed
+	// rowID ahead of an invalid session. loadImportEntryForUser also asserts
+	// the importID is the correct length.
 	entry, ok := loadImportEntryForUser(w, r, importID)
 	if !ok {
 		return
 	}
 
-	if rowID < 0 || rowID >= len(entry.Rows) {
-		writeError(w, http.StatusBadRequest, "row_id out of range")
+	rowID, err := strconv.Atoi(rowIDStr)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid row_id")
 		return
 	}
 
@@ -1091,13 +1130,26 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Serialize entry.Rows access across concurrent handlers for this
+	// session. The realistic race is two browser tabs on the same import:
+	// one tab's PATCH mutation can interleave with another tab's PATCH,
+	// Confirm, or GET read of entry.Rows. We hold the mutex across the
+	// buildCollisionGroups DB calls so the returned groups snapshot is
+	// consistent with the Rows snapshot emitted in the same response.
+	// Cross-entry contention does not exist — each importEntry has its
+	// own mutex.
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+
+	if rowID < 0 || rowID >= len(entry.Rows) {
+		writeError(w, http.StatusBadRequest, "row_id out of range")
+		return
+	}
+
 	// Mutate the row in place via a pointer into entry.Rows. We do NOT
 	// take a copy, edit the copy, and re-assign by index — that pattern
-	// works but reads as "two writes where there is really one", which
-	// makes the locking/concurrency story harder to review. The PATCH
-	// serialization story (spec § Cross-row PATCH race) is "the frontend
-	// promise chain guarantees at-most-one in-flight PATCH per import_id",
-	// so we do not need a mutex around entry.Rows inside the handler.
+	// reads as "two writes where there is really one" and the mutex above
+	// already establishes the serialization story.
 	row := &entry.Rows[rowID]
 	switch req.Field {
 	case "date":
@@ -1210,6 +1262,13 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 	if !ok {
 		return
 	}
+
+	// Serialize entry.Rows access — see handleImportPatchRow for the full
+	// rationale. This read path is included so a concurrent PATCH from
+	// another tab cannot interleave with the buildCollisionGroups read of
+	// entry.Rows here.
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
 
 	// Load categories for the canonical hash resolution.
 	// buildCollisionGroups needs catNameToID (upload-time name match)
