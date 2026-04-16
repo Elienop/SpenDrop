@@ -1701,6 +1701,112 @@ func TestHandleImportPatchRow_HappyPath_UnbreaksRowFromGroupOfThree(t *testing.T
 	}
 }
 
+// TestHandleImportPatchRow_ResponseMatchesImportPreviewShape is the shape
+// regression test for a real bug caught during the Phase 3.4b smoke test:
+// the PATCH handler returned only {rows, collision_groups}, but the
+// PatchRowResponse TypeScript alias equals ImportPreview, so the hook's
+// applyResponse spread set import_id/row_count/columns/unique_categories
+// to undefined on local state. That silently broke every follow-on PATCH
+// — the next request built `/import/undefined/rows/N` and 404'd, so a
+// user could mark a row skipped (first PATCH lands cleanly) but could
+// NOT un-check it (second PATCH dies on the undefined import_id URL).
+//
+// This test owns the full response-shape contract so a future refactor
+// can't quietly drop one of those fields again. We assert the presence
+// of every field the upload handler emits, with value checks strong
+// enough to catch "return zero value for this field" regressions.
+func TestHandleImportPatchRow_ResponseMatchesImportPreviewShape(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "shapechecker", "member")
+	seedTestCategory(t, q, "Coffee", "expense")
+
+	// Two rows with two different category names so unique_categories is
+	// non-empty AND len > 1 — the contract check below needs to see a
+	// populated slice. "Food" is already a default seeded category in
+	// setupTestDB so it resolves without re-seeding.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2025-07-01", "Starbucks", "5.00", "Coffee"},
+			{"2025-07-02", "Lunch", "12.00", "Food"},
+		},
+	)
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var upload map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &upload); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := upload["import_id"].(string)
+
+	// Toggle skip on row 0 — the exact user gesture that surfaced the bug
+	// (click the Skip checkbox → first PATCH lands, second PATCH fails).
+	patchRec := patchImportRow(t, h, user, importID, 0, "skip", true)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d: %s", patchRec.Code, patchRec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(patchRec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal patch response: %v", err)
+	}
+
+	// Contract: every field ImportPreview declares must be present. Check
+	// each one with a strong assertion — "field exists and is non-zero" —
+	// so returning `nil` or the zero value for any slot still fails.
+	if got, _ := resp["import_id"].(string); got != importID {
+		t.Errorf("expected import_id=%q, got %v", importID, resp["import_id"])
+	}
+	if got, _ := resp["row_count"].(float64); int(got) != 2 {
+		t.Errorf("expected row_count=2, got %v", resp["row_count"])
+	}
+	rows, _ := resp["rows"].([]any)
+	if len(rows) != 2 {
+		t.Errorf("expected rows len=2, got %d", len(rows))
+	}
+	cols, _ := resp["columns"].([]any)
+	if len(cols) == 0 {
+		t.Errorf("expected columns to be populated, got %v", resp["columns"])
+	}
+	uniq, _ := resp["unique_categories"].([]any)
+	if len(uniq) == 0 {
+		t.Errorf("expected unique_categories to be populated, got %v", resp["unique_categories"])
+	}
+	if _, ok := resp["collision_groups"]; !ok {
+		t.Errorf("expected collision_groups key to be present (even if empty array)")
+	}
+
+	// Cross-check the "second PATCH succeeds" invariant — if the first
+	// response's shape regresses, the hook's `const importID =
+	// preview.import_id` path produces undefined and this second PATCH
+	// would 404 against `/import/undefined/rows/0`. We simulate the hook's
+	// behavior by reading import_id out of the first response and reusing
+	// it, the same way applyResponse flows through state.
+	secondImportID := resp["import_id"].(string)
+	secondPatch := patchImportRow(t, h, user, secondImportID, 0, "skip", false)
+	if secondPatch.Code != http.StatusOK {
+		t.Fatalf("second patch (un-skip): expected 200, got %d: %s", secondPatch.Code, secondPatch.Body.String())
+	}
+	var second map[string]any
+	if err := json.Unmarshal(secondPatch.Body.Bytes(), &second); err != nil {
+		t.Fatalf("unmarshal second patch response: %v", err)
+	}
+	secondRows, _ := second["rows"].([]any)
+	if len(secondRows) == 0 {
+		t.Fatalf("expected rows in second patch response, got %v", second)
+	}
+	row0 := secondRows[0].(map[string]any)
+	if row0["skip"] != false {
+		t.Errorf("expected row 0 skip=false after un-skip PATCH, got %v", row0["skip"])
+	}
+}
+
 // TestHandleImportPatchRow_ReCollision_PreservesSkip owns the skip-sticky
 // invariant from the spec's Edge Cases table: once a row is marked skip=true,
 // no subsequent edit ever clears that flag. Here we mark a colliding row as

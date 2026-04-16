@@ -1151,9 +1151,25 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Emit the full ImportPreview shape — same fields as handleImportUpload
+	// and handleImportGetSession. The PatchRowResponse TS type aliases
+	// ImportPreview, so the frontend's applyResponse spreads the whole
+	// object into state; omitting import_id/row_count/columns/
+	// unique_categories here caused them to land as `undefined` on the
+	// merged preview, which in turn caused the next PATCH to build a
+	// URL with `import/undefined/rows/N` and 404, silently dropping
+	// every subsequent edit (including un-checking the Skip checkbox).
+	// unique_categories is recomputed from the current rows, matching
+	// the GET resume handler — if a description edit renames a category
+	// cell, that cell's new string is in the snapshot.
+	uniqueCats := uniqueCategoriesFromRows(entry.Rows)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"rows":             entry.Rows,
-		"collision_groups": groups,
+		"import_id":         importID,
+		"row_count":         len(entry.Rows),
+		"rows":              entry.Rows,
+		"columns":           entry.Columns,
+		"unique_categories": uniqueCats,
+		"collision_groups":  groups,
 	})
 }
 
