@@ -5,201 +5,146 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
 )
 
-func TestBuildTransactionWhereClause_Empty(t *testing.T) {
-	q := url.Values{}
-	where, args := buildTransactionWhereClause(q)
-	if where != "" {
-		t.Errorf("expected empty where clause, got %q", where)
+// TestBuildTransactionWhereClause covers every supported query-parameter
+// shape plus the composite case. The table is the single source of truth —
+// adding a new filter means adding one row. Expected args are compared
+// with reflect.DeepEqual, which is strictly stronger than the original
+// length-only checks: a drift in argument order or type would fail here
+// but slip past the old per-test length assertions.
+//
+// Phase 3.1a: the amount filter compares against t.amount_cents (int64),
+// not t.amount (float64). The float bound is converted to cents at parse
+// time so SQLite never sees a float in the comparison.
+func TestBuildTransactionWhereClause(t *testing.T) {
+	cases := []struct {
+		name      string
+		q         url.Values
+		wantWhere string
+		wantArgs  []any
+	}{
+		{
+			name:      "empty",
+			q:         url.Values{},
+			wantWhere: "",
+			wantArgs:  nil,
+		},
+		{
+			name:      "date_from",
+			q:         url.Values{"date_from": {"2025-01-01"}},
+			wantWhere: " WHERE t.date >= ?",
+			wantArgs:  []any{"2025-01-01"},
+		},
+		{
+			name:      "date_to",
+			q:         url.Values{"date_to": {"2025-12-31"}},
+			wantWhere: " WHERE t.date <= ?",
+			wantArgs:  []any{"2025-12-31"},
+		},
+		{
+			name: "date range",
+			q: url.Values{
+				"date_from": {"2025-01-01"},
+				"date_to":   {"2025-12-31"},
+			},
+			wantWhere: " WHERE t.date >= ? AND t.date <= ?",
+			wantArgs:  []any{"2025-01-01", "2025-12-31"},
+		},
+		{
+			name:      "invalid date is dropped",
+			q:         url.Values{"date_from": {"not-a-date"}},
+			wantWhere: "",
+			wantArgs:  nil,
+		},
+		{
+			name:      "category_id",
+			q:         url.Values{"category_id": {"5"}},
+			wantWhere: " WHERE t.category_id = ?",
+			wantArgs:  []any{int64(5)},
+		},
+		{
+			name: "category_id ignored when category_ids present",
+			q: url.Values{
+				"category_id":  {"5"},
+				"category_ids": {"1,2,3"},
+			},
+			wantWhere: " WHERE t.category_id IN (?,?,?)",
+			wantArgs:  []any{int64(1), int64(2), int64(3)},
+		},
+		{
+			name:      "type",
+			q:         url.Values{"type": {"expense"}},
+			wantWhere: " WHERE c.type = ?",
+			wantArgs:  []any{"expense"},
+		},
+		{
+			name:      "invalid type is dropped",
+			q:         url.Values{"type": {"invalid"}},
+			wantWhere: "",
+			wantArgs:  nil,
+		},
+		{
+			name:      "search",
+			q:         url.Values{"search": {"groceries"}},
+			wantWhere: " WHERE t.description LIKE ? ESCAPE '\\'",
+			wantArgs:  []any{"%groceries%"},
+		},
+		{
+			name: "amount range is compared in cents",
+			q: url.Values{
+				"amount_min": {"10.50"},
+				"amount_max": {"100.00"},
+			},
+			wantWhere: " WHERE t.amount_cents >= ? AND t.amount_cents <= ?",
+			wantArgs:  []any{int64(1050), int64(10000)},
+		},
+		{
+			name:      "category_ids",
+			q:         url.Values{"category_ids": {"1,3,5"}},
+			wantWhere: " WHERE t.category_id IN (?,?,?)",
+			wantArgs:  []any{int64(1), int64(3), int64(5)},
+		},
+		{
+			name:      "tags",
+			q:         url.Values{"tags": {"food"}},
+			wantWhere: " WHERE t.tags LIKE ? ESCAPE '\\'",
+			wantArgs:  []any{"%food%"},
+		},
+		{
+			name:      "tags escapes LIKE metacharacters",
+			q:         url.Values{"tags": {"100%"}},
+			wantWhere: " WHERE t.tags LIKE ? ESCAPE '\\'",
+			wantArgs:  []any{"%100\\%%"},
+		},
+		{
+			name: "multiple filters compose in implementation order",
+			q: url.Values{
+				"date_from":  {"2025-01-01"},
+				"date_to":    {"2025-12-31"},
+				"type":       {"expense"},
+				"search":     {"rent"},
+				"amount_min": {"500"},
+			},
+			wantWhere: " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?",
+			wantArgs:  []any{"2025-01-01", "2025-12-31", "expense", "%rent%", int64(50000)},
+		},
 	}
-	if len(args) != 0 {
-		t.Errorf("expected no args, got %d", len(args))
-	}
-}
 
-func TestBuildTransactionWhereClause_DateFrom(t *testing.T) {
-	q := url.Values{"date_from": {"2025-01-01"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.date >= ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "2025-01-01" {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_DateTo(t *testing.T) {
-	q := url.Values{"date_to": {"2025-12-31"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.date <= ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "2025-12-31" {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_DateRange(t *testing.T) {
-	q := url.Values{
-		"date_from": {"2025-01-01"},
-		"date_to":   {"2025-12-31"},
-	}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.date >= ? AND t.date <= ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
-	}
-}
-
-func TestBuildTransactionWhereClause_InvalidDate(t *testing.T) {
-	q := url.Values{"date_from": {"not-a-date"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != "" {
-		t.Errorf("expected empty where for invalid date, got %q", where)
-	}
-	if len(args) != 0 {
-		t.Errorf("expected no args for invalid date, got %d", len(args))
-	}
-}
-
-func TestBuildTransactionWhereClause_CategoryID(t *testing.T) {
-	q := url.Values{"category_id": {"5"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.category_id = ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != int64(5) {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_CategoryIDIgnoredWhenCategoryIDs(t *testing.T) {
-	q := url.Values{
-		"category_id":  {"5"},
-		"category_ids": {"1,2,3"},
-	}
-	where, args := buildTransactionWhereClause(q)
-	// category_id should be ignored when category_ids is present
-	if where != " WHERE t.category_id IN (?,?,?)" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 3 {
-		t.Errorf("expected 3 args, got %d: %v", len(args), args)
-	}
-}
-
-func TestBuildTransactionWhereClause_Type(t *testing.T) {
-	q := url.Values{"type": {"expense"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE c.type = ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "expense" {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_TypeInvalid(t *testing.T) {
-	q := url.Values{"type": {"invalid"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != "" {
-		t.Errorf("expected empty where for invalid type, got %q", where)
-	}
-	if len(args) != 0 {
-		t.Errorf("expected no args for invalid type, got %d", len(args))
-	}
-}
-
-func TestBuildTransactionWhereClause_Search(t *testing.T) {
-	q := url.Values{"search": {"groceries"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.description LIKE ? ESCAPE '\\'" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "%groceries%" {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_AmountRange(t *testing.T) {
-	q := url.Values{
-		"amount_min": {"10.50"},
-		"amount_max": {"100.00"},
-	}
-	where, args := buildTransactionWhereClause(q)
-	// Phase 3.1a: the amount range filter now compares against t.amount_cents
-	// (int64) instead of t.amount (float64). The float bound is converted to
-	// cents by dollarsToCents at parse time so SQLite never sees a float in
-	// the comparison.
-	if where != " WHERE t.amount_cents >= ? AND t.amount_cents <= ?" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 2 {
-		t.Errorf("expected 2 args, got %d", len(args))
-	}
-	if args[0] != int64(1050) {
-		t.Errorf("args[0]=%v, want 1050 (10.50 in cents)", args[0])
-	}
-	if args[1] != int64(10000) {
-		t.Errorf("args[1]=%v, want 10000 (100.00 in cents)", args[1])
-	}
-}
-
-func TestBuildTransactionWhereClause_CategoryIDs(t *testing.T) {
-	q := url.Values{"category_ids": {"1,3,5"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.category_id IN (?,?,?)" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 3 {
-		t.Errorf("expected 3 args, got %d", len(args))
-	}
-}
-
-func TestBuildTransactionWhereClause_Tags(t *testing.T) {
-	q := url.Values{"tags": {"food"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.tags LIKE ? ESCAPE '\\'" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "%food%" {
-		t.Errorf("unexpected args: %v", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_TagsEscapesSpecialChars(t *testing.T) {
-	q := url.Values{"tags": {"100%"}}
-	where, args := buildTransactionWhereClause(q)
-	if where != " WHERE t.tags LIKE ? ESCAPE '\\'" {
-		t.Errorf("unexpected where clause: %q", where)
-	}
-	if len(args) != 1 || args[0] != "%100\\%%" {
-		t.Errorf("unexpected args: %v (expected %%100\\%%%%)", args)
-	}
-}
-
-func TestBuildTransactionWhereClause_MultipleFilters(t *testing.T) {
-	q := url.Values{
-		"date_from":  {"2025-01-01"},
-		"date_to":    {"2025-12-31"},
-		"type":       {"expense"},
-		"search":     {"rent"},
-		"amount_min": {"500"},
-	}
-	where, args := buildTransactionWhereClause(q)
-	// Phase 3.1a: amount_min compares against t.amount_cents, not t.amount.
-	expected := " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?"
-	if where != expected {
-		t.Errorf("unexpected where clause:\ngot:  %q\nwant: %q", where, expected)
-	}
-	if len(args) != 5 {
-		t.Errorf("expected 5 args, got %d: %v", len(args), args)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			where, args := buildTransactionWhereClause(tc.q)
+			if where != tc.wantWhere {
+				t.Errorf("where = %q, want %q", where, tc.wantWhere)
+			}
+			if !reflect.DeepEqual(args, tc.wantArgs) {
+				t.Errorf("args = %#v, want %#v", args, tc.wantArgs)
+			}
+		})
 	}
 }
 
