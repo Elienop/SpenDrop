@@ -256,4 +256,37 @@ describe('ImportPreviewTable', () => {
     // The cell shows the original value again.
     expect(screen.getByText('Starbucks')).toBeInTheDocument();
   });
+
+  it('renders a collision group header with "Skip all" that fires N onPatchRow calls', async () => {
+    const user = userEvent.setup();
+    const onPatchRow = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <ImportPreviewTable
+        preview={makePreview({
+          collision_groups: [
+            { group_id: 'g1', reason: 'intra_file', member_row_ids: [0, 1, 2] },
+          ],
+        })}
+        cellErrors={{}}
+        unresolvedCount={3}
+        canImport={false}
+        pendingPatchCount={0}
+        onPatchRow={onPatchRow}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    // Header row present and labelled.
+    expect(screen.getByText(/3 rows collide/i)).toBeInTheDocument();
+
+    const skipAll = screen.getByRole('button', { name: /skip all/i });
+    await user.click(skipAll);
+
+    // One PATCH per member row, in member-row-id order, each with skip=true.
+    expect(onPatchRow).toHaveBeenCalledTimes(3);
+    expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'skip', true);
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'skip', true);
+    expect(onPatchRow).toHaveBeenNthCalledWith(3, 2, 'skip', true);
+  });
 });
