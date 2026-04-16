@@ -298,6 +298,25 @@ export function Dashboard() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-9"
+            onClick={() => {
+              // Rebuild `now` on click so a tab open past midnight jumps
+              // to the *actual* current month, not the one captured at
+              // initial render.
+              const today = new Date();
+              setSelectedYear(today.getFullYear());
+              setSelectedMonth(today.getMonth() + 1);
+            }}
+            disabled={
+              selectedYear === now.getFullYear() &&
+              selectedMonth === now.getMonth() + 1
+            }
+          >
+            Today
+          </Button>
           <Select value={String(selectedMonth)} onValueChange={(v) => setSelectedMonth(Number(v))}>
             <SelectTrigger className="h-9 w-[140px]" aria-label="Month">
               <SelectValue />
