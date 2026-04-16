@@ -227,10 +227,19 @@ WHERE t.content_hash = ? AND t.deleted_at IS NULL;
 -- content; see migration 008_transactions_content_hash.sql for the
 -- full rationale on why the index filter and the lookup filter must
 -- agree.
+--
+-- The `id > ?` cursor pages past rows the backfill has already
+-- attempted. When a row's UPDATE would violate the partial unique
+-- index (a legitimate same-date/same-amount/same-description duplicate
+-- in legacy data), the caller leaves its content_hash NULL and skips
+-- it — but without the cursor, that same row would reappear at the
+-- head of the next page and the loop would spin forever. The cursor
+-- guarantees monotonic progress regardless of whether the UPDATE
+-- succeeded or was skipped on UNIQUE.
 SELECT t.id, t.date, t.amount_cents, t.description, c.name AS category_name
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.content_hash IS NULL
+WHERE t.content_hash IS NULL AND t.id > ?
 ORDER BY t.id
 LIMIT ?;
 

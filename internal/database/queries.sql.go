@@ -1282,10 +1282,15 @@ const listTransactionsForHashBackfill = `-- name: ListTransactionsForHashBackfil
 SELECT t.id, t.date, t.amount_cents, t.description, c.name AS category_name
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
-WHERE t.content_hash IS NULL
+WHERE t.content_hash IS NULL AND t.id > ?
 ORDER BY t.id
 LIMIT ?
 `
+
+type ListTransactionsForHashBackfillParams struct {
+	ID    int64 `json:"id"`
+	Limit int64 `json:"limit"`
+}
 
 type ListTransactionsForHashBackfillRow struct {
 	ID           int64     `json:"id"`
@@ -1303,8 +1308,13 @@ type ListTransactionsForHashBackfillRow struct {
 // deleted_at, because the partial unique index also ignores deleted_at
 // and we want the tombstoned row's hash to be stable so a later Restore
 // flows through Phase 3.3's checkpoint hook cleanly.
-func (q *Queries) ListTransactionsForHashBackfill(ctx context.Context, limit int64) ([]ListTransactionsForHashBackfillRow, error) {
-	rows, err := q.db.QueryContext(ctx, listTransactionsForHashBackfill, limit)
+//
+// The id cursor (t.id > ?) pages past rows the backfill has already
+// attempted. A row left NULL after a UNIQUE-collision skip must not
+// reappear at the head of the next page; the cursor makes progress
+// monotonic regardless of whether each UPDATE succeeded.
+func (q *Queries) ListTransactionsForHashBackfill(ctx context.Context, arg ListTransactionsForHashBackfillParams) ([]ListTransactionsForHashBackfillRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTransactionsForHashBackfill, arg.ID, arg.Limit)
 	if err != nil {
 		return nil, err
 	}

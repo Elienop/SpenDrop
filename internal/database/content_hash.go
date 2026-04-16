@@ -121,21 +121,50 @@ const backfillFloorBudget = 5 * time.Minute
 // but keeps the latency of concurrent handler writes bounded to a few
 // milliseconds. At household scale the whole sweep is sub-second.
 //
-// Errors are grouped: an UpdateTransactionContentHash failure on any
-// single row aborts the sweep with that row's id in the error message,
-// so operators can diagnose (e.g. a corrupted row that can't be
-// updated) without having silently half-completed state. The partial
-// unique index means any hash collision — which would be a semantic
-// bug in ComputeContentHash or a genuine byte-identical duplicate —
-// surfaces as a UNIQUE constraint error on the UPDATE, which is the
-// right place for it: the index is doing its job, and the operator
-// has to deduplicate the legacy rows by hand before the next boot.
+// Error policy. The backfill distinguishes two error shapes:
+//
+//  1. A UNIQUE constraint violation on the partial index
+//     idx_transactions_content_hash. This happens when a pre-existing
+//     legacy row has the same (date, amount_cents, description,
+//     category_name) as an earlier row that was already hashed in this
+//     sweep — i.e. a legitimate duplicate-looking entry in the user's
+//     own history (two coffees on the same day, for example). The
+//     caller tolerates these: the earliest row (lowest id) keeps the
+//     hash as the canonical anchor for future deduped imports, later
+//     colliding rows keep content_hash = NULL and remain in the ledger
+//     untouched. Skipping the hash on a legacy row only means future
+//     imports of the same content dedupe against the canonical row,
+//     not this skipped one — which is correct: both rows already exist,
+//     and the user does not expect a retroactive identity change.
+//
+//  2. Any other error (a corrupted row, a disk failure, a timeout,
+//     an unexpected constraint on another column) aborts the sweep
+//     with the offending row's id in the message. A half-completed
+//     backfill is safe — the query filter `content_hash IS NULL`
+//     resumes cleanly on the next boot — so early abort is the right
+//     behaviour: operators diagnose the real failure instead of silently
+//     masking it.
+//
+// The original Phase 3.4 design (commit see migration 008) treated
+// all UNIQUE collisions as operator errors that had to be
+// hand-deduplicated before boot. That assumption proved wrong in
+// practice: real household spreadsheets contain legitimate
+// same-date/same-amount/same-description rows that normalize to the
+// same hash, and the hard-abort turned a first-boot-after-upgrade
+// into a crash loop the user could not escape without SQL surgery.
+// The skip-on-collision behaviour preserves the partial index's value
+// (future imports still dedupe against the canonical row) without
+// making legacy data a boot blocker.
 //
 // Progress is logged once at start (with the computed deadline so an
 // operator can see it in startup logs and grep for a slow run) and
-// once at finish with the row count. No per-page logging — on a
-// fresh container every boot would hit the backfill once (n=0 after
-// completion) and per-page log noise would drown the real signal.
+// once at finish with the hashed-row count. If any rows were skipped
+// on collision, an additional informational line lists a bounded
+// preview of their ids so an operator can eyeball them — without
+// flooding the log on a large legacy DB that contains many duplicates.
+// No per-page logging — on a fresh container every boot would hit the
+// backfill once (n=0 after completion) and per-page log noise would
+// drown the real signal.
 func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	q := New(db)
 
@@ -168,9 +197,22 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	ctx, cancel := context.WithTimeout(ctx, budget)
 	defer cancel()
 
-	var done int64
+	// cursor drives the id-based pagination. Every processed row
+	// advances the cursor past itself, whether the UPDATE succeeded or
+	// was skipped on UNIQUE. The query uses `t.id > ?` so pages are
+	// monotonic in id, and a row left NULL on collision does not
+	// reappear at the head of the next page (which would otherwise
+	// spin the loop forever).
+	var (
+		cursor  int64
+		done    int64
+		skipped []int64
+	)
 	for {
-		rows, err := q.ListTransactionsForHashBackfill(ctx, backfillPageSize)
+		rows, err := q.ListTransactionsForHashBackfill(ctx, ListTransactionsForHashBackfillParams{
+			ID:    cursor,
+			Limit: backfillPageSize,
+		})
 		if err != nil {
 			return fmt.Errorf("backfill content_hash: list page: %w", err)
 		}
@@ -179,13 +221,19 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 		}
 		for _, row := range rows {
 			hash := ComputeContentHash(row.Date, row.AmountCents, row.Description, row.CategoryName)
-			if err := q.UpdateTransactionContentHash(ctx, UpdateTransactionContentHashParams{
+			err := q.UpdateTransactionContentHash(ctx, UpdateTransactionContentHashParams{
 				ContentHash: sql.NullString{String: hash, Valid: true},
 				ID:          row.ID,
-			}); err != nil {
+			})
+			switch {
+			case err == nil:
+				done++
+			case isContentHashUniqueViolation(err):
+				skipped = append(skipped, row.ID)
+			default:
 				return fmt.Errorf("backfill content_hash: update row id=%d: %w", row.ID, err)
 			}
-			done++
+			cursor = row.ID
 		}
 		// If the page came back short (fewer than the limit), there
 		// are no more rows to process. Break before querying an empty
@@ -196,5 +244,49 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	}
 
 	log.Printf("Backfill content_hash: hashed %d rows", done)
+	if len(skipped) > 0 {
+		// A collision-skipped row is intact in the ledger — we only
+		// withheld the derived hash. Print a bounded preview of ids so
+		// operators can inspect specific rows without flooding the log
+		// on a large legacy DB with many duplicates. This is
+		// informational, not an error: the app is healthy.
+		const maxIDsToLog = 20
+		preview := skipped
+		suffix := ""
+		if len(preview) > maxIDsToLog {
+			preview = preview[:maxIDsToLog]
+			suffix = fmt.Sprintf(" (+%d more)", len(skipped)-maxIDsToLog)
+		}
+		log.Printf(
+			"Backfill content_hash: %d legacy duplicate row(s) not hashed%s; ids=%v. "+
+				"These rows match earlier rows byte-for-byte (date, amount, description, category) "+
+				"and remain intact; future imports of the same content will dedupe against the "+
+				"canonical row.",
+			len(skipped), suffix, preview,
+		)
+	}
 	return nil
+}
+
+// isContentHashUniqueViolation reports whether err is a UNIQUE constraint
+// violation on the partial index idx_transactions_content_hash. This is
+// the exact-and-only error shape the backfill tolerates: any other
+// UNIQUE violation (e.g. on users.username or categories.name) would
+// indicate a real bug and must surface.
+//
+// The match is a substring check on the driver's error message —
+// "UNIQUE constraint failed: transactions.content_hash" — because the
+// qualifying column name is the whole point of the decision and
+// sqlite3.Error does not expose it as a struct field. Even with
+// errors.As against sqlite3.Error and sqlite3.ErrConstraintUnique,
+// the only way to tell this index apart from users.username is to
+// read the message, so the typed check would add ceremony without
+// tightening the scope. The message format itself is stable: upstream
+// SQLite emits it from sqlite3.c as "UNIQUE constraint failed: %s.%s",
+// not driver-side, so a mattn version bump cannot silently change it.
+func isContentHashUniqueViolation(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "UNIQUE constraint failed: transactions.content_hash")
 }

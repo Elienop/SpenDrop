@@ -335,3 +335,212 @@ func TestGetTransactionByContentHash_HidesTombstoned(t *testing.T) {
 		t.Errorf("expected sql.ErrNoRows after soft-delete, got %v", err)
 	}
 }
+
+// TestBackfillContentHashes_ToleratesLegitimateCollisions is the regression
+// test for the TrueNAS boot-loop incident. Users with legitimately-identical
+// legacy rows — same date, same amount_cents, same normalized description,
+// same category — must not crash-loop the backfill on first boot after
+// migration 008. The earliest row (lowest id) claims the hash as the
+// canonical anchor for future imports; later colliding rows stay NULL and
+// remain in the ledger untouched. The whole sweep must still complete so
+// the rest of the pending rows (non-colliding) get hashed, and the function
+// must return nil so main.go does not abort startup.
+//
+// The legacy assumption in migration 008's original comment — that the
+// operator would pre-deduplicate by hand — is wrong for real household
+// spreadsheets, which contain legitimate same-date/same-amount/same-
+// description rows (e.g. two coffees on the same day). Locking this in
+// prevents a future refactor from reintroducing the abort-on-collision
+// behaviour.
+func TestBackfillContentHashes_ToleratesLegitimateCollisions(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "collider",
+		PasswordHash: "$2a$10$fake",
+		DisplayName:  "Collider",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	var foodID, foodName = int64(0), ""
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+			foodName = c.Name
+			break
+		}
+	}
+	if foodID == 0 {
+		t.Fatal("seed category 'Food' missing")
+	}
+
+	// Seed three rows:
+	//   - first colliding pair (two "Coffee" rows on the same day)
+	//   - a non-colliding third row
+	// The non-colliding row proves the sweep continues after a collision
+	// instead of aborting and leaving later rows unhashed.
+	date := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	first, err := q.CreateTransaction(ctx, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		Amount:      5,
+		AmountCents: 500,
+		Description: "Coffee",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{}, // legacy NULL
+	})
+	if err != nil {
+		t.Fatalf("CreateTransaction first: %v", err)
+	}
+	second, err := q.CreateTransaction(ctx, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		Amount:      5,
+		AmountCents: 500,
+		Description: "Coffee",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{}, // legacy NULL — will collide with first
+	})
+	if err != nil {
+		t.Fatalf("CreateTransaction second: %v", err)
+	}
+	third, err := q.CreateTransaction(ctx, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		Amount:      10,
+		AmountCents: 1000,
+		Description: "Lunch",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{}, // legacy NULL — no collision
+	})
+	if err != nil {
+		t.Fatalf("CreateTransaction third: %v", err)
+	}
+
+	// The backfill MUST return nil — a UNIQUE violation on one row
+	// cannot fail the whole sweep.
+	if err := BackfillContentHashes(ctx, db); err != nil {
+		t.Fatalf("BackfillContentHashes returned error on legitimate collision: %v", err)
+	}
+
+	// first (lowest id) is the canonical anchor — it gets the hash.
+	var firstHash sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT content_hash FROM transactions WHERE id = ?`, first.ID,
+	).Scan(&firstHash); err != nil {
+		t.Fatalf("select first: %v", err)
+	}
+	if !firstHash.Valid {
+		t.Errorf("earliest colliding row id=%d should have been hashed", first.ID)
+	}
+	want := ComputeContentHash(date, 500, "Coffee", foodName)
+	if firstHash.String != want {
+		t.Errorf("first row hash mismatch\n got: %s\nwant: %s", firstHash.String, want)
+	}
+
+	// second (higher id, same identity) stays NULL: the partial unique
+	// index rejected its UPDATE, and our tolerance left it untouched.
+	var secondHash sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT content_hash FROM transactions WHERE id = ?`, second.ID,
+	).Scan(&secondHash); err != nil {
+		t.Fatalf("select second: %v", err)
+	}
+	if secondHash.Valid {
+		t.Errorf("later colliding row id=%d should still have NULL content_hash, got %q", second.ID, secondHash.String)
+	}
+
+	// third (non-colliding) must be hashed — the sweep continued after the
+	// collision instead of bailing out at the first UNIQUE error.
+	var thirdHash sql.NullString
+	if err := db.QueryRowContext(ctx,
+		`SELECT content_hash FROM transactions WHERE id = ?`, third.ID,
+	).Scan(&thirdHash); err != nil {
+		t.Fatalf("select third: %v", err)
+	}
+	if !thirdHash.Valid {
+		t.Errorf("non-colliding row id=%d should have been hashed; sweep aborted early", third.ID)
+	}
+	wantThird := ComputeContentHash(date, 1000, "Lunch", foodName)
+	if thirdHash.String != wantThird {
+		t.Errorf("third row hash mismatch\n got: %s\nwant: %s", thirdHash.String, wantThird)
+	}
+}
+
+// TestBackfillContentHashes_CollisionSkipped_IsStableAcrossReboots asserts
+// that a row left NULL by a previous collision does not re-trigger a crash
+// on the next boot. This is the "container restart" case: whatever the
+// implementation does to advance past a NULL-and-skipped row, it must do so
+// again on the next invocation with the same final state.
+//
+// Without this guarantee, the skipped row could re-enter the pending set on
+// every boot, re-collide with the canonical row, and keep the
+// startup-noise loud forever. We want the second run to be a clean no-op
+// on that row.
+func TestBackfillContentHashes_CollisionSkipped_IsStableAcrossReboots(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "reboot",
+		PasswordHash: "$2a$10$fake",
+		DisplayName:  "Reboot",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	foodID := cats[0].ID
+
+	date := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 2; i++ {
+		if _, err := q.CreateTransaction(ctx, CreateTransactionParams{
+			UserID:      user.ID,
+			Date:        date,
+			Amount:      5,
+			AmountCents: 500,
+			Description: "Coffee",
+			CategoryID:  foodID,
+			ContentHash: sql.NullString{},
+		}); err != nil {
+			t.Fatalf("CreateTransaction %d: %v", i, err)
+		}
+	}
+
+	if err := BackfillContentHashes(ctx, db); err != nil {
+		t.Fatalf("first BackfillContentHashes: %v", err)
+	}
+	// Second invocation simulates a restart: the skipped NULL row must
+	// be tolerated again and must not crash. The canonical row is
+	// already hashed, so the pending set is {skipped row} and the only
+	// attempted UPDATE will again hit the UNIQUE index and be skipped.
+	if err := BackfillContentHashes(ctx, db); err != nil {
+		t.Fatalf("second BackfillContentHashes (simulated restart): %v", err)
+	}
+
+	// State must match what we had after the first run: exactly one
+	// row hashed, exactly one NULL.
+	var nullCount, validCount int64
+	if err := db.QueryRowContext(ctx,
+		`SELECT
+			COUNT(*) FILTER (WHERE content_hash IS NULL),
+			COUNT(*) FILTER (WHERE content_hash IS NOT NULL)
+		 FROM transactions`,
+	).Scan(&nullCount, &validCount); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if nullCount != 1 || validCount != 1 {
+		t.Errorf("expected 1 NULL + 1 hashed after reboot, got %d NULL + %d hashed", nullCount, validCount)
+	}
+}
