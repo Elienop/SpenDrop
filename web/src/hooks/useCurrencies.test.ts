@@ -83,6 +83,16 @@ describe('useCurrencies', () => {
     expect(result.current.rateFor('ZRO')).toBe(null);
   });
 
+  it('rateFor returns null for negative rate_to_base', async () => {
+    mockedGet.mockResolvedValue([
+      { code: 'USD', name: 'US Dollar', symbol: '$', rate_to_base: 1, is_base: true, updated_at: '2026-04-01T00:00:00Z' },
+      { code: 'BAD', name: 'Bad', symbol: '?', rate_to_base: -0.5, is_base: false, updated_at: '2026-04-01T00:00:00Z' },
+    ]);
+    const { result } = renderHook(() => useCurrencies());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.rateFor('BAD')).toBe(null);
+  });
+
   it('transitions loading: true → false on resolve', async () => {
     let resolveFn!: (value: Currency[]) => void;
     mockedGet.mockReturnValue(
@@ -109,5 +119,20 @@ describe('useCurrencies', () => {
     expect(result.current.list).toEqual([]);
     expect(result.current.baseCode).toBe('USD'); // DEFAULT_CURRENCY fallback
     expect(result.current.rateFor('EUR')).toBe(null);
+  });
+
+  it('caches failure outcome: second mount after error does not refetch', async () => {
+    mockedGet.mockRejectedValueOnce(new Error('network down'));
+    const { result: first } = renderHook(() => useCurrencies());
+    await waitFor(() => expect(first.current.loading).toBe(false));
+    expect(first.current.error).toMatch(/network down/);
+    expect(mockedGet).toHaveBeenCalledTimes(1);
+
+    // Second consumer mounts after the error — must reuse the cached failure
+    // rather than re-hitting the network.
+    const { result: second } = renderHook(() => useCurrencies());
+    await waitFor(() => expect(second.current.loading).toBe(false));
+    expect(second.current.error).toMatch(/network down/);
+    expect(mockedGet).toHaveBeenCalledTimes(1);
   });
 });

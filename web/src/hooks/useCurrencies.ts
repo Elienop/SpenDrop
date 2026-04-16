@@ -63,7 +63,12 @@ export function useCurrencies(): UseCurrenciesResult {
     let cancelled = false;
     fetchCurrencies().then((entry) => {
       if (cancelled) return;
-      setState({ ...entry, loading: false });
+      setState({
+        list: entry.list,
+        baseCode: entry.baseCode,
+        error: entry.error,
+        loading: false,
+      });
     });
     return () => {
       cancelled = true;
