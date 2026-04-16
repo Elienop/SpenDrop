@@ -9,7 +9,20 @@ import {
 
 const originalFetch = globalThis.fetch;
 
-function mockFetch(responses: Array<Partial<Response> & { body?: unknown }>) {
+// Local interface rather than `Partial<Response> & { body?: unknown }` —
+// intersecting with Response lets TS pull in the real `body` typing
+// (`ReadableStream<Uint8Array<ArrayBuffer>>` on newer lib.dom.d.ts), and
+// the excess-property check rejects `code`/`error`/`import_id` on the
+// object literal. The strictness surfaces under `tsc -b` (composite
+// build) but not under a bare `tsc --noEmit`. Keep the spec shape
+// independent of the `Response` interface to avoid the trap.
+interface MockResponseSpec {
+  ok?: boolean;
+  status?: number;
+  body?: unknown;
+}
+
+function mockFetch(responses: MockResponseSpec[]) {
   let call = 0;
   const mock = vi.fn().mockImplementation(async () => {
     const r = responses[Math.min(call, responses.length - 1)];
