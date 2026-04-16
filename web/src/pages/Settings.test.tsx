@@ -447,12 +447,14 @@ describe('Settings', () => {
       import_id: 'abc-123',
       row_count: 5,
       rows: [
-        { date: '2026-01-15', description: 'Grocery Store', amount: 45.50, category: 'Food' },
-        { date: '2026-01-16', description: 'Bus Ticket', amount: 2.50, category: 'Transport' },
-        { date: '2026-01-17', description: 'Coffee Shop', amount: 5.00, category: 'Unknown' },
+        { row_id: 0, skip: false, content_hash: '', date: '2026-01-15', description: 'Grocery Store', amount: 45.50, category: 'Food' },
+        { row_id: 1, skip: false, content_hash: '', date: '2026-01-16', description: 'Bus Ticket', amount: 2.50, category: 'Transport' },
+        { row_id: 2, skip: false, content_hash: '', date: '2026-01-17', description: 'Coffee Shop', amount: 5.00, category: 'Unknown' },
       ],
       columns: ['date', 'description', 'amount', 'category'],
       unique_categories: ['Food', 'Transport', 'Unknown'],
+      collision_groups: [],
+      expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     };
 
     const mockImportResult: ImportResult = {
