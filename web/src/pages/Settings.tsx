@@ -13,10 +13,12 @@ import type {
   Category,
   Currency,
   ImportPreview,
-  ImportResult,
+  PatchRowRequest,
   SavingsGoal,
   User,
 } from '../api/types';
+import { ImportPreviewTable } from '@/components/ImportPreviewTable';
+import { useImportSession, type CellError } from '@/hooks/useImportSession';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -1015,6 +1017,15 @@ function UsersSection() {
 
 interface ImportPreviewStepProps {
   preview: ImportPreview;
+  cellErrors: Record<string, CellError>;
+  unresolvedCount: number;
+  canImport: boolean;
+  pendingPatchCount: number;
+  patchRow: (
+    rowID: number,
+    field: PatchRowRequest['field'],
+    value: string | boolean,
+  ) => Promise<void>;
   categories: Category[];
   categoryMap: Record<string, string>;
   setCategoryMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
@@ -1026,6 +1037,11 @@ interface ImportPreviewStepProps {
 
 function ImportPreviewStep({
   preview,
+  cellErrors,
+  unresolvedCount,
+  canImport,
+  pendingPatchCount,
+  patchRow,
   categories,
   categoryMap,
   setCategoryMap,
@@ -1067,31 +1083,21 @@ function ImportPreviewStep({
         {`Found ${preview.row_count} rows to import.`}
       </p>
 
-      {/* Data table */}
-      <div className="max-h-[400px] overflow-auto rounded-md border">
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead className="sticky top-0 bg-card">Date</TableHead>
-              <TableHead className="sticky top-0 bg-card">Description</TableHead>
-              <TableHead className="sticky top-0 bg-card text-right">Amount</TableHead>
-              <TableHead className="sticky top-0 bg-card">Category</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {preview.rows.map((row, i) => (
-              <TableRow key={i}>
-                <TableCell className="whitespace-nowrap">{row.date}</TableCell>
-                <TableCell>{row.description}</TableCell>
-                <TableCell className="text-right font-mono tabular-nums">
-                  {row.amount.toFixed(2)}
-                </TableCell>
-                <TableCell>{row.category}</TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      </div>
+      {/* Data table — editable, with inline collision resolution.
+          The component owns its entire footer (status + Cancel + Import)
+          so this step renders no standalone action block below. Pairing
+          Cancel and Import on the same decision row keeps the primary
+          and abort actions together — Fitts's and user-expectation both. */}
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={cellErrors}
+        unresolvedCount={unresolvedCount}
+        canImport={canImport}
+        pendingPatchCount={pendingPatchCount}
+        onPatchRow={patchRow}
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />
 
       {/* Category mapping summary */}
       {uniqueImportCategories.length > 0 && (
@@ -1189,23 +1195,11 @@ function ImportPreviewStep({
           </Select>
         </div>
       )}
-
-      {/* Actions */}
-      <div className="flex gap-2">
-        <Button type="button" variant="outline" onClick={onConfirm}>
-          Import {preview.row_count} Rows
-        </Button>
-        <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
     </div>
   );
 }
 
 /* ---------- Import / Export Tab ---------- */
-
-type ImportStep = 'upload' | 'preview' | 'done';
 
 function DataSection() {
   const now = new Date();
@@ -1213,18 +1207,22 @@ function DataSection() {
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
 
-  // Import wizard state
-  const [importStep, setImportStep] = useState<ImportStep>('upload');
-  const [preview, setPreview] = useState<ImportPreview | null>(null);
-  const [result, setResult] = useState<ImportResult | null>(null);
-  const [importError, setImportError] = useState<string | null>(null);
+  // Import wizard state — preview / importStep / result are owned by the
+  // hook now; destructure them so the rest of the function reads identically
+  // to the old local-state version.
+  const importSession = useImportSession();
+  const { preview, importStep, result, error: importError } = importSession;
+
   const [defaultCategoryId, setDefaultCategoryId] = useState<number | null>(
     null,
   );
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
-  const [confirmOpen, setConfirmOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Tracks the import_id we last auto-mapped categories for. Resets to null
+  // on cancel / startOver so the next upload (or a re-upload) re-runs the
+  // auto-map exactly once. See autoMapCategories effect below.
+  const lastAutoMappedImportIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     api
@@ -1235,6 +1233,20 @@ function DataSection() {
       });
   }, []);
 
+  // Auto-map categories whenever the hook's preview changes to a new
+  // import_id. The guard avoids clobbering the user's manual re-mapping on
+  // unrelated re-renders (e.g. after a PATCH that only updates one row).
+  useEffect(() => {
+    if (!preview) {
+      // Upload cancelled / session reset — arm the ref for the next preview.
+      lastAutoMappedImportIdRef.current = null;
+      return;
+    }
+    if (lastAutoMappedImportIdRef.current === preview.import_id) return;
+    setCategoryMap(autoMapCategories(preview, categories));
+    lastAutoMappedImportIdRef.current = preview.import_id;
+  }, [preview, categories]);
+
   function clearFileInput() {
     if (fileInputRef.current) fileInputRef.current.value = '';
   }
@@ -1242,68 +1254,37 @@ function DataSection() {
   async function handleFileChange(e: ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
-    setImportError(null);
-    try {
-      const data = await api.upload<ImportPreview>('import/upload', file);
-      setPreview(data);
-      setCategoryMap(autoMapCategories(data, categories));
-      setImportStep('preview');
-    } catch (err) {
-      setImportError(err instanceof Error ? err.message : 'Upload failed');
-      clearFileInput();
-    }
+    // uploadFile catches internally and sets importSession.error, which
+    // the Alert below renders. On success importStep flips to 'preview'
+    // and the file input unmounts, so clearing it here only matters for
+    // the rejected path (so the same file can be re-selected without
+    // tripping the browser's value-equality no-op on change events).
+    await importSession.uploadFile(file);
+    clearFileInput();
   }
 
   async function handleConfirmImport() {
     if (!preview) return;
-    try {
-      // Convert string IDs to numbers for the backend (Go expects int64)
-      const numericCategoryMap: Record<string, number> = {};
-      for (const [name, id] of Object.entries(categoryMap)) {
-        if (id) numericCategoryMap[name] = parseInt(id, 10);
-      }
-
-      const payload: {
-        import_id: string;
-        default_category_id?: number;
-        category_map: Record<string, number>;
-      } = {
-        import_id: preview.import_id,
-        category_map: numericCategoryMap,
-      };
-      if (defaultCategoryId !== null) {
-        payload.default_category_id = defaultCategoryId;
-      }
-
-      const res = await api.post<ImportResult>('import/confirm', payload);
-      setResult(res);
-      setImportStep('done');
-      setConfirmOpen(false);
-      setImportError(null);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Import failed');
-      setConfirmOpen(false);
+    // Convert string IDs to numbers for the backend (Go expects int64).
+    const numericCategoryMap: Record<string, number> = {};
+    for (const [name, id] of Object.entries(categoryMap)) {
+      if (id) numericCategoryMap[name] = parseInt(id, 10);
     }
+    // confirmImport never throws — it converts 409s into a local
+    // collision_groups update + error message, and non-409s into
+    // importSession.error. The Alert below renders that state.
+    await importSession.confirmImport(numericCategoryMap, defaultCategoryId);
   }
 
-  function handleCancelImport() {
-    // Tell backend to free the import slot
-    if (preview?.import_id) {
-      void api.del(`import/${preview.import_id}`).catch(() => {});
-    }
-    setImportStep('upload');
-    setPreview(null);
-    setImportError(null);
+  async function handleCancelImport() {
+    await importSession.cancelImport();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
   }
 
   function handleImportAnother() {
-    setImportStep('upload');
-    setPreview(null);
-    setResult(null);
-    setImportError(null);
+    importSession.startOver();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
@@ -1395,52 +1376,21 @@ function DataSection() {
           )}
 
           {importStep === 'preview' && preview && (
-            <>
-              <ImportPreviewStep
-                preview={preview}
-                categories={categories}
-                categoryMap={categoryMap}
-                setCategoryMap={setCategoryMap}
-                defaultCategoryId={defaultCategoryId}
-                setDefaultCategoryId={setDefaultCategoryId}
-                onConfirm={() => setConfirmOpen(true)}
-                onCancel={handleCancelImport}
-              />
-
-              <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-                <DialogContent aria-label="Confirm Import">
-                  <DialogHeader>
-                    <DialogTitle>Confirm Import</DialogTitle>
-                    <DialogDescription>
-                      Import {preview.row_count} transactions
-                      {defaultCategoryId
-                        ? ` with default category "${
-                            categories.find(
-                              (c) => c.id === defaultCategoryId,
-                            )?.name ?? ''
-                          }"`
-                        : ''}
-                      ? This cannot be undone.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <DialogFooter>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => setConfirmOpen(false)}
-                    >
-                      Cancel
-                    </Button>
-                    <Button
-                      type="button"
-                      onClick={() => void handleConfirmImport()}
-                    >
-                      Confirm and Import
-                    </Button>
-                  </DialogFooter>
-                </DialogContent>
-              </Dialog>
-            </>
+            <ImportPreviewStep
+              preview={preview}
+              cellErrors={importSession.cellErrors}
+              unresolvedCount={importSession.unresolvedCount}
+              canImport={importSession.canImport}
+              pendingPatchCount={importSession.pendingPatchCount}
+              patchRow={importSession.patchRow}
+              categories={categories}
+              categoryMap={categoryMap}
+              setCategoryMap={setCategoryMap}
+              defaultCategoryId={defaultCategoryId}
+              setDefaultCategoryId={setDefaultCategoryId}
+              onConfirm={() => void handleConfirmImport()}
+              onCancel={() => void handleCancelImport()}
+            />
           )}
 
           {importStep === 'done' && result && (
@@ -1541,6 +1491,12 @@ export function Settings() {
     if (isValidTab(tabParam) && tabParam !== activeTab) {
       setActiveTab(tabParam);
     }
+    // activeTab is intentionally excluded from deps: this effect is a
+    // one-way URL → state sync. Including activeTab would re-run the
+    // effect every time the user clicks a tab and could race with the
+    // history listener. The guard above already prevents redundant
+    // setState on equal values, so the only meaningful trigger is a
+    // fresh tabParam coming in from the router.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabParam]);
 

@@ -399,6 +399,36 @@ Use the `Alert` component for all error displays:
 
 ---
 
+## Patterns
+
+These are higher-level interaction patterns built on top of the shadcn primitives above. When a new screen needs one of these, reuse the approach rather than reinventing the keyboard / focus / ARIA plumbing.
+
+### Editable cells in data tables
+
+First introduced on the Import preview (`components/ImportPreviewTable.tsx`). Use this whenever a table row's fields should be edited in place without opening a modal or drawer.
+
+Principles:
+
+- **Single edit slot.** Only one cell is in edit mode at a time. Local state is a `{ rowID, field }` pair — never a per-row map of drafts. Cross-cell drafts are an unresolvable ambiguity (what does Tab commit mean when three cells are dirty?).
+- **Entry points:** double-click (mouse), Enter or F2 (keyboard) from a focused cell. Enter matches Google Sheets, F2 matches Excel — either is expected.
+- **Exit points:** Enter / blur commits, Escape cancels, Tab commits and advances focus natively.
+- **Focus anchor:** capture the `<td>` element on edit-entry in a ref. On Enter and Escape, restore focus to the anchor so keyboard users do not land on `document.body` when the `<Input>` unmounts. Tab explicitly opts out of the anchor so the browser's native focus-advance is not clobbered.
+- **`tabIndex={isEditing ? -1 : 0}` on the cell.** While an Input is mounted, the surrounding `<td>` is out of tab order — Shift+Tab from the Input lands directly on the previous editable cell instead of the enclosing cell.
+- **Imperative mirror for edit state.** `useState<EditingCell>` is read by React on re-render; the Input's `onBlur` handler fires synchronously inside the same tick as `cellEl.focus()` and gets the pre-render closure value. Mirror the edit target in a `useRef` and null it synchronously in `commitEdit` / `cancelEdit` before `setEditing(null)` — that is the only signal fast enough to tell the chained blur "the edit was already handled, don't fire PATCH again."
+- **ARIA:** combine the row / group context id and any per-cell error message id in `aria-describedby` via a space-separated IDREFS list. Attach the same tokens to the idle `<td>` and the active `<Input>` so screen readers announce context regardless of which state the cell is in.
+- **Inline error surface:** server 400s render as a small `<p>` below the cell, marked with `id="cell-error-<rowID>-<field>"` and referenced by the Input's `aria-describedby`. Never pop a toast for a per-cell validation error — the cell is the correction surface.
+
+### Bulk soft-destructive actions
+
+Introduced on collision group headers in `components/ImportPreviewTable.tsx`. Use this when a button applies a reversible change (skip, archive, unpublish) to multiple items at once.
+
+- **Embed the scope in the label.** Write `Skip all 3 in group`, not `Skip all in group`. Showing the count before the click is a UX safeguard — the user reads the destructive scope as part of the commitment.
+- **Disable while pending.** Any button that fires a burst of mutations must `disabled={pendingCount > 0}` so a double-click cannot decouple the client's in-flight counter from the server's actual queue depth.
+- **Amber framing for the group header.** `bg-amber-500/15` background, `border-l-2 border-l-amber-500` left rule, and an `AlertTriangle` (lucide) icon at `h-4 w-4 text-amber-500`. Amber is the attention-without-alarm register — the action is reversible, so red (`--destructive`) is too loud.
+- **Skip sticky semantics.** Once the user marks a row as skipped, only an explicit un-check clears it. No upstream edit (re-mapping a category, editing a duplicate into uniqueness) should reset a row's skip state — the server is the source of truth for every row's skip flag.
+
+---
+
 ## Quick Reference
 
 ### Do

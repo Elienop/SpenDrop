@@ -1,0 +1,424 @@
+import { renderHook, act, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useImportSession } from './useImportSession';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
+
+const originalFetch = globalThis.fetch;
+
+interface MockResponseSpec {
+  ok?: boolean;
+  status?: number;
+  body?: unknown;
+  delayMs?: number;
+}
+
+/**
+ * Builds a queued-response fetch mock. Each call to the mock pops the
+ * next spec from the queue in insertion order. Tests that need to
+ * assert call-ordering or call-count mid-flight can inspect
+ * `fetchMock.mock.calls` directly.
+ */
+function installFetchQueue(responses: MockResponseSpec[]): ReturnType<typeof vi.fn> {
+  let call = 0;
+  const fetchMock = vi.fn().mockImplementation(async () => {
+    const r = responses[Math.min(call, responses.length - 1)];
+    call += 1;
+    if (r.delayMs) await new Promise((resolve) => setTimeout(resolve, r.delayMs));
+    return {
+      ok: r.ok ?? true,
+      status: r.status ?? 200,
+      json: () => Promise.resolve(r.body ?? {}),
+    } as Response;
+  });
+  globalThis.fetch = fetchMock;
+  return fetchMock;
+}
+
+/**
+ * Builds a successful Response object matching the shape our helpers
+ * expect. Used by test #4 where we need to manually resolve a stalled
+ * fetch promise rather than going through `installFetchQueue`.
+ */
+function okResponse(body: unknown): Response {
+  return {
+    ok: true,
+    status: 200,
+    json: () => Promise.resolve(body),
+  } as Response;
+}
+
+function freshPreviewBody(importID: string) {
+  return {
+    import_id: importID,
+    row_count: 2,
+    rows: [
+      {
+        row_id: 0,
+        skip: false,
+        content_hash: 'h0',
+        date: '2025-01-07',
+        description: 'Starbucks',
+        amount: 5,
+        category: 'Food',
+      },
+      {
+        row_id: 1,
+        skip: false,
+        content_hash: 'h1',
+        date: '2025-01-08',
+        description: "Trader Joe's",
+        amount: 42.1,
+        category: 'Food',
+      },
+    ],
+    columns: ['Date', 'Description', 'Amount', 'Category'],
+    unique_categories: ['Food'],
+    collision_groups: [],
+    expires_at: '2099-01-01T00:00:00Z',
+  };
+}
+
+describe('useImportSession', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+    vi.restoreAllMocks();
+  });
+
+  it('uploadFile sets preview and writes importId to localStorage', async () => {
+    installFetchQueue([{ body: freshPreviewBody('abc') }]);
+    const { result } = renderHook(() => useImportSession());
+
+    await act(async () => {
+      await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+    });
+
+    expect(result.current.preview?.import_id).toBe('abc');
+    expect(result.current.importStep).toBe('preview');
+    expect(localStorage.getItem(STORAGE_KEYS.importId)).toBe('abc');
+  });
+
+  it('mount with stored importId rehydrates via GET', async () => {
+    localStorage.setItem(STORAGE_KEYS.importId, 'stored-id');
+    const fetchMock = installFetchQueue([{ body: freshPreviewBody('stored-id') }]);
+
+    const { result } = renderHook(() => useImportSession());
+
+    await waitFor(() => {
+      expect(result.current.preview?.import_id).toBe('stored-id');
+    });
+
+    expect(result.current.importStep).toBe('preview');
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toContain('/api/import/stored-id');
+  });
+
+  it('mount with stored importId clears localStorage and does NOT surface an error on 404', async () => {
+    localStorage.setItem(STORAGE_KEYS.importId, 'expired-id');
+    // Use a realistic backend 404 body — NOT the magic string "HTTP 404".
+    // The hook's silence logic uses `err instanceof NotFoundError`, so it
+    // must work regardless of what the backend returns in the error body.
+    // If this test uses a magic string, a regression back to string-match
+    // silencing would trivially pass.
+    installFetchQueue([
+      {
+        ok: false,
+        status: 404,
+        body: { error: 'session not found or expired' },
+      },
+    ]);
+
+    const { result } = renderHook(() => useImportSession());
+
+    await waitFor(() => {
+      expect(localStorage.getItem(STORAGE_KEYS.importId)).toBeNull();
+    });
+
+    // Expired sessions are expected — the hook should silently drop
+    // back to the upload step without an error banner.
+    expect(result.current.error).toBeNull();
+    expect(result.current.importStep).toBe('upload');
+    expect(result.current.preview).toBeNull();
+  });
+
+  it('patchRow serializes cross-row PATCHes through a single queue', async () => {
+    // This test proves the concurrency gate: PATCH #2 must NOT be
+    // dispatched until PATCH #1's response arrives. The previous
+    // implementation relied on fake delays and call-order ordering,
+    // which would still pass against a broken concurrent implementation
+    // because the test helper records calls at invocation time (in
+    // insertion order) regardless of concurrency.
+    //
+    // Instead we stall PATCH #1 on a manually-resolved promise and
+    // inspect fetchMock.mock.calls.length DURING the stall. A broken
+    // implementation (parallel fires) would already be at 3 calls; a
+    // correct implementation (serialized queue) stays at 2 until we
+    // resolve PATCH #1 ourselves.
+
+    let resolvePatch1!: (value: Response) => void;
+    const patch1Promise = new Promise<Response>((resolve) => {
+      resolvePatch1 = resolve;
+    });
+
+    const fetchMock = vi.fn();
+    // Call 1: upload — resolves immediately.
+    fetchMock.mockResolvedValueOnce(okResponse(freshPreviewBody('abc')));
+    // Call 2: PATCH row 0 — stalls until we resolve it manually.
+    fetchMock.mockReturnValueOnce(patch1Promise);
+    // Call 3: PATCH row 1 — resolves immediately (but the queue
+    // must not dispatch it until call 2 settles).
+    fetchMock.mockResolvedValueOnce(okResponse(freshPreviewBody('abc')));
+    globalThis.fetch = fetchMock;
+
+    const { result } = renderHook(() => useImportSession());
+
+    await act(async () => {
+      await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+    });
+
+    // Fire both PATCHes back-to-back without awaiting. The hook's
+    // patchQueueRef must serialize them — PATCH #2 should wait for
+    // PATCH #1's response, which is currently stalled.
+    let p1: Promise<void> | undefined;
+    let p2: Promise<void> | undefined;
+    act(() => {
+      p1 = result.current.patchRow(0, 'description', 'Starbucks NYC');
+      p2 = result.current.patchRow(1, 'description', 'TJs');
+    });
+
+    // Flush the microtask queue so the upload and the first PATCH
+    // dispatch have a chance to run. We intentionally do NOT use
+    // `await waitFor` here — we want to inspect the mock state in the
+    // middle of the stall, not after it completes.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // THE critical assertion: while PATCH #1 is stalled, PATCH #2
+    // must NOT have been dispatched. Only 2 fetches should have
+    // happened so far (upload + PATCH #1).
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(result.current.pendingPatchCount).toBe(2);
+
+    // Now resolve PATCH #1 — PATCH #2 should dispatch immediately after.
+    await act(async () => {
+      resolvePatch1(okResponse(freshPreviewBody('abc')));
+      await Promise.all([p1, p2]);
+    });
+
+    // All three fetches have fired. Order is upload → PATCH #1 → PATCH #2.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [, patch1Args, patch2Args] = fetchMock.mock.calls;
+    expect(patch1Args[0]).toContain('/rows/0');
+    expect(patch2Args[0]).toContain('/rows/1');
+    expect(result.current.pendingPatchCount).toBe(0);
+  });
+
+  it('patchRow 400 error populates cellErrors; a following 200 clears it', async () => {
+    const fetchMock = installFetchQueue([
+      { body: freshPreviewBody('abc') }, // upload
+      { ok: false, status: 400, body: { error: 'INVALID_DATE' } }, // PATCH 1: bad date
+      { body: freshPreviewBody('abc') }, // PATCH 2: good date
+    ]);
+
+    const { result } = renderHook(() => useImportSession());
+
+    await act(async () => {
+      await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+    });
+
+    // Bad PATCH: rejects, sets cellError.
+    await act(async () => {
+      try {
+        await result.current.patchRow(0, 'date', 'not-a-date');
+      } catch {
+        /* expected */
+      }
+    });
+
+    expect(result.current.cellErrors['0:date']).toBeDefined();
+    expect(result.current.cellErrors['0:date']?.message).toBe('INVALID_DATE');
+
+    // Good PATCH: cellError cleared.
+    await act(async () => {
+      await result.current.patchRow(0, 'date', '2025-01-07');
+    });
+
+    expect(result.current.cellErrors['0:date']).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('confirmImport 409 updates collision_groups WITHOUT clobbering user-edited rows', async () => {
+    // This test pins two invariants at once:
+    //   A. 409 recovery updates collision_groups to the server's view.
+    //   B. User edits made BEFORE the confirm attempt are preserved
+    //      across the 409 — the hook must NOT replace rows with the
+    //      server's pristine rows on 409.
+    //
+    // Setup: upload → PATCH row 0 description to a sentinel → confirm
+    // → assert both (A) the new collision_groups ARE on the preview
+    // and (B) the sentinel description IS still on the preview.
+
+    const patchResponse = {
+      ...freshPreviewBody('abc'),
+      rows: [
+        {
+          row_id: 0,
+          skip: false,
+          content_hash: 'h0-edited',
+          date: '2025-01-07',
+          description: 'EDITED_SENTINEL',
+          amount: 5,
+          category: 'Food',
+        },
+        {
+          row_id: 1,
+          skip: false,
+          content_hash: 'h1',
+          date: '2025-01-08',
+          description: "Trader Joe's",
+          amount: 42.1,
+          category: 'Food',
+        },
+      ],
+    };
+
+    installFetchQueue([
+      { body: freshPreviewBody('abc') }, // 1. upload
+      { body: patchResponse },           // 2. PATCH row 0 → description EDITED_SENTINEL
+      {
+        ok: false,
+        status: 409,
+        body: {
+          code: 'UNRESOLVED_COLLISIONS',
+          collision_groups: [
+            {
+              group_id: 'g1',
+              reason: 'intra_file',
+              member_row_ids: [0, 1],
+            },
+          ],
+        },
+      },                                 // 3. confirm → 409
+    ]);
+
+    const { result } = renderHook(() => useImportSession());
+
+    await act(async () => {
+      await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+    });
+
+    // Edit row 0 to the sentinel BEFORE confirming.
+    await act(async () => {
+      await result.current.patchRow(0, 'description', 'EDITED_SENTINEL');
+    });
+
+    expect(result.current.preview?.rows[0].description).toBe('EDITED_SENTINEL');
+    expect(result.current.preview?.collision_groups).toEqual([]);
+    expect(result.current.canImport).toBe(true);
+
+    // Confirm hits 409 — hook should update collision_groups in place
+    // WITHOUT reverting rows[0] back to the server's pristine "Starbucks".
+    await act(async () => {
+      await result.current.confirmImport({ Food: 5 }, null);
+    });
+
+    // (A) collision_groups updated.
+    expect(result.current.preview?.collision_groups).toHaveLength(1);
+    expect(result.current.preview?.collision_groups[0].group_id).toBe('g1');
+    // With 1 active (non-skipped) collision group, canImport flips false.
+    expect(result.current.unresolvedCount).toBe(1);
+    expect(result.current.canImport).toBe(false);
+    // The user-facing error message is set.
+    expect(result.current.error).toContain('Unresolved');
+
+    // (B) THE critical invariant: row 0's description is STILL the
+    // sentinel. A regression that did `setPreview(err.body)` or
+    // `setPreview({ ...prev, ...err.body })` would clobber rows here
+    // because `err.body` doesn't carry rows at all, so the merge would
+    // either throw or revert to the last known rows — both of which
+    // would lose EDITED_SENTINEL.
+    expect(result.current.preview?.rows[0].description).toBe('EDITED_SENTINEL');
+    // Row 1 is unchanged by the edit AND unchanged by the 409.
+    expect(result.current.preview?.rows[1].description).toBe("Trader Joe's");
+  });
+
+  it('skipping every member of a collision group flips unresolvedCount to 0 and canImport to true', async () => {
+    // Guards the skip-is-sticky rule (spec §§359–369): a collision
+    // group is considered "resolved" when every one of its member rows
+    // has `skip === true`, even though the content hashes still
+    // collide. Without this test, a regression that counted skipped
+    // rows toward unresolved would silently pass every other test in
+    // this suite (since all other tests use collision_groups === []).
+
+    // Seed with a collision group covering rows 0 and 1. The initial
+    // upload response carries a non-empty collision_groups.
+    const withCollision = {
+      ...freshPreviewBody('abc'),
+      collision_groups: [
+        {
+          group_id: 'g1',
+          reason: 'intra_file' as const,
+          member_row_ids: [0, 1],
+        },
+      ],
+    };
+
+    // After skipping row 0, the group still has row 1 active → still
+    // unresolved. After skipping row 1 too, the group is resolved.
+    const afterSkip0 = {
+      ...withCollision,
+      rows: [
+        { ...withCollision.rows[0], skip: true },
+        { ...withCollision.rows[1] },
+      ],
+    };
+    const afterSkip1 = {
+      ...withCollision,
+      rows: [
+        { ...withCollision.rows[0], skip: true },
+        { ...withCollision.rows[1], skip: true },
+      ],
+    };
+
+    installFetchQueue([
+      { body: withCollision }, // upload
+      { body: afterSkip0 },    // PATCH row 0 skip=true
+      { body: afterSkip1 },    // PATCH row 1 skip=true
+    ]);
+
+    const { result } = renderHook(() => useImportSession());
+
+    await act(async () => {
+      await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+    });
+
+    // Before any skip: one active collision group, unresolvedCount=1, cannot import.
+    expect(result.current.preview?.collision_groups).toHaveLength(1);
+    expect(result.current.unresolvedCount).toBe(1);
+    expect(result.current.canImport).toBe(false);
+
+    // Skip row 0 — group still has row 1 active.
+    await act(async () => {
+      await result.current.patchRow(0, 'skip', true);
+    });
+    expect(result.current.preview?.rows[0].skip).toBe(true);
+    expect(result.current.unresolvedCount).toBe(1); // still 1 — row 1 is live
+    expect(result.current.canImport).toBe(false);
+
+    // Skip row 1 — group is now fully skipped → resolved.
+    await act(async () => {
+      await result.current.patchRow(1, 'skip', true);
+    });
+    expect(result.current.preview?.rows[1].skip).toBe(true);
+    expect(result.current.unresolvedCount).toBe(0); // every member skipped
+    expect(result.current.canImport).toBe(true);    // gate is open
+    // NB: collision_groups is still length 1 — the group is not
+    // removed by the backend, only "resolved" by the user skipping
+    // every member. The `canImport` flag is computed from the rows'
+    // skip state, not from `collision_groups.length`.
+    expect(result.current.preview?.collision_groups).toHaveLength(1);
+  });
+});

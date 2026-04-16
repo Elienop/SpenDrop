@@ -25,6 +25,13 @@ export const STORAGE_KEYS = {
   dashboardMonth: 'spendrop-dash-month',
   /** Rows-per-page selection on the transactions table. */
   transactionsPerPage: 'spendrop-tx-per-page',
+  /**
+   * The import_id of the currently-active import preview session, if
+   * any. Set on successful upload, read on component mount to resume
+   * a session after F5 / tab refresh, cleared on successful confirm
+   * or on 404 from the resume GET.
+   */
+  importId: 'spendrop-import-id',
 } as const;
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

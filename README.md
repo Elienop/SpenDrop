@@ -56,7 +56,7 @@ Tabbed settings page with five sections:
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
-- **Import / Export** -- Upload Excel files, preview rows, confirm import; export transactions or monthly/yearly reports
+- **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
 
 ![Settings](docs/screenshots/08-settings.png)
 
@@ -634,8 +634,11 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 ### Import
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/import/upload` | Upload Excel file for preview |
-| POST | `/api/import/confirm` | Confirm and import previewed rows |
+| POST | `/api/import/upload` | Upload Excel file and open a preview session (returns `import_id`, parsed rows, and any content-hash collision groups) |
+| GET | `/api/import/{importID}` | Resume an existing preview session (used by the frontend after a reload to restore the in-progress import) |
+| PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `skip`) on a preview row; backend recomputes collisions and returns the full session snapshot |
+| DELETE | `/api/import/{importID}` | Cancel the preview session and free the server-side slot |
+| POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active) |
 
 ## Project Structure
 
