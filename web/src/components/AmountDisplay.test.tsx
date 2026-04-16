@@ -48,7 +48,7 @@ describe('AmountDisplay', () => {
   });
 
   it('applies expense styling (negative sign + default foreground)', () => {
-    const { container } = render(
+    render(
       <AmountDisplay
         amount={25.5}
         originalAmount={null}
@@ -57,11 +57,12 @@ describe('AmountDisplay', () => {
         baseCode="USD"
       />,
     );
-    expect(container.textContent).toMatch(/^-/);
+    const root = screen.getByTestId('amount-display');
+    expect(root.textContent).toMatch(/^-/);
   });
 
   it('applies income styling (positive sign + green class)', () => {
-    const { container } = render(
+    render(
       <AmountDisplay
         amount={1000}
         originalAmount={null}
@@ -70,7 +71,8 @@ describe('AmountDisplay', () => {
         baseCode="USD"
       />,
     );
-    expect(container.textContent).toMatch(/^\+/);
-    expect(container.firstChild).toHaveClass('text-emerald-500');
+    const root = screen.getByTestId('amount-display');
+    expect(root.textContent).toMatch(/^\+/);
+    expect(root).toHaveClass('text-emerald-500');
   });
 });

@@ -19,17 +19,20 @@ export function AmountDisplay({
   baseCode,
   className,
 }: AmountDisplayProps) {
-  const showSecondary =
-    originalAmount != null &&
-    originalCurrency != null &&
-    originalCurrency !== baseCode;
-
   const sign = type === TYPE_EXPENSE ? '-' : '+';
   const colorClass =
     type === TYPE_EXPENSE ? 'text-foreground' : 'text-emerald-500';
 
+  const secondary =
+    originalAmount != null &&
+    originalCurrency != null &&
+    originalCurrency !== baseCode
+      ? `${formatAmount(originalAmount)} ${originalCurrency}`
+      : null;
+
   return (
     <span
+      data-testid="amount-display"
       className={cn(
         'inline-flex flex-col items-end font-mono tabular-nums',
         colorClass,
@@ -40,12 +43,12 @@ export function AmountDisplay({
         {sign}
         {formatCurrency(amount, baseCode)}
       </span>
-      {showSecondary && (
+      {secondary && (
         <span
           data-testid="amount-display-secondary"
           className="text-xs font-normal text-muted-foreground"
         >
-          {formatAmount(originalAmount!)} {originalCurrency}
+          {secondary}
         </span>
       )}
     </span>
