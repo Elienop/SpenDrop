@@ -60,6 +60,9 @@ func seedBoundaryTransaction(t *testing.T, q *database.Queries, userID, category
 // whole-dollar amount), so we match either the plain integer form or the
 // "777.00" form defensively.
 func rowsContainAmount(rows [][]string, expected ...string) bool {
+	if len(rows) == 0 {
+		return false
+	}
 	for _, row := range rows[1:] {
 		for _, cell := range row {
 			for _, want := range expected {
@@ -218,21 +221,7 @@ func TestExports_IncludeRowAtEndOfBoundaryDay_MonthlyTransactionsSheet(t *testin
 	}
 }
 
-// TestExports_IncludeRowAtEndOfBoundaryDay_YearlyMonthlyTotalsSheet
-// exercises handleExportYearly's Monthly Totals sheet. Its WHERE clause
-// has "t.date >= ? AND t.date <= ?" with dateTo=YYYY-12-31 — same trap,
-// end-of-year edition. A boundary row on the last day of December with a
-// non-zero time-of-day would be dropped from the December total. We seed
-// the row on 2026-03-31 at 14:22:00Z and check the March row (row index 3)
-// — dateFrom for yearly export is "2026-01-01", dateTo is "2026-12-31",
-// and the >= bound is accidentally safe today (because "2026-01-01" sorts
-// before "2026-03-31T14:22:00Z" lexically), but the <= bound isn't the
-// one that triggers here — what triggers here is the broader question:
-// does the yearly query include our non-midnight row at all? Today "<=
-// 2026-12-31" is passed against "2026-03-31T14:22:00Z" which is safe
-// (March < December), so this specific test of the YEARLY path is
-// *independent* of the bug and would pass today. To actually exercise
-// the trap we move the boundary row to the end of the year.
+// Seeds on end-of-year so the <= 2026-12-31 upper bound is actually exercised.
 func TestExports_IncludeRowAtEndOfBoundaryDay_YearlyMonthlyTotalsSheet(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -337,5 +326,320 @@ func TestExports_IncludeRowAtEndOfBoundaryDay_YearlyCategoryTotalsSheet(t *testi
 	}
 	if !foundFood {
 		t.Fatalf("boundary-day row dropped from yearly Category Totals sheet — the t.date <= ? comparison trap is back. Food row absent; rows=%v", catRows)
+	}
+}
+
+// --- Upper-bound exclusion: a row at YYYY-MM-DD+1 must NOT leak in ---
+//
+// Symmetric to the inclusion tests above. A future refactor that replaced
+// date(t.date) <= ? with something like t.date <= datetime(?, '+1 day')
+// (an inclusive open-bound) would pass the inclusion tests but silently
+// leak the *next* day into the result. Each exclusion test seeds a
+// single row at the start of the day AFTER the boundary and asserts it
+// is not present in the endpoint's output.
+
+// seedNextDayTransaction inserts a transaction at the start of the day
+// immediately after the boundary-day, with the same distinctive $777.00
+// amount. Used by the exclusion tests to prove that upper bounds stay
+// strictly exclusive of YYYY-MM-DD+1.
+func seedNextDayTransaction(t *testing.T, q *database.Queries, userID, categoryID int64, d time.Time) database.Transaction {
+	t.Helper()
+	const amount = 777.00
+	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      userID,
+		Date:        d,
+		Amount:      amount,
+		AmountCents: dollarsToCents(amount),
+		Description: "next-day row",
+		CategoryID:  categoryID,
+	})
+	if err != nil {
+		t.Fatalf("seed next-day transaction: %v", err)
+	}
+	return txn
+}
+
+func TestExports_ExcludeNextDayRow_CSVExport(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	// 2026-04-01T00:00:00Z is the start of the day AFTER the 2026-03-31 bound.
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/transactions?date_from=2026-03-01&date_to=2026-03-31", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleExportTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	rows, err := f.GetRows("Transactions")
+	if err != nil {
+		t.Fatalf("get Transactions sheet: %v", err)
+	}
+	if rowsContainAmount(rows, "777", "777.00") {
+		t.Fatalf("next-day row leaked into /api/export/transactions — upper-bound exclusion broke. rows=%v", rows)
+	}
+}
+
+func TestExports_ExcludeNextDayRow_ListFilter(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?date_from=2026-03-01&date_to=2026-03-31", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Transactions []map[string]any `json:"transactions"`
+		Total        int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Total != 0 || len(resp.Transactions) != 0 {
+		t.Fatalf("next-day row leaked into /api/transactions list filter — upper-bound exclusion broke. total=%d transactions=%v", resp.Total, resp.Transactions)
+	}
+}
+
+func TestExports_ExcludeNextDayRow_MonthlySummarySheet(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/monthly/2026/03", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026", "month": "03"})
+	rec := httptest.NewRecorder()
+	h.handleExportMonthly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	summaryRows, err := f.GetRows("Summary")
+	if err != nil {
+		t.Fatalf("get Summary sheet: %v", err)
+	}
+	// Food row should be absent entirely (HAVING total_cents > 0 filters
+	// out zero-total categories). If the next-day row leaked in, Food
+	// would show total=777.
+	for _, row := range summaryRows[1:] {
+		if len(row) >= 3 && row[0] == "Food" {
+			t.Fatalf("next-day row leaked into monthly Summary sheet — upper-bound exclusion broke. Food row present: %v", row)
+		}
+	}
+}
+
+func TestExports_ExcludeNextDayRow_MonthlyTransactionsSheet(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/monthly/2026/03", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026", "month": "03"})
+	rec := httptest.NewRecorder()
+	h.handleExportMonthly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	txnRows, err := f.GetRows("Transactions")
+	if err != nil {
+		t.Fatalf("get Transactions sheet: %v", err)
+	}
+	if rowsContainAmount(txnRows, "777", "777.00") {
+		t.Fatalf("next-day row leaked into monthly Transactions sheet — upper-bound exclusion broke. rows=%v", txnRows)
+	}
+}
+
+func TestExports_ExcludeNextDayRow_YearlyMonthlyTotalsSheet(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	// 2027-01-01T00:00:00Z is the start of the day AFTER the 2026-12-31 bound.
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/yearly/2026", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026"})
+	rec := httptest.NewRecorder()
+	h.handleExportYearly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	monthlyRows, err := f.GetRows("Monthly Totals")
+	if err != nil {
+		t.Fatalf("get Monthly Totals: %v", err)
+	}
+	// Every month should be zero. Check all 12 month data rows.
+	if len(monthlyRows) < 13 {
+		t.Fatalf("expected 13 rows in Monthly Totals, got %d", len(monthlyRows))
+	}
+	for i := 1; i <= 12; i++ {
+		row := monthlyRows[i]
+		if len(row) < 4 {
+			continue
+		}
+		// Columns: Month, Expenses, Income, Net. A leaked next-day row would
+		// show up as 777 in Expenses for one of the months.
+		if row[1] != "0" && row[1] != "0.00" {
+			t.Fatalf("next-day row leaked into yearly Monthly Totals sheet — upper-bound exclusion broke. %s expenses=%q want 0", row[0], row[1])
+		}
+	}
+}
+
+func TestExports_ExcludeNextDayRow_YearlyCategoryTotalsSheet(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedNextDayTransaction(t, q, user.ID, 1, time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/yearly/2026", nil)
+	req = withUserAndURLParams(req, user, map[string]string{"year": "2026"})
+	rec := httptest.NewRecorder()
+	h.handleExportYearly(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	catRows, err := f.GetRows("Category Totals")
+	if err != nil {
+		t.Fatalf("get Category Totals: %v", err)
+	}
+	// Food row should be absent entirely (HAVING total_cents > 0 filters
+	// out zero-total categories). If the next-day row leaked, Food would
+	// show total=777.
+	for _, row := range catRows[1:] {
+		if len(row) >= 3 && row[0] == "Food" {
+			t.Fatalf("next-day row leaked into yearly Category Totals sheet — upper-bound exclusion broke. Food row present: %v", row)
+		}
+	}
+}
+
+// --- Tombstone discipline on the boundary day ---
+//
+// Prove that the date() wrapper didn't accidentally drop the
+// t.deleted_at IS NULL predicate. Seeds two rows on the same boundary
+// day at non-zero time — one live ($777), one tombstoned ($888) — and
+// asserts only the live one appears.
+
+// seedTombstonedBoundaryTransaction inserts a transaction on 2026-03-31
+// at 14:22:00Z and immediately soft-deletes it via the sqlc-generated
+// SoftDeleteTransaction query. The caller-supplied amount lets the test
+// use a distinct sentinel ($888) from the live boundary row ($777) so
+// the assertion can distinguish them in the output.
+func seedTombstonedBoundaryTransaction(t *testing.T, q *database.Queries, userID, categoryID int64, amount float64) database.Transaction {
+	t.Helper()
+	d := time.Date(2026, 3, 31, 14, 22, 0, 0, time.UTC)
+	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      userID,
+		Date:        d,
+		Amount:      amount,
+		AmountCents: dollarsToCents(amount),
+		Description: "tombstoned boundary",
+		CategoryID:  categoryID,
+	})
+	if err != nil {
+		t.Fatalf("seed tombstoned boundary transaction: %v", err)
+	}
+	if err := q.SoftDeleteTransaction(context.Background(), txn.ID); err != nil {
+		t.Fatalf("soft-delete boundary transaction: %v", err)
+	}
+	return txn
+}
+
+func TestExports_ExcludeTombstonedRowAtEndOfBoundaryDay_CSVExport(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedBoundaryTransaction(t, q, user.ID, 1)                      // live, 777
+	seedTombstonedBoundaryTransaction(t, q, user.ID, 1, 888.00)    // tombstoned, 888
+
+	req := httptest.NewRequest(http.MethodGet, "/api/export/transactions?date_from=2026-03-01&date_to=2026-03-31", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleExportTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	f, err := excelize.OpenReader(bytes.NewReader(rec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse xlsx: %v", err)
+	}
+	defer f.Close()
+	rows, err := f.GetRows("Transactions")
+	if err != nil {
+		t.Fatalf("get Transactions sheet: %v", err)
+	}
+	if !rowsContainAmount(rows, "777", "777.00") {
+		t.Fatalf("live boundary row dropped from /api/export/transactions — boundary regression. rows=%v", rows)
+	}
+	if rowsContainAmount(rows, "888", "888.00") {
+		t.Fatalf("tombstoned boundary row leaked into /api/export/transactions — t.deleted_at IS NULL predicate broke. rows=%v", rows)
+	}
+}
+
+func TestExports_ExcludeTombstonedRowAtEndOfBoundaryDay_ListFilter(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	seedBoundaryTransaction(t, q, user.ID, 1)                   // live, 777
+	seedTombstonedBoundaryTransaction(t, q, user.ID, 1, 888.00) // tombstoned, 888
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions?date_from=2026-03-01&date_to=2026-03-31", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleListTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Transactions []map[string]any `json:"transactions"`
+		Total        int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if resp.Total != 1 || len(resp.Transactions) != 1 {
+		t.Fatalf("expected exactly 1 live transaction (tombstoned must be excluded) — got total=%d transactions=%v", resp.Total, resp.Transactions)
+	}
+	desc, _ := resp.Transactions[0]["description"].(string)
+	if !strings.Contains(desc, "boundary-day") {
+		t.Fatalf("tombstoned boundary row leaked into /api/transactions list filter — t.deleted_at IS NULL predicate broke. got description=%q", desc)
 	}
 }
