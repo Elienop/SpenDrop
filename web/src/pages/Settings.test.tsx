@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -28,13 +28,16 @@ vi.mock('sonner', () => ({
 
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
-import { toast } from 'sonner';
 import { Settings } from './Settings';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
-const mockedToast = vi.mocked(toast);
+// The `sonner` module mock above is still required — Settings.tsx itself
+// imports `toast` and calls it in budget/currency/goals/users flows. The
+// old import-failure tests used to assert on `mockedToast.error`; 3.4b
+// routed import errors through `importSession.error` → Alert instead, so
+// the test-side binding is dead but the module mock is still live.
 
 function renderSettings() {
   return render(
@@ -47,6 +50,12 @@ function renderSettings() {
 describe('Settings', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // useImportSession persists the import_id in localStorage across a
+    // successful upload + 60-min resume window. Tests that upload must
+    // not leak that key into the next test's mount effect (which would
+    // fire a GET /api/import/{id} and race the test's own wiring). Clear
+    // explicitly rather than rely on happy-dom teardown.
+    localStorage.clear();
     mockedApi.get.mockImplementation((path: string) => {
       if (path.includes('budget'))
         return Promise.resolve([
@@ -469,6 +478,26 @@ describe('Settings', () => {
       });
     }
 
+    // useImportSession hits raw `fetch` for POST /api/import/confirm (to
+    // preserve the 409 UNRESOLVED_COLLISIONS body) rather than going
+    // through the mocked `api.post`. These tests stub `globalThis.fetch`
+    // per-case with a small helper and restore the original afterwards.
+    const originalFetch = globalThis.fetch;
+
+    function mockConfirmFetch(spec: {
+      ok?: boolean;
+      status?: number;
+      body?: unknown;
+    }): ReturnType<typeof vi.fn> {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: spec.ok ?? true,
+        status: spec.status ?? 200,
+        json: () => Promise.resolve(spec.body ?? {}),
+      } as Response);
+      globalThis.fetch = fetchMock;
+      return fetchMock;
+    }
+
     beforeEach(() => {
       mockedUseAuth.mockReturnValue({
         user: {
@@ -483,6 +512,10 @@ describe('Settings', () => {
         register: vi.fn(),
         logout: vi.fn(),
       });
+    });
+
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
     });
 
     async function goToDataTab() {
@@ -574,17 +607,16 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        // Button label dropped the " Rows" suffix in 3.4b — the label now
+        // comes from ImportPreviewTable's footer (`Import ${keepCount}`).
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
         expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument();
       });
     });
 
     test('confirms import and shows result', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
-      mockedApi.post.mockImplementation((path: string) => {
-        if (path === 'import/confirm') return Promise.resolve(mockImportResult);
-        return Promise.resolve({});
-      });
+      mockConfirmFetch({ body: mockImportResult });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -595,20 +627,13 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
-
-      // Confirmation dialog should appear
-      await waitFor(() => {
-        expect(
-          screen.getByRole('dialog', { name: /confirm import/i }),
-        ).toBeInTheDocument();
-      });
-      await user.click(
-        screen.getByRole('button', { name: /confirm and import/i }),
-      );
+      // 3.4b collapsed the confirm modal — clicking the Import button now
+      // fires the confirm POST directly. The old two-step (click Import →
+      // dialog → click "Confirm and Import") is gone.
+      await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
       await waitFor(() => {
         expect(screen.getByText(/4 imported/i)).toBeInTheDocument();
@@ -618,10 +643,7 @@ describe('Settings', () => {
 
     test('shows "Import Another" button after successful import', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
-      mockedApi.post.mockImplementation((path: string) => {
-        if (path === 'import/confirm') return Promise.resolve(mockImportResult);
-        return Promise.resolve({});
-      });
+      mockConfirmFetch({ body: mockImportResult });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -632,19 +654,9 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
-
-      // Confirmation dialog should appear
-      await waitFor(() => {
-        expect(
-          screen.getByRole('dialog', { name: /confirm import/i }),
-        ).toBeInTheDocument();
-      });
-      await user.click(
-        screen.getByRole('button', { name: /confirm and import/i }),
-      );
+      await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: /import another/i })).toBeInTheDocument();
@@ -692,9 +704,15 @@ describe('Settings', () => {
 
     test('shows error message on confirm failure', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
-      mockedApi.post.mockImplementation((path: string) => {
-        if (path === 'import/confirm') return Promise.reject(new Error('Import failed: duplicate rows'));
-        return Promise.resolve({});
+      // Non-409 confirm failure — the hook surfaces `err.error` from the
+      // backend body via `importSession.error`, which the Alert renders
+      // inline. 3.4b dropped the old toast path because a destructive
+      // alert is more durable than a dismissable toast for a blocking
+      // error on a multi-step wizard.
+      mockConfirmFetch({
+        ok: false,
+        status: 500,
+        body: { error: 'Import failed: duplicate rows' },
       });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
@@ -706,34 +724,21 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
-      // Confirmation dialog should appear
       await waitFor(() => {
         expect(
-          screen.getByRole('dialog', { name: /confirm import/i }),
+          screen.getByText('Import failed: duplicate rows'),
         ).toBeInTheDocument();
-      });
-      await user.click(
-        screen.getByRole('button', { name: /confirm and import/i }),
-      );
-
-      await waitFor(() => {
-        expect(mockedToast.error).toHaveBeenCalledWith(
-          'Import failed: duplicate rows',
-        );
       });
     });
 
     test('resets to upload step when "Import Another" is clicked', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
-      mockedApi.post.mockImplementation((path: string) => {
-        if (path === 'import/confirm') return Promise.resolve(mockImportResult);
-        return Promise.resolve({});
-      });
+      mockConfirmFetch({ body: mockImportResult });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -744,19 +749,9 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
       });
-      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
-
-      // Confirmation dialog should appear
-      await waitFor(() => {
-        expect(
-          screen.getByRole('dialog', { name: /confirm import/i }),
-        ).toBeInTheDocument();
-      });
-      await user.click(
-        screen.getByRole('button', { name: /confirm and import/i }),
-      );
+      await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
       await waitFor(() => {
         expect(screen.getByRole('button', { name: /import another/i })).toBeInTheDocument();
@@ -786,10 +781,7 @@ describe('Settings', () => {
 
     test('sends import_id when confirming import', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
-      mockedApi.post.mockImplementation((path: string) => {
-        if (path === 'import/confirm') return Promise.resolve(mockImportResult);
-        return Promise.resolve({});
-      });
+      const fetchMock = mockConfirmFetch({ body: mockImportResult });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -800,26 +792,25 @@ describe('Settings', () => {
       await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
 
       await waitFor(() => {
-        expect(screen.getByRole('button', { name: /^import \d+ rows$/i })).toBeInTheDocument();
+        expect(screen.getByRole('button', { name: /^import \d+$/i })).toBeInTheDocument();
       });
 
-      await user.click(screen.getByRole('button', { name: /^import \d+ rows$/i }));
+      await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
-      // Confirmation dialog should appear
+      // `confirmImport` serializes its payload with JSON.stringify before
+      // handing it to fetch, so we inspect the body string here rather
+      // than relying on a structural matcher against the api.post mock
+      // (which the hook bypasses — see web/src/api/import.ts).
       await waitFor(() => {
-        expect(
-          screen.getByRole('dialog', { name: /confirm import/i }),
-        ).toBeInTheDocument();
+        expect(fetchMock).toHaveBeenCalled();
       });
-      await user.click(
-        screen.getByRole('button', { name: /confirm and import/i }),
-      );
-
-      await waitFor(() => {
-        expect(mockedApi.post).toHaveBeenCalledWith('import/confirm', expect.objectContaining({
-          import_id: 'abc-123',
-        }));
-      });
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toContain('/api/import/confirm');
+      expect(init.method).toBe('POST');
+      const parsedBody = JSON.parse(init.body as string) as {
+        import_id: string;
+      };
+      expect(parsedBody.import_id).toBe('abc-123');
     });
   });
 });
