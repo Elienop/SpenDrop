@@ -47,9 +47,7 @@ describe('AmountCurrencyInput', () => {
     const onValueChange = vi.fn();
     renderInput({ onValueChange });
     await user.type(screen.getByRole('spinbutton'), '150');
-    const lastCall = onValueChange.mock.calls.at(-1)!;
-    expect(lastCall[0]).toBe(150);
-    expect(typeof lastCall[0]).toBe('number');
+    expect(onValueChange).toHaveBeenLastCalledWith(150);
   });
 
   it('clicking the suffix button opens the Popover with a searchable list', async () => {
@@ -147,14 +145,28 @@ describe('AmountCurrencyInput', () => {
 
   it('hideInactive=true: filters is_active=false entries out of the picker', async () => {
     const user = userEvent.setup();
+    // Backend Currency type does not yet carry `is_active`, so we force-cast
+    // here to exercise the safe-no-op filter. When the backend adds
+    // `is_active` to the Currency payload, this test keeps working unchanged.
     const list: Currency[] = [
       ...currencies,
-      { code: 'INC', name: 'Inactive', symbol: 'I', rate_to_base: 5, is_base: false, updated_at: '2026-04-01T00:00:00Z' },
+      {
+        ...{
+          code: 'INC',
+          name: 'Inactive',
+          symbol: 'I',
+          rate_to_base: 5,
+          is_base: false,
+          updated_at: '2026-04-01T00:00:00Z',
+        },
+        is_active: false,
+      } as unknown as Currency,
     ];
     renderInput({ currencies: list, hideInactive: true });
     await user.click(screen.getByRole('button', { name: /USD/ }));
     expect(screen.getByRole('option', { name: /USD/ })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /EUR/ })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: /INC/ })).not.toBeInTheDocument();
   });
 
   it('currencies with rateFor() === null render disabled', async () => {

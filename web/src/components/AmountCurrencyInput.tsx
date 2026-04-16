@@ -18,6 +18,12 @@ import type { Currency } from '@/api/types';
 import { cn, selectAllOnFocus } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 
+/**
+ * Composed amount + currency picker. **The amount `<Input>` is not self-labeled** —
+ * consumers must wrap this component with a `<Label>` / `<FormLabel>` bound by
+ * `id`, or use `aria-labelledby` on a surrounding element, for screen-reader
+ * accessibility. The integrating parent in Task 3.1 / 3.3 owns the label.
+ */
 export interface AmountCurrencyInputProps {
   value: number;
   onValueChange: (v: number) => void;
@@ -72,6 +78,8 @@ export function AmountCurrencyInput({
   const [rawInput, setRawInput] = useState<string>(() => valueToRaw(value));
   const focusedRef = useRef(false);
 
+  // While focused we intentionally ignore incoming `value` prop changes so the
+  // user's in-flight keystrokes aren't stomped; blur re-syncs from prop.
   useEffect(() => {
     if (!focusedRef.current) {
       setRawInput(valueToRaw(value));
@@ -98,7 +106,13 @@ export function AmountCurrencyInput({
           onChange={(e) => {
             const next = e.target.value;
             setRawInput(next);
-            onValueChange(next === '' ? 0 : Number(next));
+            // `type="number"` inputs can hold intermediate strings like `"1e"`,
+            // `"-"`, `"."`, `"1.2.3"`, or pasted garbage. `Number()` of those
+            // yields `NaN`, which would propagate into the parent state,
+            // preview math, and Zod validation. Guard with `isFinite` so we
+            // emit a clean `0` until the user produces a parseable number.
+            const n = Number(next);
+            onValueChange(next === '' || !Number.isFinite(n) ? 0 : n);
           }}
           onFocus={(e) => {
             focusedRef.current = true;
@@ -112,7 +126,7 @@ export function AmountCurrencyInput({
           }}
           ref={inputRef}
           data-entry-field={dataEntryField}
-          disabled={disabled}
+          disabled={loading || disabled}
           className="rounded-r-none font-mono tabular-nums"
         />
         <Popover open={open} onOpenChange={setOpen}>
@@ -124,7 +138,8 @@ export function AmountCurrencyInput({
               className="rounded-l-none border-l-0 px-2 font-mono text-xs"
               aria-label={`Currency: ${currency}`}
             >
-              {loading ? <Loader2 className="size-3 animate-spin" /> : currency}
+              {loading && <Loader2 className="mr-1 size-3 animate-spin" />}
+              {currency}
             </Button>
           </PopoverTrigger>
           <PopoverContent className="p-0" align="end">
@@ -133,6 +148,9 @@ export function AmountCurrencyInput({
               <CommandList>
                 <CommandEmpty>No currency found.</CommandEmpty>
                 {visible.map((c) => {
+                  // The base currency is always selectable even without a valid
+                  // rate, because "convert from base to base" is a no-op
+                  // (amount === original_amount, no original_* stored).
                   const itemDisabled =
                     rateFor(c.code) == null && c.code !== baseCode;
                   const inactive =
