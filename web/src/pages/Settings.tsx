@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ChangeEvent, FormEvent, MutableRefObject } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
@@ -88,6 +88,31 @@ const VALID_TABS = [
 ] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
 
+// User-facing label for each tab. Used in the discard-edits dialog so the
+// prompt can name the destination ("Leaving for Currencies will lose
+// them...") rather than showing a bare slug.
+const TAB_LABELS: Record<SettingsTab, string> = {
+  general: 'General',
+  currencies: 'Currencies',
+  savings: 'Savings',
+  users: 'Users',
+  data: 'Import / Export',
+};
+
+// User-facing label for each top-level route the sidebar links to. Used
+// in the discard-edits dialog when a route change is intercepted — keeps
+// the description friendly ("Leaving for Transactions") instead of
+// dumping the raw pathname. Falls back to the pathname if a new route
+// ever shows up without a label here.
+const ROUTE_LABELS: Record<string, string> = {
+  '/': 'Dashboard',
+  '/transactions': 'Transactions',
+  '/reports': 'Reports',
+  '/categories': 'Categories',
+  '/trash': 'Trash',
+  '/settings': 'Settings',
+};
+
 /* ---------- Pure helpers ---------- */
 
 function isValidTab(value: string | null): value is SettingsTab {
@@ -111,6 +136,74 @@ function autoMapCategories(
     }
   }
   return map;
+}
+
+/* ---------- Shared: discard-edits confirm dialog ---------- */
+
+interface DiscardEditsDialogProps {
+  open: boolean;
+  count: number;
+  destinationLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/**
+ * Shadcn-styled replacement for the native `window.confirm` we used to
+ * pop when a user tried to leave the General tab (year dropdown, tab
+ * switch, or sidebar navigation) with unsaved budget edits. One dialog
+ * for all three call sites: the body reads "Discard <N> unsaved
+ * change(s)? You are about to leave for <destinationLabel>." and the
+ * destructive button wins focus so Enter commits (matching the muscle
+ * memory of the old OS dialog). Mirrors <ConfirmPurgeDialog> in
+ * Trash.tsx for visual consistency.
+ */
+function DiscardEditsDialog({
+  open,
+  count,
+  destinationLabel,
+  onCancel,
+  onConfirm,
+}: DiscardEditsDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(isOpen) => {
+        if (!isOpen) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Discard unsaved budget changes?</DialogTitle>
+          <DialogDescription>
+            You have{' '}
+            <span className="font-semibold text-foreground">
+              {count} unsaved change{count === 1 ? '' : 's'}
+            </span>
+            . Leaving for{' '}
+            <span className="font-semibold text-foreground">
+              {destinationLabel}
+            </span>{' '}
+            will lose them. Save your budgets first if you want to keep
+            them.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>
+            Keep editing
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={onConfirm}
+            autoFocus
+          >
+            Discard changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 /* ---------- General Tab ---------- */
@@ -382,6 +475,12 @@ function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
     return () => window.removeEventListener('beforeunload', handler);
   }, [dirtyCount]);
 
+  // When a year switch is pending (dirty + user picked a different year),
+  // we park the target year here and open <DiscardEditsDialog>. Clearing
+  // this closes the dialog. Storing the target year (not just a flag) lets
+  // us name the destination in the prompt body.
+  const [pendingYear, setPendingYear] = useState<number | null>(null);
+
   function handleYearSelect(value: string) {
     const next = Number(value);
     // Defensive: Radix `SelectItem` values are always stringified years
@@ -392,12 +491,8 @@ function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
       return;
     }
     if (next === year) return;
-    if (
-      dirtyCount > 0 &&
-      !window.confirm(
-        `You have ${dirtyCount} unsaved budget change${dirtyCount === 1 ? '' : 's'}. Discard and switch to ${next}?`,
-      )
-    ) {
+    if (dirtyCount > 0) {
+      setPendingYear(next);
       return;
     }
     setYear(next);
@@ -584,6 +679,16 @@ function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
           </Button>
         </form>
       </CardContent>
+      <DiscardEditsDialog
+        open={pendingYear !== null}
+        count={dirtyCount}
+        destinationLabel={pendingYear === null ? '' : String(pendingYear)}
+        onCancel={() => setPendingYear(null)}
+        onConfirm={() => {
+          if (pendingYear !== null) setYear(pendingYear);
+          setPendingYear(null);
+        }}
+      />
     </Card>
   );
 }
@@ -1729,6 +1834,7 @@ export function Settings() {
   const { user } = useAuth();
   const admin = isAdmin(user);
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
   const initialTab = isValidTab(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
@@ -1738,6 +1844,12 @@ export function Settings() {
   // whole Settings tree on every keystroke. GeneralSection writes into
   // this ref via an effect and resets it on unmount.
   const generalDirtyCountRef = useRef(0);
+
+  // Parked targets while the discard-edits dialog is open. Storing the
+  // target (tab name or href) rather than a boolean lets the same dialog
+  // name the destination and commit the change on "Discard".
+  const [pendingTab, setPendingTab] = useState<SettingsTab | null>(null);
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
 
   useEffect(() => {
     if (isValidTab(tabParam) && tabParam !== activeTab) {
@@ -1752,25 +1864,73 @@ export function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabParam]);
 
+  // Guard in-app navigation (e.g. sidebar NavLinks) when the General
+  // tab has unsaved budget edits. The app uses <BrowserRouter> — not
+  // the data router — so react-router v7's `useBlocker` isn't
+  // available. We intercept at the DOM level instead: a capture-phase
+  // document listener inspects anchor clicks before React Router's own
+  // onClick handler runs, which is early enough to preventDefault and
+  // park the target in `pendingHref`.
+  //
+  // Scope / filters:
+  //   - Only active while we're on the General tab (other tabs have
+  //     no dirty state today).
+  //   - Only primary-button, unmodified clicks — ctrl/cmd/shift/middle
+  //     are "open in new tab/window" and the user has not asked to
+  //     leave the current view.
+  //   - Only same-origin anchors whose pathname differs from current.
+  //     Hash links, external links, and `target="_blank"` downloads
+  //     (e.g. Import/Export) pass through unguarded.
+  useEffect(() => {
+    if (activeTab !== 'general') return;
+    function handler(e: MouseEvent) {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target as Element | null;
+      if (!target || typeof target.closest !== 'function') return;
+      const anchor = target.closest('a[href]') as HTMLAnchorElement | null;
+      if (!anchor) return;
+      if (anchor.target === '_blank') return;
+      const rawHref = anchor.getAttribute('href');
+      if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('mailto:')) {
+        return;
+      }
+      const url = new URL(anchor.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      if (url.pathname === window.location.pathname) return;
+      if (generalDirtyCountRef.current <= 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPendingHref(url.pathname + url.search + url.hash);
+    }
+    document.addEventListener('click', handler, true);
+    return () => document.removeEventListener('click', handler, true);
+  }, [activeTab]);
+
   function handleTabChange(v: string) {
     const next = v as SettingsTab;
     if (next === activeTab) return;
-    const n = generalDirtyCountRef.current;
     // Only the General tab owns unsaved budget edits today. If other
     // sections grow their own dirty state, add parallel refs and OR
     // them here rather than collapsing into a single shared counter —
     // we want to report which tab is dirty in the prompt.
-    if (
-      activeTab === 'general' &&
-      n > 0 &&
-      !window.confirm(
-        `You have ${n} unsaved budget change${n === 1 ? '' : 's'}. Discard and leave this tab?`,
-      )
-    ) {
+    if (activeTab === 'general' && generalDirtyCountRef.current > 0) {
+      setPendingTab(next);
       return;
     }
     setActiveTab(next);
   }
+
+  // Friendly label for the intercepted route. Falls back to the raw
+  // pathname when a route we don't know about shows up, so the dialog
+  // is still readable — just less polished.
+  const pendingHrefLabel = useMemo(() => {
+    if (pendingHref === null) return '';
+    const pathOnly = pendingHref.split(/[?#]/)[0];
+    return ROUTE_LABELS[pathOnly] ?? pathOnly;
+  }, [pendingHref]);
+
+  const dirtyCount = generalDirtyCountRef.current;
 
   return (
     <div className="flex flex-col gap-6">
@@ -1806,6 +1966,32 @@ export function Settings() {
           <DataSection />
         </TabsContent>
       </Tabs>
+      <DiscardEditsDialog
+        open={pendingTab !== null}
+        count={dirtyCount}
+        destinationLabel={
+          pendingTab === null ? '' : `the ${TAB_LABELS[pendingTab]} tab`
+        }
+        onCancel={() => setPendingTab(null)}
+        onConfirm={() => {
+          if (pendingTab !== null) setActiveTab(pendingTab);
+          setPendingTab(null);
+        }}
+      />
+      <DiscardEditsDialog
+        open={pendingHref !== null}
+        count={dirtyCount}
+        destinationLabel={pendingHrefLabel}
+        onCancel={() => setPendingHref(null)}
+        onConfirm={() => {
+          const href = pendingHref;
+          // Clear *before* navigating: navigate() unmounts this
+          // component and fires the listener cleanup, so there's no
+          // re-render after this point to flush the "null" state.
+          setPendingHref(null);
+          if (href !== null) navigate(href);
+        }}
+      />
     </div>
   );
 }

@@ -619,109 +619,229 @@ describe('Settings', () => {
       }
     });
 
-    test('year change with unsaved changes prompts confirm and respects cancel', async () => {
+    test('year change with unsaved changes opens discard dialog and respects Keep editing', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
       try {
         const user = userEvent.setup({ pointerEventsCheck: 0 });
-        // happy-dom doesn't ship a `window.confirm`. Install a stub
-        // (not a spy) and restore whatever was there before.
-        const confirmSpy = vi.fn<(msg?: string) => boolean>(() => false);
-        const originalConfirm = window.confirm;
-        window.confirm = confirmSpy as unknown as typeof window.confirm;
-        try {
-          renderSettings();
+        renderSettings();
 
-          const april = () =>
-            screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
-          await waitFor(() => expect(april().value).toBe('3000'));
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
 
-          await user.clear(april());
-          await user.type(april(), '4000');
+        await user.clear(april());
+        await user.type(april(), '4000');
 
-          // Baseline call count: initial fetch for 2026 + currencies.
-          const getCallsBeforeYearChange = mockedApi.get.mock.calls.length;
+        // Baseline call count: initial fetch for 2026 + currencies.
+        const getCallsBeforeYearChange = mockedApi.get.mock.calls.length;
 
-          // Open Radix Select and choose 2025.
-          const trigger = screen.getByRole('combobox', {
-            name: /budget year/i,
-          });
-          await user.click(trigger);
-          await user.click(
-            await screen.findByRole('option', { name: '2025' }),
-          );
+        // Open Radix Select and choose 2025.
+        const trigger = screen.getByRole('combobox', {
+          name: /budget year/i,
+        });
+        await user.click(trigger);
+        await user.click(
+          await screen.findByRole('option', { name: '2025' }),
+        );
 
-          expect(confirmSpy).toHaveBeenCalledTimes(1);
-          expect(confirmSpy.mock.calls[0][0]).toMatch(/1 unsaved/);
-          expect(confirmSpy.mock.calls[0][0]).toMatch(/2025/);
+        // shadcn Dialog replaces the old window.confirm — assert on the
+        // dialog body and the "Keep editing" / "Discard changes" buttons.
+        const dialog = await screen.findByRole('dialog');
+        expect(dialog).toHaveTextContent(/1 unsaved change/i);
+        expect(dialog).toHaveTextContent(/2025/);
 
-          // Cancel => year unchanged, no refetch, dirty input preserved.
-          expect(april().value).toBe('4000');
-          expect(mockedApi.get.mock.calls.length).toBe(
-            getCallsBeforeYearChange,
-          );
-          expect(
-            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
-          ).toBeInTheDocument();
-        } finally {
-          window.confirm = originalConfirm;
-        }
+        await user.click(
+          screen.getByRole('button', { name: /keep editing/i }),
+        );
+
+        // Cancel => year unchanged, no refetch, dirty input preserved.
+        expect(april().value).toBe('4000');
+        expect(mockedApi.get.mock.calls.length).toBe(
+          getCallsBeforeYearChange,
+        );
+        expect(
+          screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+        ).toBeInTheDocument();
+        // Dialog is dismissed.
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        );
       } finally {
         vi.useRealTimers();
       }
     });
 
-    test('switching Settings tab with dirty budgets prompts confirm', async () => {
+    test('year change Discard changes commits the year switch', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
       try {
         const user = userEvent.setup({ pointerEventsCheck: 0 });
-        const confirmSpy = vi.fn<(msg?: string) => boolean>(() => false);
-        const originalConfirm = window.confirm;
-        window.confirm = confirmSpy as unknown as typeof window.confirm;
-        try {
-          renderSettings();
+        renderSettings();
 
-          const april = () =>
-            screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
-          await waitFor(() => expect(april().value).toBe('3000'));
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
 
-          await user.clear(april());
-          await user.type(april(), '4000');
+        await user.clear(april());
+        await user.type(april(), '4000');
 
-          await waitFor(() => {
-            expect(
-              screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
-            ).toBeInTheDocument();
-          });
+        await user.click(
+          screen.getByRole('combobox', { name: /budget year/i }),
+        );
+        await user.click(
+          await screen.findByRole('option', { name: '2025' }),
+        );
 
-          // Attempt to switch to Currencies — the Tabs guard must fire
-          // the confirm BEFORE Radix unmounts GeneralSection (otherwise
-          // the dirty state is gone before anything can prompt).
-          await user.click(screen.getByRole('tab', { name: /currencies/i }));
+        // Accept the discard → refetch for 2025 fires and April clears
+        // because the default mock returns only an April-2026 row.
+        await user.click(
+          await screen.findByRole('button', { name: /discard changes/i }),
+        );
 
-          expect(confirmSpy).toHaveBeenCalledTimes(1);
-          expect(confirmSpy.mock.calls[0][0]).toMatch(/1 unsaved/);
+        await waitFor(() => {
+          expect(mockedApi.get).toHaveBeenCalledWith('budgets?year=2025');
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
 
-          // Confirm returned false → still on General, input preserved.
-          expect(april().value).toBe('4000');
+    test('switching Settings tab with dirty budgets opens discard dialog', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
 
-          // Switching from General to General must not prompt.
-          await user.click(screen.getByRole('tab', { name: /general/i }));
-          expect(confirmSpy).toHaveBeenCalledTimes(1);
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
 
-          // Accept the confirm → switch commits, GeneralSection unmounts.
-          confirmSpy.mockReturnValue(true);
-          await user.click(screen.getByRole('tab', { name: /currencies/i }));
-          expect(confirmSpy).toHaveBeenCalledTimes(2);
-          await waitFor(() => {
-            expect(
-              screen.queryByLabelText(/Budget for April 2026/i),
-            ).not.toBeInTheDocument();
-          });
-        } finally {
-          window.confirm = originalConfirm;
-        }
+        await user.clear(april());
+        await user.type(april(), '4000');
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+          ).toBeInTheDocument();
+        });
+
+        // Attempt to switch to Currencies — the Tabs guard must open the
+        // dialog BEFORE Radix unmounts GeneralSection (otherwise the
+        // dirty state would be gone before anything could prompt).
+        await user.click(screen.getByRole('tab', { name: /currencies/i }));
+
+        const dialog = await screen.findByRole('dialog');
+        expect(dialog).toHaveTextContent(/1 unsaved change/i);
+        expect(dialog).toHaveTextContent(/Currencies/);
+
+        // Keep editing → still on General, input preserved.
+        await user.click(
+          screen.getByRole('button', { name: /keep editing/i }),
+        );
+        expect(april().value).toBe('4000');
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        );
+
+        // Switching from General to General must not prompt.
+        await user.click(screen.getByRole('tab', { name: /general/i }));
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+
+        // Discard changes → switch commits, GeneralSection unmounts.
+        await user.click(screen.getByRole('tab', { name: /currencies/i }));
+        await user.click(
+          await screen.findByRole('button', { name: /discard changes/i }),
+        );
+        await waitFor(() => {
+          expect(
+            screen.queryByLabelText(/Budget for April 2026/i),
+          ).not.toBeInTheDocument();
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('sidebar navigation with dirty budgets is intercepted by discard dialog', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        // Render a sidebar-style anchor alongside Settings so the
+        // capture-phase document listener has a real <a href> to catch.
+        // Using a raw anchor (not react-router's <Link>) exercises the
+        // same DOM path the real Sidebar's NavLink produces.
+        render(
+          <MemoryRouter>
+            <a href="/transactions" data-testid="sidebar-link">
+              Transactions
+            </a>
+            <Settings />
+          </MemoryRouter>,
+        );
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
+
+        await user.clear(april());
+        await user.type(april(), '4000');
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+          ).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByTestId('sidebar-link'));
+
+        const dialog = await screen.findByRole('dialog');
+        expect(dialog).toHaveTextContent(/1 unsaved change/i);
+        expect(dialog).toHaveTextContent(/Transactions/);
+
+        // Keep editing → still on General, input preserved.
+        await user.click(
+          screen.getByRole('button', { name: /keep editing/i }),
+        );
+        expect(april().value).toBe('4000');
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('sidebar navigation without dirty budgets passes through unguarded', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        render(
+          <MemoryRouter>
+            <a href="/transactions" data-testid="sidebar-link">
+              Transactions
+            </a>
+            <Settings />
+          </MemoryRouter>,
+        );
+
+        // Wait for initial budget fetch so baseline is populated — a
+        // premature click would race the ref write and look clean even
+        // if the guard were broken.
+        await waitFor(() => {
+          expect(
+            screen.getByLabelText(/Budget for April 2026/i),
+          ).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByTestId('sidebar-link'));
+
+        // No dirty edits → no dialog, nav proceeds normally (browser-
+        // level; MemoryRouter doesn't actually follow <a>, but the
+        // absence of the dialog is what we're asserting).
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       } finally {
         vi.useRealTimers();
       }
