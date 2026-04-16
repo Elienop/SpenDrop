@@ -9,6 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { Button } from '@/components/ui/button';
 
 export interface ImportPreviewTableProps {
   preview: ImportPreview;
@@ -24,7 +25,9 @@ export interface ImportPreviewTableProps {
   onConfirm: () => void;
 }
 
-export function ImportPreviewTable({ preview }: ImportPreviewTableProps) {
+export function ImportPreviewTable(props: ImportPreviewTableProps) {
+  const { preview, unresolvedCount, canImport, pendingPatchCount, onConfirm } = props;
+
   // Derive collision membership from props on EVERY render. No useState,
   // no useEffect — structural guarantee against importcsv #16 (the
   // stale-style bug where a row that flipped collision → clean kept its
@@ -36,6 +39,8 @@ export function ImportPreviewTable({ preview }: ImportPreviewTableProps) {
     }
     return s;
   }, [preview.collision_groups]);
+
+  const keepCount = preview.rows.filter((r) => !r.skip).length;
 
   return (
     <div className="flex flex-col gap-3">
@@ -74,6 +79,26 @@ export function ImportPreviewTable({ preview }: ImportPreviewTableProps) {
             })}
           </TableBody>
         </Table>
+      </div>
+      <div className="flex items-center justify-between gap-3 pt-2 border-t border-border">
+        <div className="text-sm">
+          {unresolvedCount > 0 ? (
+            <span className="text-amber-500" aria-live="polite">
+              {`Fix or skip ${unresolvedCount} ${unresolvedCount === 1 ? 'collision' : 'collisions'} to enable import`}
+            </span>
+          ) : (
+            <span className="text-emerald-500" aria-live="polite">
+              {`Ready to import ${keepCount} rows`}
+            </span>
+          )}
+        </div>
+        <Button
+          type="button"
+          disabled={!canImport || pendingPatchCount > 0}
+          onClick={onConfirm}
+        >
+          {`Import ${keepCount}`}
+        </Button>
       </div>
     </div>
   );

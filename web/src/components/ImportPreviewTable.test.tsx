@@ -111,4 +111,70 @@ describe('ImportPreviewTable', () => {
     // And row 1 still carries it.
     expect(screen.getByText("Trader Joe's").closest('tr')!.getAttribute('data-collision')).toBe('true');
   });
+
+  it('Import button reflects canImport and pendingPatchCount', () => {
+    const onConfirm = vi.fn();
+    const preview = makePreview();
+
+    // Case 1: canImport=false → disabled, label shows unresolved count.
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={{}}
+        unresolvedCount={3}
+        canImport={false}
+        pendingPatchCount={0}
+        onPatchRow={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    const btn = screen.getByRole('button', { name: /import/i });
+    expect(btn).toBeDisabled();
+    // Status message reflects unresolved count.
+    expect(screen.getByText(/3.*collision/i)).toBeInTheDocument();
+
+    // Case 2: canImport=true, pendingPatchCount=0 → enabled.
+    rerender(
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    expect(btn).toBeEnabled();
+
+    // Case 3: pendingPatchCount > 0 → disabled even though canImport is
+    // nominally true. This is the PATCH/confirm race guard.
+    rerender(
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={2}
+        onPatchRow={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    expect(btn).toBeDisabled();
+
+    // Case 4: click back in case-2 state fires onConfirm once.
+    rerender(
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={vi.fn()}
+        onConfirm={onConfirm}
+      />,
+    );
+    btn.click();
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
 });
