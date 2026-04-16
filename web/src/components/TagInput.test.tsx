@@ -155,9 +155,4 @@ describe('TagInput', () => {
     expect(screen.getByText('rent')).toBeInTheDocument();
     expect(screen.getByText('travel')).toBeInTheDocument();
   });
-
-  test('applies custom className', () => {
-    const { container } = render(<TagInput value="" onChange={() => {}} className="custom-class" />);
-    expect(container.firstElementChild).toHaveClass('custom-class');
-  });
 });

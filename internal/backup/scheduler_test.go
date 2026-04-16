@@ -98,8 +98,14 @@ func TestScheduler_DisabledReturnsImmediately(t *testing.T) {
 // backup immediately on RunLoop entry, then one per tick. Counting files
 // after N ticks is the only deterministic check here — timing-based
 // assertions are brittle.
+//
+// Not run in parallel: this is a scheduler-lifecycle test, not a concurrency
+// test. Under `-race` on a loaded CI runner, running in parallel with other
+// scheduler tests starved each runOnce of CPU and pushed 3 VACUUM INTO
+// cycles past the 5s deadline, producing a flake (dbCount=2, want>=3).
+// Running serially removes the contention without changing the invariant
+// the test guards.
 func TestScheduler_FiresOnStartupAndThenInterval(t *testing.T) {
-	t.Parallel()
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.db")
 	dir := filepath.Join(tmp, "backups")

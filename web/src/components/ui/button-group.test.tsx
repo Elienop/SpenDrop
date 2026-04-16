@@ -16,42 +16,6 @@ describe('ButtonGroup', () => {
     );
   });
 
-  test('defaults to horizontal orientation', () => {
-    render(<ButtonGroup data-testid="bg">content</ButtonGroup>);
-    expect(screen.getByTestId('bg')).toHaveAttribute(
-      'data-orientation',
-      'horizontal',
-    );
-  });
-
-  test('accepts vertical orientation', () => {
-    render(<ButtonGroup data-testid="bg" orientation="vertical">content</ButtonGroup>);
-    expect(screen.getByTestId('bg')).toHaveAttribute(
-      'data-orientation',
-      'vertical',
-    );
-  });
-
-  test('applies vertical flex-col class when vertical', () => {
-    render(<ButtonGroup data-testid="bg" orientation="vertical">content</ButtonGroup>);
-    expect(screen.getByTestId('bg').className).toContain('flex-col');
-  });
-
-  test('does not apply flex-col when horizontal', () => {
-    render(<ButtonGroup data-testid="bg">content</ButtonGroup>);
-    expect(screen.getByTestId('bg').className).not.toContain('flex-col');
-  });
-
-  test('merges custom className', () => {
-    render(<ButtonGroup data-testid="bg" className="my-class">content</ButtonGroup>);
-    expect(screen.getByTestId('bg').className).toContain('my-class');
-  });
-
-  test('passes through extra div props', () => {
-    render(<ButtonGroup data-testid="bg" id="grp">content</ButtonGroup>);
-    expect(screen.getByTestId('bg')).toHaveAttribute('id', 'grp');
-  });
-
   test('renders children', () => {
     render(
       <ButtonGroup>

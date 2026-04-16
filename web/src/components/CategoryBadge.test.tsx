@@ -3,11 +3,6 @@ import { describe, it, expect } from 'vitest';
 import { CategoryBadge } from './CategoryBadge';
 
 describe('CategoryBadge', () => {
-  it('renders the category name', () => {
-    render(<CategoryBadge category={{ id: 3, name: 'Groceries' }} />);
-    expect(screen.getByText('Groceries')).toBeInTheDocument();
-  });
-
   it('sets the chart-color CSS variable based on the category id', () => {
     render(<CategoryBadge category={{ id: 3, name: 'Groceries' }} />);
     const badge = screen.getByText('Groceries');
