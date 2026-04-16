@@ -1,4 +1,5 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
 import { ImportPreviewTable } from './ImportPreviewTable';
 import type { ImportPreview } from '@/api/types';
@@ -176,5 +177,83 @@ describe('ImportPreviewTable', () => {
     );
     btn.click();
     expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('double-click cell + type + Enter fires onPatchRow with correct payload, and inline 400 renders when cellErrors is non-empty', async () => {
+    const user = userEvent.setup();
+    const onPatchRow = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={makePreview()}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={onPatchRow}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    // Double-click row 0's description cell (Starbucks).
+    const cell = screen.getByText('Starbucks');
+    await user.dblClick(cell);
+
+    // Edit input must exist, focused, and have the current value.
+    const input = await screen.findByDisplayValue('Starbucks');
+    expect(input).toHaveFocus();
+
+    // Clear + type new value + Enter.
+    await user.clear(input);
+    await user.type(input, 'Starbucks NYC{Enter}');
+
+    expect(onPatchRow).toHaveBeenCalledTimes(1);
+    expect(onPatchRow).toHaveBeenCalledWith(0, 'description', 'Starbucks NYC');
+
+    // Rerender with the 400 error injected for (row_id=0, field='description').
+    rerender(
+      <ImportPreviewTable
+        preview={makePreview()}
+        cellErrors={{ '0:description': { field: 'description', message: 'INVALID_DESCRIPTION' } }}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={onPatchRow}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    // Inline error message rendered.
+    expect(screen.getByText('INVALID_DESCRIPTION')).toBeInTheDocument();
+    // The cell has an error marker (data attribute to avoid coupling to classes).
+    const row0 = screen.getByText('Starbucks').closest('tr')!;
+    const errorCell = within(row0).getAllByText(/INVALID_DESCRIPTION|Starbucks/i)[0].closest('td')!;
+    expect(errorCell.getAttribute('data-cell-error')).toBe('true');
+  });
+
+  it('Escape during edit cancels without firing onPatchRow', async () => {
+    const user = userEvent.setup();
+    const onPatchRow = vi.fn();
+
+    render(
+      <ImportPreviewTable
+        preview={makePreview()}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={onPatchRow}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    await user.dblClick(screen.getByText('Starbucks'));
+    const input = await screen.findByDisplayValue('Starbucks');
+    await user.clear(input);
+    await user.type(input, 'Nope{Escape}');
+
+    expect(onPatchRow).not.toHaveBeenCalled();
+    // The cell shows the original value again.
+    expect(screen.getByText('Starbucks')).toBeInTheDocument();
   });
 });
