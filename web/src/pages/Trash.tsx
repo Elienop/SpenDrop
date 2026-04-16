@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { Navigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
@@ -81,10 +81,12 @@ import {
  *   - Page-scoped batch restore (checkbox selection) is allowed; page-
  *     scoped batch purge is deliberately NOT exposed — the plan spec
  *     omits it because "restore many at once, purge one at a time" is
- *     the right friction profile at the row level. The page-header
- *     "Purge all" button exists because wiping the whole trash is an
- *     operator intent in its own right (distinct from "purge these
- *     three rows I picked"), and the confirm dialog gives it teeth.
+ *     the right friction profile at the row level. The "Purge all"
+ *     button (rendered into the table toolbar next to "Rows per page"
+ *     via the PaginationBar `leadingActions` slot) exists because
+ *     wiping the whole trash is an operator intent in its own right
+ *     (distinct from "purge these three rows I picked"), and the
+ *     confirm dialog gives it teeth.
  */
 
 interface PaginationBarProps {
@@ -93,6 +95,14 @@ interface PaginationBarProps {
   perPage: number;
   onPageChange: (page: number) => void;
   onPerPageChange: (perPage: number) => void;
+  /**
+   * Optional content rendered on the leading (left) side of the bar,
+   * immediately after the "Rows per page" cluster. The Trash page uses
+   * this to surface whole-trash bulk actions (Restore all / Purge all)
+   * in the table toolbar rather than above the card — callers that
+   * omit it get the original two-cluster layout unchanged.
+   */
+  leadingActions?: ReactNode;
 }
 
 function getPageNumbers(page: number, totalPages: number): number[] {
@@ -126,12 +136,16 @@ function PaginationBar({
   perPage,
   onPageChange,
   onPerPageChange,
+  leadingActions,
 }: PaginationBarProps) {
   const pageNumbers = getPageNumbers(page, totalPages);
 
   return (
-    <div className="flex items-center justify-between px-4 py-3">
-      <div className="flex items-center gap-2">
+    // `flex-wrap` + row-gap keeps the toolbar legible once `leadingActions`
+    // adds buttons on narrow viewports — without it the page-nav cluster
+    // would spill past the card edge instead of wrapping to a new line.
+    <div className="flex flex-wrap items-center justify-between gap-y-2 px-4 py-3">
+      <div className="flex flex-wrap items-center gap-2">
         <p className="text-sm font-medium">Rows per page</p>
         <Select
           value={String(perPage)}
@@ -150,6 +164,7 @@ function PaginationBar({
             </SelectGroup>
           </SelectContent>
         </Select>
+        {leadingActions}
       </div>
       <div className="flex items-center gap-1">
         <Button
@@ -374,10 +389,10 @@ function ConfirmPurgeAllDialog({
             disabled={busy}
           >
             {/*
-              Distinct from the header "Purge all N" trigger button so
-              the accessible name is unambiguous when the dialog is
-              mounted above the header. Matches the single-row dialog's
-              "Purge permanently" pattern.
+              Distinct from the toolbar "Purge all N" trigger button so
+              the accessible name is unambiguous while the dialog is
+              mounted. Matches the single-row dialog's "Purge
+              permanently" pattern.
             */}
             {busy ? 'Purging...' : 'Purge all permanently'}
           </Button>
@@ -666,52 +681,52 @@ export function Trash() {
 
   const bulkBusy = restoringAll || purgingAll;
 
+  // Whole-trash bulk actions rendered into the table toolbar (next to
+  // "Rows per page") rather than above the card. Only surfaced when
+  // there's actually something in the trash — on an empty trash these
+  // buttons would be no-ops that just add visual noise. The buttons
+  // mirror the row-level action ordering (restore first, purge second)
+  // and the outline/destructive variants so the visual weight matches
+  // the consequence. Passed only to the TOP `PaginationBar` so the
+  // bottom bar stays a pure pagination strip.
+  const bulkActions =
+    total > 0 ? (
+      <div className="ml-2 flex flex-wrap items-center gap-2 border-l pl-3">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => void handleRestoreAll()}
+          disabled={bulkBusy}
+        >
+          <RotateCcw className="size-3.5" />
+          {restoringAll ? 'Restoring...' : `Restore all ${total}`}
+        </Button>
+        <Button
+          type="button"
+          variant="destructive"
+          size="sm"
+          className="h-8 gap-1.5 text-xs"
+          onClick={() => setPendingPurgeAll(true)}
+          disabled={bulkBusy}
+        >
+          <Trash2 className="size-3.5" />
+          {purgingAll ? 'Purging...' : `Purge all ${total}`}
+        </Button>
+      </div>
+    ) : null;
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="flex flex-col gap-2">
-          <h1 className="text-2xl font-semibold tracking-tight">Trash</h1>
-          <p className="max-w-3xl text-sm text-muted-foreground">
-            Recently deleted transactions are kept here so a bulk-delete
-            mistake can be recovered. Restored rows reappear in the live
-            transactions list immediately. Purging is permanent — there is
-            no recovery path after that.
-          </p>
-        </div>
-        {/*
-          Page-level bulk actions. Only surfaced when there's actually
-          something in the trash — on an empty trash these buttons would
-          be no-ops that just add visual noise to the "Trash is empty"
-          card below. The buttons mirror the row-level action ordering
-          (restore first, purge second) and the outline/destructive
-          variants so the visual weight matches the consequence.
-        */}
-        {total > 0 && (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => void handleRestoreAll()}
-              disabled={bulkBusy}
-            >
-              <RotateCcw className="size-3.5" />
-              {restoringAll ? 'Restoring...' : `Restore all ${total}`}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              className="h-8 gap-1.5 text-xs"
-              onClick={() => setPendingPurgeAll(true)}
-              disabled={bulkBusy}
-            >
-              <Trash2 className="size-3.5" />
-              {purgingAll ? 'Purging...' : `Purge all ${total}`}
-            </Button>
-          </div>
-        )}
+      <div className="flex flex-col gap-2">
+        <h1 className="text-2xl font-semibold tracking-tight">Trash</h1>
+        <p className="max-w-3xl text-sm text-muted-foreground">
+          Recently deleted transactions are kept here so a bulk-delete
+          mistake can be recovered. Restored rows reappear in the live
+          transactions list immediately. Purging is permanent — there is
+          no recovery path after that.
+        </p>
       </div>
 
       {error && (
@@ -746,6 +761,7 @@ export function Trash() {
             perPage={perPage}
             onPageChange={handlePageChange}
             onPerPageChange={handlePerPageChange}
+            leadingActions={bulkActions}
           />
 
           {selectionCount > 0 && (
