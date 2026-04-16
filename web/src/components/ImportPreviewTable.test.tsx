@@ -342,7 +342,11 @@ describe('ImportPreviewTable', () => {
     // Header row present and labelled.
     expect(screen.getByText(/3 rows collide/i)).toBeInTheDocument();
 
-    const skipAll = screen.getByRole('button', { name: /skip all/i });
+    // Button label MUST embed the member count so the user sees the
+    // destructive scope before clicking — matches "Skip all 3 in group",
+    // not the looser "Skip all" pattern that would silently accept a
+    // label regression like "Skip all".
+    const skipAll = screen.getByRole('button', { name: /skip all 3 in group/i });
     await user.click(skipAll);
 
     // One PATCH per member row, in member-row-id order, each with skip=true.

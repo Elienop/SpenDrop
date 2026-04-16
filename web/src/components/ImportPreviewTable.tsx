@@ -229,7 +229,16 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                           size="sm"
                           onClick={() => void skipAllInGroup(unit.group)}
                         >
-                          Skip all in group
+                          {/*
+                            Embedding the member count makes the
+                            destructive scope explicit before the click —
+                            "Skip all 2 in group" reads differently from
+                            "Skip all in group" when the user's intent is
+                            "I only want to skip one of these". This is a
+                            UX safeguard, not a functional change: the
+                            handler already skips every member row.
+                          */}
+                          {`Skip all ${count} in group`}
                         </Button>
                       </div>
                     </TableCell>
