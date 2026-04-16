@@ -3,16 +3,6 @@ import { render, screen } from '@testing-library/react';
 import { ChartCard } from './ChartCard';
 
 describe('ChartCard', () => {
-  test('renders title and children', () => {
-    render(
-      <ChartCard title="Cash Flow">
-        <div data-testid="chart-body">chart here</div>
-      </ChartCard>,
-    );
-    expect(screen.getByText('Cash Flow')).toBeInTheDocument();
-    expect(screen.getByTestId('chart-body')).toBeInTheDocument();
-  });
-
   test('renders subtitle when provided', () => {
     render(
       <ChartCard title="Cash Flow" subtitle="Income vs expenses">

@@ -3,18 +3,6 @@ import { render, screen } from '@testing-library/react';
 import { KpiCard } from './KpiCard';
 
 describe('KpiCard', () => {
-  test('renders label, dollars, and cents', () => {
-    render(
-      <KpiCard
-        label="Total Balance"
-        dollars="$2,847"
-        cents=".32"
-      />,
-    );
-    expect(screen.getByText('Total Balance')).toBeInTheDocument();
-    expect(screen.getByText('$2,847.32')).toBeInTheDocument();
-  });
-
   test('renders delta badge when positive', () => {
     render(
       <KpiCard

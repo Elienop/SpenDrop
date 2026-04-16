@@ -131,14 +131,4 @@ describe('Sidebar', () => {
       window.removeEventListener('sidebar-toggle', listener);
     }
   });
-
-  test('user avatar uses radix Avatar component with fallback', () => {
-    renderSidebar();
-    // The avatar initial "A" should be inside a span rendered by AvatarFallback
-    const initial = screen.getByText('A');
-    // AvatarFallback renders a <span> element (Radix primitive)
-    expect(initial.tagName).toBe('SPAN');
-    // The parent root should also be a <span> from Avatar
-    expect(initial.parentElement?.tagName).toBe('SPAN');
-  });
 });

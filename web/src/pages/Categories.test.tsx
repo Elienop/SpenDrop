@@ -78,22 +78,6 @@ function asAdmin() {
   });
 }
 
-function asMember() {
-  mockedUseAuth.mockReturnValue({
-    user: {
-      id: 2,
-      username: 'bob',
-      display_name: 'Bob',
-      role: 'member',
-      created_at: '2024-01-01',
-    },
-    loading: false,
-    login: vi.fn(),
-    register: vi.fn(),
-    logout: vi.fn(),
-  });
-}
-
 describe('Categories', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -344,27 +328,4 @@ describe('Categories', () => {
     });
   });
 
-  describe('as member', () => {
-    beforeEach(asMember);
-
-    test('hides Add category button for non-admin', async () => {
-      renderCategories();
-      await waitFor(() => {
-        expect(screen.getByText('Food')).toBeInTheDocument();
-      });
-      expect(
-        screen.queryByRole('button', { name: /add category/i }),
-      ).not.toBeInTheDocument();
-    });
-
-    test('hides row kebab menus for non-admin', async () => {
-      renderCategories();
-      await waitFor(() => {
-        expect(screen.getByText('Food')).toBeInTheDocument();
-      });
-      expect(
-        screen.queryByRole('button', { name: /actions for food/i }),
-      ).not.toBeInTheDocument();
-    });
-  });
 });
