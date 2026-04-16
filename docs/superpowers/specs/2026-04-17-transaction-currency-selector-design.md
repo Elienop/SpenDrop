@@ -78,7 +78,7 @@ This spec introduces a **per-transaction currency selector** on the entry row, o
 - `web/src/lib/currency.test.ts` — helper unit tests.
 
 **Modified:**
-- `web/src/components/TransactionEntryRow.tsx` — replace the bare `<Input type="number">` at lines 289-311 with `<AmountCurrencyInput>`; extend Zod schema (line 85-91) with `currency: z.string().regex(/^[A-Z]{3}$/)`; add `'currency'` to the Tab-navigation order (line 227); read sticky currency via new helpers paralleling `getLastDate` / `saveLastDate`.
+- `web/src/components/TransactionEntryRow.tsx` — replace the bare `<Input type="number">` at lines 289-311 with `<AmountCurrencyInput>` (passing `hideInactive: true`); extend Zod schema (line 85-91) with `currency: z.string().regex(/^[A-Z]{3}$/)`; add `'currency'` to the Tab-navigation order (line 227); add module-local `getLastCurrency` / `saveLastCurrency` helpers in the same file alongside the existing `getLastDate` / `saveLastDate` / `getLastCategoryId` / `saveLastCategory` helpers (lines 47-66).
 - `web/src/components/TransactionEntryRow.test.tsx` — extend for default currency, payload shape, tab order, sticky persistence.
 - `web/src/components/TransactionRow.tsx` — replace the inline amount `<span>` formatter with `<AmountDisplay>`.
 - `web/src/components/TransactionRow.test.tsx` — regression test that base-currency rows (original_* null) render unchanged.
@@ -124,7 +124,20 @@ interface AmountCurrencyInputProps {
   currency: string;                    // ISO code (e.g. "USD", "LBP")
   onCurrencyChange: (code: string) => void;
   baseCode: string;
-  currencies: Currency[];              // list from useCurrencies; caller filters inactive for entry
+  /**
+   * FULL list from useCurrencies (including inactive). The component renders
+   * an `(inactive)` suffix on any entry with `is_active === false` and
+   * disables entries for which `rateFor(code) === null`. The parent does
+   * NOT pre-filter — mode-specific filtering lives in the component so
+   * entry and edit surfaces share one implementation. See Edge Case #1.
+   */
+  currencies: Currency[];
+  /**
+   * If true, the picker hides entries whose `is_active === false`. Entry
+   * mode passes `true`; edit mode passes `false` so the stored-but-now-
+   * inactive currency on a historical row is still selectable for round-trip.
+   */
+  hideInactive: boolean;
   rateFor: (code: string) => number | null;
   loading?: boolean;                   // disables the picker + shows spinner
   error?: string | null;               // inline error text
@@ -138,6 +151,7 @@ interface AmountCurrencyInputProps {
 - Base-currency pick: no `≈` preview (redundant).
 - Non-base pick with valid `rateFor`: `≈ $X.XX` under the input, using `formatCurrency(value / rateFor(code), baseCode)`.
 - Non-base pick with null `rateFor`: picker entry is disabled (`aria-disabled` + tooltip `"No exchange rate configured — set in Settings"`); if somehow selected (edit mode of an older row), inline error + Save blocked.
+- **Inactive currencies:** when `hideInactive === true` (entry mode), entries with `is_active === false` are not rendered at all. When `hideInactive === false` (edit mode), they render with an `(inactive)` suffix after the code and remain selectable for round-trip fidelity.
 
 **Keyboard:**
 - The amount input owns text focus.
@@ -165,12 +179,20 @@ interface AmountDisplayProps {
 ### `lib/currency.ts` helpers
 
 ```ts
-/** Collapses to { amount } when currency === baseCode; otherwise produces the full payload. */
-export function toCreatePayload(
-  values: { amount: number; currency: string; /* other fields passed through */ ...rest },
+/**
+ * Collapses to { amount } when currency === baseCode; otherwise produces
+ * the full payload. Generic over the caller's value object so
+ * TransactionEntryRow and the edit form can both pass their own field set
+ * (description, category_id, tags, ...) through without losing types.
+ */
+export function toCreatePayload<
+  T extends Record<string, unknown> & { amount: number; currency: string },
+>(
+  values: T,
   baseCode: string,
   rateFor: (code: string) => number | null,
-): { amount: number; original_amount?: number; original_currency?: string; ...rest };
+): Omit<T, 'currency'> &
+  ({ amount: number } | { amount: number; original_amount: number; original_currency: string });
 
 /** For edit mode: derive initial form values from a saved Transaction. */
 export function toEditDefaults(
@@ -183,9 +205,11 @@ export const PREVIEW_DECIMALS = 2;
 ```
 
 **`toCreatePayload` rules:**
-- `currency === baseCode` → `{ amount: values.amount }` (no `original_*`).
-- `currency !== baseCode` AND `rateFor(currency) > 0` → `{ amount: round(values.amount / rate, 2), original_amount: values.amount, original_currency: currency }`.
+- `currency === baseCode` → strips `currency` from `values` and returns `{ ...rest, amount: values.amount }` (no `original_*`).
+- `currency !== baseCode` AND `rateFor(currency) > 0` → strips `currency` and returns `{ ...rest, amount: round(values.amount / rate, 2), original_amount: values.amount, original_currency: currency }`.
 - `currency !== baseCode` AND `rateFor(currency)` null → throws `Error("no rate")` — caller is responsible for disabling Save before this path.
+
+**Edit path uses the same `toCreatePayload`.** The edit form invokes `toCreatePayload` on Save with the current form values; a re-saved transaction gets the same collapse / expand treatment as a new one (so switching back to base currency on edit correctly drops `original_*` on the wire).
 
 **`toEditDefaults` rules:**
 - `tx.original_amount != null && tx.original_currency != null` → `{ amount: tx.original_amount, currency: tx.original_currency }`.
@@ -226,6 +250,7 @@ export const PREVIEW_DECIMALS = 2;
    - `AmountCurrencyInput` preview uses `≈` explicitly and 2-decimal rounding (`PREVIEW_DECIMALS`).
    - `AmountDisplay` post-save row does NOT use `≈` — the value came from the backend and is canonical.
    - The backend's own rounding (`math.Round(converted*100)/100` at `transaction_handlers.go:173`) matches the frontend's preview rounding, so the pre-save preview and post-save display agree to the cent.
+   - **Known limitation: 2-decimal assumption.** The `PREVIEW_DECIMALS = 2` constant assumes the base currency has 2 fractional digits — true for USD, EUR, LBP, and most common currencies, but not for JPY / KRW (0) or BHD / KWD (3). This matches the backend's rounding and the existing `formatCurrency` helper. Non-2-decimal base currencies are out of scope for this feature; if a household ever configures one as their base, both the preview and the backend's `amount_cents` rounding will be wrong together, and it's a separate ticket to fix both surfaces in lockstep.
 
 8. **`currency === baseCode` collapse.**
    - **Invariant:** when the selected currency equals `baseCode`, the submit payload MUST NOT include `original_amount` or `original_currency` — only `amount`. `toCreatePayload` enforces this.
