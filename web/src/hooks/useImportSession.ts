@@ -1,0 +1,338 @@
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import type {
+  CollisionGroup,
+  ImportPreview,
+  ImportResult,
+  ImportRow,
+  PatchRowRequest,
+} from '../api/types';
+import {
+  uploadImport,
+  getImportSession,
+  patchImportRow,
+  confirmImport as confirmImportAPI,
+  cancelImport as cancelImportAPI,
+  NotFoundError,
+  UnresolvedCollisionsError,
+} from '../api/import';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
+
+export type ImportStep = 'upload' | 'preview' | 'done';
+
+export interface CellError {
+  field: PatchRowRequest['field'];
+  message: string;
+}
+
+export interface UseImportSessionResult {
+  // Core state
+  preview: ImportPreview | null;
+  importStep: ImportStep;
+  result: ImportResult | null;
+  error: string | null;
+
+  // PATCH / editing state
+  pendingPatchCount: number;
+  cellErrors: Record<string, CellError>;
+
+  // Derived state
+  unresolvedCount: number;
+  canImport: boolean;
+
+  // Actions
+  uploadFile: (file: File) => Promise<void>;
+  patchRow: (
+    rowID: number,
+    field: PatchRowRequest['field'],
+    value: string | boolean,
+  ) => Promise<void>;
+  confirmImport: (
+    categoryMap: Record<string, number>,
+    defaultCategoryId: number | null,
+  ) => Promise<void>;
+  cancelImport: () => Promise<void>;
+  startOver: () => void;
+}
+
+/**
+ * Returns the number of collision groups that still need user action.
+ * A group "needs action" if AT LEAST ONE of its member rows is not
+ * marked as skipped. A group where every member is skipped is
+ * considered resolved (the user decided to drop them all), so it does
+ * NOT block the Import button.
+ *
+ * Extracted as a pure function for unit-test clarity — the hook's
+ * main body is busy with promise-chain plumbing and localStorage
+ * side effects.
+ */
+function computeUnresolvedCount(
+  groups: CollisionGroup[],
+  rows: ImportRow[],
+): number {
+  const rowById = new Map<number, ImportRow>();
+  for (const row of rows) rowById.set(row.row_id, row);
+
+  let unresolved = 0;
+  for (const group of groups) {
+    const stillActive = group.member_row_ids.some((id) => {
+      const r = rowById.get(id);
+      return r !== undefined && !r.skip;
+    });
+    if (stillActive) unresolved += 1;
+  }
+  return unresolved;
+}
+
+export function useImportSession(): UseImportSessionResult {
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
+  const [importStep, setImportStep] = useState<ImportStep>('upload');
+  const [result, setResult] = useState<ImportResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pendingPatchCount, setPendingPatchCount] = useState(0);
+  const [cellErrors, setCellErrors] = useState<Record<string, CellError>>({});
+
+  // Single-lane PATCH queue. Every enqueued PATCH awaits the previous
+  // one's settlement before firing, so the backend never sees two
+  // concurrent PATCHes for the same import_id. See design doc
+  // "Race prevention (cross-row PATCH ordering)".
+  const patchQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  // ---- localStorage resume on mount ----
+  useEffect(() => {
+    const stored = (() => {
+      try {
+        return localStorage.getItem(STORAGE_KEYS.importId);
+      } catch {
+        return null;
+      }
+    })();
+    if (!stored) return;
+
+    void getImportSession(stored)
+      .then((fresh) => {
+        setPreview(fresh);
+        setImportStep('preview');
+      })
+      .catch((err) => {
+        // Always drop the stale importId — whether the session
+        // expired (NotFoundError) or something else went wrong, the
+        // stored id is no longer actionable.
+        try {
+          localStorage.removeItem(STORAGE_KEYS.importId);
+        } catch {
+          /* ignore */
+        }
+        // 404 (NotFoundError) is the expected outcome after a
+        // 60-minute idle — silently drop back to the upload step
+        // without an error banner. Any other error surfaces as a
+        // banner so the user knows their resume attempt failed.
+        // Using `instanceof` (not string matching) means the silence
+        // logic is decoupled from the backend's exact error message.
+        if (err instanceof NotFoundError) return;
+        const message = err instanceof Error ? err.message : 'resume failed';
+        setError(message);
+      });
+  }, []);
+
+  // ---- derived state ----
+  const unresolvedCount = useMemo(() => {
+    if (!preview) return 0;
+    return computeUnresolvedCount(preview.collision_groups, preview.rows);
+  }, [preview]);
+
+  const canImport = preview !== null && unresolvedCount === 0 && pendingPatchCount === 0;
+
+  // ---- row merge helpers ----
+  /**
+   * Applies a fresh server response to local state. Preserves object
+   * identity for unchanged rows so React reconciliation keeps the
+   * just-edited input mounted — Tab/Shift-Tab focus does not jump
+   * back to the document root mid-burst. Only the row whose row_id
+   * changed gets a new object reference.
+   */
+  const applyResponse = useCallback(
+    (fresh: ImportPreview, patchedRowID: number) => {
+      setPreview((prev) => {
+        if (!prev) return fresh;
+        const mergedRows = prev.rows.map((oldRow) => {
+          if (oldRow.row_id !== patchedRowID) return oldRow;
+          const updated = fresh.rows.find((r) => r.row_id === patchedRowID);
+          return updated ?? oldRow;
+        });
+        // Handle the corner case where a row was added or removed
+        // server-side (should never happen in 3.4b, but defensive):
+        // fall back to the fresh rows array directly.
+        if (mergedRows.length !== fresh.rows.length) {
+          return fresh;
+        }
+        return {
+          ...fresh,
+          rows: mergedRows,
+        };
+      });
+    },
+    [],
+  );
+
+  // ---- actions ----
+  const uploadFile = useCallback(async (file: File) => {
+    setError(null);
+    try {
+      const fresh = await uploadImport(file);
+      setPreview(fresh);
+      setImportStep('preview');
+      setCellErrors({});
+      try {
+        localStorage.setItem(STORAGE_KEYS.importId, fresh.import_id);
+      } catch {
+        /* ignore quota errors — resume is a nice-to-have */
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed');
+    }
+  }, []);
+
+  const patchRow = useCallback(
+    async (
+      rowID: number,
+      field: PatchRowRequest['field'],
+      value: string | boolean,
+    ): Promise<void> => {
+      if (!preview) return;
+      const importID = preview.import_id;
+      const cellKey = `${rowID}:${field}`;
+
+      setPendingPatchCount((n) => n + 1);
+
+      const next = patchQueueRef.current.then(async () => {
+        try {
+          const fresh = await patchImportRow(importID, rowID, { field, value });
+          applyResponse(fresh, rowID);
+          // Clear any prior 400 error on this exact cell. Does NOT
+          // clear errors on OTHER cells in the same row — each cell
+          // owns its own error lifecycle.
+          setCellErrors((prev) => {
+            if (!(cellKey in prev)) return prev;
+            const next = { ...prev };
+            delete next[cellKey];
+            return next;
+          });
+        } catch (err) {
+          const message =
+            err instanceof Error ? err.message : 'Update failed';
+          setCellErrors((prev) => ({
+            ...prev,
+            [cellKey]: { field, message },
+          }));
+          // Re-throw so the promise rejects for the caller; the queue
+          // tail catches this so subsequent PATCHes still fire.
+          throw err;
+        }
+      });
+
+      // Swallow rejections on the QUEUE TAIL so one failed PATCH
+      // does not freeze every subsequent edit. The returned promise
+      // still rejects so the caller can surface an inline error.
+      patchQueueRef.current = next
+        .catch(() => {})
+        .finally(() => {
+          setPendingPatchCount((n) => Math.max(0, n - 1));
+        });
+
+      return next;
+    },
+    [preview, applyResponse],
+  );
+
+  const confirmImport = useCallback(
+    async (
+      categoryMap: Record<string, number>,
+      defaultCategoryId: number | null,
+    ): Promise<void> => {
+      if (!preview) return;
+      setError(null);
+      try {
+        const payload: {
+          import_id: string;
+          category_map: Record<string, number>;
+          default_category_id?: number;
+        } = {
+          import_id: preview.import_id,
+          category_map: categoryMap,
+        };
+        if (defaultCategoryId !== null) {
+          payload.default_category_id = defaultCategoryId;
+        }
+        const res = await confirmImportAPI(payload);
+        setResult(res);
+        setImportStep('done');
+        try {
+          localStorage.removeItem(STORAGE_KEYS.importId);
+        } catch {
+          /* ignore */
+        }
+      } catch (err) {
+        if (err instanceof UnresolvedCollisionsError) {
+          // Update the local collision_groups to match the server's
+          // current view. The rest of preview (rows, row_count,
+          // columns, unique_categories) is unchanged — only the
+          // collision membership changed.
+          setPreview((prev) =>
+            prev
+              ? { ...prev, collision_groups: err.collision_groups }
+              : prev,
+          );
+          setError(
+            'Unresolved collisions — please fix or skip the highlighted rows',
+          );
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Import failed');
+      }
+    },
+    [preview],
+  );
+
+  const cancelImport = useCallback(async () => {
+    if (preview?.import_id) {
+      await cancelImportAPI(preview.import_id);
+    }
+    try {
+      localStorage.removeItem(STORAGE_KEYS.importId);
+    } catch {
+      /* ignore */
+    }
+    setPreview(null);
+    setImportStep('upload');
+    setError(null);
+    setCellErrors({});
+    setPendingPatchCount(0);
+  }, [preview]);
+
+  const startOver = useCallback(() => {
+    // Called from the "Import another file" button on the done step.
+    // No DELETE needed — the confirm already consumed the session.
+    setPreview(null);
+    setImportStep('upload');
+    setResult(null);
+    setError(null);
+    setCellErrors({});
+    setPendingPatchCount(0);
+  }, []);
+
+  return {
+    preview,
+    importStep,
+    result,
+    error,
+    pendingPatchCount,
+    cellErrors,
+    unresolvedCount,
+    canImport,
+    uploadFile,
+    patchRow,
+    confirmImport,
+    cancelImport,
+    startOver,
+  };
+}
