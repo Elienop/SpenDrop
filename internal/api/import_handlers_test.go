@@ -33,6 +33,22 @@ func clearImportStore() {
 	})
 }
 
+// countTransactionsForUser returns the number of live (non-tombstoned)
+// transactions for the given user, bypassing the soft-delete filter at the
+// SQL layer. Use this when a test needs to assert inserts/skips at the DB
+// level without depending on the list-transactions handler's filters.
+func countTransactionsForUser(t *testing.T, db *sql.DB, userID int64) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(
+		"SELECT COUNT(*) FROM transactions WHERE user_id = ? AND deleted_at IS NULL",
+		userID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count transactions: %v", err)
+	}
+	return n
+}
+
 // createTestXLSX builds an in-memory xlsx file with the given sheet name,
 // headers, and data rows, returning the bytes.
 func createTestXLSX(t *testing.T, sheetName string, headers []string, rows [][]string) []byte {
@@ -2256,5 +2272,333 @@ func TestHandleImportGetSession_ExpiredSession_Returns404(t *testing.T) {
 	}
 	if _, still := importStore.Load(importID); still {
 		t.Error("expected loadImportEntryForUser to delete the expired entry; it is still in the store")
+	}
+}
+
+// TestHandleImportConfirm_UnresolvedCollisions_Returns409 verifies that
+// confirming a session that still contains a non-skipped collision
+// group is rejected with 409 UNRESOLVED_COLLISIONS and zero rows are
+// inserted. Uploads two identical rows (same date, description,
+// amount, category) which produce a size-2 intra_file collision
+// group, then immediately confirms without PATCHing — the backend
+// must refuse the import.
+//
+// This test owns the "no partial insert" invariant: Phase 3.4 without
+// this gate would insert the first identical row and silently skip
+// the rest with skipReasonDuplicate, losing 19 of 20 rows in the
+// 20-Starbucks-receipts case. After Chunk 3, /confirm returns 409
+// and the DB is untouched.
+func TestHandleImportConfirm_UnresolvedCollisions_Returns409(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "collider", "member")
+
+	// Two identical rows — intra_file collision with no resolution.
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2025-01-07", "Starbucks", "5.00", "Food"},
+		{"2025-01-07", "Starbucks", "5.00", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Sanity: upload already flagged the collision group. If this
+	// precondition fails, the bug is in Chunk 1 (upload-time
+	// grouping), not Chunk 3 — the confirm re-check can't be tested
+	// if upload is missing the group.
+	uploadGroups, _ := uploadResp["collision_groups"].([]any)
+	if len(uploadGroups) != 1 {
+		t.Fatalf("precondition: upload should return 1 collision group, got %d", len(uploadGroups))
+	}
+
+	// Build a category_map so confirm can resolve categories.
+	cats, err := q.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	catMap := make(map[string]float64)
+	var defaultID int64
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+		if c.Name == "Food" || c.Name == "Groceries" {
+			defaultID = c.ID
+		}
+	}
+	if defaultID == 0 {
+		defaultID = cats[0].ID
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultID,
+		"category_map":        catMap,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var confirmResp map[string]any
+	decodeResponse(t, confirmRec, &confirmResp)
+	if code, _ := confirmResp["code"].(string); code != "UNRESOLVED_COLLISIONS" {
+		t.Errorf("code: want UNRESOLVED_COLLISIONS, got %v", confirmResp["code"])
+	}
+	groupsResp, ok := confirmResp["collision_groups"].([]any)
+	if !ok {
+		t.Fatalf("collision_groups missing from 409 body, got %T", confirmResp["collision_groups"])
+	}
+	if len(groupsResp) != 1 {
+		t.Errorf("collision_groups: want 1 group, got %d", len(groupsResp))
+	}
+
+	// Zero-insert invariant: no transactions exist for this user.
+	// The session should also still be present in importStore — 409
+	// does not clean up state (only 200 does), so the frontend can
+	// re-submit after editing.
+	if count := countTransactionsForUser(t, db, user.ID); count != 0 {
+		t.Errorf("DB leaked %d rows past the 409 gate — expected 0", count)
+	}
+	if _, stillPresent := importStore.Load(importID); !stillPresent {
+		t.Error("expected session to remain in importStore after 409 — 409 should NOT reap")
+	}
+}
+
+// TestHandleImportConfirm_PersistsContentHash verifies that a
+// successful /confirm writes a non-null content_hash to every inserted
+// transaction row. This is the regression guard for the full Phase
+// 3.4b invariant: after confirm, the DB rows have content_hash
+// populated so a re-import of the same file would trigger the
+// collision detection path. Without this, the re-import path silently
+// double-inserts.
+//
+// Uses two distinct rows (no collision) so confirm hits the happy
+// path, then SELECTs content_hash directly from the transactions
+// table and asserts both values are populated and distinct.
+func TestHandleImportConfirm_PersistsContentHash(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "hasher", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2025-01-07", "Starbucks", "5.00", "Food"},
+		{"2025-01-08", "Trader Joe's", "42.10", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, err := q.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	catMap := make(map[string]float64)
+	var defaultID int64
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+		if c.Name == "Food" || c.Name == "Groceries" {
+			defaultID = c.ID
+		}
+	}
+	if defaultID == 0 {
+		defaultID = cats[0].ID
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultID,
+		"category_map":        catMap,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var confirmResp map[string]any
+	decodeResponse(t, confirmRec, &confirmResp)
+	if imported, _ := confirmResp["imported"].(float64); int(imported) != 2 {
+		t.Errorf("imported: want 2, got %v", confirmResp["imported"])
+	}
+
+	// Pull every content_hash value for this user and assert both are
+	// non-null and distinct. Queries the raw column because the typed
+	// Transaction struct exposes content_hash via sql.NullString and
+	// asserting on the raw scan is the shortest path to the invariant.
+	rowsRS, err := db.Query("SELECT content_hash FROM transactions WHERE user_id = ? AND deleted_at IS NULL ORDER BY date", user.ID)
+	if err != nil {
+		t.Fatalf("select content_hash: %v", err)
+	}
+	defer rowsRS.Close()
+
+	var hashes []string
+	for rowsRS.Next() {
+		var hashCell sql.NullString
+		if err := rowsRS.Scan(&hashCell); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if !hashCell.Valid || hashCell.String == "" {
+			t.Error("row has NULL or empty content_hash — confirm path did not populate it")
+		}
+		hashes = append(hashes, hashCell.String)
+	}
+	if err := rowsRS.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+
+	if len(hashes) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(hashes))
+	}
+	if hashes[0] == hashes[1] {
+		t.Errorf("both inserted rows have the same content_hash %q — they should differ for distinct rows", hashes[0])
+	}
+}
+
+// TestHandleImportConfirm_SkippedRows_ExcludedFromInserts verifies the
+// skip ≠ unresolved distinction: a row whose Skip field was flipped
+// via a Chunk 2 PATCH is excluded from inserts entirely, does NOT
+// count toward the collision re-check, and IS counted toward the
+// `skipped` field of the confirm response.
+//
+// Upload two distinct rows → PATCH row 0 with skip=true → confirm →
+// assert imported=1, skipped=1, total=2, and that only row 1 landed
+// in the DB. Exercises the full round-trip of PATCH's Skip mutation
+// flowing into confirm's handler-level filter.
+func TestHandleImportConfirm_SkippedRows_ExcludedFromInserts(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "skipper", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2025-01-07", "Starbucks", "5.00", "Food"},
+		{"2025-01-08", "Trader Joe's", "42.10", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// PATCH row 0 to set skip=true via the Chunk 2 handler.
+	patchBody, _ := json.Marshal(map[string]any{
+		"field": "skip",
+		"value": true,
+	})
+	patchReq := httptest.NewRequest(http.MethodPatch, "/api/import/"+importID+"/rows/0", bytes.NewReader(patchBody))
+	patchReq = withUserAndURLParams(patchReq, user, map[string]string{
+		"importID": importID,
+		"rowID":    "0",
+	})
+	patchRec := httptest.NewRecorder()
+	h.handleImportPatchRow(patchRec, patchReq)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d; body: %s", patchRec.Code, patchRec.Body.String())
+	}
+
+	// Now confirm. Expect the skipped row to be excluded from inserts.
+	cats, err := q.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	catMap := make(map[string]float64)
+	var defaultID int64
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+		if c.Name == "Food" || c.Name == "Groceries" {
+			defaultID = c.ID
+		}
+	}
+	if defaultID == 0 {
+		defaultID = cats[0].ID
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": defaultID,
+		"category_map":        catMap,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	var confirmResp map[string]any
+	decodeResponse(t, confirmRec, &confirmResp)
+	if imported, _ := confirmResp["imported"].(float64); int(imported) != 1 {
+		t.Errorf("imported: want 1, got %v", confirmResp["imported"])
+	}
+	if skipped, _ := confirmResp["skipped"].(float64); int(skipped) != 1 {
+		t.Errorf("skipped: want 1 (the user-skipped row), got %v", confirmResp["skipped"])
+	}
+	if total, _ := confirmResp["total"].(float64); int(total) != 2 {
+		t.Errorf("total: want 2, got %v", confirmResp["total"])
+	}
+
+	// DB verification: only row 1 (Trader Joe's) should exist; the
+	// skipped row (Starbucks) must not have been inserted.
+	descRows, err := db.Query("SELECT description FROM transactions WHERE user_id = ? AND deleted_at IS NULL", user.ID)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	defer descRows.Close()
+
+	var descriptions []string
+	for descRows.Next() {
+		var d string
+		if err := descRows.Scan(&d); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		descriptions = append(descriptions, d)
+	}
+	if err := descRows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+
+	if len(descriptions) != 1 {
+		t.Fatalf("expected exactly 1 row in DB, got %d: %v", len(descriptions), descriptions)
+	}
+	if descriptions[0] != "Trader Joe's" {
+		t.Errorf("expected only Trader Joe's in DB, got %q — the skipped Starbucks row leaked past the filter", descriptions[0])
 	}
 }
