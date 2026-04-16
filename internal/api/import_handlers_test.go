@@ -2602,3 +2602,65 @@ func TestHandleImportConfirm_SkippedRows_ExcludedFromInserts(t *testing.T) {
 		t.Errorf("expected only Trader Joe's in DB, got %q — the skipped Starbucks row leaked past the filter", descriptions[0])
 	}
 }
+
+// TestHandleImportUpload_PreviewCanonicalizesSerialDate pins the fix for
+// the Phase 3.4b preview-leaks-serial-date bug: main's PR #19 switched the
+// xlsx reader to RawCellValue:true so that date cells arrive as Excel
+// serial strings (e.g. "45859"). That fix taught the confirm path to parse
+// serials via excelize.ExcelDateToTime, but the upload handler still stored
+// the raw cell value into ir.Date, so the 3.4b preview table rendered
+// "45689.0" in the Date column (reported via smoke test screenshot on
+// 2026-04-15). This test builds an xlsx file with a native date cell in a
+// non-text display format, uploads it, and asserts the preview response
+// emits ISO (YYYY-MM-DD) strings, not Excel serial numbers. Without the
+// fix at ir.Date = val, the assertion on rows[0]["date"] will read a
+// numeric string like "45859" and fail — which mirrors exactly what the
+// user saw in the UI.
+func TestHandleImportUpload_PreviewCanonicalizesSerialDate(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "previewdateimporter", "member")
+
+	xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
+		[]string{"Date", "Description", "Amount"},
+		// mm-dd-yy is deliberately not one of the text formats
+		// parseImportDate would ever try directly; the only path by
+		// which it can parse this cell is the Excel-serial path (the
+		// display format is irrelevant once RawCellValue:true is on).
+		"mm-dd-yy",
+		[]nativeDateRow{
+			{Date: time.Date(2025, 7, 21, 0, 0, 0, 0, time.UTC), Rest: []string{"supermarket", "45.00"}},
+			{Date: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC), Rest: []string{"year-end treat", "10.00"}},
+		})
+
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+
+	rows, ok := resp["rows"].([]any)
+	if !ok {
+		t.Fatal("expected rows to be an array")
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(rows))
+	}
+
+	want := []string{"2025-07-21", "2025-12-31"}
+	for i, w := range want {
+		row := rows[i].(map[string]any)
+		got, _ := row["date"].(string)
+		if got != w {
+			t.Errorf("rows[%d].date = %q, want %q — preview is leaking the raw xlsx cell value instead of canonicalizing to ISO. The frontend import preview will render this string as-is.",
+				i, got, w)
+		}
+	}
+}

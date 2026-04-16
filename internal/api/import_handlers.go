@@ -551,7 +551,25 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 				}
 				switch field {
 				case "date":
-					ir.Date = val
+					// Canonicalize to ISO (YYYY-MM-DD) at parse time so
+					// the preview response — and every downstream path
+					// that reads ir.Date — sees the same string. xlsx
+					// date cells arrive as Excel serials (e.g. "45689")
+					// under RawCellValue:true; without this step the
+					// preview table would leak raw serials to the
+					// frontend. Mirrors the PATCH handler's
+					// parseImportDate + Format canonicalization so an
+					// uploaded "45689" and a later PATCH of "2025-02-27"
+					// produce the same stored string (and the same
+					// content hash). On parse failure we fall back to
+					// the raw value — the downstream confirm loop
+					// re-runs parseImportDate and will skip the row
+					// with a typed error if it still can't parse.
+					if parsed, err := parseImportDate(val); err == nil {
+						ir.Date = parsed.Format("2006-01-02")
+					} else {
+						ir.Date = val
+					}
 				case "description":
 					ir.Description = val
 				case "amount":
