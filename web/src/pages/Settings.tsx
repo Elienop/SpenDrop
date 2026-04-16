@@ -115,25 +115,35 @@ function autoMapCategories(
 
 /* ---------- General Tab ---------- */
 
+// How far ahead of the current year the budget picker lets users plan.
+// Keep small enough that the dropdown stays scannable but large enough
+// to cover realistic forward budgeting (mortgage amortization, yearly
+// goal tracking). Lower bound is `MIN_YEAR` so historical xlsx imports
+// that predate the current year still have a landing spot.
+const BUDGET_YEARS_AHEAD = 5;
+
 function GeneralSection() {
   const baseCurrency = useBaseCurrency();
-  // Hoisted so both `useState` initializers share the same read of the
-  // system clock — otherwise a sub-millisecond drift across a year
-  // boundary could desync `yearInput` from `year` on first render.
   const initialYear = new Date().getFullYear();
-  // Dual state for the year input: `yearInput` is the raw string the user
-  // is typing (keeps the input controlled even during mid-edit invalid
-  // states), `year` is the committed integer value used to fetch. We
-  // commit on every keystroke that's a valid integer in range, so the
-  // table tracks typing in real time, but `Number('') === 0`, a fractional
-  // value like `2026.5`, or an out-of-range number never slips through to
-  // the fetch (which would 400).
-  const [yearInput, setYearInput] = useState(() => String(initialYear));
   const [year, setYear] = useState(initialYear);
   // Per-month input strings, keyed by 1-12. Strings (not numbers) so a
   // cleared field stays empty rather than collapsing to "0", which the
   // backend would reject and which is ambiguous with "not yet set".
   const [editAmounts, setEditAmounts] = useState<Record<number, string>>({});
+  // Raw text for the "Set all months" quick-fill input. Kept separate
+  // from `editAmounts` so applying it is an explicit user action; typing
+  // here must never mutate the 12 rows.
+  const [bulkInput, setBulkInput] = useState('');
+  // Non-null iff at least one bulk write (Apply or Copy-from-previous)
+  // has happened since the last fetch/Undo. Holds the `editAmounts`
+  // captured *before the first* bulk write so Undo restores the fully
+  // pre-bulk state — not an intermediate one. Subsequent bulk writes do
+  // not overwrite it; otherwise `Apply → Copy → Undo` would strand the
+  // user at the Apply-filled state instead of the original baseline.
+  // Cleared on Save success (via refetch), year change, and Undo.
+  const [preBulkSnapshot, setPreBulkSnapshot] = useState<
+    Record<number, string> | null
+  >(null);
   const [saving, setSaving] = useState(false);
   // Snapshot of `editAmounts` at the moment of the last successful fetch,
   // keyed by month. We compare the user's current input against the
@@ -144,12 +154,25 @@ function GeneralSection() {
   // it doesn't trigger a re-render.
   const baselineRef = useRef<Record<number, string>>({});
 
+  // `currentYear + N … MIN_YEAR`, descending. Memoized not for perf
+  // (32 items) but to keep `new Date()` out of render — two renders
+  // crossing a New Year midnight would otherwise produce different
+  // option arrays and reset Radix's Select focus state.
+  const yearSelectOptions = useMemo(() => {
+    const opts: number[] = [];
+    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= MIN_YEAR; y--) {
+      opts.push(y);
+    }
+    return opts;
+  }, [initialYear]);
+
   const fetchBudgets = useCallback(async () => {
     const data = await api.get<Budget[]>(`budgets?year=${year}`);
     const amounts: Record<number, string> = {};
     for (const b of data) amounts[b.month] = String(b.amount);
     baselineRef.current = { ...amounts };
     setEditAmounts(amounts);
+    setPreBulkSnapshot(null);
   }, [year]);
 
   useEffect(() => {
@@ -159,6 +182,7 @@ function GeneralSection() {
       // subsequent save would target the *last successfully loaded* year.
       baselineRef.current = {};
       setEditAmounts({});
+      setPreBulkSnapshot(null);
       toast.error(
         'Failed to load budgets: ' +
           (err instanceof Error ? err.message : 'unknown'),
@@ -166,14 +190,48 @@ function GeneralSection() {
     });
   }, [fetchBudgets]);
 
-  function handleYearChange(e: ChangeEvent<HTMLInputElement>) {
-    const v = e.target.value;
-    setYearInput(v);
-    if (v === '') return;
-    const n = Number(v);
-    // `Number.isInteger` (not `isFinite`) — rejects `2026.5`, `1e10`, NaN.
-    if (Number.isInteger(n) && n >= MIN_YEAR && n <= MAX_YEAR) {
-      setYear(n);
+  function handleApplyBulk() {
+    const raw = bulkInput.trim();
+    const n = Number(raw);
+    // Mirror the per-row validation: empty / non-finite / ≤0 are all
+    // rejected. Keyed off the same Number.isFinite check as `handleSave`
+    // so "Apply" can never stage a row that the save loop would refuse.
+    if (raw === '' || !Number.isFinite(n) || n <= 0) {
+      toast.error('Amount must be greater than 0');
+      return;
+    }
+    setPreBulkSnapshot((prev) => prev ?? editAmounts);
+    const next: Record<number, string> = {};
+    for (let m = 1; m <= 12; m++) next[m] = raw;
+    setEditAmounts(next);
+    setBulkInput('');
+  }
+
+  function handleUndoBulk() {
+    if (preBulkSnapshot === null) return;
+    setEditAmounts(preBulkSnapshot);
+    setPreBulkSnapshot(null);
+  }
+
+  async function handleCopyFromPrev() {
+    const prev = year - 1;
+    if (prev < MIN_YEAR) return;
+    try {
+      const data = await api.get<Budget[]>(`budgets?year=${prev}`);
+      if (data.length === 0) {
+        toast.info(`No budgets found for ${prev}`);
+        return;
+      }
+      setPreBulkSnapshot((snap) => snap ?? editAmounts);
+      const next: Record<number, string> = {};
+      for (const b of data) next[b.month] = String(b.amount);
+      setEditAmounts(next);
+      setBulkInput('');
+    } catch (err) {
+      toast.error(
+        `Failed to load ${prev}: ` +
+          (err instanceof Error ? err.message : 'unknown'),
+      );
     }
   }
 
@@ -249,44 +307,126 @@ function GeneralSection() {
     }
   }
 
-  // True when the user is typing something the committed `year` state
-  // hasn't accepted (empty, fractional, out of range). Drives `aria-invalid`
-  // and a small hint below the input so the user knows the table isn't
-  // reflecting what they typed.
-  const yearDivergent = yearInput !== String(year);
+  // Sum of positive, finite per-row values. Empty or invalid rows
+  // contribute 0 so the total never flashes NaN while the user is mid-edit.
+  const annualTotal = useMemo(() => {
+    let sum = 0;
+    for (let m = 1; m <= 12; m++) {
+      const n = Number(editAmounts[m] ?? '');
+      if (Number.isFinite(n) && n > 0) sum += n;
+    }
+    return sum;
+  }, [editAmounts]);
+
+  const copyPrevDisabled = saving || year <= MIN_YEAR;
+  // `Apply` stays disabled until the text parses as a positive finite
+  // number — matches the toast-error branch in `handleApplyBulk` so the
+  // user sees the button react before they click.
+  const bulkParsed = Number(bulkInput.trim());
+  const applyDisabled =
+    saving ||
+    bulkInput.trim() === '' ||
+    !Number.isFinite(bulkParsed) ||
+    bulkParsed <= 0;
 
   return (
     <Card>
-      <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <CardHeader className="flex flex-col gap-3">
         <CardTitle className="text-base">Monthly Budgets</CardTitle>
-        <div className="flex flex-col items-end gap-1">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
             <Label
               htmlFor="budget-year"
               className="text-sm text-muted-foreground"
             >
               Year
             </Label>
-            <Input
-              id="budget-year"
-              type="number"
-              value={yearInput}
-              onChange={handleYearChange}
-              onFocus={selectAllOnFocus}
-              min={MIN_YEAR}
-              max={MAX_YEAR}
+            <Select
+              value={String(year)}
+              onValueChange={(v) => setYear(Number(v))}
               disabled={saving}
-              aria-invalid={yearDivergent}
-              className="w-24"
-              aria-label="Budget year"
-            />
+            >
+              <SelectTrigger
+                id="budget-year"
+                className="w-28"
+                aria-label="Budget year"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {yearSelectOptions.map((y) => (
+                  <SelectItem key={y} value={String(y)}>
+                    {y}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          {yearDivergent && (
-            <p className="text-xs text-muted-foreground">
-              Showing {year}
-            </p>
-          )}
+          <div className="flex flex-col gap-1">
+            <Label
+              htmlFor="budget-set-all"
+              className="text-sm text-muted-foreground"
+            >
+              Set all months ({baseCurrency})
+            </Label>
+            <div className="flex gap-2">
+              <Input
+                id="budget-set-all"
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="0.00"
+                value={bulkInput}
+                onChange={(e) => setBulkInput(e.target.value)}
+                onFocus={selectAllOnFocus}
+                disabled={saving}
+                aria-label={`Apply amount to all months of ${year}`}
+                className="w-32"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleApplyBulk}
+                disabled={applyDisabled}
+              >
+                Apply
+              </Button>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void handleCopyFromPrev()}
+            disabled={copyPrevDisabled}
+            className="self-end"
+          >
+            Copy from {year - 1}
+          </Button>
+          <div className="flex flex-col gap-1 sm:ml-auto sm:items-end">
+            <span className="text-sm text-muted-foreground">Annual total</span>
+            <span
+              className="text-sm font-medium tabular-nums"
+              aria-label="Annual total"
+            >
+              {formatCurrency(annualTotal, baseCurrency)}
+            </span>
+          </div>
         </div>
+        {preBulkSnapshot !== null && (
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary">Bulk change applied</Badge>
+            <Button
+              type="button"
+              variant="link"
+              size="sm"
+              onClick={handleUndoBulk}
+              disabled={saving}
+              className="h-auto p-0"
+            >
+              Undo
+            </Button>
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         <form

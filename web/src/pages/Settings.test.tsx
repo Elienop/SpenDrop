@@ -300,6 +300,301 @@ describe('Settings', () => {
       }
     });
 
+    test('Set all applies amount to every month and shows Undo', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        // Wait for the initial fetch so baseline is populated.
+        await waitFor(() => {
+          expect(
+            (screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement).value,
+          ).toBe('3000');
+        });
+
+        const bulk = screen.getByLabelText(/Apply amount to all months of 2026/i);
+        await user.clear(bulk);
+        await user.type(bulk, '1000');
+        await user.click(screen.getByRole('button', { name: /^Apply$/ }));
+
+        // Every month takes the bulk value.
+        for (const name of [
+          'January', 'February', 'March', 'April', 'May', 'June',
+          'July', 'August', 'September', 'October', 'November', 'December',
+        ]) {
+          const input = screen.getByLabelText(
+            new RegExp(`Budget for ${name} 2026`, 'i'),
+          ) as HTMLInputElement;
+          expect(input.value).toBe('1000');
+        }
+
+        // Undo chip is visible.
+        expect(
+          screen.getByRole('button', { name: /^Undo$/ }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('Undo restores pre-bulk amounts', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        const may = () =>
+          screen.getByLabelText(/Budget for May 2026/i) as HTMLInputElement;
+
+        await waitFor(() => expect(april().value).toBe('3000'));
+        expect(may().value).toBe('');
+
+        const bulk = screen.getByLabelText(/Apply amount to all months of 2026/i);
+        await user.type(bulk, '1000');
+        await user.click(screen.getByRole('button', { name: /^Apply$/ }));
+        expect(april().value).toBe('1000');
+        expect(may().value).toBe('1000');
+
+        await user.click(screen.getByRole('button', { name: /^Undo$/ }));
+
+        expect(april().value).toBe('3000');
+        expect(may().value).toBe('');
+        expect(
+          screen.queryByRole('button', { name: /^Undo$/ }),
+        ).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('Copy from previous year fills months from prior year', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        // Override the default mock: return different rows for 2025.
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'budgets?year=2026')
+            return Promise.resolve([
+              { id: 1, year: 2026, month: 4, amount: 3000, updated_at: '' },
+            ]);
+          if (path === 'budgets?year=2025')
+            return Promise.resolve([
+              { id: 10, year: 2025, month: 1, amount: 800, updated_at: '' },
+              { id: 11, year: 2025, month: 2, amount: 900, updated_at: '' },
+            ]);
+          if (path === 'currencies')
+            return Promise.resolve([
+              {
+                code: 'USD',
+                name: 'US Dollar',
+                symbol: '$',
+                rate_to_base: 1,
+                is_base: true,
+                updated_at: '',
+              },
+            ]);
+          return Promise.resolve([]);
+        });
+
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        await waitFor(() => {
+          expect(
+            (screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement).value,
+          ).toBe('3000');
+        });
+
+        await user.click(screen.getByRole('button', { name: /Copy from 2025/i }));
+
+        await waitFor(() => {
+          expect(
+            (screen.getByLabelText(/Budget for January 2026/i) as HTMLInputElement).value,
+          ).toBe('800');
+        });
+        expect(
+          (screen.getByLabelText(/Budget for February 2026/i) as HTMLInputElement).value,
+        ).toBe('900');
+        // Months not present in prior year reset to empty (Copy is a replace).
+        expect(
+          (screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement).value,
+        ).toBe('');
+        expect(
+          screen.getByRole('button', { name: /^Undo$/ }),
+        ).toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('Copy from previous year shows info toast when prior year is empty', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'budgets?year=2026')
+            return Promise.resolve([
+              { id: 1, year: 2026, month: 4, amount: 3000, updated_at: '' },
+            ]);
+          if (path === 'budgets?year=2025') return Promise.resolve([]);
+          if (path === 'currencies')
+            return Promise.resolve([
+              {
+                code: 'USD',
+                name: 'US Dollar',
+                symbol: '$',
+                rate_to_base: 1,
+                is_base: true,
+                updated_at: '',
+              },
+            ]);
+          return Promise.resolve([]);
+        });
+
+        const { toast } = await import('sonner');
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/Budget for April 2026/i)).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: /Copy from 2025/i }));
+
+        await waitFor(() => {
+          expect(toast.info).toHaveBeenCalledWith('No budgets found for 2025');
+        });
+        // April input unchanged (no bulk write happened).
+        expect(
+          (screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement).value,
+        ).toBe('3000');
+        expect(
+          screen.queryByRole('button', { name: /^Undo$/ }),
+        ).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('Apply then Copy then Undo restores original baseline', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'budgets?year=2026')
+            return Promise.resolve([
+              { id: 1, year: 2026, month: 4, amount: 3000, updated_at: '' },
+            ]);
+          if (path === 'budgets?year=2025')
+            return Promise.resolve([
+              { id: 10, year: 2025, month: 1, amount: 800, updated_at: '' },
+            ]);
+          if (path === 'currencies')
+            return Promise.resolve([
+              {
+                code: 'USD',
+                name: 'US Dollar',
+                symbol: '$',
+                rate_to_base: 1,
+                is_base: true,
+                updated_at: '',
+              },
+            ]);
+          return Promise.resolve([]);
+        });
+
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        const january = () =>
+          screen.getByLabelText(/Budget for January 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
+
+        // First bulk: Apply "1000" → snapshot captures baseline (Apr=3000).
+        const bulk = screen.getByLabelText(/Apply amount to all months of 2026/i);
+        await user.type(bulk, '1000');
+        await user.click(screen.getByRole('button', { name: /^Apply$/ }));
+        expect(april().value).toBe('1000');
+
+        // Second bulk: Copy from 2025 → snapshot MUST NOT be overwritten.
+        await user.click(screen.getByRole('button', { name: /Copy from 2025/i }));
+        await waitFor(() => expect(january().value).toBe('800'));
+
+        // Undo goes back to the ORIGINAL baseline (April=3000, others empty),
+        // not the intermediate Apply-filled state.
+        await user.click(screen.getByRole('button', { name: /^Undo$/ }));
+        expect(april().value).toBe('3000');
+        expect(january().value).toBe('');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('Undo then Apply takes a fresh snapshot', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
+
+        const bulk = () =>
+          screen.getByLabelText(/Apply amount to all months of 2026/i);
+
+        // First cycle: Apply → Undo.
+        await user.type(bulk(), '1000');
+        await user.click(screen.getByRole('button', { name: /^Apply$/ }));
+        await user.click(screen.getByRole('button', { name: /^Undo$/ }));
+        expect(april().value).toBe('3000');
+
+        // Second cycle: the snapshot was cleared by Undo, so the next
+        // Apply captures the current (post-Undo baseline) state, and
+        // Undo correctly returns there — not to some stale snapshot.
+        await user.type(bulk(), '2500');
+        await user.click(screen.getByRole('button', { name: /^Apply$/ }));
+        expect(april().value).toBe('2500');
+
+        await user.click(screen.getByRole('button', { name: /^Undo$/ }));
+        expect(april().value).toBe('3000');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('annual total reflects per-row edits', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const total = () => screen.getByLabelText(/^Annual total$/);
+
+        await waitFor(() => {
+          expect(total().textContent).toBe('$3,000.00');
+        });
+
+        const may = screen.getByLabelText(/Budget for May 2026/i);
+        await user.type(may, '500');
+
+        await waitFor(() => {
+          expect(total().textContent).toBe('$3,500.00');
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     test('saves currency rates via PUT with full currency object', async () => {
       mockedApi.put.mockResolvedValue({});
       const user = userEvent.setup({ pointerEventsCheck: 0 });
