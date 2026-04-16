@@ -10,6 +10,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Input } from '@/components/ui/input';
 
 type EditableField = 'date' | 'description' | 'amount';
@@ -258,7 +259,24 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                     typeof row.amount === 'number' ? row.amount.toFixed(2) : String(row.amount),
                     `text-right font-mono tabular-nums ${skipClass}`,
                   )}
-                  <TableCell />
+                  <TableCell>
+                    {/*
+                      Per-row Skip toggle. The checkbox is fully controlled
+                      off `row.skip` — clicks fire `onPatchRow` and the
+                      server-merged preview flips the prop on the next
+                      render. We never track a local "pending" state:
+                      that would re-introduce the importcsv #16 class of
+                      bug where the UI drifts from the server's truth.
+                      aria-label distinguishes the two directions so a
+                      screen-reader user can confirm the effect of the
+                      click before committing it.
+                    */}
+                    <Checkbox
+                      checked={row.skip}
+                      onCheckedChange={(v) => void onPatchRow(row.row_id, 'skip', Boolean(v))}
+                      aria-label={row.skip ? `Unskip row ${row.row_id + 1}` : `Skip row ${row.row_id + 1}`}
+                    />
+                  </TableCell>
                 </TableRow>
               );
             })}

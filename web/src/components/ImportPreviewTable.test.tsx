@@ -257,6 +257,68 @@ describe('ImportPreviewTable', () => {
     expect(screen.getByText('Starbucks')).toBeInTheDocument();
   });
 
+  it('Skip checkbox toggles in both directions: unskipped row → skip=true, pre-skipped row → skip=false', async () => {
+    const user = userEvent.setup();
+    const onPatchRow = vi.fn().mockResolvedValue(undefined);
+
+    // Fixture intentionally mixes skip states so a single render exercises
+    // BOTH transitions. The un-skip case is the one most likely to regress
+    // silently — after a "Skip all in group" bulk action the user needs a
+    // way to un-skip individual rows, and that's the only UI surface for
+    // it. If this test only checked the skip direction, a bug where the
+    // checkbox was hard-coded to always emit `true` would pass.
+    const preview = makePreview({
+      rows: [
+        {
+          row_id: 0,
+          skip: false,
+          content_hash: 'h0',
+          date: '2025-01-07',
+          description: 'Starbucks',
+          amount: 5,
+          category: 'Food',
+        },
+        {
+          row_id: 1,
+          skip: true,
+          content_hash: 'h1',
+          date: '2025-01-08',
+          description: "Trader Joe's",
+          amount: 42.1,
+          category: 'Food',
+        },
+      ],
+    });
+
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        cellErrors={{}}
+        unresolvedCount={0}
+        canImport={true}
+        pendingPatchCount={0}
+        onPatchRow={onPatchRow}
+        onConfirm={vi.fn()}
+      />,
+    );
+
+    // Unskipped row → checkbox unchecked, click emits skip=true.
+    const row0 = screen.getByText('Starbucks').closest('tr')!;
+    const checkbox0 = within(row0).getByRole('checkbox');
+    expect(checkbox0).not.toBeChecked();
+    await user.click(checkbox0);
+    expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'skip', true);
+
+    // Pre-skipped row → checkbox checked, click emits skip=false (un-skip path).
+    const row1 = screen.getByText("Trader Joe's").closest('tr')!;
+    const checkbox1 = within(row1).getByRole('checkbox');
+    expect(checkbox1).toBeChecked();
+    await user.click(checkbox1);
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'skip', false);
+
+    expect(onPatchRow).toHaveBeenCalledTimes(2);
+  });
+
   it('renders a collision group header with "Skip all" that fires N onPatchRow calls', async () => {
     const user = userEvent.setup();
     const onPatchRow = vi.fn().mockResolvedValue(undefined);
