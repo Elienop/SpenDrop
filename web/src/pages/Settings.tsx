@@ -318,6 +318,59 @@ function GeneralSection() {
     return sum;
   }, [editAmounts]);
 
+  // Count of rows whose `editAmounts` value differs from `baselineRef`
+  // AND would produce a valid PUT at save time — mirroring the bucketing
+  // logic in `handleSave`. The count drives the "(N)" badge on the Save
+  // button and the year-change / beforeunload confirms, so it has to
+  // match "what would actually save" rather than "what's visually
+  // different" (a row whose value was cleared is visually different but
+  // we don't issue a DELETE for it, so it shouldn't block navigation).
+  //
+  // `baselineRef.current` is read on every render; React re-renders when
+  // `editAmounts` changes, and every write to `baselineRef.current` in
+  // `fetchBudgets` is paired with a `setEditAmounts`, so this memo always
+  // sees the latest ref value.
+  const dirtyCount = useMemo(() => {
+    let count = 0;
+    for (let m = 1; m <= 12; m++) {
+      const raw = editAmounts[m] ?? '';
+      if (raw === '') continue;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      const baseline = baselineRef.current[m] ?? '';
+      if (raw === baseline) continue;
+      count++;
+    }
+    return count;
+  }, [editAmounts]);
+
+  // Block accidental tab-close / reload while changes are unsaved. The
+  // browser always shows its own generic prompt; the `returnValue`
+  // assignment is the legacy handshake that triggers it on Chromium.
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirtyCount]);
+
+  function handleYearSelect(value: string) {
+    const next = Number(value);
+    if (next === year) return;
+    if (
+      dirtyCount > 0 &&
+      !window.confirm(
+        `You have ${dirtyCount} unsaved budget change${dirtyCount === 1 ? '' : 's'}. Discard and switch to ${next}?`,
+      )
+    ) {
+      return;
+    }
+    setYear(next);
+  }
+
   const copyPrevDisabled = saving || year <= MIN_YEAR;
   // `Apply` stays disabled until the text parses as a positive finite
   // number — matches the toast-error branch in `handleApplyBulk` so the
@@ -343,7 +396,7 @@ function GeneralSection() {
             </Label>
             <Select
               value={String(year)}
-              onValueChange={(v) => setYear(Number(v))}
+              onValueChange={handleYearSelect}
               disabled={saving}
             >
               <SelectTrigger
@@ -412,19 +465,32 @@ function GeneralSection() {
             </span>
           </div>
         </div>
-        {preBulkSnapshot !== null && (
+        {(preBulkSnapshot !== null || dirtyCount > 0) && (
           <div className="flex items-center gap-2">
-            <Badge variant="secondary">Bulk change applied</Badge>
-            <Button
-              type="button"
-              variant="link"
-              size="sm"
-              onClick={handleUndoBulk}
-              disabled={saving}
-              className="h-auto p-0"
-            >
-              Undo
-            </Button>
+            {preBulkSnapshot !== null && (
+              <>
+                <Badge variant="secondary">Bulk change applied</Badge>
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  onClick={handleUndoBulk}
+                  disabled={saving}
+                  className="h-auto p-0"
+                >
+                  Undo
+                </Button>
+              </>
+            )}
+            {dirtyCount > 0 && (
+              <span
+                className="text-sm text-amber-600 dark:text-amber-500"
+                aria-live="polite"
+                data-testid="budget-dirty-indicator"
+              >
+                {dirtyCount} unsaved change{dirtyCount === 1 ? '' : 's'}
+              </span>
+            )}
           </div>
         )}
       </CardHeader>
@@ -473,8 +539,16 @@ function GeneralSection() {
               })}
             </TableBody>
           </Table>
-          <Button type="submit" className="w-fit" disabled={saving}>
-            {saving ? 'Saving...' : 'Save Budgets'}
+          <Button
+            type="submit"
+            className={`w-fit ${dirtyCount > 0 && !saving ? 'font-semibold' : ''}`}
+            disabled={saving}
+          >
+            {saving
+              ? 'Saving...'
+              : dirtyCount > 0
+                ? `Save Budgets (${dirtyCount})`
+                : 'Save Budgets'}
           </Button>
         </form>
       </CardContent>

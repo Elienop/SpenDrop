@@ -571,6 +571,179 @@ describe('Settings', () => {
       }
     });
 
+    test('Save button shows dirty count when a row diverges from baseline', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
+
+        // Baseline: Save button shows plain label, no dirty indicator.
+        expect(
+          screen.getByRole('button', { name: /^Save Budgets$/ }),
+        ).toBeInTheDocument();
+        expect(
+          screen.queryByTestId('budget-dirty-indicator'),
+        ).not.toBeInTheDocument();
+
+        // Edit April → dirty count = 1.
+        await user.clear(april());
+        await user.type(april(), '3500');
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+          ).toBeInTheDocument();
+        });
+        expect(
+          screen.getByTestId('budget-dirty-indicator').textContent,
+        ).toMatch(/1 unsaved change$/);
+
+        // Edit May → dirty count = 2.
+        await user.type(screen.getByLabelText(/Budget for May 2026/i), '500');
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(2\)$/ }),
+          ).toBeInTheDocument();
+        });
+        expect(
+          screen.getByTestId('budget-dirty-indicator').textContent,
+        ).toMatch(/2 unsaved changes$/);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('year change with unsaved changes prompts confirm and respects cancel', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        // happy-dom doesn't ship a `window.confirm`. Install a stub
+        // (not a spy) and restore whatever was there before.
+        const confirmSpy = vi.fn<(msg?: string) => boolean>(() => false);
+        const originalConfirm = window.confirm;
+        window.confirm = confirmSpy as unknown as typeof window.confirm;
+        try {
+          renderSettings();
+
+          const april = () =>
+            screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+          await waitFor(() => expect(april().value).toBe('3000'));
+
+          await user.clear(april());
+          await user.type(april(), '4000');
+
+          // Baseline call count: initial fetch for 2026 + currencies.
+          const getCallsBeforeYearChange = mockedApi.get.mock.calls.length;
+
+          // Open Radix Select and choose 2025.
+          const trigger = screen.getByRole('combobox', {
+            name: /budget year/i,
+          });
+          await user.click(trigger);
+          await user.click(
+            await screen.findByRole('option', { name: '2025' }),
+          );
+
+          expect(confirmSpy).toHaveBeenCalledTimes(1);
+          expect(confirmSpy.mock.calls[0][0]).toMatch(/1 unsaved/);
+          expect(confirmSpy.mock.calls[0][0]).toMatch(/2025/);
+
+          // Cancel => year unchanged, no refetch, dirty input preserved.
+          expect(april().value).toBe('4000');
+          expect(mockedApi.get.mock.calls.length).toBe(
+            getCallsBeforeYearChange,
+          );
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+          ).toBeInTheDocument();
+        } finally {
+          window.confirm = originalConfirm;
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    test('dirty indicator and Save count clear after successful save', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        mockedApi.put.mockResolvedValue({});
+        // After save, the refetch should return the new amount so the
+        // baseline is updated and dirtyCount drops back to 0.
+        let aprilAmount = 3000;
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'budgets?year=2026')
+            return Promise.resolve([
+              {
+                id: 1,
+                year: 2026,
+                month: 4,
+                amount: aprilAmount,
+                updated_at: '',
+              },
+            ]);
+          if (path === 'currencies')
+            return Promise.resolve([
+              {
+                code: 'USD',
+                name: 'US Dollar',
+                symbol: '$',
+                rate_to_base: 1,
+                is_base: true,
+                updated_at: '',
+              },
+            ]);
+          return Promise.resolve([]);
+        });
+
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderSettings();
+
+        const april = () =>
+          screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+        await waitFor(() => expect(april().value).toBe('3000'));
+
+        await user.clear(april());
+        await user.type(april(), '4000');
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+          ).toBeInTheDocument();
+        });
+
+        // Flip the mock so the post-save refetch returns the new value.
+        aprilAmount = 4000;
+        await user.click(
+          screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+        );
+
+        await waitFor(() => {
+          expect(mockedApi.put).toHaveBeenCalledWith('budgets/2026/4', {
+            amount: 4000,
+          });
+        });
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Save Budgets$/ }),
+          ).toBeInTheDocument();
+        });
+        expect(
+          screen.queryByTestId('budget-dirty-indicator'),
+        ).not.toBeInTheDocument();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     test('annual total reflects per-row edits', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
