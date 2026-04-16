@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import type { ChangeEvent, FormEvent, MutableRefObject } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
@@ -88,6 +88,31 @@ const VALID_TABS = [
 ] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
 
+// User-facing label for each tab. Used in the discard-edits dialog so the
+// prompt can name the destination ("Leaving for Currencies will lose
+// them...") rather than showing a bare slug.
+const TAB_LABELS: Record<SettingsTab, string> = {
+  general: 'General',
+  currencies: 'Currencies',
+  savings: 'Savings',
+  users: 'Users',
+  data: 'Import / Export',
+};
+
+// User-facing label for each top-level route the sidebar links to. Used
+// in the discard-edits dialog when a route change is intercepted — keeps
+// the description friendly ("Leaving for Transactions") instead of
+// dumping the raw pathname. Falls back to the pathname if a new route
+// ever shows up without a label here.
+const ROUTE_LABELS: Record<string, string> = {
+  '/': 'Dashboard',
+  '/transactions': 'Transactions',
+  '/reports': 'Reports',
+  '/categories': 'Categories',
+  '/trash': 'Trash',
+  '/settings': 'Settings',
+};
+
 /* ---------- Pure helpers ---------- */
 
 function isValidTab(value: string | null): value is SettingsTab {
@@ -113,27 +138,114 @@ function autoMapCategories(
   return map;
 }
 
+/* ---------- Shared: discard-edits confirm dialog ---------- */
+
+interface DiscardEditsDialogProps {
+  open: boolean;
+  count: number;
+  destinationLabel: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+/**
+ * Shadcn-styled replacement for the native `window.confirm` we used to
+ * pop when a user tried to leave the General tab (year dropdown, tab
+ * switch, or sidebar navigation) with unsaved budget edits. One dialog
+ * for all three call sites: the body reads "Discard <N> unsaved
+ * change(s)? You are about to leave for <destinationLabel>." and the
+ * destructive button wins focus so Enter commits (matching the muscle
+ * memory of the old OS dialog). Mirrors <ConfirmPurgeDialog> in
+ * Trash.tsx for visual consistency.
+ */
+function DiscardEditsDialog({
+  open,
+  count,
+  destinationLabel,
+  onCancel,
+  onConfirm,
+}: DiscardEditsDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(isOpen) => {
+        if (!isOpen) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Discard unsaved budget changes?</DialogTitle>
+          <DialogDescription>
+            You have{' '}
+            <span className="font-semibold text-foreground">
+              {count} unsaved change{count === 1 ? '' : 's'}
+            </span>
+            . Leaving for{' '}
+            <span className="font-semibold text-foreground">
+              {destinationLabel}
+            </span>{' '}
+            will lose them. Save your budgets first if you want to keep
+            them.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onCancel}>
+            Keep editing
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={onConfirm}
+            autoFocus
+          >
+            Discard changes
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 /* ---------- General Tab ---------- */
 
-function GeneralSection() {
+// How far ahead of the current year the budget picker lets users plan.
+// Keep small enough that the dropdown stays scannable but large enough
+// to cover realistic forward budgeting (mortgage amortization, yearly
+// goal tracking). Lower bound is `MIN_YEAR` so historical xlsx imports
+// that predate the current year still have a landing spot.
+const BUDGET_YEARS_AHEAD = 5;
+
+interface GeneralSectionProps {
+  // Parent-held mirror of `dirtyCount`. Lets the Settings-level tab
+  // switcher consult the current dirty state *before* committing a tab
+  // change (and before Radix unmounts this component and wipes the
+  // in-progress edits with it). Passed as a ref rather than a callback
+  // so keystrokes don't re-render the parent.
+  dirtyCountRef?: MutableRefObject<number>;
+}
+
+function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
   const baseCurrency = useBaseCurrency();
-  // Hoisted so both `useState` initializers share the same read of the
-  // system clock — otherwise a sub-millisecond drift across a year
-  // boundary could desync `yearInput` from `year` on first render.
   const initialYear = new Date().getFullYear();
-  // Dual state for the year input: `yearInput` is the raw string the user
-  // is typing (keeps the input controlled even during mid-edit invalid
-  // states), `year` is the committed integer value used to fetch. We
-  // commit on every keystroke that's a valid integer in range, so the
-  // table tracks typing in real time, but `Number('') === 0`, a fractional
-  // value like `2026.5`, or an out-of-range number never slips through to
-  // the fetch (which would 400).
-  const [yearInput, setYearInput] = useState(() => String(initialYear));
   const [year, setYear] = useState(initialYear);
   // Per-month input strings, keyed by 1-12. Strings (not numbers) so a
   // cleared field stays empty rather than collapsing to "0", which the
   // backend would reject and which is ambiguous with "not yet set".
   const [editAmounts, setEditAmounts] = useState<Record<number, string>>({});
+  // Raw text for the "Set all months" quick-fill input. Kept separate
+  // from `editAmounts` so applying it is an explicit user action; typing
+  // here must never mutate the 12 rows.
+  const [bulkInput, setBulkInput] = useState('');
+  // Non-null iff at least one bulk write (Apply or Copy-from-previous)
+  // has happened since the last fetch/Undo. Holds the `editAmounts`
+  // captured *before the first* bulk write so Undo restores the fully
+  // pre-bulk state — not an intermediate one. Subsequent bulk writes do
+  // not overwrite it; otherwise `Apply → Copy → Undo` would strand the
+  // user at the Apply-filled state instead of the original baseline.
+  // Cleared on Save success (via refetch), year change, and Undo.
+  const [preBulkSnapshot, setPreBulkSnapshot] = useState<
+    Record<number, string> | null
+  >(null);
   const [saving, setSaving] = useState(false);
   // Snapshot of `editAmounts` at the moment of the last successful fetch,
   // keyed by month. We compare the user's current input against the
@@ -144,12 +256,25 @@ function GeneralSection() {
   // it doesn't trigger a re-render.
   const baselineRef = useRef<Record<number, string>>({});
 
+  // `currentYear + N … MIN_YEAR`, descending. Memoized not for perf
+  // (32 items) but to keep `new Date()` out of render — two renders
+  // crossing a New Year midnight would otherwise produce different
+  // option arrays and reset Radix's Select focus state.
+  const yearSelectOptions = useMemo(() => {
+    const opts: number[] = [];
+    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= MIN_YEAR; y--) {
+      opts.push(y);
+    }
+    return opts;
+  }, [initialYear]);
+
   const fetchBudgets = useCallback(async () => {
     const data = await api.get<Budget[]>(`budgets?year=${year}`);
     const amounts: Record<number, string> = {};
     for (const b of data) amounts[b.month] = String(b.amount);
     baselineRef.current = { ...amounts };
     setEditAmounts(amounts);
+    setPreBulkSnapshot(null);
   }, [year]);
 
   useEffect(() => {
@@ -159,6 +284,7 @@ function GeneralSection() {
       // subsequent save would target the *last successfully loaded* year.
       baselineRef.current = {};
       setEditAmounts({});
+      setPreBulkSnapshot(null);
       toast.error(
         'Failed to load budgets: ' +
           (err instanceof Error ? err.message : 'unknown'),
@@ -166,14 +292,48 @@ function GeneralSection() {
     });
   }, [fetchBudgets]);
 
-  function handleYearChange(e: ChangeEvent<HTMLInputElement>) {
-    const v = e.target.value;
-    setYearInput(v);
-    if (v === '') return;
-    const n = Number(v);
-    // `Number.isInteger` (not `isFinite`) — rejects `2026.5`, `1e10`, NaN.
-    if (Number.isInteger(n) && n >= MIN_YEAR && n <= MAX_YEAR) {
-      setYear(n);
+  function handleApplyBulk() {
+    const raw = bulkInput.trim();
+    const n = Number(raw);
+    // Mirror the per-row validation: empty / non-finite / ≤0 are all
+    // rejected. Keyed off the same Number.isFinite check as `handleSave`
+    // so "Apply" can never stage a row that the save loop would refuse.
+    if (raw === '' || !Number.isFinite(n) || n <= 0) {
+      toast.error('Amount must be greater than 0');
+      return;
+    }
+    setPreBulkSnapshot((prev) => prev ?? editAmounts);
+    const next: Record<number, string> = {};
+    for (let m = 1; m <= 12; m++) next[m] = raw;
+    setEditAmounts(next);
+    setBulkInput('');
+  }
+
+  function handleUndoBulk() {
+    if (preBulkSnapshot === null) return;
+    setEditAmounts(preBulkSnapshot);
+    setPreBulkSnapshot(null);
+  }
+
+  async function handleCopyFromPrev() {
+    const prev = year - 1;
+    if (prev < MIN_YEAR) return;
+    try {
+      const data = await api.get<Budget[]>(`budgets?year=${prev}`);
+      if (data.length === 0) {
+        toast.info(`No budgets found for ${prev}`);
+        return;
+      }
+      setPreBulkSnapshot((snap) => snap ?? editAmounts);
+      const next: Record<number, string> = {};
+      for (const b of data) next[b.month] = String(b.amount);
+      setEditAmounts(next);
+      setBulkInput('');
+    } catch (err) {
+      toast.error(
+        `Failed to load ${prev}: ` +
+          (err instanceof Error ? err.message : 'unknown'),
+      );
     }
   }
 
@@ -249,44 +409,217 @@ function GeneralSection() {
     }
   }
 
-  // True when the user is typing something the committed `year` state
-  // hasn't accepted (empty, fractional, out of range). Drives `aria-invalid`
-  // and a small hint below the input so the user knows the table isn't
-  // reflecting what they typed.
-  const yearDivergent = yearInput !== String(year);
+  // Sum of positive, finite per-row values. Empty or invalid rows
+  // contribute 0 so the total never flashes NaN while the user is mid-edit.
+  const annualTotal = useMemo(() => {
+    let sum = 0;
+    for (let m = 1; m <= 12; m++) {
+      const n = Number(editAmounts[m] ?? '');
+      if (Number.isFinite(n) && n > 0) sum += n;
+    }
+    return sum;
+  }, [editAmounts]);
+
+  // Count of rows whose `editAmounts` value differs from `baselineRef`
+  // AND would produce a valid PUT at save time — mirroring the bucketing
+  // logic in `handleSave`. The count drives the "(N)" badge on the Save
+  // button and the year-change / beforeunload confirms, so it has to
+  // match "what would actually save" rather than "what's visually
+  // different" (a row whose value was cleared is visually different but
+  // we don't issue a DELETE for it, so it shouldn't block navigation).
+  //
+  // `baselineRef.current` is read on every render; React re-renders when
+  // `editAmounts` changes, and every write to `baselineRef.current` in
+  // `fetchBudgets` is paired with a `setEditAmounts`, so this memo always
+  // sees the latest ref value.
+  const dirtyCount = useMemo(() => {
+    let count = 0;
+    for (let m = 1; m <= 12; m++) {
+      const raw = editAmounts[m] ?? '';
+      if (raw === '') continue;
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      const baseline = baselineRef.current[m] ?? '';
+      if (raw === baseline) continue;
+      count++;
+    }
+    return count;
+  }, [editAmounts]);
+
+  // Mirror `dirtyCount` into the parent's ref so the Settings-level tab
+  // switcher can guard tab changes. `TabsContent` unmounts inactive tabs
+  // by default, so without this the user's in-progress edits vanish
+  // silently when they switch to Currencies/Savings/etc. The cleanup
+  // resets to 0 on unmount so a stale count can't block a future tab
+  // change after this component is already gone.
+  useEffect(() => {
+    if (!dirtyCountRef) return;
+    dirtyCountRef.current = dirtyCount;
+    return () => {
+      dirtyCountRef.current = 0;
+    };
+  }, [dirtyCount, dirtyCountRef]);
+
+  // Block accidental browser close / reload while changes are unsaved.
+  // The browser always shows its own generic prompt; the `returnValue`
+  // assignment is the legacy handshake that triggers it on Chromium.
+  // Note: this does NOT fire on in-app navigation (route changes or
+  // Settings tab switches) — those are guarded separately.
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirtyCount]);
+
+  // When a year switch is pending (dirty + user picked a different year),
+  // we park the target year here and open <DiscardEditsDialog>. Clearing
+  // this closes the dialog. Storing the target year (not just a flag) lets
+  // us name the destination in the prompt body.
+  const [pendingYear, setPendingYear] = useState<number | null>(null);
+
+  function handleYearSelect(value: string) {
+    const next = Number(value);
+    // Defensive: Radix `SelectItem` values are always stringified years
+    // here, but `Number('')` is 0 and `Number('custom')` is NaN — either
+    // would slip past the `next === year` guard and yield a garbage
+    // `setYear` call. Reject anything that isn't a valid in-range year.
+    if (!Number.isInteger(next) || next < MIN_YEAR || next > MAX_YEAR) {
+      return;
+    }
+    if (next === year) return;
+    if (dirtyCount > 0) {
+      setPendingYear(next);
+      return;
+    }
+    setYear(next);
+  }
+
+  const copyPrevDisabled = saving || year <= MIN_YEAR;
+  // `Apply` stays disabled until the text parses as a positive finite
+  // number — matches the toast-error branch in `handleApplyBulk` so the
+  // user sees the button react before they click.
+  const bulkParsed = Number(bulkInput.trim());
+  const applyDisabled =
+    saving ||
+    bulkInput.trim() === '' ||
+    !Number.isFinite(bulkParsed) ||
+    bulkParsed <= 0;
 
   return (
     <Card>
-      <CardHeader className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+      <CardHeader className="flex flex-col gap-3">
         <CardTitle className="text-base">Monthly Budgets</CardTitle>
-        <div className="flex flex-col items-end gap-1">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
             <Label
               htmlFor="budget-year"
               className="text-sm text-muted-foreground"
             >
               Year
             </Label>
-            <Input
-              id="budget-year"
-              type="number"
-              value={yearInput}
-              onChange={handleYearChange}
-              onFocus={selectAllOnFocus}
-              min={MIN_YEAR}
-              max={MAX_YEAR}
+            <Select
+              value={String(year)}
+              onValueChange={handleYearSelect}
               disabled={saving}
-              aria-invalid={yearDivergent}
-              className="w-24"
-              aria-label="Budget year"
-            />
+            >
+              <SelectTrigger
+                id="budget-year"
+                className="w-28"
+                aria-label="Budget year"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {yearSelectOptions.map((y) => (
+                  <SelectItem key={y} value={String(y)}>
+                    {y}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          {yearDivergent && (
-            <p className="text-xs text-muted-foreground">
-              Showing {year}
-            </p>
-          )}
+          <div className="flex flex-col gap-1">
+            <Label
+              htmlFor="budget-set-all"
+              className="text-sm text-muted-foreground"
+            >
+              Set all months ({baseCurrency})
+            </Label>
+            <div className="flex gap-2">
+              <Input
+                id="budget-set-all"
+                type="number"
+                step="0.01"
+                min="0"
+                placeholder="0.00"
+                value={bulkInput}
+                onChange={(e) => setBulkInput(e.target.value)}
+                onFocus={selectAllOnFocus}
+                disabled={saving}
+                aria-label={`Apply amount to all months of ${year}`}
+                className="w-32"
+              />
+              <Button
+                type="button"
+                variant="secondary"
+                onClick={handleApplyBulk}
+                disabled={applyDisabled}
+              >
+                Apply
+              </Button>
+            </div>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void handleCopyFromPrev()}
+            disabled={copyPrevDisabled}
+            className="self-end"
+          >
+            Copy from {year - 1}
+          </Button>
+          <div className="flex flex-col gap-1 sm:ml-auto sm:items-end">
+            <span className="text-sm text-muted-foreground">Annual total</span>
+            <span
+              className="text-sm font-medium tabular-nums"
+              aria-label="Annual total"
+            >
+              {formatCurrency(annualTotal, baseCurrency)}
+            </span>
+          </div>
         </div>
+        {(preBulkSnapshot !== null || dirtyCount > 0) && (
+          <div className="flex items-center gap-2">
+            {preBulkSnapshot !== null && (
+              <>
+                <Badge variant="secondary">Bulk change applied</Badge>
+                <Button
+                  type="button"
+                  variant="link"
+                  size="sm"
+                  onClick={handleUndoBulk}
+                  disabled={saving}
+                  className="h-auto p-0"
+                >
+                  Undo
+                </Button>
+              </>
+            )}
+            {dirtyCount > 0 && (
+              <span
+                className="text-sm text-amber-600 dark:text-amber-500"
+                aria-live="polite"
+                data-testid="budget-dirty-indicator"
+              >
+                {dirtyCount} unsaved change{dirtyCount === 1 ? '' : 's'}
+              </span>
+            )}
+          </div>
+        )}
       </CardHeader>
       <CardContent>
         <form
@@ -333,11 +666,29 @@ function GeneralSection() {
               })}
             </TableBody>
           </Table>
-          <Button type="submit" className="w-fit" disabled={saving}>
-            {saving ? 'Saving...' : 'Save Budgets'}
+          <Button
+            type="submit"
+            className={`w-fit ${dirtyCount > 0 && !saving ? 'font-semibold' : ''}`}
+            disabled={saving}
+          >
+            {saving
+              ? 'Saving...'
+              : dirtyCount > 0
+                ? `Save Budgets (${dirtyCount})`
+                : 'Save Budgets'}
           </Button>
         </form>
       </CardContent>
+      <DiscardEditsDialog
+        open={pendingYear !== null}
+        count={dirtyCount}
+        destinationLabel={pendingYear === null ? '' : String(pendingYear)}
+        onCancel={() => setPendingYear(null)}
+        onConfirm={() => {
+          if (pendingYear !== null) setYear(pendingYear);
+          setPendingYear(null);
+        }}
+      />
     </Card>
   );
 }
@@ -1483,9 +1834,22 @@ export function Settings() {
   const { user } = useAuth();
   const admin = isAdmin(user);
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
   const initialTab = isValidTab(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+
+  // Live mirror of GeneralSection's dirtyCount so this component can
+  // block a tab change without GeneralSection having to re-render the
+  // whole Settings tree on every keystroke. GeneralSection writes into
+  // this ref via an effect and resets it on unmount.
+  const generalDirtyCountRef = useRef(0);
+
+  // Parked targets while the discard-edits dialog is open. Storing the
+  // target (tab name or href) rather than a boolean lets the same dialog
+  // name the destination and commit the change on "Discard".
+  const [pendingTab, setPendingTab] = useState<SettingsTab | null>(null);
+  const [pendingHref, setPendingHref] = useState<string | null>(null);
 
   useEffect(() => {
     if (isValidTab(tabParam) && tabParam !== activeTab) {
@@ -1500,12 +1864,81 @@ export function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabParam]);
 
+  // Guard in-app navigation (e.g. sidebar NavLinks) when the General
+  // tab has unsaved budget edits. The app uses <BrowserRouter> — not
+  // the data router — so react-router v7's `useBlocker` isn't
+  // available. We intercept at the DOM level instead: a capture-phase
+  // document listener inspects anchor clicks before React Router's own
+  // onClick handler runs, which is early enough to preventDefault and
+  // park the target in `pendingHref`.
+  //
+  // Scope / filters:
+  //   - Only active while we're on the General tab (other tabs have
+  //     no dirty state today).
+  //   - Only primary-button, unmodified clicks — ctrl/cmd/shift/middle
+  //     are "open in new tab/window" and the user has not asked to
+  //     leave the current view.
+  //   - Only same-origin anchors whose pathname differs from current.
+  //     Hash links, external links, and `target="_blank"` downloads
+  //     (e.g. Import/Export) pass through unguarded.
+  useEffect(() => {
+    if (activeTab !== 'general') return;
+    function handler(e: MouseEvent) {
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      const target = e.target as Element | null;
+      if (!target || typeof target.closest !== 'function') return;
+      const anchor = target.closest('a[href]') as HTMLAnchorElement | null;
+      if (!anchor) return;
+      if (anchor.target === '_blank') return;
+      const rawHref = anchor.getAttribute('href');
+      if (!rawHref || rawHref.startsWith('#') || rawHref.startsWith('mailto:')) {
+        return;
+      }
+      const url = new URL(anchor.href, window.location.href);
+      if (url.origin !== window.location.origin) return;
+      if (url.pathname === window.location.pathname) return;
+      if (generalDirtyCountRef.current <= 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setPendingHref(url.pathname + url.search + url.hash);
+    }
+    document.addEventListener('click', handler, true);
+    return () => document.removeEventListener('click', handler, true);
+  }, [activeTab]);
+
+  function handleTabChange(v: string) {
+    const next = v as SettingsTab;
+    if (next === activeTab) return;
+    // Only the General tab owns unsaved budget edits today. If other
+    // sections grow their own dirty state, add parallel refs and OR
+    // them here rather than collapsing into a single shared counter —
+    // we want to report which tab is dirty in the prompt.
+    if (activeTab === 'general' && generalDirtyCountRef.current > 0) {
+      setPendingTab(next);
+      return;
+    }
+    setActiveTab(next);
+  }
+
+  // Friendly label for the intercepted route. Falls back to the raw
+  // pathname when a route we don't know about shows up, so the dialog
+  // is still readable — just less polished.
+  const pendingHrefLabel = useMemo(() => {
+    if (pendingHref === null) return '';
+    const pathOnly = pendingHref.split(/[?#]/)[0];
+    return ROUTE_LABELS[pathOnly] ?? pathOnly;
+  }, [pendingHref]);
+
+  const dirtyCount = generalDirtyCountRef.current;
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
       <Tabs
         value={activeTab}
-        onValueChange={(v) => setActiveTab(v as SettingsTab)}
+        onValueChange={handleTabChange}
+        activationMode="manual"
         className="w-full"
       >
         <TabsList>
@@ -1516,7 +1949,7 @@ export function Settings() {
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="general" className="mt-6">
-          <GeneralSection />
+          <GeneralSection dirtyCountRef={generalDirtyCountRef} />
         </TabsContent>
         <TabsContent value="currencies" className="mt-6">
           <CurrenciesSection />
@@ -1533,6 +1966,32 @@ export function Settings() {
           <DataSection />
         </TabsContent>
       </Tabs>
+      <DiscardEditsDialog
+        open={pendingTab !== null}
+        count={dirtyCount}
+        destinationLabel={
+          pendingTab === null ? '' : `the ${TAB_LABELS[pendingTab]} tab`
+        }
+        onCancel={() => setPendingTab(null)}
+        onConfirm={() => {
+          if (pendingTab !== null) setActiveTab(pendingTab);
+          setPendingTab(null);
+        }}
+      />
+      <DiscardEditsDialog
+        open={pendingHref !== null}
+        count={dirtyCount}
+        destinationLabel={pendingHrefLabel}
+        onCancel={() => setPendingHref(null)}
+        onConfirm={() => {
+          const href = pendingHref;
+          // Clear *before* navigating: navigate() unmounts this
+          // component and fires the listener cleanup, so there's no
+          // re-render after this point to flush the "null" state.
+          setPendingHref(null);
+          if (href !== null) navigate(href);
+        }}
+      />
     </div>
   );
 }
