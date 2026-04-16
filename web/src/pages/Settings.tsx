@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
+import type { ChangeEvent, FormEvent, MutableRefObject } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
@@ -122,7 +122,16 @@ function autoMapCategories(
 // that predate the current year still have a landing spot.
 const BUDGET_YEARS_AHEAD = 5;
 
-function GeneralSection() {
+interface GeneralSectionProps {
+  // Parent-held mirror of `dirtyCount`. Lets the Settings-level tab
+  // switcher consult the current dirty state *before* committing a tab
+  // change (and before Radix unmounts this component and wipes the
+  // in-progress edits with it). Passed as a ref rather than a callback
+  // so keystrokes don't re-render the parent.
+  dirtyCountRef?: MutableRefObject<number>;
+}
+
+function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
   const baseCurrency = useBaseCurrency();
   const initialYear = new Date().getFullYear();
   const [year, setYear] = useState(initialYear);
@@ -344,9 +353,25 @@ function GeneralSection() {
     return count;
   }, [editAmounts]);
 
-  // Block accidental tab-close / reload while changes are unsaved. The
-  // browser always shows its own generic prompt; the `returnValue`
+  // Mirror `dirtyCount` into the parent's ref so the Settings-level tab
+  // switcher can guard tab changes. `TabsContent` unmounts inactive tabs
+  // by default, so without this the user's in-progress edits vanish
+  // silently when they switch to Currencies/Savings/etc. The cleanup
+  // resets to 0 on unmount so a stale count can't block a future tab
+  // change after this component is already gone.
+  useEffect(() => {
+    if (!dirtyCountRef) return;
+    dirtyCountRef.current = dirtyCount;
+    return () => {
+      dirtyCountRef.current = 0;
+    };
+  }, [dirtyCount, dirtyCountRef]);
+
+  // Block accidental browser close / reload while changes are unsaved.
+  // The browser always shows its own generic prompt; the `returnValue`
   // assignment is the legacy handshake that triggers it on Chromium.
+  // Note: this does NOT fire on in-app navigation (route changes or
+  // Settings tab switches) — those are guarded separately.
   useEffect(() => {
     if (dirtyCount === 0) return;
     const handler = (e: BeforeUnloadEvent) => {
@@ -359,6 +384,13 @@ function GeneralSection() {
 
   function handleYearSelect(value: string) {
     const next = Number(value);
+    // Defensive: Radix `SelectItem` values are always stringified years
+    // here, but `Number('')` is 0 and `Number('custom')` is NaN — either
+    // would slip past the `next === year` guard and yield a garbage
+    // `setYear` call. Reject anything that isn't a valid in-range year.
+    if (!Number.isInteger(next) || next < MIN_YEAR || next > MAX_YEAR) {
+      return;
+    }
     if (next === year) return;
     if (
       dirtyCount > 0 &&
@@ -1701,6 +1733,12 @@ export function Settings() {
   const initialTab = isValidTab(tabParam) ? tabParam : 'general';
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
+  // Live mirror of GeneralSection's dirtyCount so this component can
+  // block a tab change without GeneralSection having to re-render the
+  // whole Settings tree on every keystroke. GeneralSection writes into
+  // this ref via an effect and resets it on unmount.
+  const generalDirtyCountRef = useRef(0);
+
   useEffect(() => {
     if (isValidTab(tabParam) && tabParam !== activeTab) {
       setActiveTab(tabParam);
@@ -1714,12 +1752,33 @@ export function Settings() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabParam]);
 
+  function handleTabChange(v: string) {
+    const next = v as SettingsTab;
+    if (next === activeTab) return;
+    const n = generalDirtyCountRef.current;
+    // Only the General tab owns unsaved budget edits today. If other
+    // sections grow their own dirty state, add parallel refs and OR
+    // them here rather than collapsing into a single shared counter —
+    // we want to report which tab is dirty in the prompt.
+    if (
+      activeTab === 'general' &&
+      n > 0 &&
+      !window.confirm(
+        `You have ${n} unsaved budget change${n === 1 ? '' : 's'}. Discard and leave this tab?`,
+      )
+    ) {
+      return;
+    }
+    setActiveTab(next);
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
       <Tabs
         value={activeTab}
-        onValueChange={(v) => setActiveTab(v as SettingsTab)}
+        onValueChange={handleTabChange}
+        activationMode="manual"
         className="w-full"
       >
         <TabsList>
@@ -1730,7 +1789,7 @@ export function Settings() {
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="general" className="mt-6">
-          <GeneralSection />
+          <GeneralSection dirtyCountRef={generalDirtyCountRef} />
         </TabsContent>
         <TabsContent value="currencies" className="mt-6">
           <CurrenciesSection />

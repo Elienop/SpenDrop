@@ -671,6 +671,62 @@ describe('Settings', () => {
       }
     });
 
+    test('switching Settings tab with dirty budgets prompts confirm', async () => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
+      try {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const confirmSpy = vi.fn<(msg?: string) => boolean>(() => false);
+        const originalConfirm = window.confirm;
+        window.confirm = confirmSpy as unknown as typeof window.confirm;
+        try {
+          renderSettings();
+
+          const april = () =>
+            screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+          await waitFor(() => expect(april().value).toBe('3000'));
+
+          await user.clear(april());
+          await user.type(april(), '4000');
+
+          await waitFor(() => {
+            expect(
+              screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+            ).toBeInTheDocument();
+          });
+
+          // Attempt to switch to Currencies — the Tabs guard must fire
+          // the confirm BEFORE Radix unmounts GeneralSection (otherwise
+          // the dirty state is gone before anything can prompt).
+          await user.click(screen.getByRole('tab', { name: /currencies/i }));
+
+          expect(confirmSpy).toHaveBeenCalledTimes(1);
+          expect(confirmSpy.mock.calls[0][0]).toMatch(/1 unsaved/);
+
+          // Confirm returned false → still on General, input preserved.
+          expect(april().value).toBe('4000');
+
+          // Switching from General to General must not prompt.
+          await user.click(screen.getByRole('tab', { name: /general/i }));
+          expect(confirmSpy).toHaveBeenCalledTimes(1);
+
+          // Accept the confirm → switch commits, GeneralSection unmounts.
+          confirmSpy.mockReturnValue(true);
+          await user.click(screen.getByRole('tab', { name: /currencies/i }));
+          expect(confirmSpy).toHaveBeenCalledTimes(2);
+          await waitFor(() => {
+            expect(
+              screen.queryByLabelText(/Budget for April 2026/i),
+            ).not.toBeInTheDocument();
+          });
+        } finally {
+          window.confirm = originalConfirm;
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     test('dirty indicator and Save count clear after successful save', async () => {
       vi.useFakeTimers({ toFake: ['Date'] });
       vi.setSystemTime(new Date('2026-04-15T12:00:00Z'));
