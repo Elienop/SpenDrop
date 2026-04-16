@@ -98,7 +98,7 @@ describe('toCreatePayload', () => {
       rates,
     );
     // 150000 / 90000 = 1.666..., rounded to 1.67
-    expect((out as { amount: number }).amount).toBe(1.67);
+    expect(out).toMatchObject({ amount: 1.67 });
   });
 
   it('_RateOneIsExplicit: non-base currency with rate === 1 still emits original_*', () => {
@@ -138,7 +138,7 @@ describe('toCreatePayload', () => {
     ).toThrow(/no rate/i);
   });
 
-  it('_NoRateThrows: throws when rateFor returns zero for a non-base currency', () => {
+  it('_ZeroRateThrows: throws when rateFor returns zero for a non-base currency', () => {
     expect(() =>
       toCreatePayload(
         {

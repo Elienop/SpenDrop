@@ -25,6 +25,11 @@ function roundToPreview(n: number): number {
  * pass through their own field set (description, category_id, tags,
  * notes, ...) without losing types. The `currency` key is stripped
  * from the output in both branches.
+ *
+ * The union return type + `as` casts are load-bearing: TS cannot narrow
+ * the discriminant through a rest-spread, so each runtime branch is
+ * asserted to its matching union arm. The casts are safe because the
+ * runtime shape exactly matches the asserted type on each branch.
  */
 export function toCreatePayload<
   T extends Record<string, unknown> & { amount: number; currency: string },
