@@ -455,6 +455,140 @@ describe('Trash', () => {
 
       expect(screen.queryByText(/2 selected/i)).not.toBeInTheDocument();
     });
+
+    // -----------------------------------------------------------------------
+    // Whole-trash bulk actions — the header "Restore all" / "Purge all"
+    // buttons. These fire against a different endpoint pair than the
+    // per-page batch toolbar (which scopes to checkbox selection), so
+    // both code paths need independent coverage.
+    // -----------------------------------------------------------------------
+
+    test('"Restore all" button shows the total count in its label', async () => {
+      renderTrash();
+      // Total in the default fixture is 2 — the button echoes it so the
+      // operator sees the magnitude before clicking.
+      expect(
+        await screen.findByRole('button', { name: /restore all 2/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('"Purge all" button shows the total count in its label', async () => {
+      renderTrash();
+      expect(
+        await screen.findByRole('button', { name: /purge all 2/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('bulk action buttons are hidden when the trash is empty', async () => {
+      mockedApi.get.mockResolvedValueOnce({
+        transactions: [],
+        total: 0,
+        page: 1,
+        per_page: 20,
+      });
+      renderTrash();
+      await screen.findByText(/trash is empty/i);
+      // Neither header button renders when there's nothing to act on —
+      // they'd just be confusing no-ops next to the empty-state card.
+      expect(
+        screen.queryByRole('button', { name: /restore all/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /purge all/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    test('clicking "Restore all" POSTs to restore-all and refetches without a confirm dialog', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 2 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /restore all 2/i }),
+      );
+
+      await waitFor(() => {
+        expect(mockedApi.post).toHaveBeenCalledWith('transactions/restore-all');
+      });
+      // No dialog should have been opened — restore is reversible and
+      // fires directly, matching the single-row and batch-restore flows.
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      // Initial load + refetch after restore-all = 2 gets
+      await waitFor(() => {
+        expect(mockedApi.get).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    test('clicking "Purge all" opens a confirm dialog without calling delete', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /purge all 2/i }),
+      );
+
+      // The dialog opens with explicit "everything in the trash" copy so
+      // the operator can't confuse it with the single-row purge dialog.
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      expect(
+        screen.getByText(/permanently delete everything in the trash/i),
+      ).toBeInTheDocument();
+      // DELETE must not fire until the user confirms
+      expect(mockedApi.del).not.toHaveBeenCalled();
+    });
+
+    test('confirming "Purge all" DELETEs trash and refetches', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue({ purged: 2 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      // Open the dialog via the header trigger ("Purge all 2"), then
+      // confirm via the dialog's distinct "Purge all permanently"
+      // button. The two labels deliberately differ so screen readers
+      // (and this test) can disambiguate between "open the dialog" and
+      // "execute the destructive action".
+      await user.click(
+        screen.getByRole('button', { name: /purge all 2/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /purge all permanently/i }),
+      );
+
+      await waitFor(() => {
+        expect(mockedApi.del).toHaveBeenCalledWith('transactions/trash');
+      });
+      // Initial load + refetch after purge-all = 2 gets
+      await waitFor(() => {
+        expect(mockedApi.get).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    test('cancelling the "Purge all" dialog closes it without calling delete', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /purge all 2/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      });
+      expect(mockedApi.del).not.toHaveBeenCalled();
+    });
   });
 
   // -------------------------------------------------------------------------

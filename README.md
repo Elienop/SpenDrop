@@ -581,7 +581,9 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | GET | `/api/transactions/deleted` | Paginated list of tombstoned transactions, newest first |
 | POST | `/api/transactions/{id}/restore` | Restore a single tombstoned row (clears `deleted_at`, emits a `restore` audit row) |
 | POST | `/api/transactions/restore-batch` | Restore up to 500 rows in one request; already-live or missing IDs are silently skipped |
+| POST | `/api/transactions/restore-all` | Restore every tombstoned row in one shot. Snapshots IDs first, then iterates inside a single SQL transaction so each restore still emits its own `restore` audit row. Returns `{"restored": N}`. |
 | DELETE | `/api/transactions/{id}/purge` | Hard-delete a tombstoned row (the only code path that physically removes a transaction) |
+| DELETE | `/api/transactions/trash` | Hard-delete every tombstoned row in one SQL statement. Returns `{"purged": N}`. Writes no audit rows — purge is intentionally unaudited because the target rows are already tombstones and the audit schema's `FOREIGN KEY(transaction_id)` has no way to reference a row that no longer exists. |
 
 ### Health and monitoring
 | Method | Endpoint | Description |

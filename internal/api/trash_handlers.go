@@ -366,3 +366,136 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 
 	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored})
 }
+
+// restoreAllResponse is the JSON output for POST /api/transactions/restore-all.
+// Mirrors batchRestoreResponse so the frontend can share a render path for
+// both the "selected" and "all pages" bulk-restore results.
+type restoreAllResponse struct {
+	Restored int `json:"restored"`
+}
+
+// handleRestoreAllTransactions serves POST /api/transactions/restore-all —
+// the "oops, everything" escape hatch that flips every tombstoned row
+// back to live in a single request. Unlike restore-batch this handler
+// takes no body: the implicit scope is "the whole trash as it stands
+// right now."
+//
+// Implementation mirrors handleBatchRestoreTransactions: load all
+// tombstoned ids, open one SQL tx, call RestoreTx per id (tolerating
+// sql.ErrNoRows so a race with a concurrent purge/restore doesn't kill
+// the whole call), commit, then re-verify Phase 3.3 checkpoints. One
+// "restore" audit row lands per id so the audit log is identical to
+// what the user would see if they'd hit Restore on each row by hand.
+func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Snapshot the trash before we open the tx. A row that becomes
+	// tombstoned between the snapshot and the tx body won't be restored
+	// on this call — the operator can re-run restore-all to pick it up.
+	// This is strictly weaker than a transactional snapshot but avoids
+	// holding an open tx across the network round-trip from the user's
+	// perspective.
+	ids, err := h.queries.ListAllDeletedTransactionIDs(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list deleted transactions")
+		return
+	}
+
+	if len(ids) == 0 {
+		// Nothing to do — return 0 without opening a tx or writing audit
+		// rows. Previous builds of the UI polled this endpoint from the
+		// trash view, and writing audit rows on every poll would flood
+		// the log.
+		writeJSON(w, http.StatusOK, restoreAllResponse{Restored: 0})
+		return
+	}
+
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	// Rollback is deferred for every non-commit exit. On the success
+	// path tx.Commit() already returned and this rollback observes
+	// sql.ErrTxDone which we deliberately ignore — surfacing any other
+	// rollback error into the logs because it signals orphaned writes.
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
+			log.Printf("restore-all rollback: %v", rbErr)
+		}
+	}()
+
+	restored := 0
+	for _, id := range ids {
+		err := h.txnStore.RestoreTx(ctx, tx, user.ID, id)
+		if err == nil {
+			restored++
+			continue
+		}
+		if errors.Is(err, sql.ErrNoRows) {
+			// Race: the row became live (or was purged) between the
+			// snapshot and this inner call. Skip and keep going.
+			continue
+		}
+		writeError(w, http.StatusInternalServerError, "failed to restore transactions")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit restore-all")
+		return
+	}
+
+	// Phase 3.3: same rationale as batch-restore — the per-id snapshot
+	// doesn't pre-load dates, so re-verify every checkpoint.
+	if restored > 0 {
+		h.verifyAffectedCheckpoints(ctx, time.Time{})
+	}
+
+	writeJSON(w, http.StatusOK, restoreAllResponse{Restored: restored})
+}
+
+// purgeAllResponse is the JSON output for DELETE /api/transactions/trash.
+// Purged is int64 because it is read straight from sql.Result.RowsAffected()
+// and SQLite returns int64; narrowing to int would be a lossy cast for no
+// benefit.
+type purgeAllResponse struct {
+	Purged int64 `json:"purged"`
+}
+
+// handlePurgeAllTransactions serves DELETE /api/transactions/trash —
+// the "empty the trash" escape hatch that hard-deletes every tombstoned
+// row in one shot. This is the only mass-delete code path in the
+// system; every other removal goes through the soft-delete flow first.
+//
+// No audit row is written — same asymmetry documented on the per-row
+// handlePurgeTransaction and on TransactionStore.Purge. The audit table's
+// CHECK constraint doesn't even permit a 'purge' action today, so
+// attempting to write one would surface as a constraint error; the
+// paired test TestHandlePurgeAllTransactions_DoesNotWriteAuditRows
+// guards the invariant explicitly.
+func (h *Handler) handlePurgeAllTransactions(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	result, err := h.queries.PurgeAllTombstonedTransactions(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to purge trash")
+		return
+	}
+	purged, err := result.RowsAffected()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read purge result")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, purgeAllResponse{Purged: purged})
+}

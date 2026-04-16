@@ -177,6 +177,8 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Use(auth.RequireAdmin)
 			r.Get("/transactions/deleted", h.handleListDeletedTransactions)
 			r.Post("/transactions/restore-batch", h.handleBatchRestoreTransactions)
+			r.Post("/transactions/restore-all", h.handleRestoreAllTransactions)
+			r.Delete("/transactions/trash", h.handlePurgeAllTransactions)
 			r.Post("/transactions/{id}/restore", h.handleRestoreTransaction)
 			r.Delete("/transactions/{id}/purge", h.handlePurgeTransaction)
 		})

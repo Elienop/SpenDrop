@@ -173,6 +173,25 @@ LIMIT ? OFFSET ?;
 -- name: CountDeletedTransactions :one
 SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL;
 
+-- name: ListAllDeletedTransactionIDs :many
+-- Drives handleRestoreAllTransactions: returns every tombstoned id so the
+-- handler can iterate through TransactionStore.RestoreTx, producing one
+-- "restore" audit row per id in the same SQL transaction. Ordered by id
+-- ASC so the audit log lands in a stable, reproducible order — tests
+-- that assert on audit row ordering stay deterministic across SQLite
+-- page-cache states.
+SELECT id FROM transactions WHERE deleted_at IS NOT NULL ORDER BY id;
+
+-- name: PurgeAllTombstonedTransactions :execresult
+-- Single-shot hard delete of every tombstoned row — backs
+-- handlePurgeAllTransactions. Unlike the per-row PurgeTransaction this
+-- does not iterate, and deliberately writes no audit rows (same
+-- asymmetry documented on TransactionStore.Purge: the original delete
+-- audit rows plus ON DELETE SET NULL on the FK are the whole audit
+-- story). :execresult surfaces sql.Result so the handler can report
+-- RowsAffected() back to the caller.
+DELETE FROM transactions WHERE deleted_at IS NOT NULL;
+
 -- name: CountAllTransactions :one
 SELECT
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,

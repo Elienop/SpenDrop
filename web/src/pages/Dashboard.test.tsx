@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import React from 'react';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 // Recharts mock — Recharts ships as ES modules that don't render in jsdom
 // without a ResizeObserver, so every component is stubbed to a passthrough.
@@ -234,6 +235,45 @@ describe('Dashboard', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     expect(screen.queryByText('Other')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
+  });
+
+  describe('Today button', () => {
+    beforeEach(() => {
+      // Each test seeds localStorage with a specific month/year, so clear
+      // it up-front to avoid leaking state from earlier tests in this file.
+      localStorage.clear();
+    });
+
+    test('is disabled when already viewing the current month', () => {
+      // The "Today" control is an escape hatch, so it should go dark when
+      // the user is already on today's month — otherwise it flashes an
+      // action that does nothing.
+      const now = new Date();
+      localStorage.setItem(STORAGE_KEYS.dashboardYear, String(now.getFullYear()));
+      localStorage.setItem(STORAGE_KEYS.dashboardMonth, String(now.getMonth() + 1));
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      expect(screen.getByRole('button', { name: /today/i })).toBeDisabled();
+    });
+
+    test('is enabled when viewing a past month', () => {
+      localStorage.setItem(STORAGE_KEYS.dashboardYear, '2024');
+      localStorage.setItem(STORAGE_KEYS.dashboardMonth, '3');
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      expect(screen.getByRole('button', { name: /today/i })).not.toBeDisabled();
+    });
+
+    test('resets to the current month when clicked', async () => {
+      const user = userEvent.setup();
+      localStorage.setItem(STORAGE_KEYS.dashboardYear, '2024');
+      localStorage.setItem(STORAGE_KEYS.dashboardMonth, '3');
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      const todayBtn = screen.getByRole('button', { name: /today/i });
+      expect(todayBtn).not.toBeDisabled();
+      await user.click(todayBtn);
+      // After the click the button flips to disabled — the state change
+      // is what the test proves; no need to poke into localStorage.
+      await waitFor(() => expect(todayBtn).toBeDisabled());
+    });
   });
 
   describe('with more than 6 categories', () => {

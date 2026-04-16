@@ -64,8 +64,13 @@ class ApiClient {
     });
   }
 
-  del(path: string): Promise<void> {
-    return this.request(path, { method: 'DELETE' });
+  // Generic over the response body so handlers that return a
+  // meaningful payload (e.g. DELETE /transactions/trash returns
+  // `{purged: N}`) can be called as `api.del<Shape>(path)` and still
+  // typecheck. Callers that don't care pass `api.del(path)` — the
+  // default `T = void` keeps the original ergonomics.
+  del<T = void>(path: string): Promise<T> {
+    return this.request<T>(path, { method: 'DELETE' });
   }
 
   async upload<T>(path: string, file: File, fieldName = 'file'): Promise<T> {

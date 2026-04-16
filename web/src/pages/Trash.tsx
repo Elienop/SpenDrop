@@ -67,6 +67,8 @@ import {
  *   POST   /api/transactions/{id}/restore      single restore
  *   DELETE /api/transactions/{id}/purge        single hard-delete
  *   POST   /api/transactions/restore-batch     bulk restore (<=500 ids)
+ *   POST   /api/transactions/restore-all       restore every tombstoned row
+ *   DELETE /api/transactions/trash             hard-delete every tombstoned row
  *
  * Design notes:
  *   - No filters, no sorting. The backend pins ordering to
@@ -75,11 +77,14 @@ import {
  *     recovery path.
  *   - Restore is treated as reversible (you can always re-delete) and
  *     fires without a confirm dialog; purge is irreversible and always
- *     walks through <ConfirmPurgeDialog>.
- *   - Batch restore is allowed; batch purge is deliberately NOT
- *     exposed — the plan spec omits it because "restore many at once,
- *     purge one at a time" is the right friction profile for a
- *     recovery surface.
+ *     walks through <ConfirmPurgeDialog> / <ConfirmPurgeAllDialog>.
+ *   - Page-scoped batch restore (checkbox selection) is allowed; page-
+ *     scoped batch purge is deliberately NOT exposed — the plan spec
+ *     omits it because "restore many at once, purge one at a time" is
+ *     the right friction profile at the row level. The page-header
+ *     "Purge all" button exists because wiping the whole trash is an
+ *     operator intent in its own right (distinct from "purge these
+ *     three rows I picked"), and the confirm dialog gives it teeth.
  */
 
 interface PaginationBarProps {
@@ -308,6 +313,80 @@ function ConfirmPurgeDialog({
   );
 }
 
+interface ConfirmPurgeAllDialogProps {
+  open: boolean;
+  count: number;
+  onCancel: () => void;
+  onConfirm: () => void;
+  busy: boolean;
+}
+
+/**
+ * Confirm dialog for the whole-trash purge action. Separate from
+ * <ConfirmPurgeDialog> (which takes a specific row) because the copy
+ * is fundamentally different: this wipes every tombstoned row in the
+ * database, not one the operator picked. The count is rendered into
+ * the body so the user sees exactly how many rows they're about to
+ * annihilate before confirming.
+ */
+function ConfirmPurgeAllDialog({
+  open,
+  count,
+  onCancel,
+  onConfirm,
+  busy,
+}: ConfirmPurgeAllDialogProps) {
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(isOpen) => {
+        // Same block-while-busy guard as the single-row dialog so the
+        // operator can't dismiss the spinner mid-purge.
+        if (busy) return;
+        if (!isOpen) onCancel();
+      }}
+    >
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>Permanently delete everything in the trash?</DialogTitle>
+          <DialogDescription>
+            This will hard-delete{' '}
+            <span className="font-semibold text-foreground">
+              {count} transaction{count === 1 ? '' : 's'}
+            </span>{' '}
+            from the database. This cannot be undone — restore is no
+            longer possible after purge.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onCancel}
+            disabled={busy}
+          >
+            Cancel
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={onConfirm}
+            disabled={busy}
+          >
+            {/*
+              Distinct from the header "Purge all N" trigger button so
+              the accessible name is unambiguous when the dialog is
+              mounted above the header. Matches the single-row dialog's
+              "Purge permanently" pattern.
+            */}
+            {busy ? 'Purging...' : 'Purge all permanently'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export function Trash() {
   const { user, loading: authLoading } = useAuth();
   const baseCurrency = useBaseCurrency();
@@ -331,6 +410,15 @@ export function Trash() {
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchRestoring, setBatchRestoring] = useState(false);
+
+  // Whole-trash bulk actions. `restoringAll` and `purgingAll` gate the
+  // header buttons (and each other — you can't run both at once), while
+  // `pendingPurgeAll` drives the destructive confirm dialog. Restore-
+  // all fires directly without a dialog, matching the reversible-op
+  // convention used by every other restore entry point on this page.
+  const [restoringAll, setRestoringAll] = useState(false);
+  const [purgingAll, setPurgingAll] = useState(false);
+  const [pendingPurgeAll, setPendingPurgeAll] = useState(false);
 
   const admin = isAdmin(user);
 
@@ -459,6 +547,54 @@ export function Trash() {
     }
   }, [selectedIds, fetchTrash]);
 
+  // Whole-trash restore. No confirm dialog — restoring is reversible
+  // (you can always re-delete) and the backend tolerates an empty
+  // trash by returning 0, so an accidental click is cheap to undo.
+  const handleRestoreAll = useCallback(async () => {
+    setRestoringAll(true);
+    try {
+      const resp = await api.post<{ restored: number }>(
+        'transactions/restore-all',
+      );
+      toast.success(
+        `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
+      );
+      // Drop any row-level selection state; the rows it pointed at are
+      // about to disappear from the list anyway.
+      setSelectedIds(new Set());
+      await fetchTrash();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to restore all',
+      );
+    } finally {
+      setRestoringAll(false);
+    }
+  }, [fetchTrash]);
+
+  // Whole-trash purge. Always walks through ConfirmPurgeAllDialog —
+  // this is the single most destructive action on the page and the
+  // confirm button echoes the row count so the operator acknowledges
+  // the magnitude before we fire the DELETE.
+  const handlePurgeAll = useCallback(async () => {
+    setPurgingAll(true);
+    try {
+      const resp = await api.del<{ purged: number }>('transactions/trash');
+      toast.success(
+        `Purged ${resp.purged} transaction${resp.purged === 1 ? '' : 's'}`,
+      );
+      setPendingPurgeAll(false);
+      setSelectedIds(new Set());
+      await fetchTrash();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to purge all',
+      );
+    } finally {
+      setPurgingAll(false);
+    }
+  }, [fetchTrash]);
+
   const handleSelect = useCallback((id: number, checked: boolean) => {
     setSelectedIds((prev) => {
       const next = new Set(prev);
@@ -528,16 +664,54 @@ export function Trash() {
     selectableRows.length > 0 &&
     selectableRows.every((r) => selectedIds.has(r.id));
 
+  const bulkBusy = restoringAll || purgingAll;
+
   return (
     <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Trash</h1>
-        <p className="max-w-3xl text-sm text-muted-foreground">
-          Recently deleted transactions are kept here so a bulk-delete
-          mistake can be recovered. Restored rows reappear in the live
-          transactions list immediately. Purging is permanent — there is
-          no recovery path after that.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex flex-col gap-2">
+          <h1 className="text-2xl font-semibold tracking-tight">Trash</h1>
+          <p className="max-w-3xl text-sm text-muted-foreground">
+            Recently deleted transactions are kept here so a bulk-delete
+            mistake can be recovered. Restored rows reappear in the live
+            transactions list immediately. Purging is permanent — there is
+            no recovery path after that.
+          </p>
+        </div>
+        {/*
+          Page-level bulk actions. Only surfaced when there's actually
+          something in the trash — on an empty trash these buttons would
+          be no-ops that just add visual noise to the "Trash is empty"
+          card below. The buttons mirror the row-level action ordering
+          (restore first, purge second) and the outline/destructive
+          variants so the visual weight matches the consequence.
+        */}
+        {total > 0 && (
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => void handleRestoreAll()}
+              disabled={bulkBusy}
+            >
+              <RotateCcw className="size-3.5" />
+              {restoringAll ? 'Restoring...' : `Restore all ${total}`}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              size="sm"
+              className="h-8 gap-1.5 text-xs"
+              onClick={() => setPendingPurgeAll(true)}
+              disabled={bulkBusy}
+            >
+              <Trash2 className="size-3.5" />
+              {purgingAll ? 'Purging...' : `Purge all ${total}`}
+            </Button>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -747,6 +921,14 @@ export function Trash() {
         onConfirm={() => {
           if (pendingPurge) void handlePurge(pendingPurge);
         }}
+      />
+
+      <ConfirmPurgeAllDialog
+        open={pendingPurgeAll}
+        count={total}
+        busy={purgingAll}
+        onCancel={() => setPendingPurgeAll(false)}
+        onConfirm={() => void handlePurgeAll()}
       />
     </div>
   );

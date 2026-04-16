@@ -617,6 +617,243 @@ func TestHandleBatchRestoreTransactions_InvalidJSON_Returns400(t *testing.T) {
 	}
 }
 
+// --- handleRestoreAllTransactions ---
+//
+// POST /api/transactions/restore-all is the "oops I emptied a whole filter"
+// escape hatch — one click to flip every tombstoned row back to live. The
+// handler must match the per-row restore's audit contract (one "restore"
+// audit row per id) and Phase 3.3 checkpoint reverification, so the tests
+// below mirror the batch-restore suite's invariants.
+
+func TestHandleRestoreAllTransactions_RestoresEverythingInTrash(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Three tombstoned rows + one live row. A regression that widened the
+	// underlying query would pick up the live row as well and the live
+	// count would be wrong after the call.
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "a")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "b")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "c")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-04", 40.0, "live")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-all", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleRestoreAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp restoreAllResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 3 {
+		t.Errorf("Restored=%d, want 3", resp.Restored)
+	}
+
+	// All four rows are now live; no tombstones remain.
+	if got := countTransactions(t, db); got != 4 {
+		t.Errorf("live count after restore-all=%d, want 4", got)
+	}
+	if got := countTombstonedTransactions(t, db); got != 0 {
+		t.Errorf("tombstone count after restore-all=%d, want 0", got)
+	}
+}
+
+func TestHandleRestoreAllTransactions_EmptyTrash_ReturnsZero(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Only a live row exists — trash is empty.
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "live")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-all", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleRestoreAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp restoreAllResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 0 {
+		t.Errorf("Restored=%d, want 0 (empty trash)", resp.Restored)
+	}
+	// An empty-trash call must write no audit rows — otherwise every
+	// "peek at the trash" action in the UI would pollute the log.
+	if got := countAuditRows(t, db); got != 0 {
+		t.Errorf("audit rows after empty-trash restore=%d, want 0", got)
+	}
+}
+
+func TestHandleRestoreAllTransactions_WritesRestoreAuditRowPerID(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	t1 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "a")
+	t2 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "b")
+	t3 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "c")
+
+	// Seeding via the raw sqlc helpers bypasses the store, so the audit
+	// table is empty at this point. The post-call count then equals
+	// exactly the number of restores the endpoint performed.
+	if got := countAuditRows(t, db); got != 0 {
+		t.Fatalf("pre-call audit count=%d, want 0", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-all", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleRestoreAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	if len(rows) != 3 {
+		t.Fatalf("audit row count=%d, want 3 (one per restored id)", len(rows))
+	}
+	gotIDs := map[int64]bool{}
+	for _, r := range rows {
+		if r.Action != database.AuditRestore {
+			t.Errorf("row %d action=%q, want %q", r.TransactionID, r.Action, database.AuditRestore)
+		}
+		gotIDs[r.TransactionID] = true
+	}
+	for _, id := range []int64{t1.ID, t2.ID, t3.ID} {
+		if !gotIDs[id] {
+			t.Errorf("missing audit row for restored transaction id=%d", id)
+		}
+	}
+	assertAllActorsEqual(t, rows, admin.ID)
+}
+
+// --- handlePurgeAllTransactions ---
+//
+// DELETE /api/transactions/trash is the "nuke the whole trash" escape
+// hatch. Unlike restore, purge deliberately writes NO audit rows (same
+// asymmetry documented on TransactionStore.Purge): the original delete
+// audit rows plus the audit table's ON DELETE SET NULL FK are together
+// the whole audit story. The tests below encode that invariant.
+
+func TestHandlePurgeAllTransactions_RemovesAllTombstonedRowsPhysically(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Three tombstoned rows + one live row. The live row must survive.
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "a")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "b")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "c")
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-04", 40.0, "live")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/transactions/trash", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handlePurgeAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp purgeAllResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Purged != 3 {
+		t.Errorf("Purged=%d, want 3", resp.Purged)
+	}
+
+	// Physical count = 1 (only the live row survives). This is the
+	// load-bearing assertion — purge-all is the only code path that
+	// mass-removes transactions from the DB.
+	if got := countAllTransactions(t, db); got != 1 {
+		t.Errorf("post-purge-all physical count=%d, want 1 (only the live row)", got)
+	}
+	if got := countTombstonedTransactions(t, db); got != 0 {
+		t.Errorf("tombstone count after purge-all=%d, want 0", got)
+	}
+}
+
+func TestHandlePurgeAllTransactions_EmptyTrash_ReturnsZero(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Only a live row exists — trash is empty.
+	seedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "live")
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/transactions/trash", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handlePurgeAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp purgeAllResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Purged != 0 {
+		t.Errorf("Purged=%d, want 0 (empty trash)", resp.Purged)
+	}
+	// The lone live row must still be there — purge-all touches only
+	// tombstones.
+	if got := countAllTransactions(t, db); got != 1 {
+		t.Errorf("physical count=%d, want 1 (live row untouched)", got)
+	}
+}
+
+func TestHandlePurgeAllTransactions_DoesNotWriteAuditRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Route two soft-deletes through the handler so two "delete" audit
+	// rows land first — the purge-all test then asserts that purge-all
+	// itself added *nothing* new. Mirror of
+	// TestHandlePurgeTransaction_DoesNotWriteAuditRow for the bulk case.
+	r1 := seedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "first")
+	r2 := seedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "second")
+
+	for _, id := range []int64{r1.ID, r2.ID} {
+		delReq := httptest.NewRequest(http.MethodDelete, "/api/transactions/"+fmt.Sprint(id), nil)
+		delReq = withUserAndURLParam(delReq, admin, "id", fmt.Sprint(id))
+		delRec := httptest.NewRecorder()
+		h.handleDeleteTransaction(delRec, delReq)
+		if delRec.Code != http.StatusOK {
+			t.Fatalf("soft-delete id=%d: status=%d body=%s", id, delRec.Code, delRec.Body.String())
+		}
+	}
+	if got := countAuditRows(t, db); got != 2 {
+		t.Fatalf("pre-purge audit count=%d, want 2 (two delete rows)", got)
+	}
+
+	req := httptest.NewRequest(http.MethodDelete, "/api/transactions/trash", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handlePurgeAllTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// CRITICAL: purge-all must not have added any audit row. The audit
+	// table's CHECK constraint doesn't even allow a 'purge' action today,
+	// so a regression that tried to write one would surface as a
+	// constraint error — but we also want to defend against the opposite
+	// regression of writing misnamed 'delete' rows on purge.
+	if got := countAuditRows(t, db); got != 2 {
+		t.Errorf("post-purge audit count=%d, want 2 (no new rows from purge-all)", got)
+	}
+	// Both surviving audit rows must still be the original delete rows.
+	rows := listAuditRows(t, db)
+	for _, r := range rows {
+		if r.Action != database.AuditDelete {
+			t.Errorf("surviving row action=%q, want %q", r.Action, database.AuditDelete)
+		}
+	}
+}
+
 // --- router-level admin gating ---
 //
 // The tests above exercise the handlers directly and bypass RequireAdmin
@@ -640,6 +877,8 @@ func TestNewRouter_TrashEndpoints_WithoutAuth_Return401(t *testing.T) {
 		{http.MethodPost, "/api/transactions/1/restore"},
 		{http.MethodDelete, "/api/transactions/1/purge"},
 		{http.MethodPost, "/api/transactions/restore-batch"},
+		{http.MethodPost, "/api/transactions/restore-all"},
+		{http.MethodDelete, "/api/transactions/trash"},
 	}
 	for _, c := range cases {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {
@@ -708,6 +947,8 @@ func TestNewRouter_TrashEndpoints_AsMember_Return403(t *testing.T) {
 		{http.MethodPost, "/api/transactions/1/restore", `{}`},
 		{http.MethodDelete, "/api/transactions/1/purge", `{}`},
 		{http.MethodPost, "/api/transactions/restore-batch", `{"ids":[1]}`},
+		{http.MethodPost, "/api/transactions/restore-all", `{}`},
+		{http.MethodDelete, "/api/transactions/trash", `{}`},
 	}
 	for _, c := range cases {
 		t.Run(c.method+" "+c.path, func(t *testing.T) {

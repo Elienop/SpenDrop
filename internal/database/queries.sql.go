@@ -765,6 +765,39 @@ func (q *Queries) ListAllCategories(ctx context.Context) ([]Category, error) {
 	return items, nil
 }
 
+const listAllDeletedTransactionIDs = `-- name: ListAllDeletedTransactionIDs :many
+SELECT id FROM transactions WHERE deleted_at IS NOT NULL ORDER BY id
+`
+
+// Drives handleRestoreAllTransactions: returns every tombstoned id so the
+// handler can iterate through TransactionStore.RestoreTx, producing one
+// "restore" audit row per id in the same SQL transaction. Ordered by id
+// ASC so the audit log lands in a stable, reproducible order — tests
+// that assert on audit row ordering stay deterministic across SQLite
+// page-cache states.
+func (q *Queries) ListAllDeletedTransactionIDs(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listAllDeletedTransactionIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBudgetsByYear = `-- name: ListBudgetsByYear :many
 SELECT id, year, month, amount, updated_at, amount_cents FROM budgets WHERE year = ? ORDER BY month
 `
@@ -1332,6 +1365,21 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 		return nil, err
 	}
 	return items, nil
+}
+
+const purgeAllTombstonedTransactions = `-- name: PurgeAllTombstonedTransactions :execresult
+DELETE FROM transactions WHERE deleted_at IS NOT NULL
+`
+
+// Single-shot hard delete of every tombstoned row — backs
+// handlePurgeAllTransactions. Unlike the per-row PurgeTransaction this
+// does not iterate, and deliberately writes no audit rows (same
+// asymmetry documented on TransactionStore.Purge: the original delete
+// audit rows plus ON DELETE SET NULL on the FK are the whole audit
+// story). :execresult surfaces sql.Result so the handler can report
+// RowsAffected() back to the caller.
+func (q *Queries) PurgeAllTombstonedTransactions(ctx context.Context) (sql.Result, error) {
+	return q.db.ExecContext(ctx, purgeAllTombstonedTransactions)
 }
 
 const purgeTransaction = `-- name: PurgeTransaction :exec
