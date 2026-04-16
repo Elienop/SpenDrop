@@ -26,13 +26,13 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 
 	if v := q.Get("date_from"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err == nil {
-			conditions = append(conditions, "t.date >= ?")
+			conditions = append(conditions, "date(t.date) >= ?")
 			args = append(args, v)
 		}
 	}
 	if v := q.Get("date_to"); v != "" {
 		if _, err := time.Parse("2006-01-02", v); err == nil {
-			conditions = append(conditions, "t.date <= ?")
+			conditions = append(conditions, "date(t.date) <= ?")
 			args = append(args, v)
 		}
 	}
@@ -276,7 +276,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	// cell boundary via centsToDollars.
 	summaryQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
 		FROM categories c
-		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
+		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		GROUP BY c.id
 		HAVING total_cents > 0
 		ORDER BY c.type, total_cents DESC`
@@ -321,7 +321,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		t.original_amount_cents, t.original_currency, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
-		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
+		WHERE t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		ORDER BY t.date DESC, t.id DESC LIMIT ?`
 
 	txnRows, err := h.db.QueryContext(ctx, txnQuery, dateFrom, dateTo, MaxExportRows)
@@ -422,7 +422,7 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount_cents ELSE 0 END), 0) AS income_cents
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
-		WHERE t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
+		WHERE t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		GROUP BY month_num
 		ORDER BY month_num`
 
@@ -492,7 +492,7 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 	// Go side scans int64 and converts at the Excel cell boundary.
 	catQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
 		FROM categories c
-		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND t.date >= ? AND t.date <= ?
+		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		GROUP BY c.id
 		HAVING total_cents > 0
 		ORDER BY c.type, total_cents DESC`

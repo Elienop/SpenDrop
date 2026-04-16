@@ -37,13 +37,13 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 		{
 			name:      "date_from",
 			q:         url.Values{"date_from": {"2025-01-01"}},
-			wantWhere: " WHERE t.date >= ?",
+			wantWhere: " WHERE date(t.date) >= ?",
 			wantArgs:  []any{"2025-01-01"},
 		},
 		{
 			name:      "date_to",
 			q:         url.Values{"date_to": {"2025-12-31"}},
-			wantWhere: " WHERE t.date <= ?",
+			wantWhere: " WHERE date(t.date) <= ?",
 			wantArgs:  []any{"2025-12-31"},
 		},
 		{
@@ -52,7 +52,7 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 				"date_from": {"2025-01-01"},
 				"date_to":   {"2025-12-31"},
 			},
-			wantWhere: " WHERE t.date >= ? AND t.date <= ?",
+			wantWhere: " WHERE date(t.date) >= ? AND date(t.date) <= ?",
 			wantArgs:  []any{"2025-01-01", "2025-12-31"},
 		},
 		{
@@ -130,7 +130,7 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 				"search":     {"rent"},
 				"amount_min": {"500"},
 			},
-			wantWhere: " WHERE t.date >= ? AND t.date <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?",
+			wantWhere: " WHERE date(t.date) >= ? AND date(t.date) <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?",
 			wantArgs:  []any{"2025-01-01", "2025-12-31", "expense", "%rent%", int64(50000)},
 		},
 	}
