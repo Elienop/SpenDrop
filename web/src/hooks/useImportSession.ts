@@ -99,6 +99,16 @@ export function useImportSession(): UseImportSessionResult {
 
   // ---- localStorage resume on mount ----
   useEffect(() => {
+    // `cancelled` gates the setState calls when the component unmounts
+    // mid-fetch (e.g. user navigates away from Settings before the
+    // resume completes). React 18 no longer warns about setState on an
+    // unmounted component, but we still want to avoid the resulting
+    // "ghost" state update — it would briefly flip importStep to
+    // 'preview' on the NEXT mount even though the user moved on.
+    // localStorage.removeItem is NOT gated: the importId is stale either
+    // way, and removing it idempotently is safe to do regardless of
+    // mount state.
+    let cancelled = false;
     const stored = (() => {
       try {
         return localStorage.getItem(STORAGE_KEYS.importId);
@@ -110,6 +120,7 @@ export function useImportSession(): UseImportSessionResult {
 
     void getImportSession(stored)
       .then((fresh) => {
+        if (cancelled) return;
         setPreview(fresh);
         setImportStep('preview');
       })
@@ -122,6 +133,7 @@ export function useImportSession(): UseImportSessionResult {
         } catch {
           /* ignore */
         }
+        if (cancelled) return;
         // 404 (NotFoundError) is the expected outcome after a
         // 60-minute idle — silently drop back to the upload step
         // without an error banner. Any other error surfaces as a
@@ -132,6 +144,10 @@ export function useImportSession(): UseImportSessionResult {
         const message = err instanceof Error ? err.message : 'resume failed';
         setError(message);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // ---- derived state ----

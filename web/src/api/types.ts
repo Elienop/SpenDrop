@@ -148,8 +148,14 @@ export interface ImportRow {
    * computed by the backend. Used by the collision detector. The
    * frontend treats this as opaque — it is shown in the UI only as a
    * debug tooltip (if at all) and is never hashed client-side.
+   *
+   * Optional because the backend does not currently emit it on the
+   * importRow wire payload; marking required would lie to consumers
+   * that the field is always present. When the debug-tooltip feature
+   * needs it, the Go side must add a json tag before flipping the
+   * type to required.
    */
-  content_hash: string;
+  content_hash?: string;
   date: string;
   description: string;
   amount: number;
@@ -221,8 +227,14 @@ export interface ImportPreview {
    * session from the in-memory importStore. The frontend reads this
    * only to show a countdown in the footer (Chunk 5) — it does NOT
    * attempt to refresh the session or warn before expiry.
+   *
+   * Optional because the backend does not currently emit it on the
+   * upload/PATCH/GET wire payload; marking required would lie to
+   * consumers that the field is always present. When the countdown
+   * feature lands, the Go side must add `"expires_at"` to all three
+   * response maps before flipping the type to required.
    */
-  expires_at: string;
+  expires_at?: string;
 }
 
 /**

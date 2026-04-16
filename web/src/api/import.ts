@@ -157,9 +157,20 @@ export async function confirmImport(payload: {
 
   if (response.status === 409) {
     const body = (await response.json().catch(() => null)) as
-      | { code?: string; collision_groups?: CollisionGroup[] }
+      | { code?: string; collision_groups?: CollisionGroup[]; error?: string }
       | null;
-    throw new UnresolvedCollisionsError(body?.collision_groups ?? []);
+    // Only the UNRESOLVED_COLLISIONS code carries a `collision_groups`
+    // payload the caller can act on. Any other 409 (current or future
+    // — e.g. duplicate session, optimistic-lock conflict) would leave
+    // `collision_groups` empty, which would look to the hook like "the
+    // collisions were resolved while we waited" and silently retry.
+    // Fall those through to the generic error branch so the user sees
+    // the server's actual `error` message instead of a confusing
+    // no-op retry loop.
+    if (body?.code === 'UNRESOLVED_COLLISIONS') {
+      throw new UnresolvedCollisionsError(body.collision_groups ?? []);
+    }
+    throw new Error(body?.error || `HTTP 409`);
   }
 
   if (!response.ok) {

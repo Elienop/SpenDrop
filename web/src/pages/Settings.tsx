@@ -1084,8 +1084,10 @@ function ImportPreviewStep({
       </p>
 
       {/* Data table — editable, with inline collision resolution.
-          The component owns its own footer (status + Import button) so
-          the Actions block below intentionally has only Cancel. */}
+          The component owns its entire footer (status + Cancel + Import)
+          so this step renders no standalone action block below. Pairing
+          Cancel and Import on the same decision row keeps the primary
+          and abort actions together — Fitts's and user-expectation both. */}
       <ImportPreviewTable
         preview={preview}
         cellErrors={cellErrors}
@@ -1094,6 +1096,7 @@ function ImportPreviewStep({
         pendingPatchCount={pendingPatchCount}
         onPatchRow={patchRow}
         onConfirm={onConfirm}
+        onCancel={onCancel}
       />
 
       {/* Category mapping summary */}
@@ -1192,14 +1195,6 @@ function ImportPreviewStep({
           </Select>
         </div>
       )}
-
-      {/* Actions — Import button lives inside ImportPreviewTable; this
-          block owns only the Cancel escape hatch. */}
-      <div className="flex gap-2">
-        <Button type="button" variant="outline" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
     </div>
   );
 }
@@ -1496,6 +1491,12 @@ export function Settings() {
     if (isValidTab(tabParam) && tabParam !== activeTab) {
       setActiveTab(tabParam);
     }
+    // activeTab is intentionally excluded from deps: this effect is a
+    // one-way URL → state sync. Including activeTab would re-run the
+    // effect every time the user clicks a tab and could race with the
+    // history listener. The guard above already prevents redundant
+    // setState on equal values, so the only meaningful trigger is a
+    // fresh tabParam coming in from the router.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tabParam]);
 
