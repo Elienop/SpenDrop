@@ -49,6 +49,16 @@ export function TagInput({
   const [suppressedPrefix, setSuppressedPrefix] = useState<string | null>(null);
   const [touchOpen, setTouchOpen] = useState(false);
 
+  // Guards the input's onBlur against committing the typed buffer when
+  // focus is leaving to a tap on the popover listbox. Set synchronously
+  // in the popover's capture-phase pointerdown (which fires before the
+  // blur event is dispatched) and cleared on the next microtask so it
+  // suppresses exactly one blur. The prior heuristic checked
+  // `relatedTarget.closest('[data-radix-popper-content-wrapper]')`, which
+  // failed whenever Radix changed its focus order or when relatedTarget
+  // was null (focus briefly on `body` during the transition).
+  const isPickingRef = useRef(false);
+
   const tags = useMemo(
     () => (value ? value.split(',').map((t) => t.trim()).filter(Boolean) : []),
     [value],
@@ -213,14 +223,13 @@ export function TagInput({
       value={input}
       onChange={handleInputChange}
       onKeyDown={handleKeyDown}
-      onBlur={(e) => {
+      onBlur={() => {
         // Don't commit the typed buffer when focus is leaving to the
         // popover listbox — the tap on an option will addTag itself, and
-        // committing "g" before "groceries" would add a stray tag.
-        const next = e.relatedTarget as HTMLElement | null;
-        if (next && next.closest('[data-radix-popper-content-wrapper]')) {
-          return;
-        }
+        // committing "g" before "groceries" would add a stray tag. The
+        // flag is set synchronously by PopoverContent's capture-phase
+        // pointerdown and cleared on the next microtask.
+        if (isPickingRef.current) return;
         addTag(input);
       }}
       placeholder={tags.length === 0 ? placeholder : ''}
@@ -288,6 +297,17 @@ export function TagInput({
               sideOffset={4}
               onOpenAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
               onCloseAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
+              onPointerDownCapture={() => {
+                // Capture phase runs root→target before the sync blur the
+                // pointerdown will trigger, so the flag is set before the
+                // input's onBlur reads it. Microtask drain happens after
+                // the blur but before click/onSelect, so exactly one blur
+                // is suppressed.
+                isPickingRef.current = true;
+                queueMicrotask(() => {
+                  isPickingRef.current = false;
+                });
+              }}
               className="w-[--radix-popover-trigger-width] p-0"
               id={listboxId}
             >
