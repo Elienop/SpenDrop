@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type Ref } from 'react';
+import { useState, type Ref } from 'react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import {
@@ -82,15 +82,22 @@ export function AmountCurrencyInput({
   // buffer from it — that way external updates (form reset, API round
   // trip) flow through correctly.
   const [rawInput, setRawInput] = useState<string>(() => valueToRaw(value));
-  const focusedRef = useRef(false);
+  const [lastSyncedValue, setLastSyncedValue] = useState(value);
+  const [isFocused, setIsFocused] = useState(false);
 
-  // While focused we intentionally ignore incoming `value` prop changes so the
-  // user's in-flight keystrokes aren't stomped; blur re-syncs from prop.
-  useEffect(() => {
-    if (!focusedRef.current) {
+  // Sync the raw buffer from `value` during render rather than in a useEffect.
+  // React docs recommend this pattern ("Adjusting state when a prop changes")
+  // — the useEffect variant was flagged by react-hooks/set-state-in-effect.
+  // Focus must be tracked in state (not a ref) because react-hooks/refs
+  // disallows reading `ref.current` during render.
+  // While focused we intentionally ignore incoming `value` so in-flight
+  // keystrokes aren't stomped; blur re-syncs via the `onBlur` handler below.
+  if (lastSyncedValue !== value) {
+    setLastSyncedValue(value);
+    if (!isFocused) {
       setRawInput(valueToRaw(value));
     }
-  }, [value]);
+  }
 
   const visible = currencies.filter((c) => {
     if (!hideInactive) return true;
@@ -144,11 +151,11 @@ export function AmountCurrencyInput({
             onValueChange(next === '' || !Number.isFinite(n) ? 0 : n);
           }}
           onFocus={(e) => {
-            focusedRef.current = true;
+            setIsFocused(true);
             selectAllOnFocus(e);
           }}
           onBlur={() => {
-            focusedRef.current = false;
+            setIsFocused(false);
             // Re-sync from the authoritative `value` on blur so any
             // parent-side clamping/rounding is reflected in the input.
             setRawInput(valueToRaw(value));

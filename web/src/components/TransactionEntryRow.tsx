@@ -5,7 +5,7 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
@@ -317,7 +317,10 @@ export function TransactionEntryRow({
   // sticky non-USD preference from localStorage does not flash a spurious
   // "No rate configured" error and briefly disable Save before the real
   // base and rate land.
-  const watchedCurrency = form.watch('currency');
+  // `useWatch` rather than `form.watch` so React Compiler can memoize the
+  // surrounding component — `form.watch` returns a non-stable function that
+  // the compiler refuses to touch (react-hooks/incompatible-library warning).
+  const watchedCurrency = useWatch({ control: form.control, name: 'currency' });
   const hasNoRate =
     !currenciesLoading &&
     watchedCurrency !== baseCode &&
