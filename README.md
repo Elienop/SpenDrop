@@ -28,6 +28,16 @@ Full CRUD for transactions with sortable columns (date, description, category, a
 
 ![Transactions](docs/screenshots/02-transactions.png)
 
+### Multi-currency transactions
+
+The transaction entry row has an inline currency selector. Pick a currency other than your household base (configured in Settings -> Currencies) to record the original-currency amount; SpenDrop divides by the configured `rate_to_base` and stores the base-currency value as the authoritative ledger amount. The list view shows both: the canonical base amount on top, and the original-currency amount as a muted secondary line.
+
+Caveats:
+
+- Every non-base currency must have a configured `rate_to_base` in Settings. If the rate is missing or zero, Save is blocked.
+- The `~=` preview shown while typing is frontend-approximate; the persisted value is the backend's recomputed amount (they round identically so they agree to the cent).
+- Inactive currencies don't appear in the entry-row picker but remain selectable on edit so historical rows round-trip.
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
