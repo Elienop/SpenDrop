@@ -62,7 +62,7 @@ export function TagInput({ value, onChange, placeholder = 'Add tag...', classNam
   return (
     <div
       className={cn(
-        'flex flex-wrap items-center gap-1 min-h-9 rounded-md border border-input bg-background px-2 py-1 cursor-text transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring',
+        'flex flex-wrap items-center gap-1 min-h-10 rounded-md border border-input bg-background px-2 py-1 cursor-text transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring',
         className,
       )}
       onClick={() => inputRef.current?.focus()}

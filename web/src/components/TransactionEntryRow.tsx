@@ -462,47 +462,48 @@ export function TransactionEntryRow({
             name="tags"
             render={({ field }) => (
               <FormItem className="w-56">
-                {/*
-                  Nested-label pattern: wrapping a <label> around the input
-                  avoids the htmlFor/id round-trip that shadcn's FormLabel
-                  expects. Clicking the visible "Tags" text focuses the
-                  first labelable descendant (TagInput's internal input)
-                  automatically, and TagInput keeps its own aria-label
-                  for screen readers. Do NOT replace with <FormLabel>
-                  unless TagInput also accepts an id prop.
-                */}
-                <label className="text-sm font-medium leading-none">
-                  <span className="mb-2 block">Tags</span>
-                  <TagInput
-                    value={field.value}
-                    onChange={field.onChange}
-                    placeholder="Add tags..."
-                    suggestions={tagSuggestions}
-                  />
-                </label>
+                {/* EntryLabel's htmlFor targets the FormItem id; TagInput
+                    doesn't forward that id to its inner input, so label
+                    clicks don't focus — acceptable because TagInput has
+                    its own click-to-focus handler on the wrapper. Using
+                    EntryLabel here (rather than a nested <label>) makes
+                    the label's inline line-box metrics match peer
+                    FormItems so the TagInput's top edge aligns with
+                    peer Inputs under items-start. */}
+                <EntryLabel>Tags</EntryLabel>
+                <TagInput
+                  value={field.value}
+                  onChange={field.onChange}
+                  placeholder="Add tags..."
+                  suggestions={tagSuggestions}
+                />
               </FormItem>
             )}
           />
 
           {/*
-            Invisible label placeholder keeps the submit button's top edge
-            aligned with peer Inputs under `items-start`. Mirrors the
-            structure of a FormItem (space-y-2 between label and control)
-            so the "Add" button sits on the same baseline as Date / Amount /
-            Description / Category / Tags inputs.
+            Invisible Label placeholder keeps the submit button's top edge
+            aligned with peer Inputs under `items-start`. Must exactly
+            mirror the peer FormItem structure — an inline shadcn <Label>
+            followed by a BLOCK-level wrapper around the control — so the
+            line-box math matches. Wrapping <Button> in a <div> forces a
+            new line after the inline label (Button itself is inline-flex
+            and would otherwise sit on the same baseline as the label).
+            Without the wrapper div the label and button share a line box
+            and the button renders ~20px above peer control tops.
           */}
           <div className="space-y-2">
-            <span aria-hidden="true" className="block text-sm leading-none">
-              &nbsp;
-            </span>
-            <Button
-              type="submit"
-              size="sm"
-              className="h-8 text-xs"
-              disabled={currenciesLoading || hasNoRate}
-            >
-              Add
-            </Button>
+            <Label aria-hidden="true">&nbsp;</Label>
+            <div>
+              <Button
+                type="submit"
+                size="sm"
+                className="h-8 text-xs"
+                disabled={currenciesLoading || hasNoRate}
+              >
+                Add
+              </Button>
+            </div>
           </div>
         </form>
       </Form>
