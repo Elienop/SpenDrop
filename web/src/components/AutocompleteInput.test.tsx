@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
 import { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AutocompleteInput } from './AutocompleteInput';
 
@@ -265,5 +265,116 @@ describe('AutocompleteInput — touch (coarse pointer)', () => {
     } finally {
       restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Key propagation contract (see docs/superpowers/specs/2026-04-18-inline-edit-keyboard-shortcuts-design.md)
+// ---------------------------------------------------------------------------
+describe('AutocompleteInput — key propagation contract', () => {
+  function renderWithParentKeydown(
+    props: { suggestions: string[]; initial?: string; onAccept?: (v: string) => void },
+  ) {
+    const parentKeyDown = vi.fn();
+    render(
+      <div onKeyDown={parentKeyDown}>
+        <ControlledAutocomplete {...props} />
+      </div>,
+    );
+    return { parentKeyDown };
+  }
+
+  test('Enter with ghost visible: consumed (preventDefault + stopPropagation), accepts ghost', async () => {
+    const user = userEvent.setup();
+    const onAccept = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'], onAccept });
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    // Character keystrokes during type() bubble to the parent (by contract —
+    // the widget does not act on them). Clear the mock so the assertion only
+    // measures the key under test.
+    parentKeyDown.mockClear();
+    await user.keyboard('{Enter}');
+
+    expect(onAccept).toHaveBeenCalledWith('groceries');
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  test('Enter without ghost: bubbles to parent, does not call onAccept', async () => {
+    const user = userEvent.setup();
+    const onAccept = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'], onAccept });
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'xyz');
+    parentKeyDown.mockClear();
+    await user.keyboard('{Enter}');
+
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].key).toBe('Enter');
+    expect(parentKeyDown.mock.calls[0][0].defaultPrevented).toBe(false);
+  });
+
+  test('Ctrl+Enter bubbles even when ghost visible (modifier bypass)', async () => {
+    const onAccept = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'], onAccept });
+    const input = screen.getByRole('combobox');
+
+    // Type prefix so ghost appears, then dispatch modifier-Enter directly.
+    const user = userEvent.setup();
+    await user.type(input, 'gro');
+    expect(screen.getByTestId('autocomplete-ghost')).toHaveTextContent('ceries');
+    parentKeyDown.mockClear();
+
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].ctrlKey).toBe(true);
+    expect(parentKeyDown.mock.calls[0][0].defaultPrevented).toBe(false);
+  });
+
+  test('Meta+Enter bubbles even when ghost visible (Mac bypass)', async () => {
+    const onAccept = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'], onAccept });
+    const input = screen.getByRole('combobox');
+
+    const user = userEvent.setup();
+    await user.type(input, 'gro');
+    parentKeyDown.mockClear();
+
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].metaKey).toBe(true);
+  });
+
+  test('Escape with ghost visible: consumed (does NOT bubble)', async () => {
+    const user = userEvent.setup();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'] });
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    parentKeyDown.mockClear();
+    await user.keyboard('{Escape}');
+
+    expect(parentKeyDown).not.toHaveBeenCalled();
+    expect(screen.getByTestId('autocomplete-ghost')).toHaveTextContent('');
+  });
+
+  test('Escape without ghost: bubbles to parent', async () => {
+    const user = userEvent.setup();
+    const { parentKeyDown } = renderWithParentKeydown({ suggestions: ['groceries'] });
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'xyz');
+    parentKeyDown.mockClear();
+    await user.keyboard('{Escape}');
+
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].key).toBe('Escape');
   });
 });

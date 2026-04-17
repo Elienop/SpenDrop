@@ -33,9 +33,17 @@ const MAX_TOUCH_MATCHES = 5;
  *   for React-Hook-Form (single source of truth on `value`). To compensate, we
  *   wire `role="combobox"` + `aria-autocomplete="inline"` on the input and mirror
  *   the full match into an `aria-live="polite"` span so screen readers announce
- *   the completion as the user types. The canonical ARIA-APG "selected text inside
- *   the input" pattern requires uncontrolled/ref-driven DOM writes that don't
- *   compose cleanly with RHF — keeping this pragmatic for now.
+ *   the completion as the user types.
+ *
+ * Key-propagation contract (see spec 2026-04-18-inline-edit-keyboard-shortcuts):
+ *   - Keys this component ACTS on (Enter/Escape with ghost, Tab/ArrowRight/End
+ *     with ghost, Escape to close the touch popover) are consumed with BOTH
+ *     preventDefault() and stopPropagation(), so the row-level keydown handler
+ *     does NOT see them.
+ *   - Keys this component does NOT act on (Enter without a ghost, Escape without
+ *     a ghost, any Cmd/Ctrl+Enter) bubble to the parent unchanged.
+ *   - Cmd/Ctrl+Enter short-circuits at the TOP of handleKeyDown so the row-level
+ *     force-save can never be intercepted by widget-local Enter handling.
  */
 export const AutocompleteInput = forwardRef<
   HTMLInputElement,
@@ -114,17 +122,26 @@ export const AutocompleteInput = forwardRef<
   // --- Desktop key handling -------------------------------------------------
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
+      // Modifier bypass — row-level Cmd/Ctrl+Enter must always see the event.
+      // This runs before any branch so no widget-local key handling can intercept.
+      if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+        onKeyDown?.(e);
+        return;
+      }
+
       if (isCoarse) {
-        // On touch, only Escape closes the popover; list navigation lives inside Command.
+        // Touch: only Escape closes the popover. Consume when we actually close.
         if (e.key === 'Escape' && touchOpen) {
+          e.preventDefault();
+          e.stopPropagation();
           setTouchOpen(false);
-          // don't preventDefault so Radix/consumer can also see it
+          return;
         }
         onKeyDown?.(e);
         return;
       }
 
-      // Desktop-only branch from here down.
+      // Desktop branch.
       const caretAtEnd =
         e.currentTarget.selectionStart === text.length &&
         e.currentTarget.selectionEnd === text.length;
@@ -132,26 +149,46 @@ export const AutocompleteInput = forwardRef<
       // Tab: accept ONLY when ghost visible; otherwise let native focus advance.
       if (e.key === 'Tab' && !e.shiftKey && ghostActive && match !== text) {
         e.preventDefault();
+        e.stopPropagation();
         acceptMatch(match);
         return;
       }
 
       if (e.key === 'ArrowRight' && ghostActive && caretAtEnd) {
         e.preventDefault();
+        e.stopPropagation();
         acceptMatch(match);
         return;
       }
 
       if (e.key === 'End' && ghostActive) {
         e.preventDefault();
+        e.stopPropagation();
         acceptMatch(match);
         return;
       }
 
+      // Enter with ghost visible: accept the ghost. Consumed — does not bubble.
+      if (e.key === 'Enter' && ghostActive) {
+        e.preventDefault();
+        e.stopPropagation();
+        acceptMatch(match);
+        return;
+      }
+
+      // Enter without ghost: fall through — the row-level handler will save.
+      // (No preventDefault, no stopPropagation, no return.)
+
       if (e.key === 'Escape' && ghostActive) {
-        // Suppress ghost for current typed prefix without blocking other Escape handlers.
+        // Consume Escape when the ghost is actually visible: suppress it for this
+        // prefix and STOP here. The prior "don't preventDefault so parent Escape
+        // handlers fire" comment was wrong for the layered-edit model — letting
+        // Escape bubble while also handling it causes the GitHub 2023 regression
+        // (single Esc press closes picker AND cancels the row).
+        e.preventDefault();
+        e.stopPropagation();
         setSuppressedPrefix(text);
-        // Don't preventDefault — closing parent popovers / dialogs is expected.
+        return;
       }
 
       onKeyDown?.(e);
