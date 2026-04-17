@@ -350,6 +350,7 @@ describe('AutocompleteInput — key propagation contract', () => {
     expect(onAccept).not.toHaveBeenCalled();
     expect(parentKeyDown).toHaveBeenCalledTimes(1);
     expect(parentKeyDown.mock.calls[0][0].metaKey).toBe(true);
+    expect(parentKeyDown.mock.calls[0][0].defaultPrevented).toBe(false);
   });
 
   test('Escape with ghost visible: consumed (does NOT bubble)', async () => {
