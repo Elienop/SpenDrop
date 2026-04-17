@@ -64,6 +64,10 @@ export interface Currency {
   symbol: string;
   rate_to_base: number;
   is_base: boolean;
+  /** Backend may omit this field on older payloads; callers MUST treat
+   *  `undefined` as active so historical rows keep rendering. Only an
+   *  explicit `false` hides the currency from entry-row pickers. */
+  is_active?: boolean;
   updated_at: string;
 }
 

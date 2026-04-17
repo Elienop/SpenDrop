@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { toCreatePayload, toEditDefaults, PREVIEW_DECIMALS } from './currency';
 import type { Transaction } from '@/api/types';
 
@@ -188,10 +188,47 @@ describe('toEditDefaults', () => {
     expect(toEditDefaults(tx, 'USD')).toEqual({ amount: 25.5, currency: 'USD' });
   });
 
-  it('falls back to baseCode when only one of the original_* fields is present', () => {
-    const txA = makeTx({ original_amount: 100, original_currency: null });
-    const txB = makeTx({ original_amount: null, original_currency: 'EUR' });
-    expect(toEditDefaults(txA, 'USD')).toEqual({ amount: txA.amount, currency: 'USD' });
-    expect(toEditDefaults(txB, 'USD')).toEqual({ amount: txB.amount, currency: 'USD' });
+  it('falls back to baseCode when only one of the original_* fields is present and warns', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const txA = makeTx({
+        id: 42,
+        original_amount: 100,
+        original_currency: null,
+      });
+      const txB = makeTx({
+        id: 43,
+        original_amount: null,
+        original_currency: 'EUR',
+      });
+      expect(toEditDefaults(txA, 'USD')).toEqual({ amount: txA.amount, currency: 'USD' });
+      expect(toEditDefaults(txB, 'USD')).toEqual({ amount: txB.amount, currency: 'USD' });
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn).toHaveBeenNthCalledWith(
+        1,
+        'toEditDefaults: partial original_* fields on transaction',
+        42,
+      );
+      expect(warn).toHaveBeenNthCalledWith(
+        2,
+        'toEditDefaults: partial original_* fields on transaction',
+        43,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('does not warn when both original_* fields are null', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      toEditDefaults(
+        makeTx({ original_amount: null, original_currency: null }),
+        'USD',
+      );
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

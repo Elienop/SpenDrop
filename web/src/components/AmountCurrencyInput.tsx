@@ -94,7 +94,10 @@ export function AmountCurrencyInput({
 
   const visible = currencies.filter((c) => {
     if (!hideInactive) return true;
-    return (c as Currency & { is_active?: boolean }).is_active !== false;
+    // `!== false` intentionally treats `undefined` as active so payloads
+    // from backends that haven't started emitting `is_active` yet keep
+    // every currency visible. See `Currency` type in `api/types.ts`.
+    return c.is_active !== false;
   });
 
   const rate = rateFor(currency);
@@ -161,8 +164,7 @@ export function AmountCurrencyInput({
                   // (amount === original_amount, no original_* stored).
                   const itemDisabled =
                     rateFor(c.code) == null && c.code !== baseCode;
-                  const inactive =
-                    (c as Currency & { is_active?: boolean }).is_active === false;
+                  const inactive = c.is_active === false;
                   return (
                     <CommandItem
                       key={c.code}

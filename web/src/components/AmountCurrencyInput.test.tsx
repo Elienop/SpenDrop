@@ -144,22 +144,17 @@ describe('AmountCurrencyInput', () => {
 
   it('hideInactive=true: filters is_active=false entries out of the picker', async () => {
     const user = userEvent.setup();
-    // Backend Currency type does not yet carry `is_active`, so we force-cast
-    // here to exercise the safe-no-op filter. When the backend adds
-    // `is_active` to the Currency payload, this test keeps working unchanged.
     const list: Currency[] = [
       ...currencies,
       {
-        ...{
-          code: 'INC',
-          name: 'Inactive',
-          symbol: 'I',
-          rate_to_base: 5,
-          is_base: false,
-          updated_at: '2026-04-01T00:00:00Z',
-        },
+        code: 'INC',
+        name: 'Inactive',
+        symbol: 'I',
+        rate_to_base: 5,
+        is_base: false,
         is_active: false,
-      } as unknown as Currency,
+        updated_at: '2026-04-01T00:00:00Z',
+      },
     ];
     renderInput({ currencies: list, hideInactive: true });
     await user.click(screen.getByRole('button', { name: /USD/ }));

@@ -71,6 +71,12 @@ export function toCreatePayload<
  * surface. When the transaction carries both `original_amount` and
  * `original_currency`, round-trips through those; otherwise falls back
  * to the base-currency `amount` and the household's base code.
+ *
+ * When exactly one of `original_amount` / `original_currency` is set —
+ * a data-corruption shape possible after a failed import or partial
+ * migration — the fallback silently strips the straggler on next Save.
+ * A `console.warn` surfaces the offending row id so future debugging
+ * can trace which transaction tripped the partial-null branch.
  */
 export function toEditDefaults(
   tx: Transaction,
@@ -78,6 +84,12 @@ export function toEditDefaults(
 ): { amount: number; currency: string } {
   if (tx.original_amount != null && tx.original_currency != null) {
     return { amount: tx.original_amount, currency: tx.original_currency };
+  }
+  if ((tx.original_amount != null) !== (tx.original_currency != null)) {
+    console.warn(
+      'toEditDefaults: partial original_* fields on transaction',
+      tx.id,
+    );
   }
   return { amount: tx.amount, currency: baseCode };
 }

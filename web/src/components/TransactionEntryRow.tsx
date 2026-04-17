@@ -312,9 +312,16 @@ export function TransactionEntryRow({
   // Lifted so the rate-missing gate stays in one place — duplicating the
   // condition across `error` and `disabled` lets the two branches drift
   // apart on any future refinement (e.g. stricter `rate <= 0` check).
+  // Gated on `!currenciesLoading` so that during the initial fetch — when
+  // the hook returns `baseCode = DEFAULT_CURRENCY` and an empty list — a
+  // sticky non-USD preference from localStorage does not flash a spurious
+  // "No rate configured" error and briefly disable Save before the real
+  // base and rate land.
   const watchedCurrency = form.watch('currency');
   const hasNoRate =
-    watchedCurrency !== baseCode && rateFor(watchedCurrency) == null;
+    !currenciesLoading &&
+    watchedCurrency !== baseCode &&
+    rateFor(watchedCurrency) == null;
 
   return (
     <Card className="p-4">
