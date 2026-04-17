@@ -108,7 +108,6 @@ describe('AmountCurrencyInput', () => {
   });
 
   it('_FocusPreservesRawInput: changing currency while amount input is focused does NOT mutate the DOM value', async () => {
-    const user = userEvent.setup();
     const onValueChange = vi.fn();
     const { rerender } = render(
       <AmountCurrencyInput
