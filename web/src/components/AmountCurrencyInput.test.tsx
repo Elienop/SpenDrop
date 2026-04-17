@@ -77,6 +77,23 @@ describe('AmountCurrencyInput', () => {
     expect(screen.getByText(/≈/)).toHaveTextContent(/\$1\.67/);
   });
 
+  it('_NoReservationWhenNoPreviewOrError: wrapper does not reserve preview/error space when neither is shown', () => {
+    // Regression guard for the "always tall" bug. An earlier fix added an
+    // unconditional `pb-5` + absolute-positioned preview/error to keep the
+    // wrapper height constant across currency toggles — that made the
+    // Amount field permanently ~20px taller than peer fields. This test
+    // pins the wrapper to the "no reservation when not needed" contract.
+    const { container } = renderInput({ value: 100, currency: 'USD', baseCode: 'USD', error: null });
+    const wrapper = container.firstElementChild as HTMLElement;
+    // No pb-5 (or equivalent always-on bottom reservation) on the wrapper.
+    expect(wrapper.className).not.toMatch(/\bpb-5\b/);
+    // And no preview/error children under this state.
+    expect(screen.queryByText(/≈/)).not.toBeInTheDocument();
+    expect(
+      container.querySelector('span.text-destructive'),
+    ).not.toBeInTheDocument();
+  });
+
   it('_PreviewUpdatesOnCurrencyChange: swapping currency with same amount re-renders the preview with the new rate', () => {
     const { rerender } = render(
       <AmountCurrencyInput

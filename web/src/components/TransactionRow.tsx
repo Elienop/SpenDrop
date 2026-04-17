@@ -141,14 +141,21 @@ export function TransactionRow({
 
   if (editing) {
     return (
-      <TableRow>
+      <TableRow className="[&>td]:align-top">
         <TableCell className="w-10">
-          <Checkbox
-            checked={selected}
-            disabled={!onSelect}
-            onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
-            aria-label={`Select ${transaction.description}`}
-          />
+          {/* h-10 flex wrapper vertically centers the 16px Checkbox
+              inside a 40px box matching peer Input height, so under
+              the row's [&>td]:align-top the checkbox center lines up
+              with the first-line center of the Date / Description /
+              Category / Tags / Amount inputs (not their top edge). */}
+          <div className="flex h-10 items-center">
+            <Checkbox
+              checked={selected}
+              disabled={!onSelect}
+              onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
+              aria-label={`Select ${transaction.description}`}
+            />
+          </div>
         </TableCell>
         <TableCell>
           <Input
