@@ -105,7 +105,14 @@ export function AmountCurrencyInput({
   const previewValue = showPreview && rate ? value / rate : 0;
 
   return (
-    <div className="flex flex-col gap-1">
+    // `relative` anchors the absolutely-positioned preview/error spans below.
+    // Keeping them out of the flex-col flow means toggling currency does NOT
+    // change the component's height — the parent form row can stay aligned
+    // via `items-end` without the amount field "jumping" upward when the
+    // `≈ <base>` preview appears. Same stability applies inside the inline
+    // edit TableCell: the table row height stays constant instead of the
+    // amount input shifting within its cell.
+    <div className="relative flex flex-col">
       <div className="flex items-stretch">
         <Input
           id={id}
@@ -200,12 +207,18 @@ export function AmountCurrencyInput({
         </Popover>
       </div>
       {showPreview && (
-        <span className="text-xs text-muted-foreground">
+        <span className="pointer-events-none absolute left-0 top-full mt-0.5 text-xs text-muted-foreground">
           &asymp; {formatCurrency(previewValue, baseCode)}
         </span>
       )}
       {error && (
-        <span className={cn('text-xs text-destructive')}>{error}</span>
+        <span
+          className={cn(
+            'pointer-events-none absolute left-0 top-full mt-0.5 text-xs text-destructive',
+          )}
+        >
+          {error}
+        </span>
       )}
     </div>
   );
