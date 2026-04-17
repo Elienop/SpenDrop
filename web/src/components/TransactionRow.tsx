@@ -5,6 +5,7 @@ import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
+import { AutocompleteInput } from './AutocompleteInput';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
 import { Badge } from '@/components/ui/badge';
@@ -39,6 +40,8 @@ export interface TransactionRowProps {
   onUpdate: (input: UpdateTransactionInput) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onError: (message: string) => void;
+  descriptionSuggestions?: string[];
+  tagSuggestions?: string[];
 }
 
 export function TransactionRow({
@@ -49,6 +52,8 @@ export function TransactionRow({
   onUpdate,
   onDelete,
   onError,
+  descriptionSuggestions = [],
+  tagSuggestions = [],
 }: TransactionRowProps) {
   const { list: currencies, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
   const [editing, setEditing] = useState(false);
@@ -165,10 +170,12 @@ export function TransactionRow({
           />
         </TableCell>
         <TableCell>
-          <Input
-            type="text"
+          <AutocompleteInput
+            suggestions={descriptionSuggestions}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            onAccept={(v) => setDescription(v)}
+            aria-label="Description"
           />
         </TableCell>
         <TableCell>
@@ -186,7 +193,12 @@ export function TransactionRow({
           </Select>
         </TableCell>
         <TableCell>
-          <TagInput value={tags} onChange={setTags} placeholder="Add tags..." />
+          <TagInput
+            value={tags}
+            onChange={setTags}
+            placeholder="Add tags..."
+            suggestions={tagSuggestions}
+          />
         </TableCell>
         <TableCell className="text-right font-mono tabular-nums">
           <AmountCurrencyInput

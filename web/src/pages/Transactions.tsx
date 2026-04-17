@@ -851,9 +851,17 @@ export function Transactions() {
                   onSelect={
                     selectionScope === 'all-matching' ? undefined : handleSelect
                   }
-                  onUpdate={updateTransaction}
+                  onUpdate={async (input) => {
+                    await updateTransaction(input);
+                    // Mirror the create path: a renamed description or
+                    // newly-added tag should surface in suggestions without a
+                    // page reload.
+                    setSuggestionsKey((k) => k + 1);
+                  }}
                   onDelete={deleteTransaction}
                   onError={setRowError}
+                  descriptionSuggestions={suggestions.descriptions}
+                  tagSuggestions={suggestions.tags}
                 />
               ))}
             </TableBody>
