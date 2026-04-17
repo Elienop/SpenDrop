@@ -15,7 +15,7 @@ import {
 } from '@/components/ui/command';
 import { Loader2 } from 'lucide-react';
 import type { Currency } from '@/api/types';
-import { cn, selectAllOnFocus } from '@/lib/utils';
+import { selectAllOnFocus } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 
 /**
@@ -112,7 +112,19 @@ export function AmountCurrencyInput({
     // `≈ <base>` preview appears. Same stability applies inside the inline
     // edit TableCell: the table row height stays constant instead of the
     // amount input shifting within its cell.
-    <div className="relative flex flex-col">
+    //
+    // `pb-5` reserves ~20px below the input for the absolute preview/error.
+    // The preview/error spans use `bottom: 0` so their bottom edge sits at
+    // the bottom of the padding box — inside the reserved strip. Using
+    // `top: 100%` instead places the span's top edge at the padding-box
+    // bottom and extends it downward past the wrapper's own rendered box,
+    // which is what previously triggered a spurious vertical scrollbar on
+    // the transactions table (the span overflowed the table's
+    // `.overflow-auto` ancestor's clientHeight). Reservation is at the
+    // component level — always present regardless of currency — so the
+    // entry-row and inline-edit row heights stay constant, which is the
+    // whole point of the absolute-positioning layout.
+    <div className="relative flex flex-col pb-5">
       <div className="flex items-stretch">
         <Input
           id={id}
@@ -207,16 +219,12 @@ export function AmountCurrencyInput({
         </Popover>
       </div>
       {showPreview && (
-        <span className="pointer-events-none absolute left-0 top-full mt-0.5 text-xs text-muted-foreground">
+        <span className="pointer-events-none absolute bottom-0 left-0 text-xs text-muted-foreground">
           &asymp; {formatCurrency(previewValue, baseCode)}
         </span>
       )}
       {error && (
-        <span
-          className={cn(
-            'pointer-events-none absolute left-0 top-full mt-0.5 text-xs text-destructive',
-          )}
-        >
+        <span className="pointer-events-none absolute bottom-0 left-0 text-xs text-destructive">
           {error}
         </span>
       )}
