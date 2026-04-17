@@ -207,9 +207,14 @@ export function TransactionRow({
           />
         </TableCell>
         <TableCell>
+          {/* `h-10` on the form matches peer TableCell input height so that
+              under the row's [&>td]:align-top, items-center vertically
+              centers the h-9 Save/Cancel buttons inside a 40px box —
+              their centers line up with the first-line center of the
+              Date / Description / Category / Tags / Amount inputs. */}
           <form
             onSubmit={(e) => void handleSave(e)}
-            className="flex items-center justify-end gap-1"
+            className="flex h-10 items-center justify-end gap-1"
           >
             <Button
               type="submit"

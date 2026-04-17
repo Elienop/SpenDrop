@@ -482,19 +482,20 @@ export function TransactionEntryRow({
           />
 
           {/*
-            Invisible Label placeholder keeps the submit button's top edge
-            aligned with peer Inputs under `items-start`. Must exactly
+            Invisible Label placeholder keeps the submit button's column
+            aligned with peer FormItems under `items-start`. Must exactly
             mirror the peer FormItem structure — an inline shadcn <Label>
             followed by a BLOCK-level wrapper around the control — so the
-            line-box math matches. Wrapping <Button> in a <div> forces a
-            new line after the inline label (Button itself is inline-flex
-            and would otherwise sit on the same baseline as the label).
-            Without the wrapper div the label and button share a line box
-            and the button renders ~20px above peer control tops.
+            line-box math matches. The inner wrapper is `h-10 flex
+            items-center` so the h-8 Button is vertically centered inside
+            a 40px box matching peer Input height; otherwise the Button's
+            top would align with the Input's top and leave an 8px gap
+            below, visually floating the Button toward the top half of
+            the Input row.
           */}
           <div className="space-y-2">
             <Label aria-hidden="true">&nbsp;</Label>
-            <div>
+            <div className="flex h-10 items-center">
               <Button
                 type="submit"
                 size="sm"
