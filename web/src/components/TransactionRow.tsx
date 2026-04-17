@@ -1,9 +1,10 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
 import { format } from 'date-fns';
 import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
+import { AmountCurrencyInput } from './AmountCurrencyInput';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
 import { Badge } from '@/components/ui/badge';
@@ -27,20 +28,16 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useCurrencies } from '@/hooks/useCurrencies';
+import { toCreatePayload, toEditDefaults } from '@/lib/currency';
+import type { UpdateTransactionInput } from '@/hooks/useTransactions';
 
 export interface TransactionRowProps {
   transaction: Transaction;
   categories: Category[];
   selected?: boolean;
   onSelect?: (id: number, checked: boolean) => void;
-  onUpdate: (input: {
-    id: number;
-    date: string;
-    amount: number;
-    description: string;
-    category_id: number;
-    tags: string;
-  }) => Promise<void>;
+  onUpdate: (input: UpdateTransactionInput) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onError: (message: string) => void;
 }
@@ -55,26 +52,63 @@ export function TransactionRow({
   onError,
 }: TransactionRowProps) {
   const baseCurrency = useBaseCurrency();
+  const { list: currencies, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
   const [editing, setEditing] = useState(false);
   const [date, setDate] = useState(transaction.date);
-  const [amount, setAmount] = useState(String(transaction.amount));
+  // `baseCode` is `DEFAULT_CURRENCY` ("USD") until the useCurrencies fetch
+  // resolves. For rows with original_* === null and a non-USD household
+  // base, the initial defaults capture "USD"; the didInitEditCurrency
+  // effect below rehydrates once the fetch lands.
+  const initialDefaults = toEditDefaults(transaction, baseCode);
+  const [editAmount, setEditAmount] = useState<number>(initialDefaults.amount);
+  const [editCurrency, setEditCurrency] = useState<string>(initialDefaults.currency);
   const [description, setDescription] = useState(transaction.description);
   const [categoryId, setCategoryId] = useState(String(transaction.category_id));
   const [tags, setTags] = useState(transaction.tags ?? '');
   const [saving, setSaving] = useState(false);
 
+  const didInitEditCurrency = useRef(false);
+  useEffect(() => {
+    if (didInitEditCurrency.current) return;
+    if (currenciesLoading) return;
+    didInitEditCurrency.current = true;
+    const resolved = toEditDefaults(transaction, baseCode);
+    if (resolved.currency !== editCurrency) {
+      setEditCurrency(resolved.currency);
+    }
+    if (resolved.amount !== editAmount) {
+      setEditAmount(resolved.amount);
+    }
+    // editAmount/editCurrency intentionally excluded: this effect must run
+    // exactly once per mount, gated by didInitEditCurrency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currenciesLoading, baseCode, transaction]);
+
   async function handleSave(e: FormEvent) {
     e.preventDefault();
     setSaving(true);
+    let payload: UpdateTransactionInput;
     try {
-      await onUpdate({
-        id: transaction.id,
-        date,
-        amount: parseFloat(amount),
-        description,
-        category_id: parseInt(categoryId, 10),
-        tags,
-      });
+      const wire = toCreatePayload(
+        {
+          amount: editAmount,
+          currency: editCurrency,
+          date,
+          description,
+          category_id: parseInt(categoryId, 10),
+          tags,
+        },
+        baseCode,
+        rateFor,
+      );
+      payload = { id: transaction.id, ...wire } as UpdateTransactionInput;
+    } catch (err) {
+      onError(err instanceof Error ? err.message : 'Invalid currency rate');
+      setSaving(false);
+      return;
+    }
+    try {
+      await onUpdate(payload);
       setEditing(false);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to save');
@@ -84,8 +118,10 @@ export function TransactionRow({
   }
 
   function handleCancel() {
+    const resolved = toEditDefaults(transaction, baseCode);
     setDate(transaction.date);
-    setAmount(String(transaction.amount));
+    setEditAmount(resolved.amount);
+    setEditCurrency(resolved.currency);
     setDescription(transaction.description);
     setCategoryId(String(transaction.category_id));
     setTags(transaction.tags ?? '');
@@ -135,12 +171,21 @@ export function TransactionRow({
           <TagInput value={tags} onChange={setTags} placeholder="Add tags..." />
         </TableCell>
         <TableCell className="text-right font-mono tabular-nums">
-          <Input
-            type="number"
-            value={amount}
-            onChange={(e) => setAmount(e.target.value)}
-            step="0.01"
-            className="text-right"
+          <AmountCurrencyInput
+            value={editAmount}
+            onValueChange={setEditAmount}
+            currency={editCurrency}
+            onCurrencyChange={setEditCurrency}
+            baseCode={baseCode}
+            currencies={currencies}
+            hideInactive={false}
+            rateFor={rateFor}
+            loading={currenciesLoading}
+            error={
+              editCurrency !== baseCode && rateFor(editCurrency) == null
+                ? 'No rate configured for this currency. Set one in Settings.'
+                : null
+            }
           />
         </TableCell>
         <TableCell>
@@ -148,7 +193,15 @@ export function TransactionRow({
             onSubmit={(e) => void handleSave(e)}
             className="flex items-center justify-end gap-1"
           >
-            <Button type="submit" size="sm" disabled={saving}>
+            <Button
+              type="submit"
+              size="sm"
+              disabled={
+                saving ||
+                currenciesLoading ||
+                (editCurrency !== baseCode && rateFor(editCurrency) == null)
+              }
+            >
               Save
             </Button>
             <Button
