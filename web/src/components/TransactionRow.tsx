@@ -3,6 +3,7 @@ import type { FormEvent } from 'react';
 import { format } from 'date-fns';
 import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
+import { AmountDisplay } from './AmountDisplay';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
 import { Badge } from '@/components/ui/badge';
@@ -25,9 +26,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { TYPE_EXPENSE } from '@/lib/transaction-types';
 
 export interface TransactionRowProps {
   transaction: Transaction;
@@ -197,16 +196,14 @@ export function TransactionRow({
             </Badge>
           ))}
       </TableCell>
-      <TableCell
-        className={cn(
-          'whitespace-nowrap text-right font-mono tabular-nums',
-          transaction.category_type === TYPE_EXPENSE
-            ? 'text-foreground'
-            : 'text-emerald-500',
-        )}
-      >
-        {transaction.category_type === TYPE_EXPENSE ? '-' : '+'}
-        {formatCurrency(transaction.amount, baseCurrency)}
+      <TableCell className="whitespace-nowrap text-right">
+        <AmountDisplay
+          amount={transaction.amount}
+          originalAmount={transaction.original_amount}
+          originalCurrency={transaction.original_currency}
+          type={transaction.category_type}
+          baseCode={baseCurrency}
+        />
       </TableCell>
       <TableCell className="text-right">
         <DropdownMenu>

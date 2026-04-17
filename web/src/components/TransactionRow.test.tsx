@@ -166,3 +166,34 @@ describe('TransactionRow tags editing', () => {
     expect(screen.queryByText('extra')).not.toBeInTheDocument();
   });
 });
+
+describe('TransactionRow amount display', () => {
+  it('renders single-line amount when original_* are null (regression)', () => {
+    renderRow(makeTx({ amount: 25.5, original_amount: null, original_currency: null }));
+    expect(screen.getByText(/-\$25\.50/)).toBeInTheDocument();
+    expect(screen.queryByTestId('amount-display-secondary')).not.toBeInTheDocument();
+  });
+
+  it('renders two-line amount when original_currency differs from base', () => {
+    renderRow(
+      makeTx({
+        amount: 1.67,
+        original_amount: 150000,
+        original_currency: 'LBP',
+      }),
+    );
+    expect(screen.getByText(/-\$1\.67/)).toBeInTheDocument();
+    expect(screen.getByTestId('amount-display-secondary')).toHaveTextContent('LBP');
+  });
+
+  it('falls back to single-line when original_currency equals base (defensive)', () => {
+    renderRow(
+      makeTx({
+        amount: 25.5,
+        original_amount: 25.5,
+        original_currency: 'USD',
+      }),
+    );
+    expect(screen.queryByTestId('amount-display-secondary')).not.toBeInTheDocument();
+  });
+});
