@@ -186,6 +186,11 @@ export function TransactionEntryRow({
     async (values: EntryFormValues) => {
       let payload: CreateTransactionInput;
       try {
+        // Union-to-optional widening: toCreatePayload returns a discriminated
+        // union (collapsed vs. expanded shape), while CreateTransactionInput
+        // declares original_amount / original_currency as optional. Both
+        // branches are structurally compatible at runtime — the cast only
+        // tells the type system that the optional-field form subsumes both.
         payload = toCreatePayload(values, baseCode, rateFor) as CreateTransactionInput;
       } catch {
         toast.error('Failed to save transaction');
@@ -304,6 +309,13 @@ export function TransactionEntryRow({
     return () => window.removeEventListener('keydown', onKey);
   }, [undoLastSave]);
 
+  // Lifted so the rate-missing gate stays in one place — duplicating the
+  // condition across `error` and `disabled` lets the two branches drift
+  // apart on any future refinement (e.g. stricter `rate <= 0` check).
+  const watchedCurrency = form.watch('currency');
+  const hasNoRate =
+    watchedCurrency !== baseCode && rateFor(watchedCurrency) == null;
+
   return (
     <Card className="p-4">
       <Form {...form}>
@@ -343,7 +355,7 @@ export function TransactionEntryRow({
                   <AmountCurrencyInput
                     value={field.value}
                     onValueChange={(v) => field.onChange(v)}
-                    currency={form.watch('currency')}
+                    currency={watchedCurrency}
                     onCurrencyChange={(code) =>
                       form.setValue('currency', code, { shouldValidate: true })
                     }
@@ -353,8 +365,7 @@ export function TransactionEntryRow({
                     rateFor={rateFor}
                     loading={currenciesLoading}
                     error={
-                      rateFor(form.watch('currency')) == null &&
-                      form.watch('currency') !== baseCode
+                      hasNoRate
                         ? 'No rate configured for this currency. Set one in Settings.'
                         : null
                     }
@@ -462,11 +473,7 @@ export function TransactionEntryRow({
             type="submit"
             size="sm"
             className="h-8 text-xs"
-            disabled={
-              currenciesLoading ||
-              (form.watch('currency') !== baseCode &&
-                rateFor(form.watch('currency')) == null)
-            }
+            disabled={currenciesLoading || hasNoRate}
           >
             Add
           </Button>
