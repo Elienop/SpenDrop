@@ -1,6 +1,7 @@
 import { describe, test, expect, vi } from 'vitest';
+import type { ReactNode } from 'react';
 import { useState } from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TagInput } from './TagInput';
 
@@ -392,5 +393,130 @@ describe('TagInput — touch (coarse pointer)', () => {
     } finally {
       restore();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Key propagation contract (see docs/superpowers/specs/2026-04-18-inline-edit-keyboard-shortcuts-design.md)
+// ---------------------------------------------------------------------------
+describe('TagInput — key propagation contract', () => {
+  function renderWithParentKeydown(node: ReactNode) {
+    const parentKeyDown = vi.fn();
+    render(<div onKeyDown={parentKeyDown}>{node}</div>);
+    return { parentKeyDown };
+  }
+
+  test('Enter with typed buffer: consumed, addTag fires, does not bubble', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput onChange={onChange} />,
+    );
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    // Character keystrokes during type() bubble to the parent (by contract —
+    // the widget does not act on them). Clear the mock so the assertion only
+    // measures the key under test.
+    parentKeyDown.mockClear();
+    await user.keyboard('{Enter}');
+
+    expect(onChange).toHaveBeenCalledWith('gro');
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  test('Enter with empty buffer: NOT consumed, bubbles to parent', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput onChange={onChange} />,
+    );
+    const input = screen.getByRole('combobox');
+
+    await user.click(input);
+    await user.keyboard('{Enter}');
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].key).toBe('Enter');
+  });
+
+  test('Ctrl+Enter with typed buffer: NOT consumed (modifier bypass), bubbles', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput onChange={onChange} />,
+    );
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    parentKeyDown.mockClear();
+    fireEvent.keyDown(input, { key: 'Enter', ctrlKey: true });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].ctrlKey).toBe(true);
+  });
+
+  test('Meta+Enter with typed buffer: NOT consumed, bubbles', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput onChange={onChange} />,
+    );
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    parentKeyDown.mockClear();
+    fireEvent.keyDown(input, { key: 'Enter', metaKey: true });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].metaKey).toBe(true);
+  });
+
+  test('Escape with ghost visible: consumed, does not bubble', async () => {
+    const user = userEvent.setup();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput suggestions={['groceries']} />,
+    );
+    const input = screen.getByRole('combobox');
+
+    await user.type(input, 'gro');
+    expect(screen.getByTestId('taginput-ghost')).toHaveTextContent('ceries');
+    parentKeyDown.mockClear();
+
+    await user.keyboard('{Escape}');
+
+    expect(parentKeyDown).not.toHaveBeenCalled();
+  });
+
+  test('Escape with no ghost and no popover: bubbles to parent', async () => {
+    const user = userEvent.setup();
+    const { parentKeyDown } = renderWithParentKeydown(<ControlledTagInput />);
+    const input = screen.getByRole('combobox');
+
+    await user.click(input);
+    await user.keyboard('{Escape}');
+
+    expect(parentKeyDown).toHaveBeenCalledTimes(1);
+    expect(parentKeyDown.mock.calls[0][0].key).toBe('Escape');
+  });
+
+  test("',' with empty buffer: preventDefault (no literal comma inserted), does not addTag", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const { parentKeyDown } = renderWithParentKeydown(
+      <ControlledTagInput onChange={onChange} />,
+    );
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+
+    await user.click(input);
+    parentKeyDown.mockClear();
+    await user.keyboard(',');
+
+    expect(onChange).not.toHaveBeenCalled();
+    // Literal ',' was swallowed — buffer must stay empty.
+    expect(input.value).toBe('');
   });
 });

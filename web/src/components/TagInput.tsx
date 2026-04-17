@@ -30,6 +30,16 @@ const MAX_TOUCH_MATCHES = 5;
  * + `aria-live` mirror announce the completion to screen readers. Touch uses a
  * shadcn Popover + Command dropdown anchored to the input via PopoverAnchor so
  * the input keeps focus.
+ *
+ * Key-propagation contract (see spec 2026-04-18-inline-edit-keyboard-shortcuts):
+ *   - Keys this component ACTS on (Enter/",", on a non-empty buffer or visible
+ *     ghost; Tab/ArrowRight/End on ghost; Escape on ghost or open popover) are
+ *     consumed with BOTH preventDefault() and stopPropagation().
+ *   - Enter on an EMPTY buffer with no ghost bubbles — this is the "Enter twice
+ *     after your last tag" pattern: first Enter commits the chip, second Enter
+ *     reaches the row handler and saves.
+ *   - Cmd/Ctrl+Enter short-circuits at the top so the row-level force-save is
+ *     never intercepted.
  */
 export function TagInput({
   value,
@@ -131,20 +141,38 @@ export function TagInput({
   );
 
   function handleKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    // Touch branch: Escape closes popover; Enter/comma/Backspace still work.
+    // Modifier bypass — row-level Cmd/Ctrl+Enter must always see the event.
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      return;
+    }
+
+    // Touch branch.
     if (isCoarse) {
       if (e.key === 'Escape' && touchOpen) {
+        e.preventDefault();
+        e.stopPropagation();
         setTouchOpen(false);
-        // don't preventDefault — let parent dialogs/popovers see it too
+        return;
       }
       if (e.key === 'Enter') {
-        e.preventDefault();
-        addTag(input);
+        // Commit typed buffer only if there is one; otherwise bubble so the row
+        // handler can save. `addTag` would early-return on empty, but we also
+        // must not call preventDefault in that case or Enter is swallowed.
+        if (input.length > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          addTag(input);
+        }
         return;
       }
       if (e.key === ',') {
+        // Always swallow the literal ',' so it never lands in the buffer,
+        // but only consume (stopPropagation) when we actually commit a tag.
         e.preventDefault();
-        addTag(input);
+        if (input.length > 0) {
+          e.stopPropagation();
+          addTag(input);
+        }
         return;
       }
       if (e.key === 'Backspace' && input === '' && tags.length > 0) {
@@ -158,45 +186,62 @@ export function TagInput({
       e.currentTarget.selectionStart === input.length &&
       e.currentTarget.selectionEnd === input.length;
 
-    // Tab: accept ghost as a tag when visible; otherwise let native focus move.
     if (e.key === 'Tab' && !e.shiftKey && ghostActive) {
       e.preventDefault();
+      e.stopPropagation();
       addTag(match);
       return;
     }
 
     if (e.key === 'ArrowRight' && ghostActive && caretAtEnd) {
       e.preventDefault();
+      e.stopPropagation();
       addTag(match);
       return;
     }
 
     if (e.key === 'End' && ghostActive) {
       e.preventDefault();
+      e.stopPropagation();
       addTag(match);
       return;
     }
 
     if (e.key === 'Enter') {
-      e.preventDefault();
-      // Prefer the ghost when visible — that's the expected autocomplete UX.
+      // Two commit paths:
+      //   - ghost visible → commit the ghost suggestion (consumed)
+      //   - buffer non-empty → commit the typed buffer (consumed)
+      //   - buffer empty, no ghost → bubble so the row handler can save
       if (ghostActive) {
+        e.preventDefault();
+        e.stopPropagation();
         addTag(match);
-      } else {
+        return;
+      }
+      if (input.length > 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        addTag(input);
+        return;
+      }
+      return; // bubble
+    }
+
+    if (e.key === ',') {
+      // Always swallow the literal ',' so it never lands in the buffer,
+      // but only consume (stopPropagation) when we actually commit a tag.
+      e.preventDefault();
+      if (input.length > 0) {
+        e.stopPropagation();
         addTag(input);
       }
       return;
     }
 
-    if (e.key === ',') {
-      e.preventDefault();
-      addTag(input);
-      return;
-    }
-
     if (e.key === 'Escape' && ghostActive) {
+      e.preventDefault();
+      e.stopPropagation();
       setSuppressedPrefix(input);
-      // Don't preventDefault — parent Escape handlers are expected to fire.
       return;
     }
 
