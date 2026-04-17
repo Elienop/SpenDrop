@@ -5,7 +5,6 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
-  type SyntheticEvent,
 } from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { Popover, PopoverContent } from '@/components/ui/popover';
@@ -295,8 +294,8 @@ export function TagInput({
             <PopoverContent
               align="start"
               sideOffset={4}
-              onOpenAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
-              onCloseAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
+              onOpenAutoFocus={(e: Event) => e.preventDefault()}
+              onCloseAutoFocus={(e: Event) => e.preventDefault()}
               onPointerDownCapture={() => {
                 // Capture phase runs root→target before the sync blur the
                 // pointerdown will trigger, so the flag is set before the

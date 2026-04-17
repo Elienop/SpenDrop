@@ -7,7 +7,6 @@ import {
   type InputHTMLAttributes,
   type KeyboardEvent,
   type ChangeEvent,
-  type SyntheticEvent,
 } from 'react';
 import * as PopoverPrimitive from '@radix-ui/react-popover';
 import { Input } from '@/components/ui/input';
@@ -197,9 +196,9 @@ export const AutocompleteInput = forwardRef<
           sideOffset={4}
           // Prevent the popover from stealing focus when it opens — the input
           // must remain the typing surface. Users tap a row to pick.
-          onOpenAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
+          onOpenAutoFocus={(e: Event) => e.preventDefault()}
           // Don't refocus the trigger (there is none in the usual sense) on close.
-          onCloseAutoFocus={(e: SyntheticEvent) => e.preventDefault()}
+          onCloseAutoFocus={(e: Event) => e.preventDefault()}
           className="w-[--radix-popover-trigger-width] p-0"
           id={listboxId}
         >
