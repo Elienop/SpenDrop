@@ -27,7 +27,6 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useCurrencies } from '@/hooks/useCurrencies';
 import { toCreatePayload, toEditDefaults } from '@/lib/currency';
 import type { UpdateTransactionInput } from '@/hooks/useTransactions';
@@ -51,7 +50,6 @@ export function TransactionRow({
   onDelete,
   onError,
 }: TransactionRowProps) {
-  const baseCurrency = useBaseCurrency();
   const { list: currencies, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
   const [editing, setEditing] = useState(false);
   const [date, setDate] = useState(transaction.date);
@@ -101,7 +99,7 @@ export function TransactionRow({
         baseCode,
         rateFor,
       );
-      payload = { id: transaction.id, ...wire } as UpdateTransactionInput;
+      payload = { id: transaction.id, ...wire };
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Invalid currency rate');
       setSaving(false);
@@ -117,7 +115,7 @@ export function TransactionRow({
     }
   }
 
-  function handleCancel() {
+  function resetEditFields() {
     const resolved = toEditDefaults(transaction, baseCode);
     setDate(transaction.date);
     setEditAmount(resolved.amount);
@@ -125,6 +123,19 @@ export function TransactionRow({
     setDescription(transaction.description);
     setCategoryId(String(transaction.category_id));
     setTags(transaction.tags ?? '');
+  }
+
+  // Reseed edit fields from the current `transaction` prop on every
+  // Edit-open, not just mount. Without this, `useState` captures the
+  // prop snapshot at first mount — so a parent refetch that lands
+  // before the user first opens Edit leaves them editing stale data.
+  function startEditing() {
+    resetEditFields();
+    setEditing(true);
+  }
+
+  function handleCancel() {
+    resetEditFields();
     setEditing(false);
   }
 
@@ -255,7 +266,7 @@ export function TransactionRow({
           originalAmount={transaction.original_amount}
           originalCurrency={transaction.original_currency}
           type={transaction.category_type}
-          baseCode={baseCurrency}
+          baseCode={baseCode}
         />
       </TableCell>
       <TableCell className="text-right">
@@ -273,7 +284,7 @@ export function TransactionRow({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end">
-            <DropdownMenuItem onSelect={() => setEditing(true)}>
+            <DropdownMenuItem onSelect={startEditing}>
               Edit
             </DropdownMenuItem>
             <DropdownMenuSeparator />
