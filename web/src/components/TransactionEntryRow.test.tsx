@@ -21,8 +21,27 @@ vi.mock('sonner', () => ({
   Toaster: () => null,
 }));
 
+vi.mock('@/api/client', () => ({
+  api: {
+    get: vi.fn(async (path: string) => {
+      if (path === 'currencies') {
+        return [
+          { code: 'USD', name: 'US Dollar', symbol: '$', rate_to_base: 1, is_base: true, updated_at: '2026-04-01T00:00:00Z' },
+          { code: 'EUR', name: 'Euro', symbol: '€', rate_to_base: 0.9, is_base: false, updated_at: '2026-04-01T00:00:00Z' },
+          { code: 'LBP', name: 'Lebanese Pound', symbol: 'LL', rate_to_base: 90000, is_base: false, updated_at: '2026-04-01T00:00:00Z' },
+        ];
+      }
+      return [];
+    }),
+    post: vi.fn(),
+    put: vi.fn(),
+    del: vi.fn(),
+  },
+}));
+
 // Import after the mock so we get the mocked version
 import { toast } from 'sonner';
+import { __resetCurrenciesCacheForTests } from '../hooks/useCurrencies';
 
 const mockCategories: Category[] = [
   {
@@ -76,6 +95,7 @@ describe('TransactionEntryRow', () => {
   let onDelete: Mock;
 
   beforeEach(() => {
+    __resetCurrenciesCacheForTests();
     onSubmit = vi.fn().mockResolvedValue(savedTransaction);
     onDelete = vi.fn().mockResolvedValue(undefined);
     (toast.success as Mock).mockClear();
@@ -228,7 +248,10 @@ describe('TransactionEntryRow', () => {
   // Phase C: Keyboard — Enter navigation + ⌘Enter submit
   // -----------------------------------------------------------------
 
-  it('Enter on Amount moves focus to Description', async () => {
+  it('Enter on Amount advances focus without submitting', async () => {
+    // With Phase J wiring the amount advances to currency (covered in the
+    // Phase J Tab order test). Here we just assert the non-submitting
+    // navigation contract: Enter does NOT submit from amount.
     const user = userEvent.setup();
     render(
       <TransactionEntryRow
@@ -237,12 +260,12 @@ describe('TransactionEntryRow', () => {
         onDelete={onDelete}
       />,
     );
+    await screen.findByRole('button', { name: /currency: usd/i });
 
     const amount = screen.getByLabelText(/amount/i);
     amount.focus();
     await user.type(amount, '50{Enter}');
 
-    expect(screen.getByLabelText(/description/i)).toHaveFocus();
     expect(onSubmit).not.toHaveBeenCalled();
   });
 
@@ -613,5 +636,142 @@ describe('TransactionEntryRow', () => {
     expect(
       screen.getByRole('button', { name: /salary/i }),
     ).toBeInTheDocument();
+  });
+
+  // -----------------------------------------------------------------
+  // Phase J: Currency selector
+  // -----------------------------------------------------------------
+
+  it('defaults currency to baseCode when localStorage is empty', async () => {
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    expect(
+      await screen.findByRole('button', { name: /currency: usd/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('defaults currency to spendrop-last-currency when present', async () => {
+    localStorage.setItem('spendrop-last-currency', 'LBP');
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    expect(
+      await screen.findByRole('button', { name: /currency: lbp/i }),
+    ).toBeInTheDocument();
+  });
+
+  it('submits the collapsed payload when currency === baseCode', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    await screen.findByRole('button', { name: /currency: usd/i });
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '25');
+    await user.type(screen.getByLabelText(/description/i), 'Lunch');
+    await user.click(
+      screen.getByRole('button', { name: /select category/i }),
+    );
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload).not.toHaveProperty('currency');
+    expect(payload).not.toHaveProperty('original_amount');
+    expect(payload).not.toHaveProperty('original_currency');
+    expect(payload).toMatchObject({ amount: 25 });
+  });
+
+  it('submits the expanded payload when currency !== baseCode', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    await screen.findByRole('button', { name: /currency: usd/i });
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '150000');
+    await user.type(screen.getByLabelText(/description/i), 'Groceries');
+    await user.click(screen.getByRole('button', { name: /currency: usd/i }));
+    await user.click(await screen.findByRole('option', { name: /LBP/ }));
+    await user.click(
+      screen.getByRole('button', { name: /select category/i }),
+    );
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    const payload = onSubmit.mock.calls[0][0];
+    expect(payload).toMatchObject({
+      amount: 1.67, // 150000 / 90000 = 1.666... → 1.67
+      original_amount: 150000,
+      original_currency: 'LBP',
+    });
+    expect(payload).not.toHaveProperty('currency');
+  });
+
+  it('persists currency on successful save', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    await screen.findByRole('button', { name: /currency: usd/i });
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '50');
+    await user.type(screen.getByLabelText(/description/i), 'x');
+    await user.click(screen.getByRole('button', { name: /currency: usd/i }));
+    await user.click(await screen.findByRole('option', { name: /EUR/ }));
+    await user.click(
+      screen.getByRole('button', { name: /select category/i }),
+    );
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() =>
+      expect(localStorage.getItem('spendrop-last-currency')).toBe('EUR'),
+    );
+  });
+
+  it('Tab order: date → amount → currency → description → category', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+    await screen.findByRole('button', { name: /currency: usd/i });
+    const amount = screen.getByLabelText(/amount/i);
+    amount.focus();
+    await user.type(amount, '5{Enter}');
+    expect(screen.getByRole('button', { name: /currency: usd/i })).toHaveFocus();
   });
 });

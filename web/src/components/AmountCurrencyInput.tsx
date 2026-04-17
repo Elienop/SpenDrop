@@ -38,6 +38,11 @@ export interface AmountCurrencyInputProps {
   disabled?: boolean;
   inputRef?: Ref<HTMLInputElement>;
   dataEntryField?: string;
+  /** Optional DOM id to apply to the inner amount `<input>`. When composed
+   *  inside a shadcn `FormControl`, Radix `Slot` injects `id={formItemId}`
+   *  onto this component; forwarding that id to the actual input is what
+   *  makes `<Label htmlFor={formItemId}>` work. */
+  id?: string;
 }
 
 /**
@@ -65,6 +70,7 @@ export function AmountCurrencyInput({
   disabled = false,
   inputRef,
   dataEntryField,
+  id,
 }: AmountCurrencyInputProps) {
   const [open, setOpen] = useState(false);
 
@@ -99,6 +105,7 @@ export function AmountCurrencyInput({
     <div className="flex flex-col gap-1">
       <div className="flex items-stretch">
         <Input
+          id={id}
           type="number"
           step="0.01"
           min="0"
@@ -126,7 +133,7 @@ export function AmountCurrencyInput({
           }}
           ref={inputRef}
           data-entry-field={dataEntryField}
-          disabled={loading || disabled}
+          disabled={disabled}
           className="rounded-r-none font-mono tabular-nums"
         />
         <Popover open={open} onOpenChange={setOpen}>
@@ -137,6 +144,7 @@ export function AmountCurrencyInput({
               disabled={loading || disabled}
               className="rounded-l-none border-l-0 px-2 font-mono text-xs"
               aria-label={`Currency: ${currency}`}
+              data-entry-field="currency"
             >
               {loading && <Loader2 className="mr-1 size-3 animate-spin" />}
               {currency}
