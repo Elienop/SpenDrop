@@ -5,7 +5,7 @@ import {
   useState,
   type KeyboardEvent,
 } from 'react';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { toast } from 'sonner';
@@ -35,10 +35,13 @@ import {
 import { Card } from '@/components/ui/card';
 import { TagInput } from './TagInput';
 import { CategoryBadge } from './CategoryBadge';
+import { AmountCurrencyInput } from './AmountCurrencyInput';
 import type { Category, Transaction } from '../api/types';
 import { formatYYYYMMDD } from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
-import { selectAllOnFocus } from '@/lib/utils';
+import { toCreatePayload } from '@/lib/currency';
+import { useCurrencies } from '@/hooks/useCurrencies';
+import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
 function todayIso(): string {
   return formatYYYYMMDD(new Date());
@@ -65,6 +68,16 @@ function saveLastCategory(id: number) {
   localStorage.setItem(STORAGE_KEYS.lastTransactionCategory, String(id));
 }
 
+function getLastCurrency(fallback: string): string {
+  return (
+    localStorage.getItem(STORAGE_KEYS.lastTransactionCurrency) ?? fallback
+  );
+}
+
+function saveLastCurrency(code: string) {
+  localStorage.setItem(STORAGE_KEYS.lastTransactionCurrency, code);
+}
+
 function EntryLabel({ children }: { children: string }) {
   const { error, formItemId } = useFormField();
   return (
@@ -85,15 +98,16 @@ function EntryLabel({ children }: { children: string }) {
 const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
   amount: z.number().positive('> 0'),
+  currency: z.string().regex(/^[A-Z]{3}$/, 'Invalid currency'),
   description: z.string().min(1, 'required').max(200),
   category_id: z.number().int().positive('required'),
   tags: z.string(),
 });
-export type EntryFormValues = z.infer<typeof entrySchema>;
+type EntryFormValues = z.infer<typeof entrySchema>;
 
 export interface TransactionEntryRowProps {
   categories: Category[];
-  onSubmit: (input: EntryFormValues) => Promise<Transaction>;
+  onSubmit: (input: CreateTransactionInput) => Promise<Transaction>;
   onDelete: (id: number) => Promise<void>;
   onClose?: () => void;
   descriptionSuggestions?: string[];
@@ -116,17 +130,36 @@ export function TransactionEntryRow({
     values: EntryFormValues;
   } | null>(null);
 
+  const { list, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
+
   const form = useForm<EntryFormValues>({
     resolver: zodResolver(entrySchema),
     defaultValues: {
       date: getLastDate(),
       amount: 0,
+      currency: getLastCurrency(baseCode),
       description: '',
       category_id: getLastCategoryId(),
       tags: '',
     },
     mode: 'onSubmit',
   });
+
+  // `baseCode` from the hook is `DEFAULT_CURRENCY` ("USD") until fetch
+  // resolves. Once currencies load, resync the form's default currency
+  // to the sticky-localStorage value or the real baseCode — but only
+  // once, and only if the user hasn't already changed it.
+  const didInitCurrency = useRef(false);
+  useEffect(() => {
+    if (didInitCurrency.current) return;
+    if (currenciesLoading) return;
+    didInitCurrency.current = true;
+    const current = form.getValues('currency');
+    const resolved = getLastCurrency(baseCode);
+    if (current !== resolved) {
+      form.setValue('currency', resolved, { shouldDirty: false });
+    }
+  }, [currenciesLoading, baseCode, form]);
 
   const undoLastSave = useCallback(async () => {
     const buf = undoBufferRef.current;
@@ -140,14 +173,32 @@ export function TransactionEntryRow({
       return;
     }
     form.reset(buf.values);
-    amountRef.current?.focus();
+    // Defer focus so React commits the form.reset state update and
+    // AmountCurrencyInput's value-sync useEffect fires with focused=false,
+    // clearing its rawInput buffer. Immediate focus() races against the
+    // React commit — onFocus sets focusedRef=true before the useEffect
+    // runs, which makes the useEffect skip the sync and strand the
+    // pre-reset rawInput in the DOM.
+    setTimeout(() => amountRef.current?.focus(), 0);
   }, [onDelete, form]);
 
   const submit = useCallback(
     async (values: EntryFormValues) => {
+      let payload: CreateTransactionInput;
+      try {
+        // Union-to-optional widening: toCreatePayload returns a discriminated
+        // union (collapsed vs. expanded shape), while CreateTransactionInput
+        // declares original_amount / original_currency as optional. Both
+        // branches are structurally compatible at runtime — the cast only
+        // tells the type system that the optional-field form subsumes both.
+        payload = toCreatePayload(values, baseCode, rateFor) as CreateTransactionInput;
+      } catch {
+        toast.error('Failed to save transaction');
+        return;
+      }
       let saved: Transaction;
       try {
-        saved = await onSubmit(values);
+        saved = await onSubmit(payload);
       } catch {
         toast.error('Failed to save transaction');
         // Leave the form untouched so the user can retry. Do not clear
@@ -157,6 +208,7 @@ export function TransactionEntryRow({
       }
       saveLastCategory(values.category_id);
       saveLastDate(values.date);
+      saveLastCurrency(values.currency);
       undoBufferRef.current = { saved, values };
 
       toast.success('Transaction saved', {
@@ -175,13 +227,20 @@ export function TransactionEntryRow({
       form.reset({
         date: values.date,
         amount: 0,
+        currency: values.currency,
         description: '',
         category_id: values.category_id,
         tags: '',
       });
-      amountRef.current?.focus();
+      // Defer focus so React commits the form.reset state update and
+      // AmountCurrencyInput's value-sync useEffect fires with focused=false,
+      // clearing its rawInput buffer. Immediate focus() races against the
+      // React commit — onFocus sets focusedRef=true before the useEffect
+      // runs, which makes the useEffect skip the sync and strand the
+      // pre-submit rawInput (e.g. "25") in the DOM.
+      setTimeout(() => amountRef.current?.focus(), 0);
     },
-    [onSubmit, form, undoLastSave],
+    [onSubmit, form, undoLastSave, baseCode, rateFor],
   );
 
   const categoryNameById = (id: number): string | undefined =>
@@ -224,7 +283,7 @@ export function TransactionEntryRow({
       }
       // Field-to-field navigation order. Tags is intentionally excluded
       // because TagInput's internal Enter handler commits a tag in-place.
-      const order: string[] = ['date', 'amount', 'description', 'category_id'];
+      const order: string[] = ['date', 'amount', 'currency', 'description', 'category_id'];
       const current = target.getAttribute('data-entry-field');
       if (!current) return;
       const idx = order.indexOf(current);
@@ -249,6 +308,23 @@ export function TransactionEntryRow({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [undoLastSave]);
+
+  // Lifted so the rate-missing gate stays in one place — duplicating the
+  // condition across `error` and `disabled` lets the two branches drift
+  // apart on any future refinement (e.g. stricter `rate <= 0` check).
+  // Gated on `!currenciesLoading` so that during the initial fetch — when
+  // the hook returns `baseCode = DEFAULT_CURRENCY` and an empty list — a
+  // sticky non-USD preference from localStorage does not flash a spurious
+  // "No rate configured" error and briefly disable Save before the real
+  // base and rate land.
+  // `useWatch` rather than `form.watch` so React Compiler can memoize the
+  // surrounding component — `form.watch` returns a non-stable function that
+  // the compiler refuses to touch (react-hooks/incompatible-library warning).
+  const watchedCurrency = useWatch({ control: form.control, name: 'currency' });
+  const hasNoRate =
+    !currenciesLoading &&
+    watchedCurrency !== baseCode &&
+    rateFor(watchedCurrency) == null;
 
   return (
     <Card className="p-4">
@@ -283,28 +359,28 @@ export function TransactionEntryRow({
             control={form.control}
             name="amount"
             render={({ field }) => (
-              <FormItem className="w-32">
+              <FormItem className="w-56">
                 <EntryLabel>Amount</EntryLabel>
                 <FormControl>
-                  <Input
-                    type="number"
-                    step="0.01"
-                    min="0"
-                    data-entry-field="amount"
-                    className="font-mono tabular-nums"
-                    name={field.name}
-                    onBlur={(e) => {
-                      if (e.target.value === '') field.onChange(0);
-                      field.onBlur();
-                    }}
-                    value={field.value || ''}
-                    onChange={(e) =>
-                      field.onChange(
-                        e.target.value === '' ? 0 : Number(e.target.value),
-                      )
+                  <AmountCurrencyInput
+                    value={field.value}
+                    onValueChange={(v) => field.onChange(v)}
+                    currency={watchedCurrency}
+                    onCurrencyChange={(code) =>
+                      form.setValue('currency', code, { shouldValidate: true })
                     }
-                    onFocus={selectAllOnFocus}
-                    ref={(el) => {
+                    baseCode={baseCode}
+                    currencies={list}
+                    hideInactive={true}
+                    rateFor={rateFor}
+                    loading={currenciesLoading}
+                    error={
+                      hasNoRate
+                        ? 'No rate configured for this currency. Set one in Settings.'
+                        : null
+                    }
+                    dataEntryField="amount"
+                    inputRef={(el) => {
                       field.ref(el);
                       amountRef.current = el;
                     }}
@@ -403,7 +479,12 @@ export function TransactionEntryRow({
             )}
           />
 
-          <Button type="submit" size="sm" className="h-8 text-xs">
+          <Button
+            type="submit"
+            size="sm"
+            className="h-8 text-xs"
+            disabled={currenciesLoading || hasNoRate}
+          >
             Add
           </Button>
         </form>

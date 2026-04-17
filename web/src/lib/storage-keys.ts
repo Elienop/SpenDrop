@@ -19,6 +19,8 @@ export const STORAGE_KEYS = {
   lastTransactionDate: 'spendrop-last-date',
   /** Last category used in the transaction entry row, for sticky default. */
   lastTransactionCategory: 'spendrop-last-category',
+  /** Last currency used in the transaction entry row, for sticky default. */
+  lastTransactionCurrency: 'spendrop-last-currency',
   /** Dashboard year filter persistence. */
   dashboardYear: 'spendrop-dash-year',
   /** Dashboard month filter persistence. */

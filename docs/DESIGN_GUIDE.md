@@ -242,6 +242,47 @@ import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 </Avatar>
 ```
 
+### AmountCurrencyInput (`components/AmountCurrencyInput.tsx`)
+
+Composite input for typing a monetary amount together with its currency. Renders a numeric `<Input>` with a currency-code suffix button that opens a Popover + Command picker. Calls `onValueChange` and `onCurrencyChange` separately so parents can hold joint `{amount, currency}` state without coupling.
+
+Use for: transaction entry row, transaction edit row. Not used for display.
+
+Props: `value: number`, `onValueChange: (v: number) => void`, `currency: string`, `onCurrencyChange: (code: string) => void`, `baseCode: string`, `currencies: Currency[]`, `hideInactive: boolean` (true in entry row, false in edit row so historical rows with inactive currencies round-trip), `rateFor: (code: string) => number | null`, plus optional `loading`, `error`, `disabled`, `inputRef`, `dataEntryField`, `id`.
+
+The inner `<input>` is not self-labeled — wrap with a `<Label htmlFor={id}>` (or pass through a shadcn `FormControl` whose Radix `Slot` forwards `id={formItemId}`).
+
+```tsx
+<AmountCurrencyInput
+  value={amount}
+  onValueChange={setAmount}
+  currency={currency}
+  onCurrencyChange={setCurrency}
+  baseCode={baseCode}
+  currencies={currencies}
+  hideInactive={true}
+  rateFor={rateFor}
+/>
+```
+
+### AmountDisplay (`components/AmountDisplay.tsx`)
+
+Read-only display for an already-persisted transaction amount. Renders the base-currency amount as the primary line; if the row has non-null `originalAmount` + `originalCurrency` (and the currency differs from `baseCode`), renders a muted secondary line with the original value. Never shows a `~=` prefix — the base amount came from the backend and is canonical.
+
+Use for: transaction list rows. Not used for inputs or pre-save previews.
+
+Props: `amount: number`, `originalAmount: number | null`, `originalCurrency: string | null`, `type: TransactionType`, `baseCode: string`, `className?: string`.
+
+```tsx
+<AmountDisplay
+  amount={transaction.amount}
+  originalAmount={transaction.original_amount}
+  originalCurrency={transaction.original_currency}
+  type={transaction.category_type}
+  baseCode={baseCode}
+/>
+```
+
 ---
 
 ## Layout

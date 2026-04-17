@@ -19,7 +19,7 @@ export interface TransactionFilters {
   search: string;
 }
 
-interface CreateTransactionInput {
+export interface CreateTransactionInput {
   date: string;
   amount: number;
   description: string;
@@ -30,7 +30,7 @@ interface CreateTransactionInput {
   notes?: string;
 }
 
-interface UpdateTransactionInput extends CreateTransactionInput {
+export interface UpdateTransactionInput extends CreateTransactionInput {
   id: number;
 }
 
