@@ -335,7 +335,12 @@ export function TransactionEntryRow({
             void form.handleSubmit(submit)(e);
           }}
           onKeyDown={handleKeyDown}
-          className="flex flex-wrap items-end gap-3"
+          // `items-start` (not `items-end`) so the AmountCurrencyInput's
+          // optional preview/error row can extend downward without shifting
+          // peer fields upward. Every field's label → control stack starts
+          // at the same top edge; extra descent in the Amount column stays
+          // below that baseline.
+          className="flex flex-wrap items-start gap-3"
           noValidate
         >
           <FormField
@@ -479,14 +484,26 @@ export function TransactionEntryRow({
             )}
           />
 
-          <Button
-            type="submit"
-            size="sm"
-            className="h-8 text-xs"
-            disabled={currenciesLoading || hasNoRate}
-          >
-            Add
-          </Button>
+          {/*
+            Invisible label placeholder keeps the submit button's top edge
+            aligned with peer Inputs under `items-start`. Mirrors the
+            structure of a FormItem (space-y-2 between label and control)
+            so the "Add" button sits on the same baseline as Date / Amount /
+            Description / Category / Tags inputs.
+          */}
+          <div className="space-y-2">
+            <span aria-hidden="true" className="block text-sm leading-none">
+              &nbsp;
+            </span>
+            <Button
+              type="submit"
+              size="sm"
+              className="h-8 text-xs"
+              disabled={currenciesLoading || hasNoRate}
+            >
+              Add
+            </Button>
+          </div>
         </form>
       </Form>
     </Card>

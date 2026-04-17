@@ -112,26 +112,30 @@ export function AmountCurrencyInput({
   const previewValue = showPreview && rate ? value / rate : 0;
 
   return (
-    // `relative` anchors the absolutely-positioned preview/error spans below.
-    // Keeping them out of the flex-col flow means toggling currency does NOT
-    // change the component's height — the parent form row can stay aligned
-    // via `items-end` without the amount field "jumping" upward when the
-    // `≈ <base>` preview appears. Same stability applies inside the inline
-    // edit TableCell: the table row height stays constant instead of the
-    // amount input shifting within its cell.
+    // Preview/error render in normal flow below the input row, NOT absolutely
+    // positioned. Two consequences:
     //
-    // `pb-5` reserves ~20px below the input for the absolute preview/error.
-    // The preview/error spans use `bottom: 0` so their bottom edge sits at
-    // the bottom of the padding box — inside the reserved strip. Using
-    // `top: 100%` instead places the span's top edge at the padding-box
-    // bottom and extends it downward past the wrapper's own rendered box,
-    // which is what previously triggered a spurious vertical scrollbar on
-    // the transactions table (the span overflowed the table's
-    // `.overflow-auto` ancestor's clientHeight). Reservation is at the
-    // component level — always present regardless of currency — so the
-    // entry-row and inline-edit row heights stay constant, which is the
-    // whole point of the absolute-positioning layout.
-    <div className="relative flex flex-col pb-5">
+    //  1. Wrapper height equals the Input's `h-10` when neither preview nor
+    //     error is present — so the control sits flush with peer fields
+    //     (Date, Description, Category, Tags). A prior iteration reserved
+    //     `pb-5` unconditionally and anchored the spans with `absolute
+    //     bottom: 0` to keep the height constant; that fixed the "jump
+    //     on toggle" symptom but made the wrapper permanently 20px taller
+    //     than siblings, which looked worse.
+    //
+    //  2. When the preview or error does appear, the wrapper grows
+    //     downward by ~20px — inside its own rendered box. That descent
+    //     stays within any `.overflow-auto` ancestor's clientHeight, so
+    //     the transactions table does NOT get a spurious vertical
+    //     scrollbar (the bug that the earlier `top: 100%` attempt
+    //     triggered by projecting the span past the wrapper).
+    //
+    // Consumers that want the amount row to stay top-aligned while this
+    // grows should use `items-start` on the surrounding flex container
+    // (see TransactionEntryRow's form). The inline-edit TableCell has no
+    // sibling alignment constraint, so growth there just extends the
+    // row height — acceptable UX while actively editing.
+    <div className="flex flex-col">
       <div className="flex items-stretch">
         <Input
           id={id}
@@ -226,12 +230,12 @@ export function AmountCurrencyInput({
         </Popover>
       </div>
       {showPreview && (
-        <span className="pointer-events-none absolute bottom-0 left-0 text-xs text-muted-foreground">
+        <span className="pointer-events-none mt-1 text-xs text-muted-foreground">
           &asymp; {formatCurrency(previewValue, baseCode)}
         </span>
       )}
       {error && (
-        <span className="pointer-events-none absolute bottom-0 left-0 text-xs text-destructive">
+        <span className="pointer-events-none mt-1 text-xs text-destructive">
           {error}
         </span>
       )}
