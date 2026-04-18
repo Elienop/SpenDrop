@@ -266,13 +266,21 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// requireJSONContentType rejects mutation requests (POST/PUT/PATCH/DELETE) that
-// do not carry an application/json Content-Type, unless the content type is
-// multipart/form-data (used for file uploads). GET, OPTIONS, and HEAD requests
-// are passed through unconditionally.
+// requireJSONContentType forces JSON Content-Type on mutations so the
+// browser's CORS preflight blocks cross-site POSTs. Bearer-authorized
+// requests skip this check — they're not cookies, not auto-attached
+// cross-site, and carry their own auth proof (spec §3.8 #3, §6.3).
+// GET/OPTIONS/HEAD always pass.
 func requireJSONContentType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodOptions || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Bearer-auth bypass. Must come BEFORE the Content-Type check so a
+		// bearer-authorized POST without application/json (hypothetical
+		// future endpoint) is not 415'd.
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			next.ServeHTTP(w, r)
 			return
 		}
