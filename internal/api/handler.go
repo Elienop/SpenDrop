@@ -16,7 +16,7 @@ type Handler struct {
 	txnStore *database.TransactionStore
 
 	apiTokenStore       *database.ApiTokenStore
-	loginFailureLimiter *ratelimit.Bucket // keyed by client IP, shared by login + token-create password reconfirm
+	loginFailureLimiter *ratelimit.Bucket // keyed by client IP, consumed only by /api/auth/login failures
 	createTokenLimiter  *ratelimit.Bucket // keyed by user id (as string), 5 hits / rolling hour
 
 	// clock is the time source every reports/dashboard handler reads for

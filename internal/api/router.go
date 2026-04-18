@@ -56,6 +56,13 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	r.Use(chimw.Recoverer)
 	r.Use(corsMiddleware)
 
+	// Shared auth-failure limiter for every Bearer code path (the combined
+	// /api middleware, /api/auth/me, and the Bearer-only /api/homepage
+	// subroute). Consolidating the bucket here keeps the 30-per-10-min
+	// quota coherent across every endpoint a bearer can reach — moving
+	// abuse to a different endpoint doesn't reset the counter.
+	authFailLimiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
+
 	// Health check (public)
 	r.Get("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -89,13 +96,17 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/login", h.handleLogin)
 		r.Post("/logout", h.handleLogout)
 
-		// /me requires authentication
-		r.With(auth.RequireAuth(queries)).Get("/me", h.handleMe)
+		// /me requires authentication. Accepts either session cookie OR
+		// Bearer token so headless scripts can introspect their own
+		// identity.
+		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).Get("/me", h.handleMe)
 	})
 
-	// Authenticated API routes
+	// Authenticated API routes. Accepts either session cookie OR Bearer
+	// token on every endpoint below — the two are interchangeable except
+	// on the dedicated Bearer-only /api/homepage subroute further down.
 	r.Route("/api", func(r chi.Router) {
-		r.Use(auth.RequireAuth(queries))
+		r.Use(auth.RequireAuthOrAPIToken(queries, authFailLimiter))
 		r.Use(requireJSONContentType)
 
 		// Transactions
@@ -216,13 +227,14 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		})
 	})
 
-	// Bearer-auth homepage widget subroute. Mounted separately from the
-	// session-auth /api tree so that no session cookie is accepted here —
-	// RequireAPIToken rejects anything that isn't a valid bearer token.
-	// A dedicated authFailLimiter (shared IP-keyed bucket, 30 attempts per
-	// 10 min) protects against enumeration; it is separate from the login
-	// limiter so homepage probes cannot exhaust the session-login budget.
-	authFailLimiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
+	// Bearer-ONLY homepage widget subroute. Deliberately does NOT accept
+	// a session cookie: the widget is consumed by a headless dashboard
+	// (e.g. Homepage/Homer) that holds a bearer token and never has a
+	// browser session. Using RequireAPIToken (not RequireAuthOrAPIToken)
+	// is the guardrail against accidental cookie-auth reuse from
+	// same-origin XHR. authFailLimiter is the SAME bucket used by the
+	// combined /api middleware above so Bearer abuse on any endpoint
+	// counts toward the same 30-per-10-minute quota.
 	r.Route("/api/homepage", func(r chi.Router) {
 		r.Use(auth.RequireAPIToken(queries, authFailLimiter))
 		r.Get("/summary", h.handleHomepageSummary)
