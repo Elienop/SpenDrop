@@ -740,3 +740,24 @@ INSERT INTO api_token_audit (
 -- own should not be acknowledged even as "revoked".
 SELECT * FROM api_tokens
 WHERE id = ? AND user_id = ?;
+
+-- name: ListAPITokenAuditByID :many
+-- Test/forensic helper: read audit rows for a given token id, oldest-first.
+-- Handlers do not call this directly in v1 — the audit UI is out of scope
+-- for the token feature — but tests need it and the future audit explorer
+-- will too. The idx_api_token_audit_token index covers this access pattern.
+SELECT * FROM api_token_audit
+WHERE token_id = sqlc.arg(token_id)
+ORDER BY created_at ASC, id ASC
+LIMIT sqlc.arg(limit);
+
+-- name: ListAPITokenAuditByUser :many
+-- Test/forensic helper: read all audit rows for a user across every token
+-- they have ever owned, newest-first. Used by the zero-tokens revoke-all
+-- test to assert *zero* audit rows were emitted (there is no sentinel row
+-- under the new FK CASCADE schema). Matches the idx_api_token_audit_user
+-- index (user_id, created_at DESC).
+SELECT * FROM api_token_audit
+WHERE user_id = sqlc.arg(user_id)
+ORDER BY created_at DESC, id DESC
+LIMIT sqlc.arg(limit);
