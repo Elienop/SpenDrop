@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // Handler holds dependencies for all API handlers.
@@ -13,6 +14,10 @@ type Handler struct {
 	queries  *database.Queries
 	db       *sql.DB
 	txnStore *database.TransactionStore
+
+	apiTokenStore       *database.ApiTokenStore
+	loginFailureLimiter *ratelimit.Bucket // keyed by client IP, shared by login + token-create password reconfirm
+	createTokenLimiter  *ratelimit.Bucket // keyed by user id (as string), 5 hits / rolling hour
 
 	// clock is the time source every reports/dashboard handler reads for
 	// "current date" decisions (year-over-year default year, rolling
@@ -61,11 +66,15 @@ type Handler struct {
 // sites compile unchanged and every production caller picks up real wall
 // time. Tests that need a frozen instant must go through NewHandlerWithClock.
 func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
+	clock := ratelimit.RealClock()
 	return &Handler{
-		queries:  queries,
-		db:       db,
-		txnStore: database.NewTransactionStore(db, queries),
-		clock:    realClock{},
+		queries:             queries,
+		db:                  db,
+		txnStore:            database.NewTransactionStore(db, queries),
+		apiTokenStore:       database.NewApiTokenStore(db, queries),
+		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, clock),
+		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, clock),
+		clock:               realClock{},
 	}
 }
 
@@ -75,11 +84,15 @@ func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 // rather than a functional option so a misuse in production grep's easily
 // (`NewHandlerWithClock` outside a _test.go file is a bug).
 func NewHandlerWithClock(queries *database.Queries, db *sql.DB, clock Clock) *Handler {
+	limiterClock := ratelimit.RealClock()
 	return &Handler{
-		queries:  queries,
-		db:       db,
-		txnStore: database.NewTransactionStore(db, queries),
-		clock:    clock,
+		queries:             queries,
+		db:                  db,
+		txnStore:            database.NewTransactionStore(db, queries),
+		apiTokenStore:       database.NewApiTokenStore(db, queries),
+		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, limiterClock),
+		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, limiterClock),
+		clock:               clock,
 	}
 }
 

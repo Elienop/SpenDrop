@@ -229,7 +229,6 @@ func startRateLimitReset() {
 			defer ticker.Stop()
 			for range ticker.C {
 				rateLimitMu.Lock()
-				loginAttempts = make(map[string]int)
 				registerAttempts = make(map[string]int)
 				rateLimitMu.Unlock()
 			}
@@ -240,10 +239,8 @@ func startRateLimitReset() {
 // handleLogin authenticates a user by username and password.
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractIP(r.RemoteAddr)
-	rateLimitMu.Lock()
-	attempts := loginAttempts[clientIP]
-	rateLimitMu.Unlock()
-	if attempts >= getRateLimitMax() {
+	if h.loginFailureLimiter.Exhausted(clientIP) {
+		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -259,17 +256,13 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.queries.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
-		rateLimitMu.Lock()
-		loginAttempts[clientIP]++
-		rateLimitMu.Unlock()
+		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
 	if !auth.CheckPassword(user.PasswordHash, req.Password) {
-		rateLimitMu.Lock()
-		loginAttempts[clientIP]++
-		rateLimitMu.Unlock()
+		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -281,9 +274,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Clear rate limit counter on successful login so shared-IP household
 	// users aren't penalised by earlier failed attempts.
-	rateLimitMu.Lock()
-	delete(loginAttempts, clientIP)
-	rateLimitMu.Unlock()
+	h.loginFailureLimiter.Reset(clientIP)
 
 	writeJSON(w, http.StatusOK, toUserResponse(user))
 }
