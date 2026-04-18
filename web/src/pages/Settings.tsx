@@ -4,7 +4,13 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
-import { AlertCircle, CheckCircle2, CircleAlert, Upload } from 'lucide-react';
+import {
+  AlertCircle,
+  AlertTriangle,
+  CheckCircle2,
+  CircleAlert,
+  Upload,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { api } from '../api/client';
@@ -32,6 +38,7 @@ import { cn, selectAllOnFocus } from '@/lib/utils';
 import {
   Card,
   CardContent,
+  CardDescription,
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
@@ -75,7 +82,17 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
@@ -135,7 +152,6 @@ const createTokenSchema = z.object({
     .min(1, 'Name is required')
     .max(100, 'Name must be 100 characters or fewer'),
   expires: z.enum(['never', '7d', '30d', '90d', '1y']),
-  password: z.string().min(1, 'Password is required'),
 });
 type CreateTokenValues = z.infer<typeof createTokenSchema>;
 
@@ -1416,84 +1432,69 @@ function ShowOnceReveal({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Token created</DialogTitle>
+        <DialogTitle>Save your new token</DialogTitle>
         <DialogDescription>
-          This is the only time you'll see this token. Store it
-          somewhere safe — you will not be able to retrieve it again.
+          This is the only time your token will be shown.
         </DialogDescription>
       </DialogHeader>
-      <div className="grid gap-3">
-        <Label htmlFor="api-token-reveal">Your new API token</Label>
-        <div className="flex items-center gap-2">
-          <Input
-            id="api-token-reveal"
-            value={token.token}
-            readOnly
-            className="font-mono"
-            onFocus={selectAllOnFocus}
-          />
-          <Button
-            type="button"
-            variant="outline"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(token.token);
-                toast.success('Copied');
-              } catch {
-                // navigator.clipboard.writeText rejects on insecure
-                // contexts (common for self-hosted SpenDrop served
-                // over HTTP on a LAN IP — localhost is treated as
-                // secure, but `http://192.168.x.x` is not) and on
-                // explicit permission denial. Either way the user
-                // cannot rely on the button alone. Focus + select
-                // the reveal <Input> so one Ctrl/Cmd+C still copies,
-                // and tell them so via a toast. The dialog stays
-                // open and the plaintext stays on screen — the user
-                // does not have to re-trigger the Create flow.
-                const revealInput = document.getElementById(
-                  'api-token-reveal',
-                ) as HTMLInputElement | null;
-                if (revealInput) {
-                  revealInput.focus();
-                  revealInput.select();
+      <div className="grid gap-4">
+        <Alert variant="warning">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>Copy it now</AlertTitle>
+          <AlertDescription>
+            We hash tokens at rest. If you lose this one, you'll have
+            to revoke it and create a new one.
+          </AlertDescription>
+        </Alert>
+        <div className="grid gap-2">
+          <Label htmlFor="api-token-reveal">Your new API token</Label>
+          <div className="flex items-center gap-2">
+            <Input
+              id="api-token-reveal"
+              value={token.token}
+              readOnly
+              className="font-mono"
+              onFocus={selectAllOnFocus}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              onClick={async () => {
+                try {
+                  await navigator.clipboard.writeText(token.token);
+                  toast.success('Copied to clipboard');
+                } catch {
+                  // navigator.clipboard.writeText rejects on insecure
+                  // contexts (common for self-hosted SpenDrop served
+                  // over HTTP on a LAN IP — localhost is treated as
+                  // secure, but `http://192.168.x.x` is not) and on
+                  // explicit permission denial. Either way the user
+                  // cannot rely on the button alone. Focus + select
+                  // the reveal <Input> so one Ctrl/Cmd+C still copies,
+                  // and tell them so via a toast. The dialog stays
+                  // open and the plaintext stays on screen — the user
+                  // does not have to re-trigger the Create flow.
+                  const revealInput = document.getElementById(
+                    'api-token-reveal',
+                  ) as HTMLInputElement | null;
+                  if (revealInput) {
+                    revealInput.focus();
+                    revealInput.select();
+                  }
+                  toast.info(
+                    'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
+                  );
                 }
-                toast.info(
-                  'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
-                );
-              }
-            }}
-          >
-            Copy
-          </Button>
+              }}
+            >
+              Copy
+            </Button>
+          </div>
         </div>
-        <details className="rounded-md border p-3 text-sm">
-          <summary className="cursor-pointer font-medium">
-            Use with Homepage
-          </summary>
-          <pre className="mt-3 overflow-x-auto rounded bg-muted p-3 text-xs">
-{`widget:
-  type: customapi
-  url: https://<your-spendrop>/api/homepage/summary
-  refreshInterval: 30000
-  method: GET
-  display: list
-  headers:
-    Authorization: "Bearer ${token.token}"
-  mappings:
-    - { field: month_spent, label: This month, format: float, prefix: "$" }
-    - { field: txn_count, label: Transactions, format: number }
-    - field: month_remaining
-      label: Remaining
-      format: float
-      prefix: "$"
-      additionalField: { field: month_remaining, format: float, color: adaptive }
-    - { field: over_budget_categories, label: Over budget, format: number }`}
-          </pre>
-        </details>
       </div>
       <DialogFooter>
         <Button type="button" onClick={onClose}>
-          Done
+          I've saved my token
         </Button>
       </DialogFooter>
     </>
@@ -1512,7 +1513,7 @@ function ApiTokensSection() {
 
   const createForm = useForm<CreateTokenValues>({
     resolver: zodResolver(createTokenSchema),
-    defaultValues: { name: '', expires: 'never', password: '' },
+    defaultValues: { name: '', expires: 'never' },
   });
 
   const fetchTokens = useCallback(async () => {
@@ -1558,7 +1559,6 @@ function ApiTokensSection() {
         {
           name: values.name.trim(),
           expires_at: computeExpiresAt(values.expires),
-          password: values.password,
         },
       );
       setCreatedToken(body);
@@ -1634,15 +1634,22 @@ function ApiTokensSection() {
   return (
     <>
       <Card>
-      <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-base">API tokens</CardTitle>
+      <CardHeader className="flex flex-row items-start justify-between gap-4">
+        <div className="grid gap-1.5">
+          <CardTitle className="text-base">API tokens</CardTitle>
+          <CardDescription>
+            Personal access tokens for scripts, dashboards, and
+            third-party integrations. Each token has full access to
+            your account.
+          </CardDescription>
+        </div>
         <div className="flex gap-2">
           <Dialog
             open={createOpen}
             onOpenChange={(open) => {
               // Guard close-while-submitting: if the POST is in flight and we
               // let the user close the dialog here, setCreatedToken(body) in
-              // onCreate resolves into a closed dialog and the next "+ New
+              // onCreate resolves into a closed dialog and the next "Create
               // token" click jumps straight to the reveal of a token the user
               // thought they'd cancelled. Mirror the revoke-dialog busy guard.
               if (creating) return;
@@ -1656,7 +1663,7 @@ function ApiTokensSection() {
             }}
           >
             <DialogTrigger asChild>
-              <Button size="sm">+ New token</Button>
+              <Button size="sm">Create token</Button>
             </DialogTrigger>
             <DialogContent>
               {createdToken === null ? (
@@ -1664,9 +1671,10 @@ function ApiTokensSection() {
                   <DialogHeader>
                     <DialogTitle>Create API token</DialogTitle>
                     <DialogDescription>
-                      Tokens grant full read/write access to this account's data.
-                      Store the generated token in your password manager — you
-                      won't be able to see it again after you close this dialog.
+                      Tokens have the same access as your account
+                      password. Name them after the script or service
+                      you'll use them from so you can revoke them
+                      individually later.
                     </DialogDescription>
                   </DialogHeader>
                   <Form {...createForm}>
@@ -1684,7 +1692,7 @@ function ApiTokensSection() {
                             <FormControl>
                               <Input
                                 {...field}
-                                placeholder="Homepage dashboard"
+                                placeholder="e.g. Homepage dashboard, backup script"
                               />
                             </FormControl>
                             <FormMessage />
@@ -1723,22 +1731,9 @@ function ApiTokensSection() {
                           </FormItem>
                         )}
                       />
-                      <FormField
-                        control={createForm.control}
-                        name="password"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Confirm password</FormLabel>
-                            <FormControl>
-                              <Input type="password" autoComplete="current-password" {...field} />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
                       <DialogFooter>
                         <Button type="submit" disabled={creating}>
-                          {creating ? 'Creating\u2026' : 'Create'}
+                          {creating ? 'Creating\u2026' : 'Create token'}
                         </Button>
                       </DialogFooter>
                     </form>
@@ -1748,11 +1743,11 @@ function ApiTokensSection() {
                 <ShowOnceReveal
                   token={createdToken}
                   onClose={() => {
-                    // Clicking Done closes the whole dialog. Radix's
-                    // `onOpenChange` does NOT re-fire when `open` is
-                    // controlled and we set it to false ourselves, so
-                    // clear the plaintext here as well to ensure the
-                    // reveal cannot be re-summoned.
+                    // Clicking "I've saved my token" closes the whole
+                    // dialog. Radix's `onOpenChange` does NOT re-fire
+                    // when `open` is controlled and we set it to false
+                    // ourselves, so clear the plaintext here as well to
+                    // ensure the reveal cannot be re-summoned.
                     setCreateOpen(false);
                     setCreatedToken(null);
                     createForm.reset();
@@ -1775,8 +1770,8 @@ function ApiTokensSection() {
       <CardContent>
         {tokens.length === 0 ? (
           <p className="text-sm text-muted-foreground">
-            No API tokens yet. Create one to connect this household to
-            Homepage or another dashboard.
+            No API tokens yet. Create one to connect a script,
+            dashboard, or other tool to SpenDrop.
           </p>
         ) : (
           <Table>
@@ -1822,84 +1817,84 @@ function ApiTokensSection() {
         )}
       </CardContent>
     </Card>
-      <Dialog
+      <AlertDialog
         open={revokingToken !== null}
         onOpenChange={(open) => {
           if (revoking) return;
           if (!open) setRevokingToken(null);
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
               Revoke{' '}
               <span className="font-mono">
-                {revokingTokenName}
+                &quot;{revokingTokenName}&quot;
               </span>
               ?
-            </DialogTitle>
-            <DialogDescription>
-              Any integration using this token will immediately stop
-              working. This cannot be undone &mdash; the token cannot be
-              reinstated. Create a new token to replace it.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setRevokingToken(null)}
-              disabled={revoking}
-            >
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Anything using this token will stop working immediately.
+              This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revoking}>
               Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => void onConfirmRevoke()}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                // Radix's AlertDialogAction auto-closes on click. We
+                // want the dialog to stay open while the DELETE is in
+                // flight so the "Revoking…" label is visible and the
+                // user can't double-fire. Prevent the default close
+                // and trigger the mutation manually — `onConfirmRevoke`
+                // flips `revokingToken` to null on success which
+                // unmounts the dialog cleanly.
+                e.preventDefault();
+                void onConfirmRevoke();
+              }}
               disabled={revoking}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
-              {revoking ? 'Revoking\u2026' : 'Revoke'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog
+              {revoking ? 'Revoking\u2026' : 'Revoke token'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      <AlertDialog
         open={revokeAllOpen}
         onOpenChange={(open) => {
           if (revoking) return;
           if (!open) setRevokeAllOpen(false);
         }}
       >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Revoke all your API tokens?</DialogTitle>
-            <DialogDescription>
-              All integrations using any of your tokens will immediately
-              stop working until you create new ones. This cannot be
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke all tokens?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Every script or dashboard you've connected will stop
+              working until you create new tokens. This cannot be
               undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => setRevokeAllOpen(false)}
-              disabled={revoking}
-            >
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revoking}>
               Cancel
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              onClick={() => void onConfirmRevokeAll()}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(e) => {
+                e.preventDefault();
+                void onConfirmRevokeAll();
+              }}
               disabled={revoking}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
             >
               {revoking ? 'Revoking\u2026' : 'Revoke all'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
   );
 }
