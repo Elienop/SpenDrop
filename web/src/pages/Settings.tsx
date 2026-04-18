@@ -13,6 +13,7 @@ import type {
   ApiToken,
   Budget,
   Category,
+  CreateTokenResponse,
   Currency,
   ImportPreview,
   ListTokensResponse,
@@ -103,6 +104,38 @@ const TAB_LABELS: Record<SettingsTab, string> = {
   'api-tokens': 'API tokens',
   data: 'Import / Export',
 };
+
+const EXPIRY_OPTIONS = {
+  never: null,
+  '7d': 7,
+  '30d': 30,
+  '90d': 90,
+  '1y': 365,
+} as const;
+
+type ExpiryChoice = keyof typeof EXPIRY_OPTIONS;
+
+function computeExpiresAt(choice: ExpiryChoice): string | null {
+  const days = EXPIRY_OPTIONS[choice];
+  if (days === null) return null;
+  // Compute in UTC — the server validates `expires_at > now`, and a
+  // tz-naive local-midnight string could land in the past for any user
+  // east of UTC on the day the token is minted.
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString();
+}
+
+const createTokenSchema = z.object({
+  name: z
+    .string()
+    .trim()
+    .min(1, 'Name is required')
+    .max(100, 'Name must be 100 characters or fewer'),
+  expires: z.enum(['never', '7d', '30d', '90d', '1y']),
+  password: z.string().min(1, 'Password is required'),
+});
+type CreateTokenValues = z.infer<typeof createTokenSchema>;
 
 // User-facing label for each top-level route the sidebar links to. Used
 // in the discard-edits dialog when a route change is intercepted — keeps
@@ -1371,8 +1404,52 @@ function UsersSection() {
 
 /* ---------- API tokens tab ---------- */
 
+function ShowOnceReveal({
+  token,
+  onClose,
+}: {
+  token: CreateTokenResponse;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <DialogHeader>
+        <DialogTitle>Token created</DialogTitle>
+        <DialogDescription>
+          This is the only time you'll see this token. Store it
+          somewhere safe — you will not be able to retrieve it again.
+        </DialogDescription>
+      </DialogHeader>
+      <div className="grid gap-3">
+        <Label htmlFor="api-token-reveal">Your new API token</Label>
+        <Input
+          id="api-token-reveal"
+          value={token.token}
+          readOnly
+          className="font-mono"
+          onFocus={selectAllOnFocus}
+        />
+        {/* Copy + YAML snippet come in Task 7.5; Done closes now. */}
+      </div>
+      <DialogFooter>
+        <Button type="button" onClick={onClose}>
+          Done
+        </Button>
+      </DialogFooter>
+    </>
+  );
+}
+
 function ApiTokensSection() {
   const [tokens, setTokens] = useState<ApiToken[]>([]);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [createdToken, setCreatedToken] = useState<CreateTokenResponse | null>(null);
+  const [creating, setCreating] = useState(false);
+
+  const createForm = useForm<CreateTokenValues>({
+    resolver: zodResolver(createTokenSchema),
+    defaultValues: { name: '', expires: 'never', password: '' },
+  });
 
   const fetchTokens = useCallback(async () => {
     const data = await api.get<ListTokensResponse>('api-tokens');
@@ -1401,12 +1478,167 @@ function ApiTokensSection() {
     return d.toLocaleDateString();
   }
 
+  async function onCreate(values: CreateTokenValues) {
+    setCreating(true);
+    try {
+      const body: CreateTokenResponse = await api.post<CreateTokenResponse>(
+        'api-tokens',
+        {
+          name: values.name.trim(),
+          expires_at: computeExpiresAt(values.expires),
+          password: values.password,
+        },
+      );
+      setCreatedToken(body);
+      createForm.reset();
+      // Optimistic update: the new row (sans full plaintext) slides
+      // into the list behind the reveal dialog, so when the user closes
+      // the reveal the list is already current. We assemble the list
+      // row by picking the `ApiToken` fields explicitly rather than
+      // destructuring `token` out, so we don't trip `noUnusedLocals`
+      // on the discarded `token` variable.
+      const listRow: ApiToken = {
+        id: body.id,
+        name: body.name,
+        token_prefix: body.token_prefix,
+        created_at: body.created_at,
+        last_used_at: body.last_used_at,
+        last_used_ip: body.last_used_ip,
+        expires_at: body.expires_at,
+      };
+      setTokens((prev) => [listRow, ...prev]);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to create token',
+      );
+    } finally {
+      setCreating(false);
+    }
+  }
+
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">API tokens</CardTitle>
         <div className="flex gap-2">
-          <Button size="sm" disabled>+ New token</Button>
+          <Dialog
+            open={createOpen}
+            onOpenChange={(open) => {
+              if (open) {
+                setCreateOpen(true);
+                return;
+              }
+              // Closing covers both rendered states: if the reveal is up, clear
+              // the plaintext; if the form is up, reset the form. Either way, the
+              // plaintext can never be re-summoned from this component — the
+              // next time the user opens the dialog they start in the form state.
+              setCreateOpen(false);
+              setCreatedToken(null);
+              createForm.reset();
+            }}
+          >
+            <DialogTrigger asChild>
+              <Button size="sm">+ New token</Button>
+            </DialogTrigger>
+            <DialogContent>
+              {createdToken === null ? (
+                <>
+                  <DialogHeader>
+                    <DialogTitle>Create API token</DialogTitle>
+                    <DialogDescription>
+                      Tokens grant full read/write access to this account's data.
+                      Store the generated token in your password manager — you
+                      won't be able to see it again after you close this dialog.
+                    </DialogDescription>
+                  </DialogHeader>
+                  <Form {...createForm}>
+                    <form
+                      onSubmit={(e) => void createForm.handleSubmit(onCreate)(e)}
+                      className="grid gap-4"
+                      noValidate
+                    >
+                      <FormField
+                        control={createForm.control}
+                        name="name"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Name</FormLabel>
+                            <FormControl>
+                              <Input
+                                {...field}
+                                placeholder="Homepage dashboard"
+                              />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={createForm.control}
+                        name="expires"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Expires</FormLabel>
+                            <Select
+                              value={field.value}
+                              onValueChange={(v) => {
+                                if (!(v in EXPIRY_OPTIONS)) return;
+                                field.onChange(v as ExpiryChoice);
+                              }}
+                            >
+                              <FormControl>
+                                <SelectTrigger aria-label="Expires">
+                                  <SelectValue />
+                                </SelectTrigger>
+                              </FormControl>
+                              <SelectContent>
+                                <SelectGroup>
+                                  <SelectItem value="never">Never</SelectItem>
+                                  <SelectItem value="7d">7 days</SelectItem>
+                                  <SelectItem value="30d">30 days</SelectItem>
+                                  <SelectItem value="90d">90 days</SelectItem>
+                                  <SelectItem value="1y">1 year</SelectItem>
+                                </SelectGroup>
+                              </SelectContent>
+                            </Select>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <FormField
+                        control={createForm.control}
+                        name="password"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Confirm password</FormLabel>
+                            <FormControl>
+                              <Input type="password" autoComplete="current-password" {...field} />
+                            </FormControl>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                      <DialogFooter>
+                        <Button type="submit" disabled={creating}>
+                          {creating ? 'Creating\u2026' : 'Create'}
+                        </Button>
+                      </DialogFooter>
+                    </form>
+                  </Form>
+                </>
+              ) : (
+                <ShowOnceReveal
+                  token={createdToken}
+                  onClose={() => {
+                    // Clicking Done closes the whole dialog — Dialog's
+                    // onOpenChange(false) handler above clears the plaintext,
+                    // so this one-liner is enough.
+                    setCreateOpen(false);
+                  }}
+                />
+              )}
+            </DialogContent>
+          </Dialog>
           {tokens.length > 0 && (
             <Button size="sm" variant="destructive" disabled>
               Revoke all

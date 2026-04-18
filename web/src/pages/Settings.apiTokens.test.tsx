@@ -117,4 +117,79 @@ describe('ApiTokensSection', () => {
     const fullTokenRegex = /spdr_[a-zA-Z0-9]{26}_[a-zA-Z0-9]{6}/;
     expect(screen.queryByText(fullTokenRegex)).not.toBeInTheDocument();
   });
+
+  test('clicking + New token opens the create dialog', async () => {
+    const user = userEvent.setup();
+    seedGetMock([]);
+    renderSettingsOnApiTokensTab();
+    // Wait for the empty state so we know the mount fetch resolved.
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole('button', { name: /\+ new token/i }),
+    );
+    // The dialog body has a header with "Create API token" and the three
+    // form fields. Assert on the header + one field to prove the dialog
+    // is the create form (not some other modal).
+    expect(
+      screen.getByRole('heading', { name: /create api token/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/confirm password/i),
+    ).toBeInTheDocument();
+  });
+
+  test('submitting create dialog with valid password shows show-once reveal', async () => {
+    const user = userEvent.setup();
+    seedGetMock([]);
+    // Wire the POST response. The server returns the full plaintext
+    // exactly once in this body; the component must echo it into a
+    // reveal block and then forget it.
+    mockedApi.post.mockResolvedValueOnce({
+      id: 7,
+      name: 'Homepage',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+      token: 'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    await user.type(
+      screen.getByLabelText(/confirm password/i),
+      'hunter2',
+    );
+    await user.click(
+      screen.getByRole('button', { name: /^create$/i }),
+    );
+    // The dialog content is swapped in-place — look for the banner copy
+    // from §7.5 and the full plaintext in a read-only input.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/only time you'll see this token/i),
+      ).toBeInTheDocument();
+    });
+    const revealInput = screen.getByLabelText(
+      /your new api token/i,
+    ) as HTMLInputElement;
+    expect(revealInput.value).toBe(
+      'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    );
+    expect(revealInput.readOnly).toBe(true);
+    // The POST body must carry exactly what the user typed — no silent
+    // defaulting of `expires_at` away from `null`.
+    expect(mockedApi.post).toHaveBeenCalledWith('api-tokens', {
+      name: 'Homepage',
+      expires_at: null,
+      password: 'hunter2',
+    });
+  });
 });
