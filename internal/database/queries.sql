@@ -627,3 +627,107 @@ WHERE t.deleted_at IS NULL
     OR (CAST(sqlc.arg(scope_type) AS TEXT) = 'category' AND t.category_id = CAST(sqlc.arg(scope_id) AS INTEGER))
     OR (CAST(sqlc.arg(scope_type) AS TEXT) = 'tag' AND ',' || COALESCE(t.tags, '') || ',' LIKE '%,' || CAST(sqlc.arg(scope_label) AS TEXT) || ',%')
   );
+
+-- API Tokens
+--
+-- All writes flow through ApiTokenStore in internal/database/store_api_token.go.
+-- Raw calls to these queries in handlers are a bug: they would bypass the
+-- paired audit row and break the "every mutation audited" invariant.
+--
+-- GetAPITokenByHash bakes in the liveness filter (revoked + expiry) so handlers
+-- cannot accidentally authenticate with a dead token. Hand-rolling the filter
+-- in each handler would rot over time.
+
+-- name: CreateAPIToken :one
+INSERT INTO api_tokens (user_id, token_hash, token_prefix, name, expires_at)
+VALUES (?, ?, ?, ?, ?)
+RETURNING *;
+
+-- name: GetAPITokenByHash :one
+-- Returns the live token row matching token_hash, or sql.ErrNoRows. Liveness
+-- means NOT revoked AND NOT expired. The middleware relies on this single
+-- query to implement "is this token valid" — do not reimplement the filter
+-- elsewhere.
+SELECT * FROM api_tokens
+WHERE token_hash = ?
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > datetime('now'));
+
+-- name: ListLiveAPITokenIDsForUser :many
+-- Returns IDs of all live (non-revoked) tokens owned by the user. Used by
+-- the store's RevokeAllForUser / RevokeAllForUserTx: they load the ID set
+-- first, then UPDATE + emit one audit row per revoked token. Listing first
+-- is required because the spec has no sentinel bulk audit row — every
+-- revoked token must produce its own `revoked_by_*` audit row against its
+-- real id (FK CASCADE means there is no id=0 to pin a summary row to).
+SELECT id FROM api_tokens
+WHERE user_id = ?
+  AND revoked_at IS NULL
+ORDER BY id;
+
+-- name: ListAPITokensForUser :many
+-- Returns all tokens owned by the user (including revoked), newest first.
+-- The Settings UI filters client-side to show only live or only revoked
+-- depending on the active tab; listing both in one query keeps the request
+-- count down.
+SELECT * FROM api_tokens
+WHERE user_id = ?
+ORDER BY created_at DESC, id DESC;
+
+-- name: RevokeAPIToken :execrows
+-- Revokes a single token owned by user_id. Idempotent: if the token is
+-- already revoked, zero rows are affected and the caller treats that as
+-- "the user already saw this token was revoked, nothing to do". The
+-- ownership check (user_id = ?) prevents a handler bug from letting
+-- user A revoke user B's token.
+--
+-- There is no revoke_reason column on api_tokens — the reason lives in the
+-- paired api_token_audit.action (revoked_by_user / revoked_by_password_change
+-- / revoked_by_mass_revoke), which is the authoritative record.
+UPDATE api_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE id = ?
+  AND user_id = ?
+  AND revoked_at IS NULL;
+
+-- name: RevokeSingleLiveTokenByID :execrows
+-- Revokes a single live token by id, no user_id filter. Used only by the
+-- store's RevokeAllForUser loop after it has already loaded the ID set
+-- filtered by user_id — re-checking ownership inside the loop would be
+-- wasted work on a query that only runs with trusted ids. Idempotent on
+-- already-revoked rows (affects zero rows) so a concurrent revoke from
+-- another session rolls cleanly instead of producing a duplicate audit.
+UPDATE api_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE id = ?
+  AND revoked_at IS NULL;
+
+-- name: TouchAPITokenLastUsed :exec
+-- Debounced update: skips the write if last_used_at was touched within the
+-- last 60 seconds. This is the Homepage-poll write-amplification fix from
+-- spec §3.6 — at a 30s default poll cadence, the write only fires every
+-- other poll per token instead of every poll.
+--
+-- The empty-string IP fold (NULLIF(?, '')) means handlers can pass
+-- r.RemoteAddr trimmed or blank without writing "" noise.
+UPDATE api_tokens
+SET last_used_at = CURRENT_TIMESTAMP,
+    last_used_ip = NULLIF(?, '')
+WHERE id = ?
+  AND (last_used_at IS NULL OR last_used_at < datetime('now', '-60 seconds'));
+
+-- name: InsertAPITokenAudit :exec
+-- Writes one audit row per API-token mutation. Column set matches migration
+-- 011 exactly:
+--   token_id           — FK CASCADE on api_tokens.id (no sentinel bulk id).
+--   user_id            — denormalised owner so the user index can scan
+--                        an operator's full history in one seek even after
+--                        their token rows are hard-deleted by a future
+--                        housekeeper (unlikely but cheap insurance).
+--   action             — one of the 4 enum values enforced by CHECK.
+--   actor_ip           — NULL for system-originated writes (future jobs).
+--   actor_user_agent   — truncated to ≤500 chars by the Go caller (CHECK).
+--   actor_session_hash — 64-hex SHA-256 of the session cookie, or NULL.
+INSERT INTO api_token_audit (
+    token_id, user_id, action, actor_ip, actor_user_agent, actor_session_hash
+) VALUES (?, ?, ?, ?, ?, ?);
