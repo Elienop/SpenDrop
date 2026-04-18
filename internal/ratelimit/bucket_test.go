@@ -45,6 +45,35 @@ func TestBucket_ConsumeUpToLimit_Then429(t *testing.T) {
 	}
 }
 
+func TestBucket_ExhaustedAtLimit_ConsumeAtLimitStillUnder(t *testing.T) {
+	// Asserts the intentional asymmetry:
+	//   Consume returns false at exactly `limit` hits (the limit-th hit is
+	//     the last one allowed).
+	//   Exhausted returns true at exactly `limit` hits (the NEXT Consume
+	//     would push over).
+	clk := newFakeClock()
+	b := NewBucket(3, time.Minute, clk)
+	defer b.Stop()
+
+	for i := 0; i < 2; i++ {
+		if over := b.Consume("k"); over {
+			t.Fatalf("consume %d: expected under limit, got over", i)
+		}
+	}
+	// Third (= limit-th) consume: still under.
+	if over := b.Consume("k"); over {
+		t.Fatal("consume at limit: expected under, got over")
+	}
+	// At limit: Exhausted is true, but we haven't exceeded yet.
+	if !b.Exhausted("k") {
+		t.Fatal("Exhausted at exactly limit: expected true, got false")
+	}
+	// Fourth consume: now over.
+	if over := b.Consume("k"); !over {
+		t.Fatal("consume at limit+1: expected over, got under")
+	}
+}
+
 func TestBucket_RollingWindow_RefillsAfterWindow(t *testing.T) {
 	clk := newFakeClock()
 	b := NewBucket(2, time.Minute, clk)
@@ -144,5 +173,36 @@ func TestBucket_Cleanup_DropsIdleBucketsAfter2xWindow(t *testing.T) {
 	b.mu.Unlock()
 	if stillThere {
 		t.Fatal("expected idle key to be GC'd by runCleanupOnce")
+	}
+}
+
+func TestBucket_ConcurrentConsume_NoRaceOrCorruption(t *testing.T) {
+	// 50 goroutines each call Consume("k") 20 times. We're checking the
+	// mutex path holds up under contention — run under -race to catch any
+	// map corruption or missing lock scope.
+	clk := newFakeClock()
+	b := NewBucket(10_000, time.Minute, clk) // far above 50*20 = 1000
+	defer b.Stop()
+
+	const goroutines = 50
+	const hitsPerG = 20
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < hitsPerG; j++ {
+				b.Consume("k")
+			}
+		}()
+	}
+	wg.Wait()
+
+	// Under the mutex, peek at the count.
+	b.mu.Lock()
+	got := len(b.hits["k"])
+	b.mu.Unlock()
+	if want := goroutines * hitsPerG; got != want {
+		t.Fatalf("concurrent Consume: want %d hits, got %d", want, got)
 	}
 }

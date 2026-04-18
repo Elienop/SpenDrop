@@ -45,10 +45,11 @@ type Bucket struct {
 	window time.Duration
 	clock  Clock
 
-	mu   sync.Mutex
-	hits map[string][]time.Time // key → timestamps within window
-	stop chan struct{}
-	wg   sync.WaitGroup
+	mu       sync.Mutex
+	hits     map[string][]time.Time // key → timestamps within window
+	stop     chan struct{}
+	stopOnce sync.Once
+	wg       sync.WaitGroup
 }
 
 // NewBucket constructs a Bucket that allows up to `limit` hits per key per
@@ -124,15 +125,12 @@ func (b *Bucket) Reset(key string) {
 	delete(b.hits, key)
 }
 
-// Stop ends the cleanup goroutine. Idempotent. Callers should defer Stop
-// during graceful shutdown; the background ticker will stop cleanly.
+// Stop ends the cleanup goroutine. Safe to call from multiple goroutines
+// — sync.Once guarantees the close happens exactly once. Callers should
+// defer Stop during graceful shutdown; the background ticker will stop
+// cleanly.
 func (b *Bucket) Stop() {
-	select {
-	case <-b.stop:
-		return // already stopped
-	default:
-	}
-	close(b.stop)
+	b.stopOnce.Do(func() { close(b.stop) })
 	b.wg.Wait()
 }
 
