@@ -69,8 +69,8 @@ describe('ApiTokensSection', () => {
       },
       loading: false,
       login: vi.fn(),
+      register: vi.fn(),
       logout: vi.fn(),
-      refresh: vi.fn(),
     });
     // happy-dom has no Clipboard API by default; install a writable
     // spy so Task 7.5's Copy button has something to call into. Installed
