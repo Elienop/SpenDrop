@@ -2222,3 +2222,334 @@ func (q *Queries) VerifyCheckpointTotal(ctx context.Context, arg VerifyCheckpoin
 	err := row.Scan(&actual_cents)
 	return actual_cents, err
 }
+
+const createAPIToken = `-- name: CreateAPIToken :one
+INSERT INTO api_tokens (user_id, token_hash, token_prefix, name, expires_at)
+VALUES (?, ?, ?, ?, ?)
+RETURNING id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, last_used_ip, revoked_at, created_at
+`
+
+type CreateAPITokenParams struct {
+	UserID      int64          `json:"user_id"`
+	TokenHash   string         `json:"token_hash"`
+	TokenPrefix string         `json:"token_prefix"`
+	Name        string         `json:"name"`
+	ExpiresAt   sql.NullTime   `json:"expires_at"`
+}
+
+// API Tokens
+func (q *Queries) CreateAPIToken(ctx context.Context, arg CreateAPITokenParams) (ApiToken, error) {
+	row := q.db.QueryRowContext(ctx, createAPIToken,
+		arg.UserID,
+		arg.TokenHash,
+		arg.TokenPrefix,
+		arg.Name,
+		arg.ExpiresAt,
+	)
+	var i ApiToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.LastUsedIp,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getAPITokenByHash = `-- name: GetAPITokenByHash :one
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, last_used_ip, revoked_at, created_at FROM api_tokens
+WHERE token_hash = ?
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > datetime('now'))
+`
+
+func (q *Queries) GetAPITokenByHash(ctx context.Context, tokenHash string) (ApiToken, error) {
+	row := q.db.QueryRowContext(ctx, getAPITokenByHash, tokenHash)
+	var i ApiToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.LastUsedIp,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const getAPITokenByID = `-- name: GetAPITokenByID :one
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, last_used_ip, revoked_at, created_at FROM api_tokens
+WHERE id = ? AND user_id = ?
+`
+
+type GetAPITokenByIDParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) GetAPITokenByID(ctx context.Context, arg GetAPITokenByIDParams) (ApiToken, error) {
+	row := q.db.QueryRowContext(ctx, getAPITokenByID, arg.ID, arg.UserID)
+	var i ApiToken
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Name,
+		&i.TokenHash,
+		&i.TokenPrefix,
+		&i.ExpiresAt,
+		&i.LastUsedAt,
+		&i.LastUsedIp,
+		&i.RevokedAt,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
+const listLiveAPITokenIDsForUser = `-- name: ListLiveAPITokenIDsForUser :many
+SELECT id FROM api_tokens
+WHERE user_id = ?
+  AND revoked_at IS NULL
+ORDER BY id
+`
+
+func (q *Queries) ListLiveAPITokenIDsForUser(ctx context.Context, userID int64) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveAPITokenIDsForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAPITokensForUser = `-- name: ListAPITokensForUser :many
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, last_used_ip, revoked_at, created_at FROM api_tokens
+WHERE user_id = ?
+ORDER BY created_at DESC, id DESC
+`
+
+func (q *Queries) ListAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error) {
+	rows, err := q.db.QueryContext(ctx, listAPITokensForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ApiToken{}
+	for rows.Next() {
+		var i ApiToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.TokenHash,
+			&i.TokenPrefix,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.LastUsedIp,
+			&i.RevokedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const revokeAPIToken = `-- name: RevokeAPIToken :execrows
+UPDATE api_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE id = ?
+  AND user_id = ?
+  AND revoked_at IS NULL
+`
+
+type RevokeAPITokenParams struct {
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+}
+
+func (q *Queries) RevokeAPIToken(ctx context.Context, arg RevokeAPITokenParams) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeAPIToken, arg.ID, arg.UserID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const revokeSingleLiveTokenByID = `-- name: RevokeSingleLiveTokenByID :execrows
+UPDATE api_tokens
+SET revoked_at = CURRENT_TIMESTAMP
+WHERE id = ?
+  AND revoked_at IS NULL
+`
+
+func (q *Queries) RevokeSingleLiveTokenByID(ctx context.Context, id int64) (int64, error) {
+	result, err := q.db.ExecContext(ctx, revokeSingleLiveTokenByID, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const touchAPITokenLastUsed = `-- name: TouchAPITokenLastUsed :exec
+UPDATE api_tokens
+SET last_used_at = CURRENT_TIMESTAMP,
+    last_used_ip = NULLIF(?, '')
+WHERE id = ?
+  AND (last_used_at IS NULL OR last_used_at < datetime('now', '-60 seconds'))
+`
+
+type TouchAPITokenLastUsedParams struct {
+	LastUsedIp sql.NullString `json:"last_used_ip"`
+	ID         int64          `json:"id"`
+}
+
+func (q *Queries) TouchAPITokenLastUsed(ctx context.Context, arg TouchAPITokenLastUsedParams) error {
+	_, err := q.db.ExecContext(ctx, touchAPITokenLastUsed, arg.LastUsedIp, arg.ID)
+	return err
+}
+
+const insertAPITokenAudit = `-- name: InsertAPITokenAudit :exec
+INSERT INTO api_token_audit (
+    token_id, user_id, action, actor_ip, actor_user_agent, actor_session_hash
+) VALUES (?, ?, ?, ?, ?, ?)
+`
+
+type InsertAPITokenAuditParams struct {
+	TokenID          int64          `json:"token_id"`
+	UserID           int64          `json:"user_id"`
+	Action           string         `json:"action"`
+	ActorIp          sql.NullString `json:"actor_ip"`
+	ActorUserAgent   sql.NullString `json:"actor_user_agent"`
+	ActorSessionHash sql.NullString `json:"actor_session_hash"`
+}
+
+func (q *Queries) InsertAPITokenAudit(ctx context.Context, arg InsertAPITokenAuditParams) error {
+	_, err := q.db.ExecContext(ctx, insertAPITokenAudit,
+		arg.TokenID,
+		arg.UserID,
+		arg.Action,
+		arg.ActorIp,
+		arg.ActorUserAgent,
+		arg.ActorSessionHash,
+	)
+	return err
+}
+
+const listAPITokenAuditByID = `-- name: ListAPITokenAuditByID :many
+SELECT id, token_id, user_id, action, actor_ip, actor_user_agent, actor_session_hash, created_at FROM api_token_audit
+WHERE token_id = ?
+ORDER BY created_at ASC, id ASC
+LIMIT ?
+`
+
+type ListAPITokenAuditByIDParams struct {
+	TokenID int64 `json:"token_id"`
+	Limit   int64 `json:"limit"`
+}
+
+func (q *Queries) ListAPITokenAuditByID(ctx context.Context, arg ListAPITokenAuditByIDParams) ([]ApiTokenAudit, error) {
+	rows, err := q.db.QueryContext(ctx, listAPITokenAuditByID, arg.TokenID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ApiTokenAudit{}
+	for rows.Next() {
+		var i ApiTokenAudit
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenID,
+			&i.UserID,
+			&i.Action,
+			&i.ActorIp,
+			&i.ActorUserAgent,
+			&i.ActorSessionHash,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAPITokenAuditByUser = `-- name: ListAPITokenAuditByUser :many
+SELECT id, token_id, user_id, action, actor_ip, actor_user_agent, actor_session_hash, created_at FROM api_token_audit
+WHERE user_id = ?
+ORDER BY created_at DESC, id DESC
+LIMIT ?
+`
+
+type ListAPITokenAuditByUserParams struct {
+	UserID int64 `json:"user_id"`
+	Limit  int64 `json:"limit"`
+}
+
+func (q *Queries) ListAPITokenAuditByUser(ctx context.Context, arg ListAPITokenAuditByUserParams) ([]ApiTokenAudit, error) {
+	rows, err := q.db.QueryContext(ctx, listAPITokenAuditByUser, arg.UserID, arg.Limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ApiTokenAudit{}
+	for rows.Next() {
+		var i ApiTokenAudit
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenID,
+			&i.UserID,
+			&i.Action,
+			&i.ActorIp,
+			&i.ActorUserAgent,
+			&i.ActorSessionHash,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}

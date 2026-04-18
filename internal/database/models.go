@@ -9,6 +9,30 @@ import (
 	"time"
 )
 
+type ApiToken struct {
+	ID          int64          `json:"id"`
+	UserID      int64          `json:"user_id"`
+	Name        string         `json:"name"`
+	TokenHash   string         `json:"token_hash"`
+	TokenPrefix string         `json:"token_prefix"`
+	ExpiresAt   sql.NullTime   `json:"expires_at"`
+	LastUsedAt  sql.NullTime   `json:"last_used_at"`
+	LastUsedIp  sql.NullString `json:"last_used_ip"`
+	RevokedAt   sql.NullTime   `json:"revoked_at"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+type ApiTokenAudit struct {
+	ID              int64          `json:"id"`
+	TokenID         int64          `json:"token_id"`
+	UserID          int64          `json:"user_id"`
+	Action          string         `json:"action"`
+	ActorIp         sql.NullString `json:"actor_ip"`
+	ActorUserAgent  sql.NullString `json:"actor_user_agent"`
+	ActorSessionHash sql.NullString `json:"actor_session_hash"`
+	CreatedAt       time.Time      `json:"created_at"`
+}
+
 type AppSetting struct {
 	Key       string    `json:"key"`
 	Value     string    `json:"value"`
