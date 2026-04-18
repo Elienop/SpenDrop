@@ -1792,6 +1792,60 @@ func (q *Queries) SumIncomeByMonth(ctx context.Context, arg SumIncomeByMonthPara
 	return total_cents, err
 }
 
+const sumExpensesByMonthForUser = `-- name: SumExpensesByMonthForUser :one
+-- User-scoped month total for /api/homepage/summary. Mirrors
+-- SumExpensesByMonth exactly but adds t.user_id = ?. Separate from the
+-- dashboard query because the dashboard is household-wide (spec §5.3:
+-- "summary scoped to token owner"). Soft-delete filter retained inline
+-- per .claude/CLAUDE.md soft-delete discipline.
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
+    AND t.user_id = ?1
+    AND strftime('%Y', t.date) = CAST(?2 AS TEXT)
+    AND strftime('%m', t.date) = CAST(?3 AS TEXT)
+`
+
+type SumExpensesByMonthForUserParams struct {
+	UserID int64  `json:"user_id"`
+	Year   string `json:"year"`
+	Month  string `json:"month"`
+}
+
+func (q *Queries) SumExpensesByMonthForUser(ctx context.Context, arg SumExpensesByMonthForUserParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, sumExpensesByMonthForUser, arg.UserID, arg.Year, arg.Month)
+	var total_cents int64
+	err := row.Scan(&total_cents)
+	return total_cents, err
+}
+
+const countMonthTransactionsForUser = `-- name: CountMonthTransactionsForUser :one
+-- User-scoped month-to-date transaction count. Counts BOTH expense and
+-- income rows — spec §5.3 defines txn_count as "number of transactions
+-- this month," not "number of expenses." Soft-delete filter inline.
+SELECT CAST(COUNT(*) AS INTEGER) AS n
+FROM transactions t
+WHERE t.deleted_at IS NULL
+    AND t.user_id = ?1
+    AND strftime('%Y', t.date) = CAST(?2 AS TEXT)
+    AND strftime('%m', t.date) = CAST(?3 AS TEXT)
+`
+
+type CountMonthTransactionsForUserParams struct {
+	UserID int64  `json:"user_id"`
+	Year   string `json:"year"`
+	Month  string `json:"month"`
+}
+
+func (q *Queries) CountMonthTransactionsForUser(ctx context.Context, arg CountMonthTransactionsForUserParams) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countMonthTransactionsForUser, arg.UserID, arg.Year, arg.Month)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
 const topDescriptions = `-- name: TopDescriptions :many
 SELECT
     t.description,

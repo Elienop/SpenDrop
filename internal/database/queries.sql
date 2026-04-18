@@ -328,6 +328,32 @@ WHERE c.type = 'income'
     AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
     AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
 
+-- name: SumExpensesByMonthForUser :one
+-- User-scoped month total for /api/homepage/summary. Mirrors
+-- SumExpensesByMonth exactly but adds t.user_id = ?. Separate from the
+-- dashboard query because the dashboard is household-wide (spec §5.3:
+-- "summary scoped to token owner"). Soft-delete filter retained inline
+-- per .claude/CLAUDE.md soft-delete discipline.
+SELECT CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE c.type = 'expense'
+    AND t.deleted_at IS NULL
+    AND t.user_id = sqlc.arg(user_id)
+    AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
+    AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
+
+-- name: CountMonthTransactionsForUser :one
+-- User-scoped month-to-date transaction count. Counts BOTH expense and
+-- income rows — spec §5.3 defines txn_count as "number of transactions
+-- this month," not "number of expenses." Soft-delete filter inline.
+SELECT CAST(COUNT(*) AS INTEGER) AS n
+FROM transactions t
+WHERE t.deleted_at IS NULL
+    AND t.user_id = sqlc.arg(user_id)
+    AND strftime('%Y', t.date) = CAST(sqlc.arg(year) AS TEXT)
+    AND strftime('%m', t.date) = CAST(sqlc.arg(month) AS TEXT);
+
 -- name: SumByCategoryForMonth :many
 SELECT c.id, c.name, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
 FROM transactions t
