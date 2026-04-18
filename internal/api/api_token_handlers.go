@@ -115,10 +115,22 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		expiresAt = sql.NullTime{Time: req.ExpiresAt.UTC(), Valid: true}
 	}
 
+	// Login-failure gate: if the IP has already exhausted the shared login
+	// bucket (from prior failed logins or failed reconfirms), block before
+	// doing the bcrypt comparison. This closes the oracle where an attacker
+	// could probe passwords via the create path without tripping the login
+	// limiter (spec §3.7).
+	clientIP := extractIP(r.RemoteAddr)
+	if h.loginFailureLimiter.Exhausted(clientIP) {
+		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
+		writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
+		return
+	}
+
 	if req.Password == "" || !auth.CheckPassword(user.PasswordHash, req.Password) {
 		// Failed reconfirm — consume the LOGIN bucket, not the create bucket.
 		// Spec §3.7: prevents slow-probing passwords on the create path.
-		h.loginFailureLimiter.Consume(extractIP(r.RemoteAddr))
+		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid password")
 		return
 	}
