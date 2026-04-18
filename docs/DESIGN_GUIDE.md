@@ -481,6 +481,28 @@ Introduced on the Trash page in `pages/Trash.tsx` (`Restore all N` / `Purge all 
 - **Hide the buttons when the surface is empty.** No trash, no buttons. The empty state is the signal; a disabled button next to "Trash is empty" is visual noise and an accessibility hazard.
 - **Cross-disable the pair.** `disabled={restoringAll || purgingAll}` on both buttons so the operator can't stack a restore and a purge into a race where the purge observes rows the restore was trying to save.
 
+### Show-once secret reveal
+
+Introduced on **Settings → API tokens** (`pages/Settings.tsx`, `ApiTokensSection` → `ShowOnceReveal`). Use this whenever the server returns a plaintext secret that will never be retrievable again (API tokens, backup signing keys, one-time recovery codes). The pattern guarantees that the plaintext lives in the render tree for exactly one user-visible moment and is unreachable after the dialog closes.
+
+- **The secret lives in local component state, not a ref or a context.** A `useState<string | null>` holds the plaintext for the duration of the dialog; the parent component's `onOpenChange` handler sets it back to `null` on close. React's unmount handling removes the DOM node carrying the plaintext as soon as the state flips, so a subsequent re-open of the dialog starts empty. Caching the plaintext in a ref or context would survive the unmount and defeats the whole point.
+- **Dialog `open` flows one state source, not two.** `<Dialog open={createOpen}>` — not `open={createOpen || revealed !== null}`. Two sources compose into double-fire `onOpenChange` calls (opening to reveal re-fires open even though we're already open). Pick one source of truth; in the API tokens flow it is the boolean the Create button flips.
+- **Input is `readOnly`, not `disabled`.** `readOnly` lets the user click into the field, select-all, and copy via keyboard shortcut. `disabled` defeats keyboard copy on Safari and screen readers, both of which refuse to read out a disabled form field's `value`.
+- **Primary copy button uses `navigator.clipboard.writeText` with a toast.** The toast is the confirmation signal — the button does not mutate its own label ("Copied!") because a label that flickers between states is a visual-bug vector on unmount (`useEffect` cleanup timing varies across React renderers). Fall back to a `Select all` helper + toast if `navigator.clipboard` is undefined (HTTP origins or pre-Secure-Context browsers).
+- **Regression-locked by a test.** `Settings.apiTokens.test.tsx` seeds one create flow, closes the reveal dialog, re-opens `+ New token`, and asserts the plaintext is absent from the DOM. Any future refactor that hoists the plaintext into a cache, memo, or parent ref fails this test. Do not ship a new show-once flow without the same regression lock.
+- **Never log the plaintext.** Not to `console.log`, not to `toast.info`, not to any error path. A logged plaintext is as bad as a stored plaintext.
+
+### API tokens settings layout
+
+Introduced on `pages/Settings.tsx` → `ApiTokensSection` as the sixth tab (`api-tokens`). Reuse these choices when adding any future "list of credentials / integrations" surface.
+
+- **Table columns: Name, Token, Last used, Created, Actions.** No expiry column by default — most tokens are created with Expires: Never, and an "Expires: Never" column is columnar noise. If the user has set an expiry it surfaces as a Badge on the Token cell, not as a dedicated column.
+- **Token cell uses `font-mono tabular-nums` on the 15-char prefix.** Same typography as other monospaced identifiers in the app (see ImportPreviewTable row-ids). Do not truncate the prefix with an ellipsis — it's already a fixed 15 characters.
+- **Last-used uses `formatDistanceToNowStrict` from `date-fns`.** Matches `Trash.tsx` usage exactly. Null (`last_used_at IS NULL`) renders as the muted-foreground placeholder "Never used" — **not** an em-dash, because screen readers treat `—` as silence and "never used" is a meaningful distinction.
+- **Revoke button is `variant="destructive"` + `size="sm"`.** Always inside a `ConfirmPurgeDialog`-style confirm (see Bulk irreversible-destructive actions above). Never revoke on a single click — the key asymmetry is that a mistaken revoke immediately breaks the user's external integration, and only a new-token mint can unbreak it.
+- **Revoke all lives on the section header, not per-row.** It is a bulk irreversible-destructive action — follow the same count-embedded / cross-disable rules from the Bulk section above.
+- **Empty state is plain prose, no illustration.** "No API tokens yet. Click **+ New token** to create one for Homepage, n8n, curl, or any other programmatic caller." The muted-foreground treatment matches the other settings-tab empty states (Savings with no goals, Currencies before the base is set).
+
 ---
 
 ## Quick Reference
