@@ -324,3 +324,43 @@ var usernameRegexp = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func isValidUsername(s string) bool {
 	return usernameRegexp.MatchString(s)
 }
+
+// TODO(password-change-handler): When SpenDrop adds a self-service password
+// change endpoint (POST /api/auth/password), implement it using the cascade
+// sequence locked in by
+// internal/database/store_api_token_password_cascade_test.go. The sequence
+// MUST run inside one sql.Tx:
+//
+//  1. Verify the caller's current password (outside the tx — no mutation yet).
+//     auth.CheckPassword(user.PasswordHash, req.CurrentPassword) must return
+//     true; otherwise writeError 401 "invalid credentials".
+//  2. Validate the new password against getPasswordBounds() (min/max bytes).
+//  3. Hash the new password with auth.HashPassword.
+//  4. tx, err := h.db.BeginTx(r.Context(), &sql.TxOptions{
+//         Isolation: sql.LevelSerializable,
+//     })
+//     defer tx.Rollback()
+//     qtx := h.queries.WithTx(tx)
+//  5. qtx.UpdateUserPassword(r.Context(), database.UpdateUserPasswordParams{
+//         PasswordHash: newHash,
+//         ID:           user.ID,
+//     })
+//  6. h.apiTokenStore.RevokeAllForUserTx(r.Context(), tx,
+//         database.ActorContext{
+//             UserID:      user.ID,
+//             IP:          extractIP(r.RemoteAddr),
+//             UserAgent:   r.UserAgent(),
+//             SessionHash: auth.HashSessionToken(sessionCookie),
+//         },
+//         database.APITokenAuditRevokedByPasswordChange)
+//  7. qtx.DeleteSessionsByUserID(r.Context(), user.ID)
+//  8. tx.Commit()
+//  9. Respond 200 with {"status": "password_changed", "tokens_revoked": N}.
+//     The frontend must redirect to /login on the next 401 from any
+//     subsequent request (the caller's own session was killed in step 7).
+//
+// DO NOT skip any step. DO NOT call store.RevokeAllForUser (non-Tx) — it
+// opens its own tx and breaks atomicity with the UPDATE and the session
+// delete. DO NOT pass APITokenAuditRevokedByMassRevoke or any other action
+// — that action label is reserved for the settings-UI "revoke all my
+// tokens" flow and would misclassify the audit trail.
