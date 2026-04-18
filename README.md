@@ -66,14 +66,14 @@ Tabbed settings page with five sections:
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
-- **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Used to authorize external integrations like the Homepage dashboard widget — see the [Homepage integration](#homepage-integration) section below for the end-to-end setup.
+- **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Use them to authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session — see [Using API tokens](#using-api-tokens) for curl and Homepage examples.
 - **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
 
 ![Settings](docs/screenshots/08-settings.png)
 
 ### Authentication
 
-Simple username/password auth with bcrypt hashing and HTTP-only session cookies. API routes additionally accept `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config. Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles.
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles.
 
 ![Login](docs/screenshots/09-login.png)
 ![Register](docs/screenshots/10-register.png)
@@ -561,6 +561,39 @@ Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS exampl
 
 **A reminder.** None of the above protects you against the running SpenDrop process being compromised. Encryption at rest is the lock on the front door of the building. TLS is the lock on the apartment door. Application-level auth is the lock on the diary inside. You need all three, and they are sold separately.
 
+## Using API tokens
+
+API tokens let you authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session. Create one from **Settings → API tokens**, copy the plaintext (shown only once), and send it as a Bearer header on any `/api/*` call:
+
+```bash
+curl -H "Authorization: Bearer <your-token>" \
+  https://spendrop.example.com/api/transactions
+```
+
+Tokens have the same access as your account password — revoke them individually from the settings page if a device is lost or a script is retired.
+
+### Example: Homepage widget
+
+```yaml
+widget:
+  type: customapi
+  url: https://spendrop.example.com/api/homepage/summary
+  refreshInterval: 30000
+  method: GET
+  display: list
+  headers:
+    Authorization: "Bearer <your-token>"
+  mappings:
+    - { field: month_spent, label: This month, format: float, prefix: "$" }
+    - { field: txn_count, label: Transactions, format: number }
+    - field: month_remaining
+      label: Remaining
+      format: float
+      prefix: "$"
+      additionalField: { field: month_remaining, format: float, color: adaptive }
+    - { field: over_budget_categories, label: Over budget, format: number }
+```
+
 ## API Reference
 
 SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) require authentication via session cookie.
@@ -575,11 +608,11 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 
 ### API Tokens
 
-Long-lived bearer tokens for programmatic access. Created via the API (requires your session + current password) and consumed via `Authorization: Bearer <token>` on every request. Tokens are scoped to the creating user — they grant the same access that user has in the UI. See [Homepage integration](#homepage-integration) below for an end-to-end worked example.
+Long-lived bearer tokens for programmatic access. Created via the API (requires an active session) and consumed via `Authorization: Bearer <token>` on every request. Tokens are scoped to the creating user — they grant the same access that user has in the UI. See [Using API tokens](#using-api-tokens) above for curl and Homepage examples.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/api-tokens` | Create a new API token. Body: `{"name":"<=100 chars","expires_at":"RFC3339 or null","password":"your current password"}`. Returns the full plaintext token in the response body **exactly once** — store it immediately; the server keeps only a SHA-256 hash. |
+| POST | `/api/api-tokens` | Create a new API token. Body: `{"name":"<=100 chars","expires_at":"RFC3339 or null"}`. Returns the full plaintext token in the response body **exactly once** — store it immediately; the server keeps only a SHA-256 hash. |
 | GET | `/api/api-tokens` | List the caller's tokens. Each item carries `id`, `name`, `token_prefix` (first 15 chars, safe to display), `created_at`, `last_used_at`, `last_used_ip`, `expires_at`. The full token is NEVER re-emitted. |
 | DELETE | `/api/api-tokens/{id}` | Revoke one token by id. Returns `{"ok":true}`. Idempotent — revoking an already-revoked token still 200s. |
 | DELETE | `/api/api-tokens` | Revoke every live token the caller owns. Returns `{"revoked":N}`. |
@@ -652,7 +685,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 
 ### Homepage integration endpoint
 
-A read-only, Bearer-only endpoint tailored for the Homepage (gethomepage.dev) `customapi` widget. Cheap enough for 30-second polling — the payload is minimal (just what the widget renders) and a per-token 15-second response cache absorbs burst traffic when multiple widgets or dashboards hit the endpoint within the same window.
+A read-only, Bearer-only endpoint whose response shape happens to map cleanly to the Homepage (gethomepage.dev) `customapi` widget. Any Bearer-authenticated caller can hit it — curl, a cron job, another dashboard. The payload is minimal (just the aggregates a widget renders) and a per-token 15-second response cache absorbs burst traffic when multiple widgets or dashboards hit the endpoint within the same window, keeping 30-second polling cheap.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -694,7 +727,7 @@ See the [Homepage integration](#homepage-integration) section below for the `ser
 
 ### 1. Mint a token
 
-In SpenDrop, open **Settings → API tokens → `+ New token`**. Name it **Homepage** (any name works, but name it something you'll recognise two years from now — it shows on the list view), leave Expires at **Never**, type your current SpenDrop password, and click **Create**. The next screen reveals the full token **once only** — click the Copy button, paste it somewhere safe for the next two steps, and click Done.
+In SpenDrop, open **Settings → API tokens → Create token**. Name it **Homepage** (any name works, but name it something you'll recognise two years from now — it shows on the list view), leave Expires at **Never**, and click **Create token**. The next screen reveals the full token **once only** — click the Copy button, paste it somewhere safe for the next two steps, and click **I've saved my token**.
 
 > The reveal view is the only place the plaintext token is ever shown. SpenDrop stores only a SHA-256 hash, so if you lose the token before Step 2 you must revoke it and mint a new one. This is deliberate — it means a stolen database backup cannot be turned into a valid token.
 
