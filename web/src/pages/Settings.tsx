@@ -1506,6 +1506,7 @@ function ApiTokensSection() {
   const [createdToken, setCreatedToken] = useState<CreateTokenResponse | null>(null);
   const [creating, setCreating] = useState(false);
   const [revokingToken, setRevokingToken] = useState<ApiToken | null>(null);
+  const [revokingTokenName, setRevokingTokenName] = useState('');
   const [revokeAllOpen, setRevokeAllOpen] = useState(false);
   const [revoking, setRevoking] = useState(false);
 
@@ -1525,6 +1526,14 @@ function ApiTokensSection() {
          the user can retry by creating a token. */
     });
   }, [fetchTokens]);
+
+  // Sticky display-name for the revoke-one dialog title: only updates when
+  // a token becomes the revoke target. When revokingToken flips back to
+  // null, the ref stays — preventing a "Revoke ?" flash during Radix's
+  // close-exit animation.
+  useEffect(() => {
+    if (revokingToken) setRevokingTokenName(revokingToken.name);
+  }, [revokingToken]);
 
   function formatLastUsed(t: ApiToken): string {
     if (!t.last_used_at) return 'Never used';
@@ -1631,14 +1640,16 @@ function ApiTokensSection() {
           <Dialog
             open={createOpen}
             onOpenChange={(open) => {
+              // Guard close-while-submitting: if the POST is in flight and we
+              // let the user close the dialog here, setCreatedToken(body) in
+              // onCreate resolves into a closed dialog and the next "+ New
+              // token" click jumps straight to the reveal of a token the user
+              // thought they'd cancelled. Mirror the revoke-dialog busy guard.
+              if (creating) return;
               if (open) {
                 setCreateOpen(true);
                 return;
               }
-              // Closing covers both rendered states: if the reveal is up, clear
-              // the plaintext; if the form is up, reset the form. Either way, the
-              // plaintext can never be re-summoned from this component — the
-              // next time the user opens the dialog they start in the form state.
               setCreateOpen(false);
               setCreatedToken(null);
               createForm.reset();
@@ -1823,7 +1834,7 @@ function ApiTokensSection() {
             <DialogTitle>
               Revoke{' '}
               <span className="font-mono">
-                {revokingToken?.name ?? ''}
+                {revokingTokenName}
               </span>
               ?
             </DialogTitle>
