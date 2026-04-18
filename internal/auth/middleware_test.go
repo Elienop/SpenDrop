@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 	_ "github.com/mattn/go-sqlite3"
 )
 
@@ -258,5 +259,108 @@ func TestGetUser_WithoutUser_ReturnsFalse(t *testing.T) {
 	_, ok := GetUser(req)
 	if ok {
 		t.Error("expected ok=false when no user in context")
+	}
+}
+
+// --- RequireAuthOrAPIToken tests ---
+//
+// The combined middleware must accept either a Bearer token OR a session
+// cookie. When Bearer is present it is exclusive — failure does NOT fall
+// back to the cookie. These tests pin that contract.
+
+// combinedAuthHelper returns the fixtures needed to exercise
+// RequireAuthOrAPIToken: queries, db, bucket, user, a plaintext bearer
+// bound to the user, a valid 64-hex session cookie bound to the user, and a
+// shutdown hook.
+func combinedAuthHelper(t *testing.T) (q *database.Queries, bucket *ratelimit.Bucket, bearer string, cookie *http.Cookie, stop func()) {
+	t.Helper()
+	q, _, bucket, stop = setupMiddlewareTest(t)
+	uid, pt := seedUserAndLiveToken(t, q, "alice")
+	// 64 hex chars so RequireAuth's length check passes.
+	sessionTok := "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
+	if err := q.CreateSession(context.Background(), database.CreateSessionParams{
+		Token:     sessionTok,
+		UserID:    uid,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	return q, bucket, pt, &http.Cookie{Name: "session", Value: sessionTok}, stop
+}
+
+func TestRequireAuthOrAPIToken_ValidBearer_AllowsAccess(t *testing.T) {
+	q, bucket, bearer, _, stop := combinedAuthHelper(t)
+	defer stop()
+
+	var attached database.User
+	mw := RequireAuthOrAPIToken(q, bucket)
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req.Header.Set("Authorization", "Bearer "+bearer)
+	req.RemoteAddr = "1.2.3.4:5678"
+	rec := httptest.NewRecorder()
+	mw(terminalHandler(&attached)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if attached.Username != "alice" {
+		t.Errorf("bearer should attach user; got %+v", attached)
+	}
+}
+
+func TestRequireAuthOrAPIToken_ValidSession_AllowsAccess(t *testing.T) {
+	q, bucket, _, cookie, stop := combinedAuthHelper(t)
+	defer stop()
+
+	var attached database.User
+	mw := RequireAuthOrAPIToken(q, bucket)
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req.AddCookie(cookie)
+	req.RemoteAddr = "1.2.3.4:5678"
+	rec := httptest.NewRecorder()
+	mw(terminalHandler(&attached)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if attached.Username != "alice" {
+		t.Errorf("cookie should attach user; got %+v", attached)
+	}
+}
+
+// TestRequireAuthOrAPIToken_BearerTakesPrecedence pins the "Bearer is
+// exclusive when present" invariant. A malformed Bearer header combined
+// with a perfectly valid session cookie must still 401 — never fall back
+// to the cookie.
+func TestRequireAuthOrAPIToken_BearerTakesPrecedence(t *testing.T) {
+	q, bucket, _, cookie, stop := combinedAuthHelper(t)
+	defer stop()
+
+	mw := RequireAuthOrAPIToken(q, bucket)
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req.Header.Set("Authorization", "Bearer spdr_garbage_invalid_token_here_xx")
+	req.AddCookie(cookie)
+	req.RemoteAddr = "1.2.3.4:5678"
+	rec := httptest.NewRecorder()
+	mw(terminalHandler(nil)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid bearer + valid cookie: want 401 (no fallback), got %d; body: %s",
+			rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequireAuthOrAPIToken_NoCredentials_401(t *testing.T) {
+	q, bucket, _, _, stop := combinedAuthHelper(t)
+	defer stop()
+
+	mw := RequireAuthOrAPIToken(q, bucket)
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req.RemoteAddr = "1.2.3.4:5678"
+	rec := httptest.NewRecorder()
+	mw(terminalHandler(nil)).ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no credentials: want 401, got %d", rec.Code)
 	}
 }
