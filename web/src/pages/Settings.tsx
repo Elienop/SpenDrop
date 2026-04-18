@@ -1422,14 +1422,72 @@ function ShowOnceReveal({
       </DialogHeader>
       <div className="grid gap-3">
         <Label htmlFor="api-token-reveal">Your new API token</Label>
-        <Input
-          id="api-token-reveal"
-          value={token.token}
-          readOnly
-          className="font-mono"
-          onFocus={selectAllOnFocus}
-        />
-        {/* Copy + YAML snippet come in Task 7.5; Done closes now. */}
+        <div className="flex items-center gap-2">
+          <Input
+            id="api-token-reveal"
+            value={token.token}
+            readOnly
+            className="font-mono"
+            onFocus={selectAllOnFocus}
+          />
+          <Button
+            type="button"
+            variant="outline"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(token.token);
+                toast.success('Copied');
+              } catch {
+                // navigator.clipboard.writeText rejects on insecure
+                // contexts (common for self-hosted SpenDrop served
+                // over HTTP on a LAN IP — localhost is treated as
+                // secure, but `http://192.168.x.x` is not) and on
+                // explicit permission denial. Either way the user
+                // cannot rely on the button alone. Focus + select
+                // the reveal <Input> so one Ctrl/Cmd+C still copies,
+                // and tell them so via a toast. The dialog stays
+                // open and the plaintext stays on screen — the user
+                // does not have to re-trigger the Create flow.
+                const revealInput = document.getElementById(
+                  'api-token-reveal',
+                ) as HTMLInputElement | null;
+                if (revealInput) {
+                  revealInput.focus();
+                  revealInput.select();
+                }
+                toast.info(
+                  'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
+                );
+              }
+            }}
+          >
+            Copy
+          </Button>
+        </div>
+        <details className="rounded-md border p-3 text-sm">
+          <summary className="cursor-pointer font-medium">
+            Use with Homepage
+          </summary>
+          <pre className="mt-3 overflow-x-auto rounded bg-muted p-3 text-xs">
+{`widget:
+  type: customapi
+  url: https://<your-spendrop>/api/homepage/summary
+  refreshInterval: 30000
+  method: GET
+  display: list
+  headers:
+    Authorization: "Bearer ${token.token}"
+  mappings:
+    - { field: month_spent, label: This month, format: float, prefix: "$" }
+    - { field: txn_count, label: Transactions, format: number }
+    - field: month_remaining
+      label: Remaining
+      format: float
+      prefix: "$"
+      additionalField: { field: month_remaining, format: float, color: adaptive }
+    - { field: over_budget_categories, label: Over budget, format: number }`}
+          </pre>
+        </details>
       </div>
       <DialogFooter>
         <Button type="button" onClick={onClose}>

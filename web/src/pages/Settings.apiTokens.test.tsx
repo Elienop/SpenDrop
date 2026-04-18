@@ -192,4 +192,58 @@ describe('ApiTokensSection', () => {
       password: 'hunter2',
     });
   });
+
+  test('Copy button writes to navigator.clipboard and fires success toast', async () => {
+    const user = userEvent.setup();
+    // userEvent.setup() attaches its own clipboard stub to navigator,
+    // which replaces the `vi.fn` spy installed in beforeEach. Re-install
+    // our writable spy AFTER setup() so the Copy button's call can be
+    // asserted. Both stubs resolve to `undefined`, so no behavior drift.
+    const writeTextSpy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: { writeText: writeTextSpy },
+      writable: true,
+      configurable: true,
+    });
+    seedGetMock([]);
+    mockedApi.post.mockResolvedValueOnce({
+      id: 7,
+      name: 'Homepage',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+      token: 'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    await user.type(
+      screen.getByLabelText(/confirm password/i),
+      'hunter2',
+    );
+    await user.click(screen.getByRole('button', { name: /^create$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/only time you'll see this token/i),
+      ).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /^copy$/i }));
+    // The writeText spy captures the exact string we handed the
+    // clipboard. That string is the only place the plaintext should
+    // land; a successful copy therefore also proves the reveal input's
+    // value is the plaintext (not the prefix).
+    expect(writeTextSpy).toHaveBeenCalledWith(
+      'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    );
+    await waitFor(() => {
+      // sonner's toast.success is mocked at the module level — assert
+      // the success variant fired, not the error variant.
+      expect(vi.mocked(toast).success).toHaveBeenCalledWith('Copied');
+    });
+  });
 });
