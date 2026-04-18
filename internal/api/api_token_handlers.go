@@ -23,7 +23,6 @@ const (
 type apiTokenCreateRequest struct {
 	Name      string     `json:"name"`
 	ExpiresAt *time.Time `json:"expires_at"`
-	Password  string     `json:"password"`
 }
 
 type apiTokenCreateResponse struct {
@@ -69,10 +68,11 @@ func newActorContext(r *http.Request, user database.User) database.ActorContext 
 	}
 }
 
-// handleCreateAPIToken mints a new API token. Requires session auth (from
-// RequireAuth in router.go) plus an in-body password reconfirm. Failed
-// reconfirms consume the shared login-failure bucket (same bucket
-// handleLogin uses). Successful creates consume the 5/hr createTokenLimiter.
+// handleCreateAPIToken mints a new API token. Requires authentication (from
+// RequireAuthOrAPIToken in router.go — session cookie or bearer both work).
+// The per-user create-rate bucket (5/hour) is the only abuse gate; there is
+// no password reconfirm, so compromise of a session cookie or bearer implies
+// compromise of this endpoint.
 func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.GetUser(r)
 	if !ok {
@@ -81,7 +81,7 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create-limit gate runs FIRST so an already-exhausted user doesn't
-	// burn a bcrypt compare on every poll.
+	// burn JSON decoding on every poll.
 	userKey := strconv.FormatInt(user.ID, 10)
 	if h.createTokenLimiter.Exhausted(userKey) {
 		w.Header().Set("Retry-After", h.createTokenLimiter.RetryAfter(userKey))
@@ -115,26 +115,6 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		expiresAt = sql.NullTime{Time: req.ExpiresAt.UTC(), Valid: true}
 	}
 
-	// Login-failure gate: if the IP has already exhausted the shared login
-	// bucket (from prior failed logins or failed reconfirms), block before
-	// doing the bcrypt comparison. This closes the oracle where an attacker
-	// could probe passwords via the create path without tripping the login
-	// limiter (spec §3.7).
-	clientIP := extractIP(r.RemoteAddr)
-	if h.loginFailureLimiter.Exhausted(clientIP) {
-		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
-		writeError(w, http.StatusTooManyRequests, "too many attempts, try again later")
-		return
-	}
-
-	if req.Password == "" || !auth.CheckPassword(user.PasswordHash, req.Password) {
-		// Failed reconfirm — consume the LOGIN bucket, not the create bucket.
-		// Spec §3.7: prevents slow-probing passwords on the create path.
-		h.loginFailureLimiter.Consume(clientIP)
-		writeError(w, http.StatusUnauthorized, "invalid password")
-		return
-	}
-
 	plaintext, hash, prefix, err := auth.GenerateAPIToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to generate token")
@@ -154,8 +134,8 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Only consume the create bucket on success (spec §3.7 — failed reconfirms
-	// do not burn the create quota).
+	// Only consume the create bucket on success — validation failures don't
+	// burn the quota.
 	h.createTokenLimiter.Consume(userKey)
 
 	writeJSON(w, http.StatusCreated, apiTokenCreateResponse{

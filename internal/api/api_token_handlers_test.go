@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -16,11 +15,14 @@ import (
 
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // seedTokenTestUser inserts a user and returns (user, plaintextPassword,
 // sessionCookie). Handlers consume auth.GetUser from the request context, so
-// every test fires requests through a RequireAuth-wrapped handler.
+// every test fires requests through the session-auth wrapped handler.
+// plaintextPassword is returned for tests that need it to exercise the login
+// path; the token-create handler itself no longer requires a password.
 func seedTokenTestUser(t *testing.T, h *Handler, username string) (database.User, string, *http.Cookie) {
 	t.Helper()
 	auth.SetBcryptCostForTesting()
@@ -52,15 +54,16 @@ func seedTokenTestUser(t *testing.T, h *Handler, username string) (database.User
 	return user, password, &http.Cookie{Name: "session", Value: token}
 }
 
-// tokenRouter wraps the caller-provided *Handler in RequireAuth +
-// requireJSONContentType, matching router.go:94-97. Reusing `h` across
-// requests is load-bearing: rate-limit tests depend on per-Handler bucket
-// state accumulating. NewRouter would construct a fresh Handler per call
-// and silently neuter every bucket assertion.
+// tokenRouter wraps the caller-provided *Handler in RequireAuthOrAPIToken +
+// requireJSONContentType, matching the production router.go wiring. Reusing
+// `h` across requests is load-bearing: rate-limit tests depend on per-Handler
+// bucket state accumulating. NewRouter would construct a fresh Handler per
+// call and silently neuter every bucket assertion.
 func tokenRouter(h *Handler) chi.Router {
+	limiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
 	r := chi.NewRouter()
 	r.Route("/api", func(r chi.Router) {
-		r.Use(auth.RequireAuth(h.queries))
+		r.Use(auth.RequireAuthOrAPIToken(h.queries, limiter))
 		r.Use(requireJSONContentType)
 		r.Route("/api-tokens", func(r chi.Router) {
 			r.Post("/", h.handleCreateAPIToken)
@@ -96,11 +99,10 @@ func tokenRequest(t *testing.T, h *Handler, method, path string, body any, cooki
 
 func TestAPITokens_Create_ReturnsPlaintextOnceInResponse(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "Homepage",
-		"password": password,
+		"name": "Homepage",
 	}, cookie)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create: want 201, got %d: %s", rec.Code, rec.Body.String())
@@ -122,69 +124,33 @@ func TestAPITokens_Create_ReturnsPlaintextOnceInResponse(t *testing.T) {
 	}
 }
 
-func TestAPITokens_Create_WrongPassword_401(t *testing.T) {
+// TestCreateAPIToken_NoPasswordRequired pins the new contract: no password
+// field is required on create, and a body that omits it must return 201 with
+// the plaintext token in the response.
+func TestCreateAPIToken_NoPasswordRequired(t *testing.T) {
 	h := setupHandler(t)
 	_, _, cookie := seedTokenTestUser(t, h, "alice")
-	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "Homepage",
-		"password": "wrong",
-	}, cookie)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("want 401, got %d", rec.Code)
-	}
-}
 
-func TestAPITokens_Create_WrongPassword_DoesNotEmitAuditRow(t *testing.T) {
-	h := setupHandler(t)
-	user, _, cookie := seedTokenTestUser(t, h, "alice")
-	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "Homepage",
-		"password": "wrong",
-	}, cookie)
-	// Zero rows in api_token_audit for this user.
-	var n int64
-	row := h.db.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM api_token_audit WHERE user_id = ?`, user.ID)
-	if err := row.Scan(&n); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if n != 0 {
-		t.Errorf("audit row leaked on failed create: %d", n)
-	}
-}
-
-func TestAPITokens_Create_WrongPassword_ConsumesLoginFailureBucketNotCreationBucket(t *testing.T) {
-	h := setupHandler(t)
-	_, _, cookie := seedTokenTestUser(t, h, "alice")
-	// ASSUMPTION: `config.Defaults().RateLimit.MaxAttempts == 10` — this is the
-	// capacity frozen into h.loginFailureLimiter at NewHandler time. If the
-	// default moves, bump the loop bound + the expected 429 trip point.
-	for i := 0; i < 10; i++ {
-		_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-			"name":     fmt.Sprintf("t%d", i),
-			"password": "wrong",
-		}, cookie)
-	}
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "t11",
-		"password": "wrong",
+		"name": "Homepage",
 	}, cookie)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("11th failed reconfirm: want 429 from login bucket, got %d", rec.Code)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create without password: want 201, got %d: %s", rec.Code, rec.Body.String())
 	}
-	// Create bucket is untouched — verify the user key is not exhausted.
-	user, _ := h.queries.GetUserByUsername(context.Background(), "alice")
-	if h.createTokenLimiter.Exhausted(strconv.FormatInt(user.ID, 10)) {
-		t.Error("create bucket was consumed by failed reconfirms (should be login-only)")
+	var resp apiTokenCreateResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !strings.HasPrefix(resp.Token, "spdr_") {
+		t.Errorf("token missing spdr_ prefix: %q", resp.Token)
 	}
 }
 
 func TestAPITokens_Create_EmitsAuditRowWithCreatedAction(t *testing.T) {
 	h := setupHandler(t)
-	user, password, cookie := seedTokenTestUser(t, h, "alice")
+	user, _, cookie := seedTokenTestUser(t, h, "alice")
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "Homepage",
-		"password": password,
+		"name": "Homepage",
 	}, cookie)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("want 201, got %d", rec.Code)
@@ -200,25 +166,26 @@ func TestAPITokens_Create_EmitsAuditRowWithCreatedAction(t *testing.T) {
 	}
 }
 
-func TestAPITokens_Create_RateLimitExceeded_429(t *testing.T) {
+// TestCreateAPIToken_RateLimitStillEnforced ensures the per-user 5/hour
+// createTokenLimiter still fires after the password reconfirm was dropped.
+// Without this the only remaining abuse control is the bucket; losing it
+// silently would let a compromised session mint unlimited tokens.
+func TestCreateAPIToken_RateLimitStillEnforced(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	// ASSUMPTION: the createTokenLimiter is hardcoded to `limit=5` in
 	// NewHandler (`ratelimit.NewBucket(5, time.Hour, clock)`). If that
 	// literal changes, bump the loop bound and the expected 429 trip point.
-	// 5 successful creates, then a 6th must 429.
 	for i := 0; i < 5; i++ {
 		rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-			"name":     fmt.Sprintf("t%d", i),
-			"password": password,
+			"name": fmt.Sprintf("t%d", i),
 		}, cookie)
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create %d: want 201, got %d: %s", i, rec.Code, rec.Body.String())
 		}
 	}
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "t6",
-		"password": password,
+		"name": "t6",
 	}, cookie)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("6th create: want 429, got %d", rec.Code)
@@ -228,44 +195,12 @@ func TestAPITokens_Create_RateLimitExceeded_429(t *testing.T) {
 	}
 }
 
-// TestAPITokens_Create_ExhaustedBucket_Returns429_EvenOnWrongPassword closes
-// the 401-vs-429 oracle: once the create bucket is exhausted, the handler
-// must 429 BEFORE doing the password check, so a probe cannot tell "bucket
-// exhausted" from "wrong password" (both would be 401 otherwise and leak
-// capacity state). Ordering check: the exhaustion gate in handleCreateAPIToken
-// runs before decodeJSON + CheckPassword — verify it by exhausting the bucket
-// with 5 successful creates, then firing a request with a wrong password and
-// asserting 429.
-func TestAPITokens_Create_ExhaustedBucket_Returns429_EvenOnWrongPassword(t *testing.T) {
-	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
-	for i := 0; i < 5; i++ {
-		rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-			"name":     fmt.Sprintf("t%d", i),
-			"password": password,
-		}, cookie)
-		if rec.Code != http.StatusCreated {
-			t.Fatalf("create %d: want 201, got %d", i, rec.Code)
-		}
-	}
-	// Now fire with a wrong password. Bucket is exhausted; handler must
-	// return 429 without consulting the password (would otherwise be 401).
-	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "t-wrong",
-		"password": "wrong",
-	}, cookie)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Fatalf("exhausted bucket + wrong password: want 429 (not 401), got %d", rec.Code)
-	}
-}
-
 func TestAPITokens_Create_ExpiresAtInPast_400(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	past := time.Now().Add(-time.Hour)
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
 		"name":       "t",
-		"password":   password,
 		"expires_at": past,
 	}, cookie)
 	if rec.Code != http.StatusBadRequest {
@@ -275,11 +210,10 @@ func TestAPITokens_Create_ExpiresAtInPast_400(t *testing.T) {
 
 func TestAPITokens_Create_ExpiresAtBeyond10Years_400(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	far := time.Now().AddDate(11, 0, 0)
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
 		"name":       "t",
-		"password":   password,
 		"expires_at": far,
 	}, cookie)
 	if rec.Code != http.StatusBadRequest {
@@ -289,10 +223,9 @@ func TestAPITokens_Create_ExpiresAtBeyond10Years_400(t *testing.T) {
 
 func TestAPITokens_Create_EmptyName_400(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     "   ",
-		"password": password,
+		"name": "   ",
 	}, cookie)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("whitespace-only name: want 400, got %d", rec.Code)
@@ -301,10 +234,9 @@ func TestAPITokens_Create_EmptyName_400(t *testing.T) {
 
 func TestAPITokens_Create_NameOver100Chars_400(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	rec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name":     strings.Repeat("x", 101),
-		"password": password,
+		"name": strings.Repeat("x", 101),
 	}, cookie)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("101-char name: want 400, got %d", rec.Code)
@@ -313,9 +245,9 @@ func TestAPITokens_Create_NameOver100Chars_400(t *testing.T) {
 
 func TestAPITokens_List_ExcludesHashAndPlaintext(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{
-		"name": "t", "password": password,
+		"name": "t",
 	}, cookie)
 	rec := tokenRequest(t, h, http.MethodGet, "/api/api-tokens/", nil, cookie)
 	if rec.Code != http.StatusOK {
@@ -331,10 +263,10 @@ func TestAPITokens_List_ExcludesHashAndPlaintext(t *testing.T) {
 
 func TestAPITokens_List_OnlyReturnsOwnTokens(t *testing.T) {
 	h := setupHandler(t)
-	_, aliceP, aliceCookie := seedTokenTestUser(t, h, "alice")
-	_, bobP, bobCookie := seedTokenTestUser(t, h, "bob")
-	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "alice-tok", "password": aliceP}, aliceCookie)
-	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "bob-tok", "password": bobP}, bobCookie)
+	_, _, aliceCookie := seedTokenTestUser(t, h, "alice")
+	_, _, bobCookie := seedTokenTestUser(t, h, "bob")
+	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "alice-tok"}, aliceCookie)
+	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "bob-tok"}, bobCookie)
 
 	rec := tokenRequest(t, h, http.MethodGet, "/api/api-tokens/", nil, aliceCookie)
 	var out apiTokenListResponse
@@ -348,12 +280,12 @@ func TestAPITokens_List_OnlyReturnsOwnTokens(t *testing.T) {
 
 func TestAPITokens_List_HidesRevokedByDefault(t *testing.T) {
 	h := setupHandler(t)
-	_, password, cookie := seedTokenTestUser(t, h, "alice")
+	_, _, cookie := seedTokenTestUser(t, h, "alice")
 	// Create two tokens, revoke one, assert list returns exactly one.
-	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "to-revoke", "password": password}, cookie)
+	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "to-revoke"}, cookie)
 	var created apiTokenCreateResponse
 	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
-	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "keep", "password": password}, cookie)
+	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "keep"}, cookie)
 
 	revokeRec := tokenRequest(t, h, http.MethodDelete, fmt.Sprintf("/api/api-tokens/%d", created.ID), nil, cookie)
 	if revokeRec.Code != http.StatusOK {
@@ -369,8 +301,8 @@ func TestAPITokens_List_HidesRevokedByDefault(t *testing.T) {
 
 func TestAPITokens_RevokeOne_SoftDeletesAndEmitsAuditWithRevokedByUser(t *testing.T) {
 	h := setupHandler(t)
-	user, password, cookie := seedTokenTestUser(t, h, "alice")
-	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t", "password": password}, cookie)
+	user, _, cookie := seedTokenTestUser(t, h, "alice")
+	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t"}, cookie)
 	var created apiTokenCreateResponse
 	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
 
@@ -397,8 +329,8 @@ func TestAPITokens_RevokeOne_SoftDeletesAndEmitsAuditWithRevokedByUser(t *testin
 
 func TestAPITokens_RevokeOne_AlreadyRevoked_Idempotent_NoSecondAudit(t *testing.T) {
 	h := setupHandler(t)
-	user, password, cookie := seedTokenTestUser(t, h, "alice")
-	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t", "password": password}, cookie)
+	user, _, cookie := seedTokenTestUser(t, h, "alice")
+	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t"}, cookie)
 	var created apiTokenCreateResponse
 	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
 
@@ -419,9 +351,9 @@ func TestAPITokens_RevokeOne_AlreadyRevoked_Idempotent_NoSecondAudit(t *testing.
 
 func TestAPITokens_RevokeOne_OtherUsersToken_404(t *testing.T) {
 	h := setupHandler(t)
-	_, aliceP, aliceCookie := seedTokenTestUser(t, h, "alice")
+	_, _, aliceCookie := seedTokenTestUser(t, h, "alice")
 	_, _, bobCookie := seedTokenTestUser(t, h, "bob")
-	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t", "password": aliceP}, aliceCookie)
+	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t"}, aliceCookie)
 	var aliceTok apiTokenCreateResponse
 	_ = json.Unmarshal(createRec.Body.Bytes(), &aliceTok)
 
@@ -433,9 +365,9 @@ func TestAPITokens_RevokeOne_OtherUsersToken_404(t *testing.T) {
 
 func TestAPITokens_RevokeAll_SoftDeletesAllLiveTokensForUser_EmitsAuditPerToken(t *testing.T) {
 	h := setupHandler(t)
-	user, password, cookie := seedTokenTestUser(t, h, "alice")
+	user, _, cookie := seedTokenTestUser(t, h, "alice")
 	for i := 0; i < 3; i++ {
-		createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": fmt.Sprintf("t%d", i), "password": password}, cookie)
+		createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": fmt.Sprintf("t%d", i)}, cookie)
 		if createRec.Code != http.StatusCreated {
 			t.Fatalf("create t%d: want 201, got %d", i, createRec.Code)
 		}
@@ -461,8 +393,8 @@ func TestAPITokens_RevokeAll_SoftDeletesAllLiveTokensForUser_EmitsAuditPerToken(
 
 func TestAPITokens_Revoke_EmitsAuditWithCorrectActorSessionHash(t *testing.T) {
 	h := setupHandler(t)
-	user, password, cookie := seedTokenTestUser(t, h, "alice")
-	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t", "password": password}, cookie)
+	user, _, cookie := seedTokenTestUser(t, h, "alice")
+	createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "t"}, cookie)
 	var created apiTokenCreateResponse
 	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
 	_ = tokenRequest(t, h, http.MethodDelete, fmt.Sprintf("/api/api-tokens/%d", created.ID), nil, cookie)
