@@ -204,6 +204,14 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)
 		r.Put("/settings/default-budget", h.handleDefaultBudget)
+
+		// API tokens (user-scoped; every user manages their own)
+		r.Route("/api-tokens", func(r chi.Router) {
+			r.Post("/", h.handleCreateAPIToken)
+			r.Get("/", h.handleListAPITokens)
+			r.Delete("/", h.handleRevokeAllAPITokens)
+			r.Delete("/{id}", h.handleRevokeAPIToken)
+		})
 	})
 
 	// SPA fallback: serve React build if web/dist exists
