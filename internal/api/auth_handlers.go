@@ -345,7 +345,7 @@ func isValidUsername(s string) bool {
 //         PasswordHash: newHash,
 //         ID:           user.ID,
 //     })
-//  6. h.apiTokenStore.RevokeAllForUserTx(r.Context(), tx,
+//  6. tokensRevoked, err := h.apiTokenStore.RevokeAllForUserTx(r.Context(), tx,
 //         database.ActorContext{
 //             UserID:      user.ID,
 //             IP:          extractIP(r.RemoteAddr),
@@ -355,7 +355,7 @@ func isValidUsername(s string) bool {
 //         database.APITokenAuditRevokedByPasswordChange)
 //  7. qtx.DeleteSessionsByUserID(r.Context(), user.ID)
 //  8. tx.Commit()
-//  9. Respond 200 with {"status": "password_changed", "tokens_revoked": N}.
+//  9. Respond 200 with {"status": "password_changed", "tokens_revoked": tokensRevoked}.
 //     The frontend must redirect to /login on the next 401 from any
 //     subsequent request (the caller's own session was killed in step 7).
 //
