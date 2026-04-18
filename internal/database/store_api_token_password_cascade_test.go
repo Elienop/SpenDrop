@@ -368,3 +368,52 @@ func TestPasswordCascade_RollbackLeavesAllStateUnchanged(t *testing.T) {
 		t.Errorf("audit rows after rollback = %d, want 0 (atomicity violation)", auditCount)
 	}
 }
+
+// TestPasswordCascade_AuditActionIsRevokedByPasswordChange — belt-and-
+// suspenders assertion over the enum value that ends up in
+// api_token_audit.action. Chunk 2's
+// TestApiTokenStore_RevokeAllForUser_EmitsPerRowAuditEntries already covered
+// the revoked_by_mass_revoke label. This test guards against a future
+// refactor that drops the action parameter plumbing and silently defaults
+// every cascade to mass_revoke (would let a password-change event appear in
+// logs as an admin-initiated mass revoke — wrong audit trail, wrong
+// incident-response story).
+func TestPasswordCascade_AuditActionIsRevokedByPasswordChange(t *testing.T) {
+	q, db := setupTestDB(t)
+	store := NewApiTokenStore(db, q)
+
+	aliceID, _ := seedUserWithPassword(t, db, "alice", "old-password")
+	tokenA := seedTokenForUser(t, db, aliceID, "homepage-a", "A")
+
+	if err := runPasswordCascade(
+		context.Background(), db, store, q, aliceID,
+		"$2a$04$new.hash.placeholder.0123456789abcd",
+		ActorContext{UserID: aliceID, IP: "127.0.0.1"},
+		nil,
+	); err != nil {
+		t.Fatalf("runPasswordCascade: %v", err)
+	}
+
+	// Read the action column directly — no constant interpolation — to
+	// catch a typo in the APITokenAuditAction enum definition or a
+	// mis-copied CHECK constraint. If this assertion ever starts failing,
+	// inspect migration 011's CHECK and store_api_token.go's enum values:
+	// they must both spell "revoked_by_password_change" literally.
+	var action string
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT action FROM api_token_audit WHERE token_id = ?`, tokenA,
+	).Scan(&action); err != nil {
+		t.Fatalf("read audit action: %v", err)
+	}
+	if action != "revoked_by_password_change" {
+		t.Errorf("audit action in DB = %q, want %q", action, "revoked_by_password_change")
+	}
+
+	// Also assert the typed constant matches the literal the CHECK constraint
+	// accepts. Compile-time guard against an enum rename that drifts from the
+	// migration file.
+	if string(APITokenAuditRevokedByPasswordChange) != "revoked_by_password_change" {
+		t.Errorf("APITokenAuditRevokedByPasswordChange const = %q, want %q",
+			APITokenAuditRevokedByPasswordChange, "revoked_by_password_change")
+	}
+}
