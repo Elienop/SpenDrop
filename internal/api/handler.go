@@ -31,6 +31,18 @@ type Handler struct {
 	// code never has a chance to pick up a fixedClock accidentally.
 	clock Clock
 
+	// summaryCache holds pre-marshalled /api/homepage/summary payloads
+	// keyed by the SHA-256 hash of the bearer token. Each token gets its
+	// own TTL slot (15 s) so inserting a new transaction from token T2
+	// does not prematurely bust T1's cached entry.
+	//
+	// The cache uses the CALLER'S clock (not limiterClock) so that tests
+	// driving NewHandlerWithClock with a fixedClock can advance time and
+	// observe TTL expiry deterministically. Production code uses realClock{}
+	// via NewHandler, which is equivalent to limiterClock but kept separate
+	// to preserve the test-clock contract.
+	summaryCache *summaryCache
+
 	// integrityMu guards lastIntegrityCheckAt / lastIntegrityCheckResult.
 	// The `/healthz/data` handler reads these under an RLock on every
 	// request (so monitoring scrapers at 1 QPS cannot stampede a single
@@ -67,6 +79,7 @@ type Handler struct {
 // time. Tests that need a frozen instant must go through NewHandlerWithClock.
 func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 	clock := ratelimit.RealClock()
+	appClock := realClock{}
 	return &Handler{
 		queries:             queries,
 		db:                  db,
@@ -74,7 +87,8 @@ func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 		apiTokenStore:       database.NewApiTokenStore(db, queries),
 		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, clock),
 		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, clock),
-		clock:               realClock{},
+		clock:               appClock,
+		summaryCache:        newSummaryCache(appClock),
 	}
 }
 
@@ -93,6 +107,7 @@ func NewHandlerWithClock(queries *database.Queries, db *sql.DB, clock Clock) *Ha
 		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, limiterClock),
 		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, limiterClock),
 		clock:               clock,
+		summaryCache:        newSummaryCache(clock), // use caller's clock so tests can control TTL expiry
 	}
 }
 
