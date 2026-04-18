@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
@@ -20,10 +21,10 @@ type homepageSummaryResponse struct {
 	// MonthSpent is the token owner's total expense spend for the current
 	// calendar month, in dollars (two decimal places).
 	MonthSpent float64 `json:"month_spent"`
-	// Budget is the configured monthly budget in dollars (monthly row →
+	// MonthBudget is the configured monthly budget in dollars (monthly row →
 	// default setting → 0).
-	Budget float64 `json:"budget"`
-	// MonthRemaining is Budget - MonthSpent. Negative means over budget.
+	MonthBudget float64 `json:"month_budget"`
+	// MonthRemaining is MonthBudget - MonthSpent. Negative means over budget.
 	MonthRemaining float64 `json:"month_remaining"`
 	// TxnCount is the number of non-deleted transactions (both expense and
 	// income) the token owner has entered this calendar month.
@@ -39,7 +40,7 @@ type homepageSummaryResponse struct {
 	// query is written. Keeping the field in the response now lets the
 	// Homepage widget template reference it without a schema break later.
 	// Tracked in: feat/per-category-budgets (future milestone).
-	OverBudgetCategories int `json:"over_budget_categories"`
+	OverBudgetCategories int64 `json:"over_budget_categories"`
 	// AsOf is the UTC instant at which the aggregation was computed. On a
 	// cache hit this reflects the original computation time, NOT the time
 	// the response was served — callers can use it to detect stale data.
@@ -61,6 +62,12 @@ type homepageSummaryResponse struct {
 // slots — inserting a new transaction invalidates the next scrape for token
 // T2 even while T1's slot is still warm.
 func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
 	// Extract the bearer token hash for cache keying. The Authorization
 	// header has already been validated by RequireAPIToken; we re-read it
 	// here only to derive the cache key — no second DB lookup.
@@ -72,12 +79,6 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(entry.payload)
-		return
-	}
-
-	user, ok := auth.GetUser(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -106,7 +107,7 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
 			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
-			if parseErr == nil {
+			if parseErr == nil && parsed >= 0 {
 				budgetCents = dollarsToCents(parsed)
 			}
 		}
@@ -142,12 +143,12 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 
 	payload := homepageSummaryResponse{
 		MonthSpent:           centsToDollars(monthSpentCents),
-		Budget:               centsToDollars(budgetCents),
+		MonthBudget:          centsToDollars(budgetCents),
 		MonthRemaining:       centsToDollars(budgetCents - monthSpentCents),
 		TxnCount:             txnCount,
 		Currency:             currency,
 		OverBudgetCategories: 0, // TODO(per-category-budgets): see field comment
-		AsOf:                 now.UTC().Format("2006-01-02T15:04:05Z"),
+		AsOf:                 now.UTC().Format(time.RFC3339),
 	}
 
 	encoded, err := json.Marshal(payload)
