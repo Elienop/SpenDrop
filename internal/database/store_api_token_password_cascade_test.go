@@ -417,3 +417,49 @@ func TestPasswordCascade_AuditActionIsRevokedByPasswordChange(t *testing.T) {
 			APITokenAuditRevokedByPasswordChange, "revoked_by_password_change")
 	}
 }
+
+// TestPasswordCascade_SessionsAreClearedInSameTransaction — the session
+// cascade is part of the same atomic unit. Chunk 2's tests never touched
+// sessions; this test pins the invariant that a future handler cannot
+// accidentally drop the DeleteSessionsByUserID step and still pass its
+// review.
+//
+// Scenario: alice has three sessions (three devices) — all must be gone
+// after cascade commits; bob's one session must survive (bystander check).
+func TestPasswordCascade_SessionsAreClearedInSameTransaction(t *testing.T) {
+	q, db := setupTestDB(t)
+	store := NewApiTokenStore(db, q)
+
+	aliceID, _ := seedUserWithPassword(t, db, "alice", "old-password")
+	bobID, _ := seedUserWithPassword(t, db, "bob", "bob-password")
+
+	seedTokenForUser(t, db, aliceID, "homepage-a", "A")
+	seedSessionForUser(t, db, aliceID, "laptop")
+	seedSessionForUser(t, db, aliceID, "phone")
+	seedSessionForUser(t, db, aliceID, "tablet")
+
+	seedSessionForUser(t, db, bobID, "bobs-laptop")
+
+	if got := countSessionsForUser(t, db, aliceID); got != 3 {
+		t.Fatalf("pre-cascade alice sessions = %d, want 3 (fixture bug)", got)
+	}
+
+	if err := runPasswordCascade(
+		context.Background(), db, store, q, aliceID,
+		"$2a$04$new.hash.placeholder.fedcba987654",
+		ActorContext{UserID: aliceID, IP: "127.0.0.1"},
+		nil,
+	); err != nil {
+		t.Fatalf("runPasswordCascade: %v", err)
+	}
+
+	// Alice: zero sessions — all three devices signed out.
+	if got := countSessionsForUser(t, db, aliceID); got != 0 {
+		t.Errorf("alice sessions after cascade = %d, want 0", got)
+	}
+
+	// Bob: one session still present — cascade did not leak across users.
+	if got := countSessionsForUser(t, db, bobID); got != 1 {
+		t.Errorf("bob sessions after cascade = %d, want 1 (cascade leaked to bystander)", got)
+	}
+}
