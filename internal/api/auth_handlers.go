@@ -346,13 +346,12 @@ func isValidUsername(s string) bool {
 //         ID:           user.ID,
 //     })
 //  6. tokensRevoked, err := h.apiTokenStore.RevokeAllForUserTx(r.Context(), tx,
-//         database.ActorContext{
-//             UserID:      user.ID,
-//             IP:          extractIP(r.RemoteAddr),
-//             UserAgent:   r.UserAgent(),
-//             SessionHash: auth.HashSessionToken(sessionCookie),
-//         },
+//         newActorContext(r, user),
 //         database.APITokenAuditRevokedByPasswordChange)
+//     // newActorContext (see api_token_handlers.go) already hashes the
+//     // session cookie and truncates User-Agent — do not hand-roll the
+//     // ActorContext here or the audit rows diverge from the rest of the
+//     // token-mutation path.
 //  7. qtx.DeleteSessionsByUserID(r.Context(), user.ID)
 //  8. tx.Commit()
 //  9. Respond 200 with {"status": "password_changed", "tokens_revoked": tokensRevoked}.
