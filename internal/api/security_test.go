@@ -360,6 +360,69 @@ func TestRequireJSONContentType_OptionsRequest_Passes(t *testing.T) {
 	}
 }
 
+// --- CSRF Bearer-auth exemption (spec §6.3) ---
+
+func TestRequireJSONContentType_BearerRequest_BypassesContentTypeCheck(t *testing.T) {
+	called := false
+	handler := requireJSONContentType(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// POST without Content-Type, but with Bearer — would 415 absent the skip.
+	req := httptest.NewRequest(http.MethodPost, "/api/homepage/summary", strings.NewReader(""))
+	req.Header.Set("Authorization", "Bearer spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 (bearer bypass), got %d", rec.Code)
+	}
+	if !called {
+		t.Error("next handler should have been called on bearer-authorized POST without Content-Type")
+	}
+}
+
+func TestRequireJSONContentType_CookieRequest_StillRequiresJSON(t *testing.T) {
+	handler := requireJSONContentType(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Session-cookie auth must remain under CSRF protection — skip is
+	// specific to Authorization: Bearer.
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions", strings.NewReader(`{}`))
+	req.AddCookie(&http.Cookie{Name: "session", Value: strings.Repeat("a", 64)})
+	req.Header.Set("Content-Type", "text/plain")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Errorf("cookie request without JSON Content-Type must still 415; got %d", rec.Code)
+	}
+}
+
+func TestRequireJSONContentType_BearerAndCookieBothPresent_BearerWins_NoCSRF(t *testing.T) {
+	called := false
+	handler := requireJSONContentType(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Both auth schemes present (curl user, test harness). Bearer wins.
+	req := httptest.NewRequest(http.MethodPost, "/api/homepage/summary", strings.NewReader(""))
+	req.Header.Set("Authorization", "Bearer spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123")
+	req.AddCookie(&http.Cookie{Name: "session", Value: strings.Repeat("a", 64)})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("bearer+cookie should behave as bearer-only and pass through; got %d", rec.Code)
+	}
+	if !called {
+		t.Error("next handler should have been called")
+	}
+}
+
 // --- Search LIKE wildcard escaping ---
 
 func TestBuildTransactionWhereClause_SearchEscapesWildcards(t *testing.T) {
@@ -410,10 +473,7 @@ func TestHandleLogin_RateLimited_After10Attempts(t *testing.T) {
 		t.Fatalf("register failed: %d", regRec.Code)
 	}
 
-	// Reset the rate limiter before our test
-	rateLimitMu.Lock()
-	loginAttempts = make(map[string]int)
-	rateLimitMu.Unlock()
+	// Bucket is fresh per setupHandler — no manual reset needed.
 
 	// Make 10 failed attempts
 	for i := 0; i < 10; i++ {
@@ -436,10 +496,6 @@ func TestHandleLogin_RateLimited_After10Attempts(t *testing.T) {
 		t.Errorf("expected 429, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 
-	// Clean up
-	rateLimitMu.Lock()
-	loginAttempts = make(map[string]int)
-	rateLimitMu.Unlock()
 }
 
 // --- handleUpdateUser validation ---

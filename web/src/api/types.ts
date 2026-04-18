@@ -340,3 +340,69 @@ export interface TransactionSuggestions {
   descriptions: string[];
   tags: string[];
 }
+
+/**
+ * A user-owned API token, as returned by `GET /api/api-tokens`. The list
+ * endpoint deliberately omits the full plaintext (`token`) — that value
+ * is only on the create response, returned once and never again. If you
+ * find yourself reaching for a `token` field here, you're mixing the
+ * list type with the create-response type; use `CreateTokenResponse`.
+ */
+export interface ApiToken {
+  id: number;
+  name: string;
+  token_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  last_used_ip: string | null;
+  expires_at: string | null;
+}
+
+export interface ListTokensResponse {
+  tokens: ApiToken[];
+}
+
+/**
+ * Body for `POST /api/api-tokens`. `expires_at` is either `null` (never
+ * expires) or a pre-computed UTC ISO-8601 timestamp derived client-side
+ * from the dropdown choice. The server rejects past or >10y-future
+ * timestamps — the spec chose a closed enum on the client, so the only
+ * way to pass validation is to emit one of the pre-computed offsets.
+ */
+export interface CreateTokenRequest {
+  name: string;
+  expires_at: string | null;
+  password: string;
+}
+
+/**
+ * Response body for `POST /api/api-tokens`. Carries the full plaintext
+ * in `token` — present ONLY on the 201 create response, never on a list
+ * fetch. The one-time-view contract is enforced structurally: the list
+ * type (`ApiToken`) does not include this field, so TypeScript catches
+ * any attempt to display a stored list row as if it had a plaintext
+ * token attached.
+ */
+export interface CreateTokenResponse extends ApiToken {
+  token: string;
+}
+
+/**
+ * Response body for `DELETE /api/api-tokens/{id}`. Chunk 4 handler
+ * emits 200 OK with `{"ok": true}` on success — we type the response
+ * rather than using `api.del<void>` so a future handler change (e.g.
+ * adding a `revoked_at` echo) surfaces as a TS error instead of a
+ * silently dropped field.
+ */
+export interface RevokeOneResponse {
+  ok: boolean;
+}
+
+/**
+ * Response body for `DELETE /api/api-tokens` (mass revoke). Chunk 4
+ * emits 200 OK with `{"revoked": <count>}` — the count is used in the
+ * success toast so the user sees how many integrations they broke.
+ */
+export interface RevokeAllResponse {
+  revoked: number;
+}

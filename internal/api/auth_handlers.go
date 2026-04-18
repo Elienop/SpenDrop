@@ -205,7 +205,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	loginAttempts    = make(map[string]int)
 	registerAttempts = make(map[string]int)
 	rateLimitMu      sync.Mutex
 
@@ -229,7 +228,6 @@ func startRateLimitReset() {
 			defer ticker.Stop()
 			for range ticker.C {
 				rateLimitMu.Lock()
-				loginAttempts = make(map[string]int)
 				registerAttempts = make(map[string]int)
 				rateLimitMu.Unlock()
 			}
@@ -240,10 +238,8 @@ func startRateLimitReset() {
 // handleLogin authenticates a user by username and password.
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	clientIP := extractIP(r.RemoteAddr)
-	rateLimitMu.Lock()
-	attempts := loginAttempts[clientIP]
-	rateLimitMu.Unlock()
-	if attempts >= getRateLimitMax() {
+	if h.loginFailureLimiter.Exhausted(clientIP) {
+		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")
 		return
 	}
@@ -259,17 +255,13 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.queries.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
-		rateLimitMu.Lock()
-		loginAttempts[clientIP]++
-		rateLimitMu.Unlock()
+		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 
 	if !auth.CheckPassword(user.PasswordHash, req.Password) {
-		rateLimitMu.Lock()
-		loginAttempts[clientIP]++
-		rateLimitMu.Unlock()
+		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
@@ -281,9 +273,7 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Clear rate limit counter on successful login so shared-IP household
 	// users aren't penalised by earlier failed attempts.
-	rateLimitMu.Lock()
-	delete(loginAttempts, clientIP)
-	rateLimitMu.Unlock()
+	h.loginFailureLimiter.Reset(clientIP)
 
 	writeJSON(w, http.StatusOK, toUserResponse(user))
 }
@@ -334,3 +324,42 @@ var usernameRegexp = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 func isValidUsername(s string) bool {
 	return usernameRegexp.MatchString(s)
 }
+
+// TODO(password-change-handler): When SpenDrop adds a self-service password
+// change endpoint (POST /api/auth/password), implement it using the cascade
+// sequence locked in by
+// internal/database/store_api_token_password_cascade_test.go. The sequence
+// MUST run inside one sql.Tx:
+//
+//  1. Verify the caller's current password (outside the tx — no mutation yet).
+//     auth.CheckPassword(user.PasswordHash, req.CurrentPassword) must return
+//     true; otherwise writeError 401 "invalid credentials".
+//  2. Validate the new password against getPasswordBounds() (min/max bytes).
+//  3. Hash the new password with auth.HashPassword.
+//  4. tx, err := h.db.BeginTx(r.Context(), &sql.TxOptions{
+//         Isolation: sql.LevelSerializable,
+//     })
+//     defer tx.Rollback()
+//     qtx := h.queries.WithTx(tx)
+//  5. qtx.UpdateUserPassword(r.Context(), database.UpdateUserPasswordParams{
+//         PasswordHash: newHash,
+//         ID:           user.ID,
+//     })
+//  6. tokensRevoked, err := h.apiTokenStore.RevokeAllForUserTx(r.Context(), tx,
+//         newActorContext(r, user),
+//         database.APITokenAuditRevokedByPasswordChange)
+//     // newActorContext (see api_token_handlers.go) already hashes the
+//     // session cookie and truncates User-Agent — do not hand-roll the
+//     // ActorContext here or the audit rows diverge from the rest of the
+//     // token-mutation path.
+//  7. qtx.DeleteSessionsByUserID(r.Context(), user.ID)
+//  8. tx.Commit()
+//  9. Respond 200 with {"status": "password_changed", "tokens_revoked": tokensRevoked}.
+//     The frontend must redirect to /login on the next 401 from any
+//     subsequent request (the caller's own session was killed in step 7).
+//
+// DO NOT skip any step. DO NOT call store.RevokeAllForUser (non-Tx) — it
+// opens its own tx and breaks atomicity with the UPDATE and the session
+// delete. DO NOT pass APITokenAuditRevokedByMassRevoke or any other action
+// — that action label is reserved for the settings-UI "revoke all my
+// tokens" flow and would misclassify the audit trail.

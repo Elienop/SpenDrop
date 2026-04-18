@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // Handler holds dependencies for all API handlers.
@@ -13,6 +14,10 @@ type Handler struct {
 	queries  *database.Queries
 	db       *sql.DB
 	txnStore *database.TransactionStore
+
+	apiTokenStore       *database.ApiTokenStore
+	loginFailureLimiter *ratelimit.Bucket // keyed by client IP, consumed only by /api/auth/login failures
+	createTokenLimiter  *ratelimit.Bucket // keyed by user id (as string), 5 hits / rolling hour
 
 	// clock is the time source every reports/dashboard handler reads for
 	// "current date" decisions (year-over-year default year, rolling
@@ -25,6 +30,18 @@ type Handler struct {
 	// non-test constructors must route through NewHandler so production
 	// code never has a chance to pick up a fixedClock accidentally.
 	clock Clock
+
+	// summaryCache holds pre-marshalled /api/homepage/summary payloads
+	// keyed by the SHA-256 hash of the bearer token. Each token gets its
+	// own TTL slot (15 s) so inserting a new transaction from token T2
+	// does not prematurely bust T1's cached entry.
+	//
+	// The cache uses the CALLER'S clock (not limiterClock) so that tests
+	// driving NewHandlerWithClock with a fixedClock can advance time and
+	// observe TTL expiry deterministically. Production code uses realClock{}
+	// via NewHandler, which is equivalent to limiterClock but kept separate
+	// to preserve the test-clock contract.
+	summaryCache *summaryCache
 
 	// integrityMu guards lastIntegrityCheckAt / lastIntegrityCheckResult.
 	// The `/healthz/data` handler reads these under an RLock on every
@@ -61,11 +78,17 @@ type Handler struct {
 // sites compile unchanged and every production caller picks up real wall
 // time. Tests that need a frozen instant must go through NewHandlerWithClock.
 func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
+	clock := ratelimit.RealClock()
+	appClock := realClock{}
 	return &Handler{
-		queries:  queries,
-		db:       db,
-		txnStore: database.NewTransactionStore(db, queries),
-		clock:    realClock{},
+		queries:             queries,
+		db:                  db,
+		txnStore:            database.NewTransactionStore(db, queries),
+		apiTokenStore:       database.NewApiTokenStore(db, queries),
+		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, clock),
+		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, clock),
+		clock:               appClock,
+		summaryCache:        newSummaryCache(appClock),
 	}
 }
 
@@ -75,11 +98,16 @@ func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 // rather than a functional option so a misuse in production grep's easily
 // (`NewHandlerWithClock` outside a _test.go file is a bug).
 func NewHandlerWithClock(queries *database.Queries, db *sql.DB, clock Clock) *Handler {
+	limiterClock := ratelimit.RealClock()
 	return &Handler{
-		queries:  queries,
-		db:       db,
-		txnStore: database.NewTransactionStore(db, queries),
-		clock:    clock,
+		queries:             queries,
+		db:                  db,
+		txnStore:            database.NewTransactionStore(db, queries),
+		apiTokenStore:       database.NewApiTokenStore(db, queries),
+		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, limiterClock),
+		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, limiterClock),
+		clock:               clock,
+		summaryCache:        newSummaryCache(clock), // use caller's clock so tests can control TTL expiry
 	}
 }
 

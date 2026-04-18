@@ -66,13 +66,14 @@ Tabbed settings page with five sections:
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
+- **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Use them to authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session — see [Using API tokens](#using-api-tokens) for curl and Homepage examples.
 - **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
 
 ![Settings](docs/screenshots/08-settings.png)
 
 ### Authentication
 
-Simple username/password auth with bcrypt hashing and HTTP-only session cookies. The first registered user automatically becomes admin. Supports admin and member roles.
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles.
 
 ![Login](docs/screenshots/09-login.png)
 ![Register](docs/screenshots/10-register.png)
@@ -560,6 +561,39 @@ Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS exampl
 
 **A reminder.** None of the above protects you against the running SpenDrop process being compromised. Encryption at rest is the lock on the front door of the building. TLS is the lock on the apartment door. Application-level auth is the lock on the diary inside. You need all three, and they are sold separately.
 
+## Using API tokens
+
+API tokens let you authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session. Create one from **Settings → API tokens**, copy the plaintext (shown only once), and send it as a Bearer header on any `/api/*` call:
+
+```bash
+curl -H "Authorization: Bearer <your-token>" \
+  https://spendrop.example.com/api/transactions
+```
+
+Tokens have the same access as your account password — revoke them individually from the settings page if a device is lost or a script is retired.
+
+### Example: Homepage widget
+
+```yaml
+widget:
+  type: customapi
+  url: https://spendrop.example.com/api/homepage/summary
+  refreshInterval: 30000
+  method: GET
+  display: list
+  headers:
+    Authorization: "Bearer <your-token>"
+  mappings:
+    - { field: month_spent, label: This month, format: float, prefix: "$" }
+    - { field: txn_count, label: Transactions, format: number }
+    - field: month_remaining
+      label: Remaining
+      format: float
+      prefix: "$"
+      additionalField: { field: month_remaining, format: float, color: adaptive }
+    - { field: over_budget_categories, label: Over budget, format: number }
+```
+
 ## API Reference
 
 SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) require authentication via session cookie.
@@ -571,6 +605,19 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | POST | `/api/auth/login` | Log in |
 | POST | `/api/auth/logout` | Log out |
 | GET | `/api/auth/me` | Get current user info |
+
+### API Tokens
+
+Long-lived bearer tokens for programmatic access. Created via the API (requires an active session) and consumed via `Authorization: Bearer <token>` on every request. Tokens are scoped to the creating user — they grant the same access that user has in the UI. See [Using API tokens](#using-api-tokens) above for curl and Homepage examples.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/api-tokens` | Create a new API token. Body: `{"name":"<=100 chars","expires_at":"RFC3339 or null"}`. Returns the full plaintext token in the response body **exactly once** — store it immediately; the server keeps only a SHA-256 hash. |
+| GET | `/api/api-tokens` | List the caller's tokens. Each item carries `id`, `name`, `token_prefix` (first 15 chars, safe to display), `created_at`, `last_used_at`, `last_used_ip`, `expires_at`. The full token is NEVER re-emitted. |
+| DELETE | `/api/api-tokens/{id}` | Revoke one token by id. Returns `{"ok":true}`. Idempotent — revoking an already-revoked token still 200s. |
+| DELETE | `/api/api-tokens` | Revoke every live token the caller owns. Returns `{"revoked":N}`. |
+
+Tokens are also revoked atomically when you change your password — if the password `UPDATE` succeeds, every live token for that user is soft-deleted in the same SQL transaction and each revocation writes a `revoked_by_password_change` audit row. A failure anywhere rolls both the password and the cascade back.
 
 ### Transactions
 | Method | Endpoint | Description |
@@ -636,6 +683,28 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | POST | `/api/reports/recurring/dismiss` | Dismiss a recurring expense |
 | GET | `/api/reports/tag-breakdown` | Spending breakdown by tag |
 
+### Homepage integration endpoint
+
+A read-only, Bearer-only endpoint whose response shape happens to map cleanly to the Homepage (gethomepage.dev) `customapi` widget. Any Bearer-authenticated caller can hit it — curl, a cron job, another dashboard. The payload is minimal (just the aggregates a widget renders) and a per-token 15-second response cache absorbs burst traffic when multiple widgets or dashboards hit the endpoint within the same window, keeping 30-second polling cheap.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/homepage/summary` | Current-month summary for the token's owner. Requires `Authorization: Bearer <token>` — session cookies are rejected on this route so a misconfigured Homepage (missing header, stale env var) fails fast with 401 instead of silently succeeding off the browser's cookie. |
+
+The response body is a JSON object with these fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `month_spent` | number | Sum of expenses in the caller's timezone for the current month, base-currency cents divided by 100. |
+| `month_budget` | number | The household's monthly budget row for the current month, base-currency cents divided by 100. `0` when no budget row has been set for the month. |
+| `month_remaining` | number | `month_budget - month_spent`; negative when over budget. With no budget row set, `month_budget` is `0` so `month_remaining` equals `-month_spent` (always negative while there is any spend in the month). |
+| `over_budget_categories` | number | Always `0` in the current release. The field is reserved for a future per-category-budgets feature; it ships now so Homepage YAML stays stable when the feature lands. Widget-side, treat it as "always 0 until a future SpenDrop release starts populating it." (Locked by `Summary_OverBudgetCategoriesIsZeroUntilFeatureLands` in `homepage_handlers_test.go`.) |
+| `txn_count` | number | Number of non-tombstoned transactions dated in the current month. |
+| `currency` | string | ISO code of the household's base currency (e.g. `USD`). |
+| `as_of` | string | RFC3339 timestamp of when the aggregation ran — stays stable across cache hits within the 15s TTL so downstream charts don't jitter. |
+
+See the [Homepage integration](#homepage-integration) section below for the `services.yaml` snippet that maps these fields to the widget's `display: list` layout.
+
 ### Export
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -651,6 +720,88 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `skip`) on a preview row; backend recomputes collisions and returns the full session snapshot |
 | DELETE | `/api/import/{importID}` | Cancel the preview session and free the server-side slot |
 | POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active) |
+
+## Homepage integration
+
+[Homepage](https://gethomepage.dev) is a self-hosted dashboard that renders widgets from JSON APIs via its built-in `customapi` widget. SpenDrop ships a read-only endpoint (`GET /api/homepage/summary`) that Homepage polls every 30 seconds and a show-once token mint UI (`Settings → API tokens`) for the auth header. End-to-end setup is four steps.
+
+### 1. Mint a token
+
+In SpenDrop, open **Settings → API tokens → Create token**. Name it **Homepage** (any name works, but name it something you'll recognise two years from now — it shows on the list view), leave Expires at **Never**, and click **Create token**. The next screen reveals the full token **once only** — click the Copy button, paste it somewhere safe for the next two steps, and click **I've saved my token**.
+
+> The reveal view is the only place the plaintext token is ever shown. SpenDrop stores only a SHA-256 hash, so if you lose the token before Step 2 you must revoke it and mint a new one. This is deliberate — it means a stolen database backup cannot be turned into a valid token.
+
+### 2. Add the token to Homepage's environment
+
+Edit the Homepage container's `docker-compose.yml` to add an environment variable holding the token. Homepage reads env vars at startup only (see [gethomepage/homepage#3422](https://github.com/gethomepage/homepage/discussions/3422)), so Step 3's restart is mandatory:
+
+```yaml
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    environment:
+      - HOMEPAGE_VAR_SPENDROP_TOKEN=spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123
+    # ... rest of Homepage config
+```
+
+Replace the example value with the token you copied in Step 1. The variable name (`HOMEPAGE_VAR_SPENDROP_TOKEN`) is a Homepage convention — any env var starting with `HOMEPAGE_VAR_` is substituted into `services.yaml` via `{{HOMEPAGE_VAR_NAME}}`.
+
+### 3. Restart Homepage
+
+```bash
+docker compose restart homepage
+```
+
+### 4. Add SpenDrop to `services.yaml`
+
+Paste this block into your Homepage `services.yaml` under whichever group you want SpenDrop to appear in (the example uses `Household`):
+
+```yaml
+- Household:
+    - SpenDrop:
+        icon: si-googlesheets
+        href: https://spendrop.example
+        description: Household expenses
+        widget:
+          type: customapi
+          url: https://spendrop.example/api/homepage/summary
+          refreshInterval: 30000
+          method: GET
+          display: list
+          headers:
+            Authorization: "Bearer {{HOMEPAGE_VAR_SPENDROP_TOKEN}}"
+            Accept: application/json
+          mappings:
+            - field: month_spent
+              label: This month
+              format: float
+              prefix: "$"
+            - field: txn_count
+              label: Transactions
+              format: number
+            - field: month_remaining
+              label: Remaining
+              format: float
+              prefix: "$"
+              additionalField:
+                field: month_remaining
+                format: float
+                color: adaptive
+            - field: over_budget_categories
+              label: Over budget
+              format: number
+```
+
+Replace `https://spendrop.example` with your SpenDrop deployment URL. The `icon: si-googlesheets` is a [simple-icons](https://simpleicons.org) slug — pick whatever you like; any slug Homepage accepts works.
+
+Save `services.yaml` and Homepage hot-reloads the widget. Within 30 seconds the widget should display "This month / Transactions / Remaining / Over budget" populated from your data.
+
+### Troubleshooting
+
+- **Widget shows "Error" or nothing** — open Homepage's container logs (`docker logs homepage`). A 401 means the token was rejected (revoked, expired, typo, or the env var substitution failed — verify with `docker exec homepage env | grep SPENDROP`). A timeout or connection refused means `url:` is wrong or your reverse proxy is not routing `/api/homepage/summary` to SpenDrop.
+- **Numbers are stale by up to 15 seconds** — expected. The endpoint caches per token for 15s to keep 30s polling cheap. The `as_of` field in the raw JSON response shows the real aggregation time.
+- **"Remaining" shows a huge negative number** — you haven't set a monthly budget in SpenDrop. `month_remaining = budget - month_spent`, so with no budget row it equals `-month_spent`. Go to **Settings → General** and set a budget; the widget will then show the real remainder.
+- **"Over budget" always shows `0`** — expected in the current release. The field is reserved for a future per-category-budgets feature and is hard-wired to `0` today. Hide the row by deleting its entry from `mappings:` if the constant zero is noisy.
 
 ## Project Structure
 

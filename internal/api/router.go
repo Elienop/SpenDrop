@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -12,6 +13,7 @@ import (
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // NewRouter creates the main chi router with all API routes registered. cfg
@@ -54,6 +56,13 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	r.Use(chimw.Recoverer)
 	r.Use(corsMiddleware)
 
+	// Shared auth-failure limiter for every Bearer code path (the combined
+	// /api middleware, /api/auth/me, and the Bearer-only /api/homepage
+	// subroute). Consolidating the bucket here keeps the 30-per-10-min
+	// quota coherent across every endpoint a bearer can reach — moving
+	// abuse to a different endpoint doesn't reset the counter.
+	authFailLimiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
+
 	// Health check (public)
 	r.Get("/api/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
@@ -87,13 +96,17 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/login", h.handleLogin)
 		r.Post("/logout", h.handleLogout)
 
-		// /me requires authentication
-		r.With(auth.RequireAuth(queries)).Get("/me", h.handleMe)
+		// /me requires authentication. Accepts either session cookie OR
+		// Bearer token so headless scripts can introspect their own
+		// identity.
+		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).Get("/me", h.handleMe)
 	})
 
-	// Authenticated API routes
+	// Authenticated API routes. Accepts either session cookie OR Bearer
+	// token on every endpoint below — the two are interchangeable except
+	// on the dedicated Bearer-only /api/homepage subroute further down.
 	r.Route("/api", func(r chi.Router) {
-		r.Use(auth.RequireAuth(queries))
+		r.Use(auth.RequireAuthOrAPIToken(queries, authFailLimiter))
 		r.Use(requireJSONContentType)
 
 		// Transactions
@@ -204,6 +217,27 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)
 		r.Put("/settings/default-budget", h.handleDefaultBudget)
+
+		// API tokens (user-scoped; every user manages their own)
+		r.Route("/api-tokens", func(r chi.Router) {
+			r.Post("/", h.handleCreateAPIToken)
+			r.Get("/", h.handleListAPITokens)
+			r.Delete("/", h.handleRevokeAllAPITokens)
+			r.Delete("/{id}", h.handleRevokeAPIToken)
+		})
+	})
+
+	// Bearer-ONLY homepage widget subroute. Deliberately does NOT accept
+	// a session cookie: the widget is consumed by a headless dashboard
+	// (e.g. Homepage/Homer) that holds a bearer token and never has a
+	// browser session. Using RequireAPIToken (not RequireAuthOrAPIToken)
+	// is the guardrail against accidental cookie-auth reuse from
+	// same-origin XHR. authFailLimiter is the SAME bucket used by the
+	// combined /api middleware above so Bearer abuse on any endpoint
+	// counts toward the same 30-per-10-minute quota.
+	r.Route("/api/homepage", func(r chi.Router) {
+		r.Use(auth.RequireAPIToken(queries, authFailLimiter))
+		r.Get("/summary", h.handleHomepageSummary)
 	})
 
 	// SPA fallback: serve React build if web/dist exists
@@ -266,13 +300,22 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// requireJSONContentType rejects mutation requests (POST/PUT/PATCH/DELETE) that
-// do not carry an application/json Content-Type, unless the content type is
-// multipart/form-data (used for file uploads). GET, OPTIONS, and HEAD requests
-// are passed through unconditionally.
+// requireJSONContentType forces JSON Content-Type on mutations so the
+// browser's CORS preflight blocks cross-site POSTs. Bearer-authorized
+// requests skip this check — they're not cookies, not auto-attached
+// cross-site, and carry their own auth proof (spec §3.8 #3, §6.3).
+// GET/OPTIONS/HEAD always pass.
 func requireJSONContentType(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodGet || r.Method == http.MethodOptions || r.Method == http.MethodHead {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Bearer-auth bypass. Must come BEFORE the Content-Type check so a
+		// bearer-authorized POST without application/json (hypothetical
+		// future endpoint) is not 415'd. Case-sensitive "Bearer " prefix
+		// mirrors RequireAPIToken — both must change together.
+		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			next.ServeHTTP(w, r)
 			return
 		}
