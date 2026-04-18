@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -93,6 +93,12 @@ describe('ApiTokensSection', () => {
         screen.getByText(/no api tokens yet/i),
       ).toBeInTheDocument();
     });
+    // Generic wording — no Homepage name-drop in the empty state.
+    expect(
+      screen.getByText(
+        /create one to connect a script, dashboard, or other tool/i,
+      ),
+    ).toBeInTheDocument();
   });
 
   test('list shows token_prefix but never full token', async () => {
@@ -118,7 +124,7 @@ describe('ApiTokensSection', () => {
     expect(screen.queryByText(fullTokenRegex)).not.toBeInTheDocument();
   });
 
-  test('clicking + New token opens the create dialog', async () => {
+  test('clicking Create token opens the create dialog', async () => {
     const user = userEvent.setup();
     seedGetMock([]);
     renderSettingsOnApiTokensTab();
@@ -127,21 +133,23 @@ describe('ApiTokensSection', () => {
       expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
     });
     await user.click(
-      screen.getByRole('button', { name: /\+ new token/i }),
+      screen.getByRole('button', { name: /^create token$/i }),
     );
-    // The dialog body has a header with "Create API token" and the three
-    // form fields. Assert on the header + one field to prove the dialog
+    // The dialog body has a header with "Create API token" and the
+    // form fields. Assert on the header + Name field to prove the dialog
     // is the create form (not some other modal).
     expect(
       screen.getByRole('heading', { name: /create api token/i }),
     ).toBeInTheDocument();
     expect(screen.getByLabelText(/^name$/i)).toBeInTheDocument();
+    // Password field was removed — if a future refactor adds it back,
+    // this assertion catches it.
     expect(
-      screen.getByLabelText(/confirm password/i),
-    ).toBeInTheDocument();
+      screen.queryByLabelText(/password/i),
+    ).not.toBeInTheDocument();
   });
 
-  test('submitting create dialog with valid password shows show-once reveal', async () => {
+  test('submitting create dialog shows show-once reveal (no password field)', async () => {
     const user = userEvent.setup();
     seedGetMock([]);
     // Wire the POST response. The server returns the full plaintext
@@ -161,22 +169,28 @@ describe('ApiTokensSection', () => {
     await waitFor(() => {
       expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
     });
-    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
-    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
-    await user.type(
-      screen.getByLabelText(/confirm password/i),
-      'hunter2',
-    );
     await user.click(
-      screen.getByRole('button', { name: /^create$/i }),
+      screen.getByRole('button', { name: /^create token$/i }),
     );
-    // The dialog content is swapped in-place — look for the banner copy
-    // from §7.5 and the full plaintext in a read-only input.
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    // Submit button inside the create form (distinguished from the
+    // trigger outside by the form's button role).
+    // Both the dialog trigger and the submit button say "Create token".
+    // Scope to the dialog to hit the submit button specifically.
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
+    // The dialog content is swapped in-place — look for the new copy
+    // from the redesign and the full plaintext in a read-only input.
     await waitFor(() => {
       expect(
-        screen.getByText(/only time you'll see this token/i),
+        screen.getByRole('heading', { name: /save your new token/i }),
       ).toBeInTheDocument();
     });
+    expect(screen.getByText(/copy it now/i)).toBeInTheDocument();
     const revealInput = screen.getByLabelText(
       /your new api token/i,
     ) as HTMLInputElement;
@@ -184,12 +198,11 @@ describe('ApiTokensSection', () => {
       'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
     );
     expect(revealInput.readOnly).toBe(true);
-    // The POST body must carry exactly what the user typed — no silent
-    // defaulting of `expires_at` away from `null`.
+    // The POST body must carry exactly what the user typed and must NOT
+    // include `password` — the backend no longer requires it.
     expect(mockedApi.post).toHaveBeenCalledWith('api-tokens', {
       name: 'Homepage',
       expires_at: null,
-      password: 'hunter2',
     });
   });
 
@@ -220,16 +233,21 @@ describe('ApiTokensSection', () => {
     await waitFor(() => {
       expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
     });
-    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
-    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
-    await user.type(
-      screen.getByLabelText(/confirm password/i),
-      'hunter2',
+    await user.click(
+      screen.getByRole('button', { name: /^create token$/i }),
     );
-    await user.click(screen.getByRole('button', { name: /^create$/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    // Both the dialog trigger and the submit button say "Create token".
+    // Scope to the dialog to hit the submit button specifically.
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
     await waitFor(() => {
       expect(
-        screen.getByText(/only time you'll see this token/i),
+        screen.getByRole('heading', { name: /save your new token/i }),
       ).toBeInTheDocument();
     });
     await user.click(screen.getByRole('button', { name: /^copy$/i }));
@@ -243,11 +261,75 @@ describe('ApiTokensSection', () => {
     await waitFor(() => {
       // sonner's toast.success is mocked at the module level — assert
       // the success variant fired, not the error variant.
-      expect(vi.mocked(toast).success).toHaveBeenCalledWith('Copied');
+      expect(vi.mocked(toast).success).toHaveBeenCalledWith(
+        'Copied to clipboard',
+      );
     });
   });
 
-  test('closing the reveal clears plaintext from state (cannot be re-opened)', async () => {
+  test('Copy button falls back to focus+select when clipboard rejects', async () => {
+    const user = userEvent.setup();
+    // Simulate an insecure-context clipboard: writeText rejects. The
+    // component must focus+select the reveal input and fire the info
+    // toast so the user can still copy with Ctrl/Cmd+C.
+    const writeTextSpy = vi
+      .fn()
+      .mockRejectedValue(new Error('clipboard blocked'));
+    Object.defineProperty(window.navigator, 'clipboard', {
+      value: { writeText: writeTextSpy },
+      writable: true,
+      configurable: true,
+    });
+    seedGetMock([]);
+    mockedApi.post.mockResolvedValueOnce({
+      id: 7,
+      name: 'Homepage',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+      token: 'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole('button', { name: /^create token$/i }),
+    );
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    // Both the dialog trigger and the submit button say "Create token".
+    // Scope to the dialog to hit the submit button specifically.
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
+    await waitFor(() => {
+      expect(
+        screen.getByRole('heading', { name: /save your new token/i }),
+      ).toBeInTheDocument();
+    });
+    const revealInput = screen.getByLabelText(
+      /your new api token/i,
+    ) as HTMLInputElement;
+    await user.click(screen.getByRole('button', { name: /^copy$/i }));
+    // writeText was attempted (and rejected).
+    expect(writeTextSpy).toHaveBeenCalled();
+    await waitFor(() => {
+      expect(document.activeElement).toBe(revealInput);
+    });
+    // A fallback info toast tells the user to press Ctrl/Cmd+C.
+    await waitFor(() => {
+      expect(vi.mocked(toast).info).toHaveBeenCalledWith(
+        'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
+      );
+    });
+  });
+
+  test("closing the reveal clears plaintext from state (cannot be re-opened)", async () => {
     const user = userEvent.setup();
     seedGetMock([]);
     mockedApi.post.mockResolvedValueOnce({
@@ -264,27 +346,39 @@ describe('ApiTokensSection', () => {
     await waitFor(() => {
       expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
     });
-    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    await user.click(
+      screen.getByRole('button', { name: /^create token$/i }),
+    );
     await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
-    await user.type(screen.getByLabelText(/confirm password/i), 'hunter2');
-    await user.click(screen.getByRole('button', { name: /^create$/i }));
+    // Both the dialog trigger and the submit button say "Create token".
+    // Scope to the dialog to hit the submit button specifically.
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
     await waitFor(() => {
       expect(
-        screen.getByText(/only time you'll see this token/i),
+        screen.getByRole('heading', { name: /save your new token/i }),
       ).toBeInTheDocument();
     });
-    // Click Done — the reveal dialog closes and plaintext should be
-    // unreachable from the rendered tree.
-    await user.click(screen.getByRole('button', { name: /^done$/i }));
+    // Click the confirmation footer button — the reveal dialog closes
+    // and plaintext should be unreachable from the rendered tree.
+    await user.click(
+      screen.getByRole('button', { name: /i've saved my token/i }),
+    );
     await waitFor(() => {
       expect(
-        screen.queryByText(/only time you'll see this token/i),
+        screen.queryByRole('heading', { name: /save your new token/i }),
       ).not.toBeInTheDocument();
     });
     // Re-open the create dialog. If the component cached plaintext, it
     // would leak here (either as the form's default value or as a
     // stale reveal). Neither is allowed.
-    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    await user.click(
+      screen.getByRole('button', { name: /^create token$/i }),
+    );
     expect(
       screen.getByRole('heading', { name: /create api token/i }),
     ).toBeInTheDocument();
@@ -297,7 +391,7 @@ describe('ApiTokensSection', () => {
     expect(screen.queryByText(fullTokenRegex)).not.toBeInTheDocument();
   });
 
-  test('Revoke button opens confirm dialog; confirming calls DELETE /api/api-tokens/{id}', async () => {
+  test('Revoke opens AlertDialog with mono token name; confirming DELETEs /api/api-tokens/{id}', async () => {
     const user = userEvent.setup();
     const token: ApiToken = {
       id: 7,
@@ -324,12 +418,20 @@ describe('ApiTokensSection', () => {
     await user.click(
       screen.getByRole('button', { name: /revoke homepage dashboard/i }),
     );
-    // Confirm dialog is up — body copy from spec §7.6.
+    // The revoke AlertDialog is up. Radix AlertDialog announces with
+    // role="alertdialog" — query by it to scope assertions.
+    const alertDialog = await screen.findByRole('alertdialog');
+    // Title quotes the token name inside a <span class="font-mono">.
+    const monoName = within(alertDialog).getByText(/"Homepage dashboard"/);
+    expect(monoName).toHaveClass('font-mono');
+    // Body copy matches the new short wording.
     expect(
-      screen.getByText(/any integration using this token will immediately stop working/i),
+      within(alertDialog).getByText(
+        /anything using this token will stop working immediately/i,
+      ),
     ).toBeInTheDocument();
     await user.click(
-      screen.getByRole('button', { name: /^revoke$/i }),
+      within(alertDialog).getByRole('button', { name: /^revoke token$/i }),
     );
     await waitFor(() => {
       expect(mockedApi.del).toHaveBeenCalledWith('api-tokens/7');
