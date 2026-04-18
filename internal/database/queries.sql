@@ -731,3 +731,12 @@ WHERE id = ?
 INSERT INTO api_token_audit (
     token_id, user_id, action, actor_ip, actor_user_agent, actor_session_hash
 ) VALUES (?, ?, ?, ?, ?, ?);
+
+-- name: GetAPITokenByID :one
+-- Loads a specific token by id AND user_id. The user_id filter makes the
+-- query return sql.ErrNoRows both for "id does not exist" and "id exists
+-- but belongs to a different user" — handlers map both to 404, which
+-- matches the contract from the user's perspective: tokens they do not
+-- own should not be acknowledged even as "revoked".
+SELECT * FROM api_tokens
+WHERE id = ? AND user_id = ?;
