@@ -573,6 +573,19 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | POST | `/api/auth/logout` | Log out |
 | GET | `/api/auth/me` | Get current user info |
 
+### API Tokens
+
+Long-lived bearer tokens for programmatic access. Created via the API (requires your session + current password) and consumed via `Authorization: Bearer <token>` on every request. Tokens are scoped to the creating user — they grant the same access that user has in the UI. See [Homepage integration](#homepage-integration) below for an end-to-end worked example.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/api-tokens` | Create a new API token. Body: `{"name":"<=100 chars","expires_at":"RFC3339 or null","password":"your current password"}`. Returns the full plaintext token in the response body **exactly once** — store it immediately; the server keeps only a SHA-256 hash. |
+| GET | `/api/api-tokens` | List the caller's tokens. Each item carries `id`, `name`, `token_prefix` (first 15 chars, safe to display), `created_at`, `last_used_at`, `last_used_ip`, `expires_at`. The full token is NEVER re-emitted. |
+| DELETE | `/api/api-tokens/{id}` | Revoke one token by id. Returns `{"ok":true}`. Idempotent — revoking an already-revoked token still 200s. |
+| DELETE | `/api/api-tokens` | Revoke every live token the caller owns. Returns `{"revoked":N}`. |
+
+Tokens are also revoked atomically when you change your password — if the password `UPDATE` succeeds, every live token for that user is soft-deleted in the same SQL transaction and each revocation writes a `revoked_by_password_change` audit row. A failure anywhere rolls both the password and the cascade back.
+
 ### Transactions
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -636,6 +649,28 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | GET | `/api/reports/recurring` | Detected recurring expenses |
 | POST | `/api/reports/recurring/dismiss` | Dismiss a recurring expense |
 | GET | `/api/reports/tag-breakdown` | Spending breakdown by tag |
+
+### Homepage integration endpoint
+
+A read-only, Bearer-only endpoint tailored for the Homepage (gethomepage.dev) `customapi` widget. Cheap enough for 30-second polling (per-token response cache, 15s TTL — one miss per two polls at that cadence) and returns a minimal payload — just what the widget renders.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/homepage/summary` | Current-month summary for the token's owner. Requires `Authorization: Bearer <token>` — session cookies are rejected on this route so a misconfigured Homepage (missing header, stale env var) fails fast with 401 instead of silently succeeding off the browser's cookie. |
+
+The response body is a JSON object with these fields:
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `month_spent` | number | Sum of expenses in the caller's timezone for the current month, base-currency cents divided by 100. |
+| `month_budget` | number | The household's monthly budget row for the current month, base-currency cents divided by 100. `0` when no budget row has been set for the month. |
+| `month_remaining` | number | `month_budget - month_spent`; negative when over budget. With no budget row set, `month_budget` is `0` so `month_remaining` equals `-month_spent` (always negative while there is any spend in the month). |
+| `over_budget_categories` | number | Always `0` in the current release. The field is reserved for a future per-category-budgets feature; it ships now so Homepage YAML stays stable when the feature lands. Widget-side, treat it as "always 0 until a future SpenDrop release starts populating it." (Locked by `Summary_OverBudgetCategoriesIsZeroUntilFeatureLands` in `homepage_handlers_test.go`.) |
+| `txn_count` | number | Number of non-tombstoned transactions dated in the current month. |
+| `currency` | string | ISO code of the household's base currency (e.g. `USD`). |
+| `as_of` | string | RFC3339 timestamp of when the aggregation ran — stays stable across cache hits within the 15s TTL so downstream charts don't jitter. |
+
+See the [Homepage integration](#homepage-integration) section below for the `services.yaml` snippet that maps these fields to the widget's `display: list` layout.
 
 ### Export
 | Method | Endpoint | Description |
