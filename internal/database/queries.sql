@@ -674,6 +674,17 @@ SELECT * FROM api_tokens
 WHERE user_id = ?
 ORDER BY created_at DESC, id DESC;
 
+-- name: ListLiveAPITokensForUser :many
+-- Returns full live-token rows for the user: not-revoked AND not-expired.
+-- Used by handleListAPITokens (Chunk 4) — the Settings default tab hides
+-- revoked/expired rows. ListAPITokensForUser stays for the "include
+-- revoked" admin/future view; do not merge them.
+SELECT * FROM api_tokens
+WHERE user_id = ?
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > datetime('now'))
+ORDER BY created_at DESC, id DESC;
+
 -- name: RevokeAPIToken :execrows
 -- Revokes a single token owned by user_id. Idempotent: if the token is
 -- already revoked, zero rows are affected and the caller treats that as

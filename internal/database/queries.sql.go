@@ -2385,6 +2385,48 @@ func (q *Queries) ListAPITokensForUser(ctx context.Context, userID int64) ([]Api
 	return items, nil
 }
 
+const listLiveAPITokensForUser = `-- name: ListLiveAPITokensForUser :many
+SELECT id, user_id, name, token_hash, token_prefix, expires_at, last_used_at, last_used_ip, revoked_at, created_at FROM api_tokens
+WHERE user_id = ?
+  AND revoked_at IS NULL
+  AND (expires_at IS NULL OR expires_at > datetime('now'))
+ORDER BY created_at DESC, id DESC
+`
+
+func (q *Queries) ListLiveAPITokensForUser(ctx context.Context, userID int64) ([]ApiToken, error) {
+	rows, err := q.db.QueryContext(ctx, listLiveAPITokensForUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ApiToken{}
+	for rows.Next() {
+		var i ApiToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Name,
+			&i.TokenHash,
+			&i.TokenPrefix,
+			&i.ExpiresAt,
+			&i.LastUsedAt,
+			&i.LastUsedIp,
+			&i.RevokedAt,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const revokeAPIToken = `-- name: RevokeAPIToken :execrows
 UPDATE api_tokens
 SET revoked_at = CURRENT_TIMESTAMP
