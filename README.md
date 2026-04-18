@@ -652,7 +652,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 
 ### Homepage integration endpoint
 
-A read-only, Bearer-only endpoint tailored for the Homepage (gethomepage.dev) `customapi` widget. Cheap enough for 30-second polling (per-token response cache, 15s TTL — one miss per two polls at that cadence) and returns a minimal payload — just what the widget renders.
+A read-only, Bearer-only endpoint tailored for the Homepage (gethomepage.dev) `customapi` widget. Cheap enough for 30-second polling — the payload is minimal (just what the widget renders) and a per-token 15-second response cache absorbs burst traffic when multiple widgets or dashboards hit the endpoint within the same window.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
