@@ -688,6 +688,88 @@ See the [Homepage integration](#homepage-integration) section below for the `ser
 | DELETE | `/api/import/{importID}` | Cancel the preview session and free the server-side slot |
 | POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active) |
 
+## Homepage integration
+
+[Homepage](https://gethomepage.dev) is a self-hosted dashboard that renders widgets from JSON APIs via its built-in `customapi` widget. SpenDrop ships a read-only endpoint (`GET /api/homepage/summary`) that Homepage polls every 30 seconds and a show-once token mint UI (`Settings → API tokens`) for the auth header. End-to-end setup is four steps.
+
+### 1. Mint a token
+
+In SpenDrop, open **Settings → API tokens → `+ New token`**. Name it **Homepage** (any name works, but name it something you'll recognise two years from now — it shows on the list view), leave Expires at **Never**, type your current SpenDrop password, and click **Create**. The next screen reveals the full token **once only** — click the Copy button, paste it somewhere safe for the next two steps, and click Done.
+
+> The reveal view is the only place the plaintext token is ever shown. SpenDrop stores only a SHA-256 hash, so if you lose the token before Step 2 you must revoke it and mint a new one. This is deliberate — it means a stolen database backup cannot be turned into a valid token.
+
+### 2. Add the token to Homepage's environment
+
+Edit the Homepage container's `docker-compose.yml` to add an environment variable holding the token. Homepage reads env vars at startup only (see [gethomepage/homepage#3422](https://github.com/gethomepage/homepage/discussions/3422)), so Step 3's restart is mandatory:
+
+```yaml
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    environment:
+      - HOMEPAGE_VAR_SPENDROP_TOKEN=spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123
+    # ... rest of Homepage config
+```
+
+Replace the example value with the token you copied in Step 1. The variable name (`HOMEPAGE_VAR_SPENDROP_TOKEN`) is a Homepage convention — any env var starting with `HOMEPAGE_VAR_` is substituted into `services.yaml` via `{{HOMEPAGE_VAR_NAME}}`.
+
+### 3. Restart Homepage
+
+```bash
+docker compose restart homepage
+```
+
+### 4. Add SpenDrop to `services.yaml`
+
+Paste this block into your Homepage `services.yaml` under whichever group you want SpenDrop to appear in (the example uses `Household`):
+
+```yaml
+- Household:
+    - SpenDrop:
+        icon: si-googlesheets
+        href: https://spendrop.example
+        description: Household expenses
+        widget:
+          type: customapi
+          url: https://spendrop.example/api/homepage/summary
+          refreshInterval: 30000
+          method: GET
+          display: list
+          headers:
+            Authorization: "Bearer {{HOMEPAGE_VAR_SPENDROP_TOKEN}}"
+            Accept: application/json
+          mappings:
+            - field: month_spent
+              label: This month
+              format: float
+              prefix: "$"
+            - field: txn_count
+              label: Transactions
+              format: number
+            - field: month_remaining
+              label: Remaining
+              format: float
+              prefix: "$"
+              additionalField:
+                field: month_remaining
+                format: float
+                color: adaptive
+            - field: over_budget_categories
+              label: Over budget
+              format: number
+```
+
+Replace `https://spendrop.example` with your SpenDrop deployment URL. The `icon: si-googlesheets` is a [simple-icons](https://simpleicons.org) slug — pick whatever you like; any slug Homepage accepts works.
+
+Save `services.yaml` and Homepage hot-reloads the widget. Within 30 seconds the widget should display "This month / Transactions / Remaining / Over budget" populated from your data.
+
+### Troubleshooting
+
+- **Widget shows "Error" or nothing** — open Homepage's container logs (`docker logs homepage`). A 401 means the token was rejected (revoked, expired, typo, or the env var substitution failed — verify with `docker exec homepage env | grep SPENDROP`). A timeout or connection refused means `url:` is wrong or your reverse proxy is not routing `/api/homepage/summary` to SpenDrop.
+- **Numbers are stale by up to 15 seconds** — expected. The endpoint caches per token for 15s to keep 30s polling cheap. The `as_of` field in the raw JSON response shows the real aggregation time.
+- **"Remaining" shows a huge negative number** — you haven't set a monthly budget in SpenDrop. `month_remaining = budget - month_spent`, so with no budget row it equals `-month_spent`. Go to **Settings → General** and set a budget; the widget will then show the real remainder.
+- **"Over budget" always shows `0`** — expected in the current release. The field is reserved for a future per-category-budgets feature and is hard-wired to `0` today. Hide the row by deleting its entry from `mappings:` if the constant zero is noisy.
+
 ## Project Structure
 
 ```
