@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
-import type { FormEvent } from 'react';
+import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
 import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
+import { AutocompleteInput } from './AutocompleteInput';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
 import { Badge } from '@/components/ui/badge';
@@ -39,6 +39,8 @@ export interface TransactionRowProps {
   onUpdate: (input: UpdateTransactionInput) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onError: (message: string) => void;
+  descriptionSuggestions?: string[];
+  tagSuggestions?: string[];
 }
 
 export function TransactionRow({
@@ -49,6 +51,8 @@ export function TransactionRow({
   onUpdate,
   onDelete,
   onError,
+  descriptionSuggestions = [],
+  tagSuggestions = [],
 }: TransactionRowProps) {
   const { list: currencies, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
   const [editing, setEditing] = useState(false);
@@ -82,8 +86,7 @@ export function TransactionRow({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currenciesLoading, baseCode, transaction]);
 
-  async function handleSave(e: FormEvent) {
-    e.preventDefault();
+  async function handleSave() {
     setSaving(true);
     let payload: UpdateTransactionInput;
     try {
@@ -139,9 +142,30 @@ export function TransactionRow({
     setEditing(false);
   }
 
+  function handleRowKeyDown(e: KeyboardEvent<HTMLTableRowElement>) {
+    // Enter save path, collapsed: Cmd/Ctrl+Enter is force-bubbled by children,
+    // plain Enter reaches us only when no child consumed it, and Shift/Alt
+    // variants are non-standard and ignored defensively.
+    if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      void handleSave();
+      return;
+    }
+    // Plain Escape cancels. Shift/Alt/Meta/Ctrl variants are non-standard for
+    // cancel and are ignored defensively so an accidental modifier chord does
+    // not discard the row's edits.
+    if (e.key === 'Escape' && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleCancel();
+      return;
+    }
+  }
+
   if (editing) {
     return (
-      <TableRow className="[&>td]:align-top">
+      <TableRow className="[&>td]:align-top" onKeyDown={handleRowKeyDown}>
         <TableCell className="w-10">
           {/* h-10 flex wrapper vertically centers the 16px Checkbox
               inside a 40px box matching peer Input height, so under
@@ -158,6 +182,11 @@ export function TransactionRow({
           </div>
         </TableCell>
         <TableCell>
+          {/* Native `<input type="date">` has cross-browser key-swallowing quirks while
+              its picker is open: Chrome/Edge and Firefox often do not bubble Enter/Esc
+              out to React. That is documented and manually verified — do not attempt
+              to force-normalize. Users close the picker (mouse or outside-click) and
+              then press Enter/Esc in any other field to save/cancel. */}
           <Input
             type="date"
             value={date}
@@ -165,28 +194,64 @@ export function TransactionRow({
           />
         </TableCell>
         <TableCell>
-          <Input
-            type="text"
+          <AutocompleteInput
+            suggestions={descriptionSuggestions}
             value={description}
             onChange={(e) => setDescription(e.target.value)}
+            onAccept={(v) => setDescription(v)}
+            aria-label="Description"
           />
         </TableCell>
         <TableCell>
-          <Select value={categoryId} onValueChange={setCategoryId}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {categories.map((cat) => (
-                <SelectItem key={cat.id} value={String(cat.id)}>
-                  {cat.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          {/* Radix react-select ^2.2.6 does NOT `stopPropagation` on the
+              Escape/Enter keydown it uses to close its own popover content,
+              so without this capture wrapper the first Escape in an open
+              Select would both close the Select AND cancel the row, and a
+              first Enter on a highlighted option would both select the
+              option AND save the row. We detect "is this Select open" via
+              the trigger's own `aria-expanded` attribute — the trigger
+              lives in this `<div>`'s subtree (the SelectContent portal
+              does not), so querying `e.currentTarget` keeps the guard
+              scoped to this wrapper's subtree and cannot be tricked by
+              an unrelated open listbox elsewhere (another row, the
+              touch autocomplete Command, etc.). Today that subtree
+              holds exactly one combobox (the category Select); if a
+              maintainer later nests another combobox here the guard
+              will correctly suppress for it too. When the trigger is
+              closed,
+              `aria-expanded` flips to false, the query returns null, and
+              Enter/Escape bubble normally so the user can save/cancel
+              from the trigger with the keyboard. */}
+          <div
+            onKeyDownCapture={(e) => {
+              if (e.key !== 'Escape' && e.key !== 'Enter') return;
+              const openTrigger = e.currentTarget.querySelector(
+                '[role="combobox"][aria-expanded="true"]',
+              );
+              if (openTrigger) e.stopPropagation();
+            }}
+          >
+            <Select value={categoryId} onValueChange={setCategoryId}>
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {categories.map((cat) => (
+                  <SelectItem key={cat.id} value={String(cat.id)}>
+                    {cat.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
         </TableCell>
         <TableCell>
-          <TagInput value={tags} onChange={setTags} placeholder="Add tags..." />
+          <TagInput
+            value={tags}
+            onChange={setTags}
+            placeholder="Add tags..."
+            suggestions={tagSuggestions}
+          />
         </TableCell>
         <TableCell className="text-right font-mono tabular-nums">
           <AmountCurrencyInput
@@ -213,7 +278,10 @@ export function TransactionRow({
               their centers line up with the first-line center of the
               Date / Description / Category / Tags / Amount inputs. */}
           <form
-            onSubmit={(e) => void handleSave(e)}
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleSave();
+            }}
             className="flex h-10 items-center justify-end gap-1"
           >
             <Button

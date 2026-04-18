@@ -851,9 +851,29 @@ export function Transactions() {
                   onSelect={
                     selectionScope === 'all-matching' ? undefined : handleSelect
                   }
-                  onUpdate={updateTransaction}
+                  onUpdate={async (input) => {
+                    // Capture before awaiting: updateTransaction kicks off
+                    // a non-awaited refetch that can replace `transactions`
+                    // in state mid-flight. Reading `original` after the
+                    // await could race against the refetch.
+                    const original = transactions.find((t) => t.id === input.id);
+                    const descriptionChanged =
+                      !original || original.description !== input.description;
+                    const tagsChanged =
+                      !original || (original.tags ?? '') !== (input.tags ?? '');
+                    await updateTransaction(input);
+                    // Only refresh the suggestions cache when description or
+                    // tags actually changed — amount/category/date edits
+                    // don't affect autocomplete, and refetching on every
+                    // save is noise.
+                    if (descriptionChanged || tagsChanged) {
+                      setSuggestionsKey((k) => k + 1);
+                    }
+                  }}
                   onDelete={deleteTransaction}
                   onError={setRowError}
+                  descriptionSuggestions={suggestions.descriptions}
+                  tagSuggestions={suggestions.tags}
                 />
               ))}
             </TableBody>

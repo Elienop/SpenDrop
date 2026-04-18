@@ -412,8 +412,12 @@ describe('Transactions page', () => {
       );
       render(<Transactions />);
 
-      // Find the first select trigger (rows per page)
-      const triggers = screen.getAllByRole('combobox');
+      // Find the rows-per-page Select trigger by its accessible value.
+      // Filter out the AutocompleteInput combobox (which is a real <input>);
+      // the Select's trigger is rendered as a <button>.
+      const triggers = screen
+        .getAllByRole('combobox')
+        .filter((el) => el.tagName === 'BUTTON');
       expect(triggers.length).toBeGreaterThanOrEqual(1);
       await user.click(triggers[0]);
 
