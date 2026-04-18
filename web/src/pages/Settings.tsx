@@ -1688,10 +1688,14 @@ function ApiTokensSection() {
                 <ShowOnceReveal
                   token={createdToken}
                   onClose={() => {
-                    // Clicking Done closes the whole dialog — Dialog's
-                    // onOpenChange(false) handler above clears the plaintext,
-                    // so this one-liner is enough.
+                    // Clicking Done closes the whole dialog. Radix's
+                    // `onOpenChange` does NOT re-fire when `open` is
+                    // controlled and we set it to false ourselves, so
+                    // clear the plaintext here as well to ensure the
+                    // reveal cannot be re-summoned.
                     setCreateOpen(false);
+                    setCreatedToken(null);
+                    createForm.reset();
                   }}
                 />
               )}

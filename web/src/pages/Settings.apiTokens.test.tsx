@@ -246,4 +246,54 @@ describe('ApiTokensSection', () => {
       expect(vi.mocked(toast).success).toHaveBeenCalledWith('Copied');
     });
   });
+
+  test('closing the reveal clears plaintext from state (cannot be re-opened)', async () => {
+    const user = userEvent.setup();
+    seedGetMock([]);
+    mockedApi.post.mockResolvedValueOnce({
+      id: 7,
+      name: 'Homepage',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+      token: 'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    await user.type(screen.getByLabelText(/^name$/i), 'Homepage');
+    await user.type(screen.getByLabelText(/confirm password/i), 'hunter2');
+    await user.click(screen.getByRole('button', { name: /^create$/i }));
+    await waitFor(() => {
+      expect(
+        screen.getByText(/only time you'll see this token/i),
+      ).toBeInTheDocument();
+    });
+    // Click Done — the reveal dialog closes and plaintext should be
+    // unreachable from the rendered tree.
+    await user.click(screen.getByRole('button', { name: /^done$/i }));
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/only time you'll see this token/i),
+      ).not.toBeInTheDocument();
+    });
+    // Re-open the create dialog. If the component cached plaintext, it
+    // would leak here (either as the form's default value or as a
+    // stale reveal). Neither is allowed.
+    await user.click(screen.getByRole('button', { name: /\+ new token/i }));
+    expect(
+      screen.getByRole('heading', { name: /create api token/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByDisplayValue(
+        'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+      ),
+    ).not.toBeInTheDocument();
+    const fullTokenRegex = /spdr_[a-zA-Z0-9]{26}_[a-zA-Z0-9]{6}/;
+    expect(screen.queryByText(fullTokenRegex)).not.toBeInTheDocument();
+  });
 });
