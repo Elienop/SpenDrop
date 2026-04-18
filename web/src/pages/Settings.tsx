@@ -9,6 +9,8 @@ import {
   AlertTriangle,
   CheckCircle2,
   CircleAlert,
+  Copy,
+  KeyRound,
   Upload,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -1422,6 +1424,12 @@ function UsersSection() {
 
 /* ---------- API tokens tab ---------- */
 
+// destructiveActionClass paints an AlertDialogAction button with the
+// destructive palette. Extracted so both revoke-one and revoke-all dialogs
+// stay in sync if the token ever changes.
+const destructiveActionClass =
+  'bg-destructive text-destructive-foreground hover:bg-destructive/90';
+
 function ShowOnceReveal({
   token,
   onClose,
@@ -1429,21 +1437,25 @@ function ShowOnceReveal({
   token: CreateTokenResponse;
   onClose: () => void;
 }) {
+  // The amber Alert below already carries the "one-time" warning with a
+  // visible title. DialogDescription would restate the same message
+  // verbatim to screen readers, so we only render DialogTitle here and
+  // let the Alert be the description surface. Radix's a11y warning for a
+  // missing DialogDescription is silenced via `aria-describedby` on the
+  // AlertTitle element below.
   return (
     <>
       <DialogHeader>
         <DialogTitle>Save your new token</DialogTitle>
-        <DialogDescription>
-          This is the only time your token will be shown.
-        </DialogDescription>
       </DialogHeader>
       <div className="grid gap-4">
         <Alert variant="warning">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>Copy it now</AlertTitle>
           <AlertDescription>
-            We hash tokens at rest. If you lose this one, you'll have
-            to revoke it and create a new one.
+            This is the only time your token will be shown. We hash
+            tokens at rest — if you lose it, revoke and create a new
+            one.
           </AlertDescription>
         </Alert>
         <div className="grid gap-2">
@@ -1487,6 +1499,7 @@ function ShowOnceReveal({
                 }
               }}
             >
+              <Copy className="mr-2 h-4 w-4" aria-hidden="true" />
               Copy
             </Button>
           </div>
@@ -1507,6 +1520,10 @@ function ApiTokensSection() {
   const [createdToken, setCreatedToken] = useState<CreateTokenResponse | null>(null);
   const [creating, setCreating] = useState(false);
   const [revokingToken, setRevokingToken] = useState<ApiToken | null>(null);
+  // Sticky display-name for the revoke-one dialog title, captured when the
+  // user clicks a Revoke button. Kept as state (not derived from
+  // revokingToken) so Radix's close-exit animation can still show the name
+  // while revokingToken has already flipped to null.
   const [revokingTokenName, setRevokingTokenName] = useState('');
   const [revokeAllOpen, setRevokeAllOpen] = useState(false);
   const [revoking, setRevoking] = useState(false);
@@ -1527,14 +1544,6 @@ function ApiTokensSection() {
          the user can retry by creating a token. */
     });
   }, [fetchTokens]);
-
-  // Sticky display-name for the revoke-one dialog title: only updates when
-  // a token becomes the revoke target. When revokingToken flips back to
-  // null, the ref stays — preventing a "Revoke ?" flash during Radix's
-  // close-exit animation.
-  useEffect(() => {
-    if (revokingToken) setRevokingTokenName(revokingToken.name);
-  }, [revokingToken]);
 
   function formatLastUsed(t: ApiToken): string {
     if (!t.last_used_at) return 'Never used';
@@ -1653,6 +1662,12 @@ function ApiTokensSection() {
               // token" click jumps straight to the reveal of a token the user
               // thought they'd cancelled. Mirror the revoke-dialog busy guard.
               if (creating) return;
+              // Guard close-while-revealed: once the plaintext is on
+              // screen, Escape/backdrop must not silently destroy it.
+              // The only way out of the reveal is the "I've saved my
+              // token" button, which calls `onClose` and clears both
+              // states. Mirrors GitHub's one-time-secret UX.
+              if (createdToken !== null && !open) return;
               if (open) {
                 setCreateOpen(true);
                 return;
@@ -1671,10 +1686,8 @@ function ApiTokensSection() {
                   <DialogHeader>
                     <DialogTitle>Create API token</DialogTitle>
                     <DialogDescription>
-                      Tokens have the same access as your account
-                      password. Name them after the script or service
-                      you'll use them from so you can revoke them
-                      individually later.
+                      Name it after the script or service you'll use it
+                      from so you can revoke it individually later.
                     </DialogDescription>
                   </DialogHeader>
                   <Form {...createForm}>
@@ -1762,23 +1775,32 @@ function ApiTokensSection() {
               variant="destructive"
               onClick={() => setRevokeAllOpen(true)}
             >
-              Revoke all
+              Revoke all ({tokens.length})
             </Button>
           )}
         </div>
       </CardHeader>
       <CardContent>
         {tokens.length === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            No API tokens yet. Create one to connect a script,
-            dashboard, or other tool to SpenDrop.
-          </p>
+          <div className="flex flex-col items-center gap-3 py-8 text-center">
+            <KeyRound
+              className="h-8 w-8 text-muted-foreground/60"
+              aria-hidden="true"
+            />
+            <div className="grid gap-1">
+              <p className="text-sm font-medium">No API tokens yet</p>
+              <p className="text-sm text-muted-foreground">
+                Create one to connect a script, dashboard, or other
+                tool to SpenDrop.
+              </p>
+            </div>
+          </div>
         ) : (
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>Name</TableHead>
-                <TableHead>Token</TableHead>
+                <TableHead>Prefix</TableHead>
                 <TableHead>Last used</TableHead>
                 <TableHead>Expires</TableHead>
                 <TableHead>Created</TableHead>
@@ -1804,7 +1826,14 @@ function ApiTokensSection() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => setRevokingToken(t)}
+                      onClick={() => {
+                        // Capture the name at click time — the AlertDialog
+                        // title reads revokingTokenName, which stays set
+                        // through the close-exit animation after
+                        // revokingToken flips back to null.
+                        setRevokingTokenName(t.name);
+                        setRevokingToken(t);
+                      }}
                       aria-label={`Revoke ${t.name}`}
                     >
                       Revoke
@@ -1855,7 +1884,7 @@ function ApiTokensSection() {
                 void onConfirmRevoke();
               }}
               disabled={revoking}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className={destructiveActionClass}
             >
               {revoking ? 'Revoking\u2026' : 'Revoke token'}
             </AlertDialogAction>
@@ -1888,9 +1917,9 @@ function ApiTokensSection() {
                 void onConfirmRevokeAll();
               }}
               disabled={revoking}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              className={destructiveActionClass}
             >
-              {revoking ? 'Revoking\u2026' : 'Revoke all'}
+              {revoking ? 'Revoking\u2026' : `Revoke all (${tokens.length})`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
