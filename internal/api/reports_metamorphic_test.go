@@ -190,7 +190,7 @@ func lastDayOfMonth(year int, month time.Month) int {
 //     deleted row would be misleading, since the bug we care about is
 //     in the date predicate, not the tombstone filter.
 func drawTestSample(rt *rapid.T, fix *reportsFixture, months int) testSample {
-	offset := rapid.IntRange(-(months + 2), 2).Draw(rt, "monthOffset")
+	offset := rapid.IntRange(-(months+2), 2).Draw(rt, "monthOffset")
 	shifted := metamorphicClockInstant.AddDate(0, offset, 0)
 	y := shifted.Year()
 	m := shifted.Month()

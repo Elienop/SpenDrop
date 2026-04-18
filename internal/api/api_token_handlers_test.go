@@ -355,7 +355,10 @@ func TestAPITokens_List_HidesRevokedByDefault(t *testing.T) {
 	_ = json.Unmarshal(createRec.Body.Bytes(), &created)
 	_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": "keep", "password": password}, cookie)
 
-	_ = tokenRequest(t, h, http.MethodDelete, fmt.Sprintf("/api/api-tokens/%d", created.ID), nil, cookie)
+	revokeRec := tokenRequest(t, h, http.MethodDelete, fmt.Sprintf("/api/api-tokens/%d", created.ID), nil, cookie)
+	if revokeRec.Code != http.StatusOK {
+		t.Fatalf("revoke: want 200, got %d", revokeRec.Code)
+	}
 	rec := tokenRequest(t, h, http.MethodGet, "/api/api-tokens/", nil, cookie)
 	var out apiTokenListResponse
 	_ = json.Unmarshal(rec.Body.Bytes(), &out)
@@ -432,7 +435,10 @@ func TestAPITokens_RevokeAll_SoftDeletesAllLiveTokensForUser_EmitsAuditPerToken(
 	h := setupHandler(t)
 	user, password, cookie := seedTokenTestUser(t, h, "alice")
 	for i := 0; i < 3; i++ {
-		_ = tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": fmt.Sprintf("t%d", i), "password": password}, cookie)
+		createRec := tokenRequest(t, h, http.MethodPost, "/api/api-tokens/", map[string]any{"name": fmt.Sprintf("t%d", i), "password": password}, cookie)
+		if createRec.Code != http.StatusCreated {
+			t.Fatalf("create t%d: want 201, got %d", i, createRec.Code)
+		}
 	}
 	rec := tokenRequest(t, h, http.MethodDelete, "/api/api-tokens/", nil, cookie)
 	if rec.Code != http.StatusOK {

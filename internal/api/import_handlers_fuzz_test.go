@@ -78,9 +78,9 @@ var dateSeeds = []string{
 	"Infinity",
 
 	// Ambiguous / invalid calendar strings.
-	"01/02/03",           // 2-digit year, not in allowlist
-	"2025-13-01",         // month 13
-	"2025-02-31",         // Feb 31
+	"01/02/03",             // 2-digit year, not in allowlist
+	"2025-13-01",           // month 13
+	"2025-02-31",           // Feb 31
 	"2025-02-29T13:45:00Z", // non-leap Feb 29 + ISO timestamp
 	"2025/01/02 03:04:05",  // includes time, not in allowlist
 }
@@ -98,12 +98,12 @@ var amountSeeds = []string{
 	"1.23",
 
 	// Currency and locale variations.
-	"1,234.56",      // US thousands
-	"$1,234.56",     // US with symbol
-	"€42,50",        // European notation; stripCurrencyFormat treats the comma as a US thousands separator and this parses as 4250, not 42.50
-	"(42.50)",       // accounting negative
-	"-$15.00",       // explicit negative with symbol
-	"1.234.567,89",  // European thousands — ParseFloat will fail cleanly
+	"1,234.56",     // US thousands
+	"$1,234.56",    // US with symbol
+	"€42,50",       // European notation; stripCurrencyFormat treats the comma as a US thousands separator and this parses as 4250, not 42.50
+	"(42.50)",      // accounting negative
+	"-$15.00",      // explicit negative with symbol
+	"1.234.567,89", // European thousands — ParseFloat will fail cleanly
 
 	// Whitespace / empty / newline.
 	"",
@@ -115,7 +115,7 @@ var amountSeeds = []string{
 	// rejects NaN/Inf and anything above MaxTransactionAmount, so all
 	// of these must error out — none should round-trip to a "success"
 	// the fuzz assertion would catch as out-of-range.
-	"99999999999",          // > MaxTransactionAmount
+	"99999999999",            // > MaxTransactionAmount
 	"1.7976931348623157e308", // float max
 	"NaN",
 	"Infinity",

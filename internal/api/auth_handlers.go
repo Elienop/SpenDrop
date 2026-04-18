@@ -205,7 +205,6 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	loginAttempts    = make(map[string]int)
 	registerAttempts = make(map[string]int)
 	rateLimitMu      sync.Mutex
 

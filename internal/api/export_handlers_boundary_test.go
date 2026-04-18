@@ -585,8 +585,8 @@ func TestExports_ExcludeTombstonedRowAtEndOfBoundaryDay_CSVExport(t *testing.T) 
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	seedBoundaryTransaction(t, q, user.ID, 1)                      // live, 777
-	seedTombstonedBoundaryTransaction(t, q, user.ID, 1, 888.00)    // tombstoned, 888
+	seedBoundaryTransaction(t, q, user.ID, 1)                   // live, 777
+	seedTombstonedBoundaryTransaction(t, q, user.ID, 1, 888.00) // tombstoned, 888
 
 	req := httptest.NewRequest(http.MethodGet, "/api/export/transactions?date_from=2026-03-01&date_to=2026-03-31", nil)
 	req = withUser(req, user)

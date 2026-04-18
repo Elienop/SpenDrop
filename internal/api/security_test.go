@@ -473,10 +473,7 @@ func TestHandleLogin_RateLimited_After10Attempts(t *testing.T) {
 		t.Fatalf("register failed: %d", regRec.Code)
 	}
 
-	// Reset the rate limiter before our test
-	rateLimitMu.Lock()
-	loginAttempts = make(map[string]int)
-	rateLimitMu.Unlock()
+	// Bucket is fresh per setupHandler — no manual reset needed.
 
 	// Make 10 failed attempts
 	for i := 0; i < 10; i++ {
@@ -499,10 +496,6 @@ func TestHandleLogin_RateLimited_After10Attempts(t *testing.T) {
 		t.Errorf("expected 429, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 
-	// Clean up
-	rateLimitMu.Lock()
-	loginAttempts = make(map[string]int)
-	rateLimitMu.Unlock()
 }
 
 // --- handleUpdateUser validation ---
