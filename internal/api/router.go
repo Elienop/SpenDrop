@@ -279,7 +279,8 @@ func requireJSONContentType(next http.Handler) http.Handler {
 		}
 		// Bearer-auth bypass. Must come BEFORE the Content-Type check so a
 		// bearer-authorized POST without application/json (hypothetical
-		// future endpoint) is not 415'd.
+		// future endpoint) is not 415'd. Case-sensitive "Bearer " prefix
+		// mirrors RequireAPIToken — both must change together.
 		if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
 			next.ServeHTTP(w, r)
 			return

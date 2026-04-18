@@ -64,11 +64,15 @@ func RequireAPIToken(
 				return
 			}
 
-			// ON DELETE CASCADE means api_tokens.user_id normally can't
-			// dangle, but this covers races (user delete mid-request) and
-			// DB errors — same opaque 401.
+			// ON DELETE CASCADE makes this branch unreachable in practice
+			// (the FK from api_tokens.user_id ensures GetAPITokenByHash
+			// returns no row before we get here). Consume the bucket
+			// anyway — the invariant "every DB-path failure consumes
+			// uniformly" must not depend on runtime constraint-timing
+			// to hold.
 			user, err := queries.GetUserByID(r.Context(), tok.UserID)
 			if err != nil {
+				authFailLimiter.Consume(ip)
 				writeBearerFailure(w)
 				return
 			}

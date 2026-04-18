@@ -271,13 +271,19 @@ func (c *countingDBTX) PrepareContext(ctx context.Context, q string) (*sql.Stmt,
 	return c.db.PrepareContext(ctx, q)
 }
 func (c *countingDBTX) QueryContext(ctx context.Context, q string, args ...interface{}) (*sql.Rows, error) {
-	if strings.Contains(q, "FROM api_tokens") {
+	// Match only the GetAPITokenByHash query body, not all api_tokens
+	// reads — otherwise a future query (e.g. ListAPITokensForUser firing
+	// before the shape check) could silently inflate the count.
+	if strings.Contains(q, "token_hash = ?") {
 		atomic.AddInt64(&c.spy.getByHashCount, 1)
 	}
 	return c.db.QueryContext(ctx, q, args...)
 }
 func (c *countingDBTX) QueryRowContext(ctx context.Context, q string, args ...interface{}) *sql.Row {
-	if strings.Contains(q, "FROM api_tokens") {
+	// Match only the GetAPITokenByHash query body, not all api_tokens
+	// reads — otherwise a future query (e.g. ListAPITokensForUser firing
+	// before the shape check) could silently inflate the count.
+	if strings.Contains(q, "token_hash = ?") {
 		atomic.AddInt64(&c.spy.getByHashCount, 1)
 	}
 	return c.db.QueryRowContext(ctx, q, args...)
