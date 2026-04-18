@@ -75,7 +75,7 @@ Tokens grant the full API surface the owning user has. Explicit decision with th
 - **Revocation**: soft-delete via `revoked_at`. Consistent with SpenDrop's transaction-tombstone discipline. Immediate effect at the next middleware check.
 - **Mass revoke**: `DELETE /api/api-tokens` (no ID) — user-triggered "sign out all my tokens." Plex pattern.
 - **Password-change cascade (atomicity is load-bearing)**: the existing password-change handler opens a single `*sql.Tx`, executes both the `UPDATE users SET password_hash = …` and a `ApiTokenStore.RevokeAllForUserTx(tx, userID, "revoked_by_password_change", actorCtx)` call on that same transaction, and commits once. `ApiTokenStore` exposes `*Tx` variants that accept a `database.DBTX` (the interface already satisfied by `*sql.DB` and `*sql.Tx` — matches the existing `TransactionStore` pattern). A failure anywhere rolls back both the password update and the cascade; "all or nothing" is structurally guaranteed by the single transaction. Nested transactions are never attempted — SQLite does not support them.
-- **`last_used_at` + `last_used_ip` debouncing is done at SQL, not in Go.** The middleware fires the UPDATE unconditionally from a goroutine, and the query itself gates the write: `UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < datetime('now','-60 seconds'))`. When N concurrent requests arrive with a stale cached `last_used_at`, SQLite's single-writer lock serializes them and only the first one wins the WHERE predicate — the other N-1 UPDATEs affect zero rows and cost one B-tree lookup each. The Go-side staleness check is kept as a cheap fast-path skip but is not the authoritative gate. SQLite is single-writer; Homepage polling at 10s × N tokens would otherwise inflate WAL and fight other writers.
+- **`last_used_at` + `last_used_ip` debouncing is done at SQL, not in Go.** The middleware fires the UPDATE unconditionally from a goroutine, and the query itself gates the write: `UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = NULLIF(?, '') WHERE id = ? AND (last_used_at IS NULL OR last_used_at < datetime('now','-60 seconds'))`. `NULLIF(?, '')` folds an empty-string IP (misbehaving proxy, container without `RemoteAddr`) into SQL NULL rather than storing `""`. When N concurrent requests arrive with a stale cached `last_used_at`, SQLite's single-writer lock serializes them and only the first one wins the WHERE predicate — the other N-1 UPDATEs affect zero rows and cost one B-tree lookup each. The Go-side staleness check is kept as a cheap fast-path skip but is not the authoritative gate. SQLite is single-writer; Homepage polling at 10s × N tokens would otherwise inflate WAL and fight other writers.
 - **Graceful shutdown of the debounced touch**: middleware-spawned goroutines use `context.WithTimeout(srv.BaseContext(), 2*time.Second)`, so `SIGTERM`-triggered `srv.Shutdown()` cancels in-flight touches before the DB closes. No `context.Background()`.
 
 ### 3.6 Audit table
@@ -113,7 +113,7 @@ Capture rules:
 7. Expiry + revocation enforced inside the SQL `WHERE`, not in Go, to make bypass-by-bug impossible. `GetAPITokenByHash` hard-codes `AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)` into the query body.
 8. Timestamps are UTC `CURRENT_TIMESTAMP` everywhere; never mix Go `time.Now()` against DB-stored strings.
 9. Admin does **not** see or revoke other users' tokens. User-scoped strictly.
-10. A server-side 15-second response cache on `/api/homepage/summary` keyed by `token_hash` so a misconfigured `refreshInterval: 1000` can't DOS the endpoint. Implemented in `internal/api/homepage_cache.go` as a thread-safe `sync.Map` storing `{jsonBytes []byte; expiresAt time.Time}` per token hash. **Cache lookup runs *after* `RequireAPIToken`** — a revoked/expired token fails middleware first and never reaches the cache lookup, so invalidation-on-revoke is structurally unneeded (TTL is the only expiration path). Clock is injected via a small `Clock interface { Now() time.Time }` so tests drive it deterministically; production uses `realClock{}`.
+10. A server-side 15-second response cache on `/api/homepage/summary` keyed by `token_hash` so a misconfigured `refreshInterval: 1000` can't DOS the endpoint. Implemented in `internal/api/homepage_cache.go` as a thread-safe `sync.Map` storing `{jsonBytes []byte; expiresAt time.Time}` per token hash. **Routing invariant:** `RequireAPIToken` runs first in the chi chain, the handler reads from the cache second. A revoked/expired token therefore fails middleware before the cache is ever consulted, which is why invalidation-on-revoke is structurally unneeded (TTL is the only expiration path). A future refactor that moves the cache into the middleware would break this guarantee — the invariant is load-bearing and is covered by `Summary_RevokedTokenReturns401_DoesNotServeStaleCache`. Clock is injected via a small `Clock interface { Now() time.Time }`; the **same** clock instance is passed into both the cache and the handler (so the `as_of` field in the payload and the cache's `expiresAt` advance in lockstep, and `Summary_AsOfReflectsOriginalRunTimeNotCacheHit` is deterministic). Production uses `realClock{}`.
 11. All middleware error paths (missing header, malformed header, invalid shape, unknown hash, user-deleted, DB error) emit the **same** 401 body `{"error":"invalid or missing token"}`. No text distinguishes "this token was valid yesterday" from "this token never existed."
 
 ## 4. Data Model (migration 011)
@@ -195,9 +195,9 @@ Request:
 
 `expires_at` is a nullable ISO-8601 UTC timestamp. Frontend submits either `null` or a pre-computed UTC timestamp based on the dropdown choice.
 
-Server-side validation on `POST`:
+Server-side validation on `POST` (layered — handler rejects first, schema CHECK is the backstop):
 
-- `name`: non-empty, ≤ 100 chars after trim. Rejects whitespace-only.
+- `name`: handler runs `strings.TrimSpace` first, then requires 1–100 chars. Whitespace-only submissions return `400 invalid name`. The schema-level `CHECK(length(name) BETWEEN 1 AND 100)` catches any future bypass of the handler validation but will not reject whitespace-only on its own — the two layers have deliberately different strictness.
 - `expires_at`: if non-null, must be strictly in the future (> `CURRENT_TIMESTAMP`) AND ≤ 10 years ahead of now. Past timestamps and suspiciously far-future ones (e.g. year 9999 to create a permanent-looking "1-year" token) return `400 invalid expires_at`.
 - `password`: non-empty string; checked with the existing `bcrypt.CompareHashAndPassword` helper.
 
@@ -210,7 +210,7 @@ Response `201 Created`:
   "token_prefix": "spdr_aB3xQ9z7kL",
   "expires_at": null,
   "created_at": "2026-04-18T14:23:00Z",
-  "token": "spdr_aB3xQ9z7kLmN3pRsTv2wXyZf_abc123"
+  "token": "spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123"
 }
 ```
 
@@ -444,7 +444,7 @@ Submit → `POST /api/api-tokens` → on `201` the dialog swaps to the show-once
     method: GET
     display: list
     headers:
-      Authorization: "Bearer spdr_aB3xQ9z7kLmN3pRsTv2wXyZf_abc123"
+      Authorization: "Bearer spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123"
     mappings:
       - { field: month_spent, label: This month, format: float, prefix: "$" }
       - { field: txn_count, label: Transactions, format: number }
@@ -518,6 +518,7 @@ Setup steps (also in README):
 - `MissingAuthorizationHeader_401`
 - `MalformedBearerPrefix_401`
 - `InvalidTokenFormat_401` (bad regex + bad CRC32)
+- `InvalidTokenFormat_DoesNotHitDatabase` — the CRC32 pre-filter's purpose is to avoid enumeration timing attacks. Test uses a spy `queries` that counts `GetAPITokenByHash` calls; asserts zero calls on malformed input.
 - `UnknownHash_401`
 - `RevokedToken_401`
 - `ExpiredToken_401`
@@ -539,7 +540,7 @@ Setup steps (also in README):
 - `Create_WrongPassword_ConsumesLoginFailureBucketNotCreationBucket` — typo-prone users don't burn their create quota.
 - `Create_ReturnsPlaintextOnceInResponse`
 - `Create_EmitsAuditRowWithCreatedAction`
-- `Create_RateLimitExceeded_429` (6th successful create within an hour)
+- `Create_RateLimitExceeded_429` (6th *attempted* create within an hour, after 5 successes)
 - `Create_ExpiresAtInPast_400`
 - `Create_ExpiresAtBeyond10Years_400`
 - `Create_EmptyName_400`
@@ -610,9 +611,11 @@ Setup steps (also in README):
 - `internal/database/migrations/011_api_tokens.sql`
 - `internal/database/store_api_token.go` — `ApiTokenStore`, wraps `Queries` plus audit row emission in one SQL transaction. Interface:
   - `Create(ctx, params CreateParams) (ApiToken, error)` — opens its own `*sql.Tx`; inserts `api_tokens` row and `api_token_audit` row with `action='created'`; commits atomically. Returns 429-ready error if the user-creation-rate-limit bucket is exhausted.
-  - `RevokeOne(ctx, id, userID int64, actor ActorContext) error` — opens own tx. Idempotent on already-revoked rows (returns nil, emits no second audit row). 404-style error if `id` is not owned by `userID`.
-  - `RevokeAllForUser(ctx, userID int64, action string, actor ActorContext) (n int, err error)` — opens own tx. One audit row emitted per revoked token. `action` must be one of the enum values — validated at call site.
-  - `RevokeAllForUserTx(ctx, tx database.DBTX, userID int64, action string, actor ActorContext) (n int, err error)` — same as above but reuses a caller-provided `*sql.Tx`. **This is the one the password-change cascade calls.** The non-`Tx` variant is a thin wrapper `{tx, err := db.BeginTx(ctx); defer commit/rollback; return RevokeAllForUserTx(ctx, tx, ...)}`, matching `TransactionStore`'s pattern.
+  - `RevokeOne(ctx, id, userID int64, actor ActorContext) error` — opens own tx. Idempotent on already-revoked rows (returns nil, emits no second audit row). Returns sentinel `ErrTokenNotFound` if `id` is not owned by `userID` or does not exist; the handler maps that specific error to HTTP 404 and any other error to 500.
+  - `RevokeAllForUser(ctx, userID int64, action AuditAction, actor ActorContext) (n int, err error)` — opens own tx. One audit row emitted per revoked token.
+  - `RevokeAllForUserTx(ctx, tx database.DBTX, userID int64, action AuditAction, actor ActorContext) (n int, err error)` — same as above but reuses a caller-provided `*sql.Tx`. **This is the one the password-change cascade calls.** The non-`Tx` variant is a thin wrapper `{tx, err := db.BeginTx(ctx); defer commit/rollback; return RevokeAllForUserTx(ctx, tx, ...)}`, matching `TransactionStore`'s pattern.
+  - **Typed action constants.** `type AuditAction string` with exported values `AuditActionCreated`, `AuditActionRevokedByUser`, `AuditActionRevokedByPasswordChange`, `AuditActionRevokedByMassRevoke`. Callers pass a typed constant, not a raw string — a typo fails at compile time instead of at the SQL `CHECK` constraint.
+  - **Exported errors.** `ErrTokenNotFound` (handler → 404), `ErrCreateRateLimit` (handler → 429), `ErrInvalidAction` (compile-time should normally prevent this; defensive 500 if somehow hit).
   - `ActorContext` is a small struct `{IP string; UserAgent string; SessionHash string}` the handler layer fills in once and passes through, so the store doesn't need `*http.Request`.
 - `internal/auth/api_token.go` — `GenerateAPIToken() (plaintext, hash, prefix string)`, `HashAPIToken(s string) string`, `IsValidTokenFormat(s string) bool`, `HashSessionToken(s string) string` (the `SHA-256` used for `actor_session_hash`).
 - `internal/auth/api_token_middleware.go`
@@ -653,7 +656,7 @@ These three items require opening specific files during plan writing to pin exac
 
 - **Clipboard on non-HTTPS origins**: `navigator.clipboard.writeText` requires a secure context. The user's deployment is HTTPS so this is fine; the reveal dialog includes a fallback "Select all" helper + toast if `navigator.clipboard` is undefined, so self-hosters on plain HTTP LAN aren't blocked.
 - **`last_used_ip` privacy**: the list response returns the user's own last-used IP back to their browser. Fine in the single-household threat model; a future iteration could truncate to `/24` if tokens are used from VPN exits that look sensitive.
-- **YAML duplication**: the show-once reveal dialog's embedded YAML (§7.5) and the README's copy-paste block (§8) both carry the same structure. Plan should extract to a single source (README is canonical; the dialog's helper text links to it with a shortened inline example).
+- **YAML duplication (explicitly accepted, not resolved)**: the copy-paste block in §8 (README) and the show-once reveal dialog in §7.5 intentionally carry the same structure. Both serve different audiences at different moments and it is cheaper to keep them in sync by hand (via a CI readme-check would be welcome but is out of scope for v1) than to introduce a generator. If the two drift in a future edit, the README wins and the dialog is updated. No build-time tooling.
 
 ---
 
