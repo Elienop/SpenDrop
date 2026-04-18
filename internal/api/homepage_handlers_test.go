@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -526,12 +527,21 @@ func TestSummary_CachedWithin15SecondsPerToken(t *testing.T) {
 // Used only in this file for cache TTL tests. Defined here rather than in
 // helpers_test.go to keep the homepage tests self-contained.
 type mutableClock struct {
-	t time.Time
+	mu sync.Mutex
+	t  time.Time
 }
 
-func (c *mutableClock) Now() time.Time { return c.t }
+func (c *mutableClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
 
-func (c *mutableClock) advance(d time.Duration) { c.t = c.t.Add(d) }
+func (c *mutableClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
 
 // TestSummary_CacheKeyIsTokenHash_NotUserID verifies that two tokens owned by
 // the same user have independent cache slots. Token T2 sees a fresh total even

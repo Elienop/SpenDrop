@@ -92,7 +92,7 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 	now := h.clock.Now()
 	ctx := r.Context()
 
-	yearStr := fmt.Sprintf("%d", now.Year())
+	yearStr := strconv.Itoa(now.Year())
 	monthStr := fmt.Sprintf("%02d", int(now.Month()))
 
 	// Resolve budget: monthly row → SettingDefaultBudget setting → 0.
