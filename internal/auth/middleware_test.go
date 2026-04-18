@@ -329,23 +329,32 @@ func TestRequireAuthOrAPIToken_ValidSession_AllowsAccess(t *testing.T) {
 }
 
 // TestRequireAuthOrAPIToken_BearerTakesPrecedence pins the "Bearer is
-// exclusive when present" invariant. A malformed Bearer header combined
-// with a perfectly valid session cookie must still 401 — never fall back
-// to the cookie.
+// exclusive when present" invariant. A Bearer token whose shape is valid
+// but whose hash is unknown to the DB, combined with a perfectly valid
+// session cookie, must still 401 — never fall back to the cookie. Using a
+// valid-shape token (not a garbage string) forces the combined middleware
+// to actually traverse the Bearer DB-lookup path; a malformed token would
+// trip the IsValidTokenFormat pre-filter and skip that branch entirely,
+// so the test would pass even if the fall-through were buggy.
 func TestRequireAuthOrAPIToken_BearerTakesPrecedence(t *testing.T) {
 	q, bucket, _, cookie, stop := combinedAuthHelper(t)
 	defer stop()
 
+	unknownPt, _, _, err := GenerateAPIToken()
+	if err != nil {
+		t.Fatalf("GenerateAPIToken: %v", err)
+	}
+
 	mw := RequireAuthOrAPIToken(q, bucket)
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
-	req.Header.Set("Authorization", "Bearer spdr_garbage_invalid_token_here_xx")
+	req.Header.Set("Authorization", "Bearer "+unknownPt)
 	req.AddCookie(cookie)
 	req.RemoteAddr = "1.2.3.4:5678"
 	rec := httptest.NewRecorder()
 	mw(terminalHandler(nil)).ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid bearer + valid cookie: want 401 (no fallback), got %d; body: %s",
+		t.Fatalf("unknown bearer + valid cookie: want 401 (no fallback), got %d; body: %s",
 			rec.Code, rec.Body.String())
 	}
 }

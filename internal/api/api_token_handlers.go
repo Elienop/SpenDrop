@@ -73,6 +73,12 @@ func newActorContext(r *http.Request, user database.User) database.ActorContext 
 // The per-user create-rate bucket (5/hour) is the only abuse gate; there is
 // no password reconfirm, so compromise of a session cookie or bearer implies
 // compromise of this endpoint.
+//
+// Abuse model note: a compromised Bearer that reaches this endpoint can mint
+// up to 5 child Bearers/hour. Revocation triage must walk the audit log
+// from the suspect token's creation time forward and revoke every token it
+// issued (transitively) — revoking just the named token is not sufficient
+// because children outlive the parent.
 func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.GetUser(r)
 	if !ok {
