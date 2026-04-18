@@ -59,7 +59,7 @@ Stored as 64-char lowercase hex in `token_hash`. `UNIQUE INDEX` on that column g
 
 **Not bcrypt/argon2id**, despite those being correct for password storage. A 154-bit random token is not brute-forceable, so KDF hardening adds no real security; running bcrypt on every Homepage poll (default 10s, floor 1s) is a DoS vector on the request pool, and salted hashes can't be uniquely indexed for direct lookup. This matches Immich, Gitea, GitHub, and Grafana's current design; diverges from Paperless-ngx / Linkding only because those inherit DRF's legacy plaintext default.
 
-The first 12 chars of the full token string are also stored as `token_prefix` so the UI can distinguish tokens in the list without re-revealing the secret (GitHub's pattern).
+The first **15 chars** of the full token string (`spdr_` + 10 random base62 chars, e.g. `spdr_aB3xQ9z7kL`) are also stored as `token_prefix` so the UI can distinguish tokens in the list without re-revealing the secret (GitHub's pattern). 15 chars exposes ~60 bits of the 154-bit entropy — enumerable at scale but structurally too costly to brute-force the remaining 94 bits even if the prefix leaks. Schema enforces `CHECK(length(token_prefix) = 15)` to catch insertion bugs early.
 
 ### 3.3 Transport — `Authorization: Bearer <token>` only
 
@@ -74,8 +74,9 @@ Tokens grant the full API surface the owning user has. Explicit decision with th
 - **Expiry**: optional. Default **Never** (Plex-aligned; common in homelab tooling). Dropdown offers 7 days / 30 days / 90 days / 1 year / Never at creation.
 - **Revocation**: soft-delete via `revoked_at`. Consistent with SpenDrop's transaction-tombstone discipline. Immediate effect at the next middleware check.
 - **Mass revoke**: `DELETE /api/api-tokens` (no ID) — user-triggered "sign out all my tokens." Plex pattern.
-- **Password-change cascade**: existing password-change handler revokes every live token for the user atomically in the same SQL transaction as the `UPDATE users SET password_hash = …`. Matches user expectation of "if my password leaked, nothing's still valid."
-- **`last_used_at` + `last_used_ip`**: updated inside the middleware, **throttled to one write per token per 60 seconds**. SQLite is single-writer; Homepage polling at 10s × N tokens otherwise inflates WAL and fights other writers.
+- **Password-change cascade (atomicity is load-bearing)**: the existing password-change handler opens a single `*sql.Tx`, executes both the `UPDATE users SET password_hash = …` and a `ApiTokenStore.RevokeAllForUserTx(tx, userID, "revoked_by_password_change", actorCtx)` call on that same transaction, and commits once. `ApiTokenStore` exposes `*Tx` variants that accept a `database.DBTX` (the interface already satisfied by `*sql.DB` and `*sql.Tx` — matches the existing `TransactionStore` pattern). A failure anywhere rolls back both the password update and the cascade; "all or nothing" is structurally guaranteed by the single transaction. Nested transactions are never attempted — SQLite does not support them.
+- **`last_used_at` + `last_used_ip` debouncing is done at SQL, not in Go.** The middleware fires the UPDATE unconditionally from a goroutine, and the query itself gates the write: `UPDATE api_tokens SET last_used_at = CURRENT_TIMESTAMP, last_used_ip = ? WHERE id = ? AND (last_used_at IS NULL OR last_used_at < datetime('now','-60 seconds'))`. When N concurrent requests arrive with a stale cached `last_used_at`, SQLite's single-writer lock serializes them and only the first one wins the WHERE predicate — the other N-1 UPDATEs affect zero rows and cost one B-tree lookup each. The Go-side staleness check is kept as a cheap fast-path skip but is not the authoritative gate. SQLite is single-writer; Homepage polling at 10s × N tokens would otherwise inflate WAL and fight other writers.
+- **Graceful shutdown of the debounced touch**: middleware-spawned goroutines use `context.WithTimeout(srv.BaseContext(), 2*time.Second)`, so `SIGTERM`-triggered `srv.Shutdown()` cancels in-flight touches before the DB closes. No `context.Background()`.
 
 ### 3.6 Audit table
 
@@ -88,23 +89,32 @@ Actions enum (SQLite `CHECK` constraint):
 - `revoked_by_password_change` — cascade from password update
 - `revoked_by_mass_revoke` — user clicked "Revoke all"
 
+Capture rules:
+
+- **`actor_session_hash`**: `hex(SHA-256(session_token_value))`, computed inside the handler from the active session cookie. No salt — session tokens are already high-entropy bearer secrets and a pinned hash-to-hash correlation across audit rows is the explicit goal.
+- **`actor_user_agent`**: truncated to 500 chars at insert time so pathological UA strings can't bloat the audit table.
+- **Idempotency**: revoking an already-revoked token is a no-op — the store returns early and emits **no** second audit row. Matches `SoftDeleteTransaction`'s contract.
+- **Failed mutations emit no audit row.** A `Create` that fails password reconfirmation or rate-limit returns 401/429 *before* the store is called, so the audit table is only ever appended to after the `api_tokens` mutation committed.
+
 ### 3.7 Rate limiting
 
-- **Token creation**: 5 per user per hour. Prevents a compromised session from minting an army of persistence tokens silently.
-- **Token auth failures**: per-IP bucket, separate from the existing login rate-limiter. Won't slow brute-force (154 bits makes that impossible anyway), but throttles log-flooding and makes leaked-token probing noisy.
+- **Token creation**: 5 successful creates per user per rolling hour, enforced in `handleCreateAPIToken`. The 6th create returns 429 with a `Retry-After` header. Prevents a compromised session from minting an army of persistence tokens silently. **Only successful password reconfirmations consume this bucket**; failed reconfirmations feed the *existing* login-failure bucket for that user (so a typo-prone legitimate user doesn't burn their create quota on wrong-password attempts, and an attacker with session but not password can't slow-probe passwords without hitting the login limiter).
+- **Token auth failures (per-IP)**: rolling 10-minute window, 30 failures → 429 for the remainder of the window. Applied inside `RequireAPIToken` **only** when the token format is valid-shaped (passes regex + CRC32) but the hash lookup fails. Malformed gibberish never consumes the bucket, so a buggy client that sends `Authorization: Bearer undefined` once per poll doesn't lock out legitimate traffic from the same NAT egress. Response is 429, body `{"error":"rate limit"}`, `Retry-After: <seconds>`.
+- **Implementation**: the codebase audit found no existing rate-limiter abstraction. This feature introduces `internal/ratelimit/bucket.go` with a minimal `TokenBucket` (`sync.Mutex`-guarded `map[string]*bucketState`, rolling window per key), a `time.Ticker`-driven cleanup goroutine that drops buckets idle for > 2× window, and constructors `NewUserBucket(limit, window)` / `NewIPBucket(limit, window)`. A `Clock` interface (same one used by the cache) supports deterministic tests. The existing login handler is migrated onto the same package so the "failed password reconfirmation → login bucket" fallback path above has a single source of truth. If plan-time exploration turns up an existing abstraction, reuse it instead.
 
 ### 3.8 Security guardrails
 
 1. CRC32 pre-check before DB lookup.
-2. `crypto/subtle.ConstantTimeCompare` on hash comparison.
-3. Bearer-auth path never creates a session cookie. Separate chi subrouter.
+2. **Hash comparison happens via a direct B-tree lookup on the UNIQUE index on `token_hash`**, not an iteration — so `crypto/subtle.ConstantTimeCompare` is structurally unnecessary here. The timing-sensitive comparison inside SQLite's binary comparator is not constant-time, but given a uniform 256-bit hash space and a CRC32 pre-filter in front of it, a timing oracle is not meaningfully exploitable.
+3. Bearer-auth path never creates a session cookie. Separate chi subrouter; no handler under that subtree calls `auth.CreateSession` or writes a `Set-Cookie` header.
 4. CSRF middleware explicitly skips requests with `Authorization: Bearer …`.
-5. Token creation requires **password reconfirmation** inside the already-authenticated session — defense in depth with the rate limiter.
+5. Token creation requires **password reconfirmation** inside the already-authenticated session — defense in depth with the rate limiter. Failed reconfirms feed the login-failure bucket (see §3.7).
 6. Logs only capture `token_prefix` + action on create / revoke; never the full token, never on successful use.
-7. Expiry + revocation enforced inside the SQL `WHERE`, not in Go, to make bypass-by-bug impossible.
+7. Expiry + revocation enforced inside the SQL `WHERE`, not in Go, to make bypass-by-bug impossible. `GetAPITokenByHash` hard-codes `AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)` into the query body.
 8. Timestamps are UTC `CURRENT_TIMESTAMP` everywhere; never mix Go `time.Now()` against DB-stored strings.
 9. Admin does **not** see or revoke other users' tokens. User-scoped strictly.
-10. A server-side 15-second response cache on `/api/homepage/summary` keyed by token, so a misconfigured `refreshInterval: 1000` in Homepage can't DOS the endpoint.
+10. A server-side 15-second response cache on `/api/homepage/summary` keyed by `token_hash` so a misconfigured `refreshInterval: 1000` can't DOS the endpoint. Implemented in `internal/api/homepage_cache.go` as a thread-safe `sync.Map` storing `{jsonBytes []byte; expiresAt time.Time}` per token hash. **Cache lookup runs *after* `RequireAPIToken`** — a revoked/expired token fails middleware first and never reaches the cache lookup, so invalidation-on-revoke is structurally unneeded (TTL is the only expiration path). Clock is injected via a small `Clock interface { Now() time.Time }` so tests drive it deterministically; production uses `realClock{}`.
+11. All middleware error paths (missing header, malformed header, invalid shape, unknown hash, user-deleted, DB error) emit the **same** 401 body `{"error":"invalid or missing token"}`. No text distinguishes "this token was valid yesterday" from "this token never existed."
 
 ## 4. Data Model (migration 011)
 
@@ -116,9 +126,9 @@ Migration 010 is reserved for Phase 3.1b REAL-column drop (see header comment in
 CREATE TABLE api_tokens (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    name            TEXT    NOT NULL,
-    token_hash      TEXT    NOT NULL UNIQUE,
-    token_prefix    TEXT    NOT NULL,
+    name            TEXT    NOT NULL CHECK(length(name) BETWEEN 1 AND 100),
+    token_hash      TEXT    NOT NULL UNIQUE CHECK(length(token_hash) = 64),
+    token_prefix    TEXT    NOT NULL CHECK(length(token_prefix) = 15),
     expires_at      DATETIME NULL,
     last_used_at    DATETIME NULL,
     last_used_ip    TEXT    NULL,
@@ -126,6 +136,10 @@ CREATE TABLE api_tokens (
     created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Partial index for ListAPITokensForUser (live tokens only).
+-- GetAPITokenByHash hits the UNIQUE INDEX on token_hash directly — no separate partial
+-- needed because revoked-but-not-yet-deleted rows are rare and the WHERE clause on
+-- revoked_at IS NULL / expires_at filters them post-lookup without a second index.
 CREATE INDEX idx_api_tokens_user_live
     ON api_tokens(user_id)
     WHERE revoked_at IS NULL;
@@ -141,8 +155,8 @@ CREATE TABLE api_token_audit (
         'revoked_by_mass_revoke'
     )),
     actor_ip           TEXT    NULL,
-    actor_user_agent   TEXT    NULL,
-    actor_session_hash TEXT    NULL,
+    actor_user_agent   TEXT    NULL CHECK(actor_user_agent IS NULL OR length(actor_user_agent) <= 500),
+    actor_session_hash TEXT    NULL CHECK(actor_session_hash IS NULL OR length(actor_session_hash) = 64),
     created_at         DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -154,7 +168,8 @@ Notes:
 
 - `ON DELETE CASCADE` on `user_id`: deleting a user wipes their tokens and audit trail — correct for a single-household app.
 - No `household_id`: SpenDrop's data model has no household column (confirmed in codebase audit — "household" is README copy; actual model is a shared DB with `users.role`).
-- `actor_session_hash`: a hash of the session token that performed the mutation, so multiple actions from the same session can be correlated without storing plaintext session identifiers.
+- `actor_session_hash`: `hex(SHA-256(session_token_value))` (64 lowercase hex chars, CHECK-enforced); see §3.6 capture rules.
+- CHECK constraints are enforced on every INSERT/UPDATE and fail fast — an off-by-one in prefix slicing or an unbounded-name bug surfaces at write time rather than corrupting the table.
 
 ## 5. API Surface
 
@@ -178,7 +193,13 @@ Request:
 }
 ```
 
-`expires_at` is a nullable ISO-8601 timestamp. Frontend submits either `null` or a pre-computed UTC timestamp based on the dropdown choice.
+`expires_at` is a nullable ISO-8601 UTC timestamp. Frontend submits either `null` or a pre-computed UTC timestamp based on the dropdown choice.
+
+Server-side validation on `POST`:
+
+- `name`: non-empty, ≤ 100 chars after trim. Rejects whitespace-only.
+- `expires_at`: if non-null, must be strictly in the future (> `CURRENT_TIMESTAMP`) AND ≤ 10 years ahead of now. Past timestamps and suspiciously far-future ones (e.g. year 9999 to create a permanent-looking "1-year" token) return `400 invalid expires_at`.
+- `password`: non-empty string; checked with the existing `bcrypt.CompareHashAndPassword` helper.
 
 Response `201 Created`:
 
@@ -240,9 +261,19 @@ Shape notes (informed by Homepage widget research):
 - **Flat, one level deep** — Homepage's `shvl.get` supports dot-paths but flat is simpler to eyeball and eliminates YAML `field:` typos.
 - **Numeric values unformatted** — Homepage has no `currency` format; the widget renders `format: float` + `prefix: "$"`. Returning raw numbers keeps locale concerns on the display side.
 - **Snake_case** — matches SpenDrop's existing handler DTO convention (confirmed in `internal/api/category_handlers.go`).
-- **`month_remaining` is the signed difference** (`month_budget - month_spent`) — positive when under budget, negative when over. Homepage's `additionalField.color: adaptive` colors positive green and negative red automatically, so the "color red if over budget" behavior drops out for free.
 - **Monetary values are derived from `amount_cents`** (integer) and divided by 100 at the JSON edge — same dual-write contract as the rest of SpenDrop per migration 006.
 - **All queries filter `deleted_at IS NULL`** per the soft-delete discipline in `.claude/CLAUDE.md`.
+
+Field semantics (explicit, to prevent ambiguity in the summary handler):
+
+- **`month_spent`**: sum of `amount_cents` for the owning user's live transactions in the **current month** where `amount_cents > 0` (expense sign by SpenDrop's existing convention), divided by 100.
+- **`month_budget`**: sum of every active budget's `monthly_amount_cents` for the owning user in the current month, divided by 100.
+- **`month_remaining`**: `month_budget - month_spent`, signed. Positive = under budget, negative = over. Homepage's `additionalField.color: adaptive` renders positive green, negative red automatically.
+- **`txn_count`**: count of **month-to-date** live transactions for the owning user. **Not lifetime.** Month-to-date keeps the field consistent with `month_spent` so a dashboard row labeled "Transactions" reads as "this month."
+- **`over_budget_categories`**: count of categories that have a non-null monthly budget **AND** whose month-to-date spend strictly exceeds that budget. Categories without a budget set are not counted.
+- **`currency`**: ISO-4217 code read from `user_settings` (same lookup the dashboard uses).
+- **`as_of`**: RFC-3339 UTC timestamp of when the aggregation actually ran — **not** when the cache served the response. Cached hits return the original run time so consumers can detect cache staleness.
+- **Month boundary**: the current calendar month in the user's configured timezone, computed by the same helper `dashboard_handlers.go` already uses (plan-time step: locate the helper, reuse verbatim — do not reimplement).
 
 ## 6. Middleware & Routing
 
@@ -251,43 +282,70 @@ Shape notes (informed by Homepage widget research):
 Lives in `internal/auth/api_token_middleware.go`. Pseudocode:
 
 ```go
-func RequireAPIToken(queries *database.Queries) func(http.Handler) http.Handler {
+// Every 401 path emits EXACTLY this body. Prevents valid-vs-invalid enumeration via
+// error text or timing side channels.
+const opaqueAuthFailure = "invalid or missing token"
+
+func RequireAPIToken(
+    queries *database.Queries,
+    authFailLimiter *ratelimit.Bucket,    // per-IP; see §3.7
+    baseCtx context.Context,              // srv.BaseContext() — for graceful shutdown
+) func(http.Handler) http.Handler {
     return func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            ip := extractIP(r)
+
             authz := r.Header.Get("Authorization")
             if !strings.HasPrefix(authz, "Bearer ") {
-                writeError(w, http.StatusUnauthorized, "missing bearer token")
+                writeError(w, http.StatusUnauthorized, opaqueAuthFailure)
                 return
             }
             plaintext := strings.TrimPrefix(authz, "Bearer ")
 
-            if !isValidTokenFormat(plaintext) {      // regex + CRC32
-                writeError(w, http.StatusUnauthorized, "invalid token")
+            if !isValidTokenFormat(plaintext) {   // regex + CRC32, pure-Go, no DB hit
+                writeError(w, http.StatusUnauthorized, opaqueAuthFailure)
                 return
             }
 
+            // Rate-limit check before DB — valid-shape misses below will consume;
+            // malformed gibberish above does not.
+            if authFailLimiter.Exhausted(ip) {
+                w.Header().Set("Retry-After", authFailLimiter.RetryAfter(ip))
+                writeError(w, http.StatusTooManyRequests, "rate limit")
+                return
+            }
+
+            // GetAPITokenByHash hard-codes the expiry + revocation filter in its
+            // WHERE clause — Go-side bypass impossible (§3.8 guardrail 7).
             hash := sha256Hex(plaintext)
             tok, err := queries.GetAPITokenByHash(r.Context(), hash)
-            if err != nil {                          // sql.ErrNoRows or DB error
-                writeError(w, http.StatusUnauthorized, "invalid or expired token")
+            if err != nil {                        // sql.ErrNoRows OR revoked OR expired OR DB error
+                authFailLimiter.Consume(ip)
+                writeError(w, http.StatusUnauthorized, opaqueAuthFailure)
                 return
             }
 
             user, err := queries.GetUserByID(r.Context(), tok.UserID)
-            if err != nil {
-                writeError(w, http.StatusUnauthorized, "user not found")
+            if err != nil {                        // user deleted, DB error — one message, no text leak
+                writeError(w, http.StatusUnauthorized, opaqueAuthFailure)
                 return
             }
 
-            // Debounced last-used update — never blocks the request.
+            // Debounced last-used update. The SQL WHERE gates concurrent writers (§3.5);
+            // the Go-side staleness check here is a cheap fast-path skip, not the gate.
             if tok.LastUsedAt == nil ||
                time.Since(*tok.LastUsedAt) > 60*time.Second {
-                go queries.TouchAPITokenLastUsed(context.Background(), TouchParams{
-                    ID:         tok.ID,
-                    LastUsedIP: extractIP(r),
-                })
+                go func() {
+                    ctx, cancel := context.WithTimeout(baseCtx, 2*time.Second)
+                    defer cancel()
+                    _ = queries.TouchAPITokenLastUsed(ctx, TouchParams{
+                        ID:         tok.ID,
+                        LastUsedIP: ip,
+                    })
+                }()
             }
 
+            // NO session cookie is issued anywhere in this path.
             ctx := context.WithValue(r.Context(), auth.UserContextKey, &user)
             next.ServeHTTP(w, r.WithContext(ctx))
         })
@@ -297,9 +355,12 @@ func RequireAPIToken(queries *database.Queries) func(http.Handler) http.Handler 
 
 Key invariants:
 
-- The `GetAPITokenByHash` query enforces `revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)` in SQL — bypass-by-bug impossible in Go.
-- `*database.User` placed on context with the same `UserContextKey` the cookie-auth middleware uses, so every downstream handler sees an authenticated user uniformly.
-- No session cookie is issued anywhere in this path.
+- **Single error message on every 401 path** — missing header, malformed prefix, invalid shape, unknown/revoked/expired hash, missing user, DB error all emit the same body with status 401. Enumeration by error text impossible.
+- **SQL WHERE is the source of truth for expiry + revocation** — `GetAPITokenByHash` hard-codes `AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)`. Go never re-checks.
+- **No `crypto/subtle.ConstantTimeCompare`** — a UNIQUE-index B-tree lookup is not iteration, and CRC32 pre-filter plus 256-bit hash space eliminates the oracle. See §3.8 item 2.
+- **`*database.User` placed on context** with the same `UserContextKey` the cookie-auth middleware uses, so downstream handlers see an authenticated user uniformly and don't need to know which auth scheme got them there.
+- **No `Set-Cookie` header** is written anywhere in this path. Invariant test `BearerRoute_ResponseHasNoSetCookie` enforces this on every bearer-subrouter handler (§9.1).
+- **Goroutine context is bounded** (`srv.BaseContext` + 2s timeout). A graceful shutdown cancels in-flight touches before the DB closes; no `context.Background()`.
 
 ### 6.2 Router wiring
 
@@ -326,6 +387,13 @@ r.Route("/api/api-tokens", func(r chi.Router) {
 ### 6.3 CSRF exemption
 
 Extend the existing CSRF middleware (wherever `requireJSONContentType` lives) to skip requests where `Authorization` starts with `Bearer `. Bearer auth is not a cookie, not sent cross-site by browsers, so CSRF protection is structurally unnecessary on that path.
+
+Footgun note: the exemption is safe *only* if the bearer path never issues or honors a session cookie on the same response. Guardrail 3 in §3.8 enforces this in code; the `BearerRoute_ResponseHasNoSetCookie` invariant test in §9.1 enforces it at test time. If a future handler accidentally mixes bearer auth with `auth.CreateSession`, the test catches it before a cross-site scripting attacker can.
+
+Precedence when both auth schemes are present on one request:
+
+- If `Authorization: Bearer …` is present on a bearer-subrouter route, the bearer scheme wins and CSRF is skipped.
+- Session cookie and bearer header on the same request is a pathological case (browsers don't add `Authorization` cross-origin, but curl can). Tested by `BearerAndCookieBothPresent_BearerWins_NoCSRF`.
 
 ## 7. Frontend
 
@@ -453,43 +521,74 @@ Setup steps (also in README):
 - `UnknownHash_401`
 - `RevokedToken_401`
 - `ExpiredToken_401`
+- `ExpiredToken_TouchIsNotUpdated` — expired tokens never reach the touch fast-path because middleware 401s first; asserts `last_used_at` is unchanged.
 - `ValidToken_AttachesUserToContext`
 - `ValidToken_TouchesLastUsedWithin60sWindow`
 - `ValidToken_SkipsTouchIfRecentlyUpdated`
+- `ValidToken_TouchConcurrentWritersOnlyOneWins` — fires N goroutines with stale `last_used_at`; asserts exactly one UPDATE affected rows (SQL WHERE gate).
+- `AllAuthFailures_SameErrorBody` — exercises every 401 path, asserts body equals `"invalid or missing token"` verbatim.
+- `AuthFailureRateLimit_429AfterThreshold` — 30 failed valid-shape lookups from one IP within 10 min triggers 429 on the 31st.
+- `AuthFailureRateLimit_MalformedGibberishDoesNotConsume` — `Bearer undefined` 100× from one IP does not trigger the limiter.
+- `BearerAndCookieBothPresent_BearerWins_NoCSRF` — request carries both `Authorization: Bearer …` and a session cookie; asserts bearer auth is used and CSRF check is skipped.
+- `BearerRoute_ResponseHasNoSetCookie` — for every handler registered on the bearer subrouter, hit it with a valid token and assert `response.Header["Set-Cookie"]` is empty. Catches accidental `auth.CreateSession` inside a bearer handler.
 
 **`internal/api/api_token_handlers_test.go`**:
 
 - `Create_WrongPassword_401`
+- `Create_WrongPassword_DoesNotEmitAuditRow` — audit is only appended after the `api_tokens` mutation commits.
+- `Create_WrongPassword_ConsumesLoginFailureBucketNotCreationBucket` — typo-prone users don't burn their create quota.
 - `Create_ReturnsPlaintextOnceInResponse`
 - `Create_EmitsAuditRowWithCreatedAction`
-- `Create_RateLimitExceeded_429` (6th create within an hour)
+- `Create_RateLimitExceeded_429` (6th successful create within an hour)
+- `Create_ExpiresAtInPast_400`
+- `Create_ExpiresAtBeyond10Years_400`
+- `Create_EmptyName_400`
+- `Create_NameOver100Chars_400`
 - `List_ExcludesHashAndPlaintext`
 - `List_OnlyReturnsOwnTokens` (seed two users; isolation check)
 - `List_HidesRevokedByDefault`
 - `RevokeOne_SoftDeletesAndEmitsAuditWithRevokedByUser`
+- `RevokeOne_AlreadyRevoked_Idempotent_NoSecondAudit` — matches `SoftDeleteTransaction`'s contract.
 - `RevokeOne_OtherUsersToken_404`
 - `RevokeAll_SoftDeletesAllLiveTokensForUser_EmitsAuditPerToken`
+- `Revoke_EmitsAuditWithCorrectActorSessionHash` — asserts `actor_session_hash = hex(SHA-256(session_cookie_value))`.
 
 **`internal/api/homepage_handlers_test.go`**:
 
 - `Summary_RequiresBearer_401_WithSessionCookie`
 - `Summary_AggregatesMonthlySpendCorrectly`
-- `Summary_HidesTombstoned` — mandatory per `.claude/CLAUDE.md` soft-delete discipline. Seed one live row and one tombstoned row with sentinel amount `999`; assert tombstoned never leaks.
+- `Summary_HidesTombstoned` — mandatory per `.claude/CLAUDE.md` soft-delete discipline. Seed one live row and one tombstoned row with sentinel amount `999`; assert tombstoned never leaks into any aggregate.
 - `Summary_ScopedToTokenOwnerUser` (seed another user with overlapping transactions; assert isolation)
 - `Summary_CurrencyFromSettings`
 - `Summary_MonthRemainingIsSignedDifference` (over-budget case returns negative)
-- `Summary_CachedWithin15SecondsPerToken` (mock clock; second call doesn't re-query)
+- `Summary_TxnCountIsMonthToDateNotLifetime` — seed transactions in previous months; assert count excludes them.
+- `Summary_OverBudgetCategories_ExcludesCategoriesWithoutBudget` — a category with spend > 0 but no budget row is not counted.
+- `Summary_OverBudgetCategories_StrictlyGreaterThan` — spend == budget is not over-budget.
+- `Summary_MonthBoundaryUsesUserTimezone` — seed a transaction at 2026-04-01T00:30:00 in UTC while user timezone is `America/Los_Angeles`; assert it belongs to March (local), not April (UTC).
+- `Summary_CachedWithin15SecondsPerToken` — mock clock; second call within window doesn't re-query and returns identical bytes.
+- `Summary_CacheKeyIsTokenHash_NotUserID` — two tokens for the same user must get isolated cache slots (so a revoked-then-recreated token doesn't inherit stale data).
+- `Summary_AsOfReflectsOriginalRunTimeNotCacheHit` — cached hit returns the `as_of` timestamp from the original aggregation, not the current time.
+- `Summary_RevokedTokenReturns401_DoesNotServeStaleCache` — revoke a token whose summary is in the cache; next call with that token fails middleware first (401), never reaching cache lookup.
 
 **Password-change cascade** — add to `internal/api/auth_handlers_test.go`:
 
-- `UpdatePassword_RevokesAllUsersTokensAtomically`
-- `UpdatePassword_EmitsAuditRowsWithRevokedByPasswordChange`
-- `UpdatePassword_Failure_DoesNotRevokeTokens` (atomicity)
+- `UpdatePassword_RevokesAllUsersTokensAtomicallyInSameTx` — pass in a DB wrapper that counts `BeginTx` calls; assert exactly one transaction spans the password UPDATE and the cascade.
+- `UpdatePassword_EmitsAuditRowsWithRevokedByPasswordChange` — one audit row per revoked token, all with `action = 'revoked_by_password_change'`.
+- `UpdatePassword_Failure_DoesNotRevokeTokens` — force the password UPDATE to fail (e.g. DB mock returns error); assert no tokens were revoked AND no audit rows were inserted. Proves atomicity.
+- `UpdatePassword_RevokesOnlyOwnerTokens` — seed two users' tokens; only the password-changer's are revoked.
 
 **CSRF exemption** — add to the CSRF middleware test file:
 
 - `BearerRequest_BypassesCSRFCheck`
 - `CookieRequest_StillRequiresCSRF`
+
+**Rate limiter** — `internal/ratelimit/bucket_test.go`:
+
+- `UserBucket_ConsumeUpToLimit_Then429`
+- `UserBucket_RollingWindow_RefillsAfterWindow`
+- `IPBucket_SeparateKeysDoNotInterfere`
+- `Cleanup_DropsIdleBucketsAfter2xWindow`
+- `Clock_InjectedForDeterministicTests`
 
 ### 9.2 Frontend
 
@@ -509,14 +608,22 @@ Setup steps (also in README):
 ### New
 
 - `internal/database/migrations/011_api_tokens.sql`
-- `internal/database/store_api_token.go` — `ApiTokenStore`, wraps `Queries` plus audit row emission in one SQL transaction for `Create`, `RevokeOne`, `RevokeAllForUser`, `RevokeAllForUserAction` (used by the password-change cascade).
-- `internal/auth/api_token.go` — `GenerateAPIToken() (plaintext, hash, prefix string)`, `HashAPIToken(s string) string`, `IsValidTokenFormat(s string) bool`.
+- `internal/database/store_api_token.go` — `ApiTokenStore`, wraps `Queries` plus audit row emission in one SQL transaction. Interface:
+  - `Create(ctx, params CreateParams) (ApiToken, error)` — opens its own `*sql.Tx`; inserts `api_tokens` row and `api_token_audit` row with `action='created'`; commits atomically. Returns 429-ready error if the user-creation-rate-limit bucket is exhausted.
+  - `RevokeOne(ctx, id, userID int64, actor ActorContext) error` — opens own tx. Idempotent on already-revoked rows (returns nil, emits no second audit row). 404-style error if `id` is not owned by `userID`.
+  - `RevokeAllForUser(ctx, userID int64, action string, actor ActorContext) (n int, err error)` — opens own tx. One audit row emitted per revoked token. `action` must be one of the enum values — validated at call site.
+  - `RevokeAllForUserTx(ctx, tx database.DBTX, userID int64, action string, actor ActorContext) (n int, err error)` — same as above but reuses a caller-provided `*sql.Tx`. **This is the one the password-change cascade calls.** The non-`Tx` variant is a thin wrapper `{tx, err := db.BeginTx(ctx); defer commit/rollback; return RevokeAllForUserTx(ctx, tx, ...)}`, matching `TransactionStore`'s pattern.
+  - `ActorContext` is a small struct `{IP string; UserAgent string; SessionHash string}` the handler layer fills in once and passes through, so the store doesn't need `*http.Request`.
+- `internal/auth/api_token.go` — `GenerateAPIToken() (plaintext, hash, prefix string)`, `HashAPIToken(s string) string`, `IsValidTokenFormat(s string) bool`, `HashSessionToken(s string) string` (the `SHA-256` used for `actor_session_hash`).
 - `internal/auth/api_token_middleware.go`
 - `internal/auth/api_token_middleware_test.go`
 - `internal/api/api_token_handlers.go` — `handleCreateAPIToken`, `handleListAPITokens`, `handleRevokeAPIToken`, `handleRevokeAllAPITokens`.
 - `internal/api/api_token_handlers_test.go`
-- `internal/api/homepage_handlers.go` — `handleHomepageSummary` plus the 15s per-token response cache.
+- `internal/api/homepage_handlers.go` — `handleHomepageSummary` plus the 15s per-token response cache (see `homepage_cache.go`).
+- `internal/api/homepage_cache.go` — `summaryCache` backed by `sync.Map[string]cacheEntry`, `Clock` interface, TTL-only invalidation.
 - `internal/api/homepage_handlers_test.go`
+- `internal/ratelimit/bucket.go` — `TokenBucket` with `Consume`/`Exhausted`/`RetryAfter` plus a `time.Ticker` cleanup goroutine.
+- `internal/ratelimit/bucket_test.go`
 - `web/src/api/apiTokens.ts` — typed client wrappers.
 
 ### Edited
@@ -534,13 +641,19 @@ Setup steps (also in README):
 
 - `docs/SCHEMA.md` — run `make docs` after migration lands.
 
-## 11. Risks and Open Questions
+## 11. Plan-time code-reading tasks (not design ambiguity)
 
-1. **sqlc regeneration command** — the codebase audit confirmed `sqlc.yaml` lives at `internal/database/sqlc.yaml` but no Makefile target exists. The plan must document the exact `sqlc generate` invocation so it's reproducible.
-2. **CSRF middleware location** — the audit didn't locate the exact file; plan-time exploration needed to confirm whether the skip-on-Bearer change goes in an existing middleware or in a new one.
-3. **Password-change handler location** — same; the plan must pinpoint the handler that currently performs the bcrypt update before wiring the cascade.
-4. **Rate limiter pattern** — unclear whether SpenDrop already has an in-memory rate limiter abstraction or whether this is the first one. Plan should either reuse the existing helper or introduce a minimal `map[userID]*tokenBucket` with a periodic cleanup goroutine.
-5. **Clipboard permission on HTTPS-only origins** — `navigator.clipboard.writeText` requires a secure context. The user's domain is HTTPS so this is fine; worth a note in README for self-hosters on plain HTTP LAN.
+These three items require opening specific files during plan writing to pin exact names/locations. None are design decisions — the design is settled above.
+
+1. **sqlc regeneration command** — confirmed `sqlc.yaml` at `internal/database/sqlc.yaml`; plan must document the exact `sqlc generate` invocation (may be bare `sqlc generate` in that dir, may require a Makefile target add).
+2. **CSRF middleware location** — locate the file containing `requireJSONContentType` and add the `Authorization: Bearer …` skip there.
+3. **Password-change handler location + existing bcrypt call site** — locate the current password-update handler, identify where the `UPDATE users SET password_hash` executes, and replace the bare `queries.UpdateUserPassword` call with a `BeginTx`-wrapped pair `(UpdateUserPassword, ApiTokenStore.RevokeAllForUserTx)`.
+
+## 12. Minor notes / future iterations
+
+- **Clipboard on non-HTTPS origins**: `navigator.clipboard.writeText` requires a secure context. The user's deployment is HTTPS so this is fine; the reveal dialog includes a fallback "Select all" helper + toast if `navigator.clipboard` is undefined, so self-hosters on plain HTTP LAN aren't blocked.
+- **`last_used_ip` privacy**: the list response returns the user's own last-used IP back to their browser. Fine in the single-household threat model; a future iteration could truncate to `/24` if tokens are used from VPN exits that look sensitive.
+- **YAML duplication**: the show-once reveal dialog's embedded YAML (§7.5) and the README's copy-paste block (§8) both carry the same structure. Plan should extract to a single source (README is canonical; the dialog's helper text links to it with a shortened inline example).
 
 ---
 
