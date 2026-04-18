@@ -2230,11 +2230,11 @@ RETURNING id, user_id, name, token_hash, token_prefix, expires_at, last_used_at,
 `
 
 type CreateAPITokenParams struct {
-	UserID      int64          `json:"user_id"`
-	TokenHash   string         `json:"token_hash"`
-	TokenPrefix string         `json:"token_prefix"`
-	Name        string         `json:"name"`
-	ExpiresAt   sql.NullTime   `json:"expires_at"`
+	UserID      int64        `json:"user_id"`
+	TokenHash   string       `json:"token_hash"`
+	TokenPrefix string       `json:"token_prefix"`
+	Name        string       `json:"name"`
+	ExpiresAt   sql.NullTime `json:"expires_at"`
 }
 
 // API Tokens

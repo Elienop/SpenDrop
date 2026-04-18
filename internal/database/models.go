@@ -23,14 +23,14 @@ type ApiToken struct {
 }
 
 type ApiTokenAudit struct {
-	ID              int64          `json:"id"`
-	TokenID         int64          `json:"token_id"`
-	UserID          int64          `json:"user_id"`
-	Action          string         `json:"action"`
-	ActorIp         sql.NullString `json:"actor_ip"`
-	ActorUserAgent  sql.NullString `json:"actor_user_agent"`
+	ID               int64          `json:"id"`
+	TokenID          int64          `json:"token_id"`
+	UserID           int64          `json:"user_id"`
+	Action           string         `json:"action"`
+	ActorIp          sql.NullString `json:"actor_ip"`
+	ActorUserAgent   sql.NullString `json:"actor_user_agent"`
 	ActorSessionHash sql.NullString `json:"actor_session_hash"`
-	CreatedAt       time.Time      `json:"created_at"`
+	CreatedAt        time.Time      `json:"created_at"`
 }
 
 type AppSetting struct {
