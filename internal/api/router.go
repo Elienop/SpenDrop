@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimw "github.com/go-chi/chi/v5/middleware"
@@ -12,6 +13,7 @@ import (
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // NewRouter creates the main chi router with all API routes registered. cfg
@@ -212,6 +214,18 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Delete("/", h.handleRevokeAllAPITokens)
 			r.Delete("/{id}", h.handleRevokeAPIToken)
 		})
+	})
+
+	// Bearer-auth homepage widget subroute. Mounted separately from the
+	// session-auth /api tree so that no session cookie is accepted here —
+	// RequireAPIToken rejects anything that isn't a valid bearer token.
+	// A dedicated authFailLimiter (shared IP-keyed bucket, 30 attempts per
+	// 10 min) protects against enumeration; it is separate from the login
+	// limiter so homepage probes cannot exhaust the session-login budget.
+	authFailLimiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
+	r.Route("/api/homepage", func(r chi.Router) {
+		r.Use(auth.RequireAPIToken(queries, authFailLimiter))
+		r.Get("/summary", h.handleHomepageSummary)
 	})
 
 	// SPA fallback: serve React build if web/dist exists
