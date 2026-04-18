@@ -18,6 +18,8 @@ import type {
   ImportPreview,
   ListTokensResponse,
   PatchRowRequest,
+  RevokeAllResponse,
+  RevokeOneResponse,
   SavingsGoal,
   User,
 } from '../api/types';
@@ -1503,6 +1505,9 @@ function ApiTokensSection() {
   const [createOpen, setCreateOpen] = useState(false);
   const [createdToken, setCreatedToken] = useState<CreateTokenResponse | null>(null);
   const [creating, setCreating] = useState(false);
+  const [revokingToken, setRevokingToken] = useState<ApiToken | null>(null);
+  const [revokeAllOpen, setRevokeAllOpen] = useState(false);
+  const [revoking, setRevoking] = useState(false);
 
   const createForm = useForm<CreateTokenValues>({
     resolver: zodResolver(createTokenSchema),
@@ -1574,8 +1579,52 @@ function ApiTokensSection() {
     }
   }
 
+  async function onConfirmRevoke() {
+    if (!revokingToken) return;
+    setRevoking(true);
+    try {
+      // Generic pins the 200 OK JSON body shape from Chunk 4
+      // (`{"ok":true}`). `api.del` is untyped by default — passing the
+      // type parameter surfaces wire-contract drift at compile time
+      // instead of letting the response degrade to `unknown`.
+      await api.del<RevokeOneResponse>(`api-tokens/${revokingToken.id}`);
+      setTokens((prev) => prev.filter((t) => t.id !== revokingToken.id));
+      toast.success('Token revoked');
+      setRevokingToken(null);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to revoke token',
+      );
+    } finally {
+      setRevoking(false);
+    }
+  }
+
+  async function onConfirmRevokeAll() {
+    setRevoking(true);
+    try {
+      // Chunk 4 returns `{"revoked":n}` with 200 OK on mass-revoke. We
+      // surface the count in the success toast rather than hard-coding
+      // "All tokens revoked" so the user gets feedback even when the
+      // list they saw pre-request is out of sync with what was actually
+      // live server-side (e.g. another tab opened, background expiry).
+      const result = await api.del<RevokeAllResponse>('api-tokens');
+      setTokens([]);
+      const n = result.revoked;
+      toast.success(`Revoked ${n} token${n === 1 ? '' : 's'}`);
+      setRevokeAllOpen(false);
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to revoke all tokens',
+      );
+    } finally {
+      setRevoking(false);
+    }
+  }
+
   return (
-    <Card>
+    <>
+      <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">API tokens</CardTitle>
         <div className="flex gap-2">
@@ -1702,7 +1751,11 @@ function ApiTokensSection() {
             </DialogContent>
           </Dialog>
           {tokens.length > 0 && (
-            <Button size="sm" variant="destructive" disabled>
+            <Button
+              size="sm"
+              variant="destructive"
+              onClick={() => setRevokeAllOpen(true)}
+            >
               Revoke all
             </Button>
           )}
@@ -1745,7 +1798,7 @@ function ApiTokensSection() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      disabled
+                      onClick={() => setRevokingToken(t)}
                       aria-label={`Revoke ${t.name}`}
                     >
                       Revoke
@@ -1758,6 +1811,85 @@ function ApiTokensSection() {
         )}
       </CardContent>
     </Card>
+      <Dialog
+        open={revokingToken !== null}
+        onOpenChange={(open) => {
+          if (revoking) return;
+          if (!open) setRevokingToken(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              Revoke{' '}
+              <span className="font-mono">
+                {revokingToken?.name ?? ''}
+              </span>
+              ?
+            </DialogTitle>
+            <DialogDescription>
+              Any integration using this token will immediately stop
+              working. This cannot be undone &mdash; the token cannot be
+              reinstated. Create a new token to replace it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRevokingToken(null)}
+              disabled={revoking}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void onConfirmRevoke()}
+              disabled={revoking}
+            >
+              {revoking ? 'Revoking\u2026' : 'Revoke'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={revokeAllOpen}
+        onOpenChange={(open) => {
+          if (revoking) return;
+          if (!open) setRevokeAllOpen(false);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Revoke all your API tokens?</DialogTitle>
+            <DialogDescription>
+              All integrations using any of your tokens will immediately
+              stop working until you create new ones. This cannot be
+              undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setRevokeAllOpen(false)}
+              disabled={revoking}
+            >
+              Cancel
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void onConfirmRevokeAll()}
+              disabled={revoking}
+            >
+              {revoking ? 'Revoking\u2026' : 'Revoke all'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

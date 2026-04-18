@@ -296,4 +296,74 @@ describe('ApiTokensSection', () => {
     const fullTokenRegex = /spdr_[a-zA-Z0-9]{26}_[a-zA-Z0-9]{6}/;
     expect(screen.queryByText(fullTokenRegex)).not.toBeInTheDocument();
   });
+
+  test('Revoke button opens confirm dialog; confirming calls DELETE /api/api-tokens/{id}', async () => {
+    const user = userEvent.setup();
+    const token: ApiToken = {
+      id: 7,
+      name: 'Homepage dashboard',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+    };
+    seedGetMock([token]);
+    // DELETE /api/api-tokens/{id} returns 200 OK with JSON body
+    // `{"ok":true}` per Chunk 4 (plan §Task 4.3). Mocking `undefined`
+    // here would diverge from the wire contract and silently pass —
+    // the `api.del<RevokeOneResponse>` call in the component would
+    // then return `undefined` and any future logic that reads
+    // `result.ok` would explode at runtime without the test catching
+    // it. Always mock the exact shape the backend sends.
+    mockedApi.del.mockResolvedValueOnce({ ok: true });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText('spdr_aB3xQ9z7kL')).toBeInTheDocument();
+    });
+    await user.click(
+      screen.getByRole('button', { name: /revoke homepage dashboard/i }),
+    );
+    // Confirm dialog is up — body copy from spec §7.6.
+    expect(
+      screen.getByText(/any integration using this token will immediately stop working/i),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole('button', { name: /^revoke$/i }),
+    );
+    await waitFor(() => {
+      expect(mockedApi.del).toHaveBeenCalledWith('api-tokens/7');
+    });
+  });
+
+  test('Revoke all is only rendered when >=1 live token exists', async () => {
+    seedGetMock([]);
+    const { unmount } = renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    // Empty list -> no Revoke all.
+    expect(
+      screen.queryByRole('button', { name: /revoke all/i }),
+    ).not.toBeInTheDocument();
+    unmount();
+    // Non-empty list -> Revoke all visible.
+    const token: ApiToken = {
+      id: 7,
+      name: 'Homepage dashboard',
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+    };
+    seedGetMock([token]);
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText('spdr_aB3xQ9z7kL')).toBeInTheDocument();
+    });
+    expect(
+      screen.getByRole('button', { name: /revoke all/i }),
+    ).toBeInTheDocument();
+  });
 });
