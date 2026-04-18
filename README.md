@@ -66,13 +66,14 @@ Tabbed settings page with five sections:
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete)
+- **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Used to authorize external integrations like the Homepage dashboard widget — see the [Homepage integration](#homepage-integration) section below for the end-to-end setup.
 - **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
 
 ![Settings](docs/screenshots/08-settings.png)
 
 ### Authentication
 
-Simple username/password auth with bcrypt hashing and HTTP-only session cookies. The first registered user automatically becomes admin. Supports admin and member roles.
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. API routes additionally accept `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config. Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles.
 
 ![Login](docs/screenshots/09-login.png)
 ![Register](docs/screenshots/10-register.png)
