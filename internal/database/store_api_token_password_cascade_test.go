@@ -293,3 +293,78 @@ func TestPasswordCascade_UpdateAndRevokeCommitAtomically(t *testing.T) {
 	_ = bobToken
 	_ = bobSession
 }
+
+// TestPasswordCascade_RollbackLeavesAllStateUnchanged — inject an error
+// between the revoke step and the session delete step. Assert the whole
+// cascade rolls back: password still old, tokens still live, sessions still
+// present, zero new audit rows. This covers spec §9.1's
+// ChangePassword_CascadeHappensInSameTransaction.
+func TestPasswordCascade_RollbackLeavesAllStateUnchanged(t *testing.T) {
+	q, db := setupTestDB(t)
+	store := NewApiTokenStore(db, q)
+
+	aliceID, originalHash := seedUserWithPassword(t, db, "alice", "old-password")
+
+	tokenA := seedTokenForUser(t, db, aliceID, "homepage-a", "A")
+	tokenB := seedTokenForUser(t, db, aliceID, "homepage-b", "B")
+	seedSessionForUser(t, db, aliceID, "device-1")
+	seedSessionForUser(t, db, aliceID, "device-2")
+
+	newHash := "$2a$04$replacement.hash.goes.here.abcdef1234"
+	injectedErr := fmt.Errorf("simulated mid-cascade failure")
+
+	actor := ActorContext{
+		UserID: aliceID,
+		IP:     "127.0.0.1",
+	}
+
+	err := runPasswordCascade(
+		context.Background(), db, store, q, aliceID, newHash, actor,
+		func(tx *sql.Tx) error { return injectedErr },
+	)
+	if err == nil {
+		t.Fatal("runPasswordCascade returned nil; expected injected error to propagate")
+	}
+
+	// Password hash unchanged.
+	if got := currentPasswordHash(t, db, aliceID); got != originalHash {
+		t.Errorf("password hash changed despite rollback: was %q, is %q", originalHash, got)
+	}
+
+	// Both tokens still live.
+	if got := countLiveTokensForUser(t, db, aliceID); got != 2 {
+		t.Errorf("live tokens after rollback = %d, want 2", got)
+	}
+	for _, id := range []int64{tokenA, tokenB} {
+		var revokedAt sql.NullTime
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT revoked_at FROM api_tokens WHERE id = ?`, id,
+		).Scan(&revokedAt); err != nil {
+			t.Fatalf("fetch revoked_at for token %d: %v", id, err)
+		}
+		if revokedAt.Valid {
+			t.Errorf("token %d was revoked despite rollback", id)
+		}
+	}
+
+	// Both sessions present.
+	if got := countSessionsForUser(t, db, aliceID); got != 2 {
+		t.Errorf("sessions after rollback = %d, want 2", got)
+	}
+
+	// Zero audit rows with the password-change action — rollback also reverts
+	// audit inserts that happened inside the tx. If we see any, it means the
+	// audit write escaped the tx (e.g. a `db.ExecContext` sneak-in instead of
+	// `qtx.ExecContext`) and the cascade is not atomic.
+	var auditCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM api_token_audit
+		 WHERE action = ? AND token_id IN (?, ?)`,
+		string(APITokenAuditRevokedByPasswordChange), tokenA, tokenB,
+	).Scan(&auditCount); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	if auditCount != 0 {
+		t.Errorf("audit rows after rollback = %d, want 0 (atomicity violation)", auditCount)
+	}
+}
