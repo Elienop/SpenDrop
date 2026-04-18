@@ -45,10 +45,10 @@ type Bucket struct {
 	window time.Duration
 	clock  Clock
 
-	mu    sync.Mutex
-	hits  map[string][]time.Time // key → timestamps within window
-	stop  chan struct{}
-	wg    sync.WaitGroup
+	mu   sync.Mutex
+	hits map[string][]time.Time // key → timestamps within window
+	stop chan struct{}
+	wg   sync.WaitGroup
 }
 
 // NewBucket constructs a Bucket that allows up to `limit` hits per key per
