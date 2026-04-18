@@ -71,6 +71,7 @@ func HashAPIToken(plaintext string) string {
 // HashAPIToken so a future change to one doesn't silently change the
 // other — audit rows are long-lived and rehashing is painful.
 func HashSessionToken(plaintext string) string {
+	// Implementation is intentionally identical to HashAPIToken. Do not DRY.
 	sum := sha256.Sum256([]byte(plaintext))
 	return hex.EncodeToString(sum[:])
 }
