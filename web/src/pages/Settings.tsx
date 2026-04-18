@@ -6,13 +6,16 @@ import { useForm } from 'react-hook-form';
 import * as z from 'zod';
 import { AlertCircle, CheckCircle2, CircleAlert, Upload } from 'lucide-react';
 import { toast } from 'sonner';
+import { formatDistanceToNowStrict } from 'date-fns';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type {
+  ApiToken,
   Budget,
   Category,
   Currency,
   ImportPreview,
+  ListTokensResponse,
   PatchRowRequest,
   SavingsGoal,
   User,
@@ -84,6 +87,7 @@ const VALID_TABS = [
   'currencies',
   'savings',
   'users',
+  'api-tokens',
   'data',
 ] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
@@ -96,6 +100,7 @@ const TAB_LABELS: Record<SettingsTab, string> = {
   currencies: 'Currencies',
   savings: 'Savings',
   users: 'Users',
+  'api-tokens': 'API tokens',
   data: 'Import / Export',
 };
 
@@ -1364,6 +1369,104 @@ function UsersSection() {
   );
 }
 
+/* ---------- API tokens tab ---------- */
+
+function ApiTokensSection() {
+  const [tokens, setTokens] = useState<ApiToken[]>([]);
+
+  const fetchTokens = useCallback(async () => {
+    const data = await api.get<ListTokensResponse>('api-tokens');
+    setTokens(data.tokens);
+  }, []);
+
+  useEffect(() => {
+    fetchTokens().catch(() => {
+      /* Initial load failure is non-critical; empty table renders and
+         the user can retry by creating a token. */
+    });
+  }, [fetchTokens]);
+
+  function formatLastUsed(t: ApiToken): string {
+    if (!t.last_used_at) return 'Never used';
+    const relative = formatDistanceToNowStrict(new Date(t.last_used_at), {
+      addSuffix: true,
+    });
+    return t.last_used_ip ? `${relative} \u00b7 ${t.last_used_ip}` : relative;
+  }
+
+  function formatExpires(t: ApiToken): string {
+    if (!t.expires_at) return 'Never';
+    const d = new Date(t.expires_at);
+    if (d.getTime() <= Date.now()) return 'Expired';
+    return d.toLocaleDateString();
+  }
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-row items-center justify-between">
+        <CardTitle className="text-base">API tokens</CardTitle>
+        <div className="flex gap-2">
+          <Button size="sm" disabled>+ New token</Button>
+          {tokens.length > 0 && (
+            <Button size="sm" variant="destructive" disabled>
+              Revoke all
+            </Button>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {tokens.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No API tokens yet. Create one to connect this household to
+            Homepage or another dashboard.
+          </p>
+        ) : (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Name</TableHead>
+                <TableHead>Token</TableHead>
+                <TableHead>Last used</TableHead>
+                <TableHead>Expires</TableHead>
+                <TableHead>Created</TableHead>
+                <TableHead className="text-right">Actions</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {tokens.map((t) => (
+                <TableRow key={t.id}>
+                  <TableCell>{t.name}</TableCell>
+                  <TableCell className="font-mono">{t.token_prefix}</TableCell>
+                  <TableCell>{formatLastUsed(t)}</TableCell>
+                  <TableCell>{formatExpires(t)}</TableCell>
+                  <TableCell
+                    title={new Date(t.created_at).toLocaleString()}
+                  >
+                    {formatDistanceToNowStrict(new Date(t.created_at), {
+                      addSuffix: true,
+                    })}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      disabled
+                      aria-label={`Revoke ${t.name}`}
+                    >
+                      Revoke
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ---------- Import Preview Step ---------- */
 
 interface ImportPreviewStepProps {
@@ -1946,6 +2049,7 @@ export function Settings() {
           <TabsTrigger value="currencies">Currencies</TabsTrigger>
           <TabsTrigger value="savings">Savings</TabsTrigger>
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}
+          <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="general" className="mt-6">
@@ -1962,6 +2066,9 @@ export function Settings() {
             <UsersSection />
           </TabsContent>
         )}
+        <TabsContent value="api-tokens" className="mt-6">
+          <ApiTokensSection />
+        </TabsContent>
         <TabsContent value="data" className="mt-6">
           <DataSection />
         </TabsContent>
