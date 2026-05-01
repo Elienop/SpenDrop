@@ -406,3 +406,35 @@ export interface RevokeOneResponse {
 export interface RevokeAllResponse {
   revoked: number;
 }
+
+// ---------- Bulk-edit ----------
+
+// BulkUpdatePatch is the partial-update payload. Keys absent = no change.
+// Mirrors the backend patchRequest in internal/api/transaction_handlers.go.
+export interface BulkUpdatePatch {
+  date?: string;
+  description?: string;
+  category_id?: number;
+  tags?: string;
+}
+
+export type BulkUpdateTagsMode = 'add' | 'remove' | 'replace';
+
+export interface BatchUpdateRequest {
+  ids: number[];
+  patch: BulkUpdatePatch;
+  tagsMode?: BulkUpdateTagsMode;
+}
+
+export interface BulkUpdateByFilterRequest {
+  patch: BulkUpdatePatch;
+  tagsMode?: BulkUpdateTagsMode;
+}
+
+// BulkUpdateResponse is shared between batch-update and update-by-filter.
+// `skipped` is present only on batch-update (filter-mode's WHERE clause
+// already excluded skips, so the response omits the field).
+export interface BulkUpdateResponse {
+  updated: number;
+  skipped?: number;
+}
