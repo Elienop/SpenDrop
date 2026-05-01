@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -626,8 +627,8 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 }
 
 // validateDate parses YYYY-MM-DD and returns the canonical form. Mirrors
-// validateTransactionRequest:633-635 but isolated so bulk-edit can call it
-// without forcing all-fields validation.
+// the date check in validateTransactionRequest but isolated so bulk-edit
+// can call it without forcing all-fields validation.
 func validateDate(s string) (string, error) {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
@@ -636,8 +637,11 @@ func validateDate(s string) (string, error) {
 	return t.Format("2006-01-02"), nil
 }
 
-// validateDescription trims, then length-checks against MaxDescriptionLength.
-// Mirrors validateTransactionRequest:636-641.
+// validateDescription trims, then length-checks the trimmed value against
+// MaxDescriptionLength. This is the bulk-edit-only helper; the single-row
+// validateTransactionRequest path inlines its own raw length check
+// deliberately to preserve legacy behavior (whitespace-only descriptions
+// stay accepted there). See spec §5.5b for the divergence rationale.
 func validateDescription(s string) (string, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -649,11 +653,10 @@ func validateDescription(s string) (string, error) {
 	return s, nil
 }
 
-// validateCategoryID matches the existing single-row laxity in
-// validateTransactionRequest:648-649 — id > 0 only. The is_active /
-// existence check is deliberately NOT added here; doing so on bulk-edit
-// alone would create a divergence with the single-row endpoint. See
-// docs/superpowers/specs/2026-05-01-transactions-bulk-edit-design.md §5.5b.
+// validateCategoryID matches the existing single-row laxity — id > 0
+// only. The is_active / existence check is deliberately NOT added here;
+// doing so on bulk-edit alone would create a divergence with the
+// single-row endpoint. See spec §5.5b.
 func validateCategoryID(id int64) (int64, error) {
 	if id <= 0 {
 		return 0, fmt.Errorf("category_id is required")
@@ -671,8 +674,11 @@ func validateTagsField(s string) (string, error) {
 }
 
 // validateTransactionRequest checks required fields on a transaction request.
-// Composes the per-field validators above so bulk-edit and single-row paths
-// share the same error wording and length caps.
+// Composes the per-field validators above for date / tags / category_id /
+// notes — but inlines its own raw description length check because
+// validateDescription trims before measuring (a bulk-edit semantic) and
+// the single-row endpoint must keep accepting whitespace-only descriptions
+// for legacy compatibility. See spec §5.5b.
 func validateTransactionRequest(req transactionRequest) error {
 	if req.Date == "" {
 		return fmt.Errorf("date is required")
@@ -683,8 +689,11 @@ func validateTransactionRequest(req transactionRequest) error {
 	if req.Description == "" {
 		return fmt.Errorf("description is required")
 	}
-	if _, err := validateDescription(req.Description); err != nil {
-		return err
+	// Inline raw length check — preserve the legacy single-row behavior.
+	// The trimming validateDescription helper exists for the bulk-edit
+	// path, not this one.
+	if len(req.Description) > MaxDescriptionLength {
+		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
 	if _, err := validateTagsField(req.Tags); err != nil {
 		return err
@@ -761,6 +770,17 @@ func buildUpdatePatch(req patchRequest, tagsMode *string) (database.UpdatePatch,
 		out.CategoryID = &c
 	}
 	if req.Tags != nil {
+		// Empty-string tags are rejected server-side per spec §3.3 line 81.
+		// The frontend already strips empty `tags` from the patch object
+		// before submitting; an empty value arriving here is either a
+		// hand-crafted client or a bypass attempt at the v1-forbidden
+		// "Replace with empty" bulk-clear-all-tags. Reject before any mode
+		// or length check so the error is "tags must not be empty" rather
+		// than the less-specific "tagsMode required ..." or a silent
+		// length-pass.
+		if *req.Tags == "" {
+			return out, fmt.Errorf("tags must not be empty when set")
+		}
 		if tagsMode == nil {
 			return out, fmt.Errorf("tagsMode required when tags is set")
 		}
@@ -814,7 +834,16 @@ func summarizePatch(p database.UpdatePatch) string {
 	out := strings.Join(parts, "; ")
 	if len(out) > summarizePatchMaxLen {
 		const suffix = "…(truncated)"
-		out = out[:summarizePatchMaxLen-len(suffix)] + suffix
+		// Walk the cut index back to the nearest rune start so we never
+		// slice mid-multibyte-UTF-8. Without this guard, a description
+		// dominated by 3-byte runes (e.g. "…") slices on a continuation
+		// byte and corrupts the audit row's before_json envelope when
+		// the JSON encoder later encounters the broken rune.
+		cut := summarizePatchMaxLen - len(suffix)
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + suffix
 	}
 	return out
 }

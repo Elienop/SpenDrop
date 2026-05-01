@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -2368,6 +2369,21 @@ func TestSummarizePatch_TruncatesAt1024Chars(t *testing.T) {
 	}
 }
 
+func TestSummarizePatch_TruncatesAtRuneBoundary_NotMidUTF8(t *testing.T) {
+	long := strings.Repeat("…", 400) // 3-byte UTF-8 character × 400 = 1200 bytes
+	p := database.UpdatePatch{Description: ptrString(long)}
+	got := summarizePatch(p)
+	if len(got) > 1024 {
+		t.Errorf("len = %d, want <= 1024", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("output is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("expected truncation suffix, got tail %q", got[len(got)-20:])
+	}
+}
+
 func TestValidateDate_AcceptsCanonicalForm(t *testing.T) {
 	got, err := validateDate("2026-04-30")
 	if err != nil {
@@ -2468,6 +2484,15 @@ func TestBuildUpdatePatch_RejectsInvalidMode(t *testing.T) {
 		_, err := buildUpdatePatch(in, ptrString(m))
 		if err == nil {
 			t.Errorf("buildUpdatePatch with mode %q: nil, want error", m)
+		}
+	}
+}
+
+func TestBuildUpdatePatch_RejectsEmptyTagsWithMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("")}
+	for _, mode := range []string{"add", "remove", "replace"} {
+		if _, err := buildUpdatePatch(in, ptrString(mode)); err == nil {
+			t.Errorf("buildUpdatePatch(empty tags, %s mode): nil, want error", mode)
 		}
 	}
 }
