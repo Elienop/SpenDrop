@@ -54,7 +54,14 @@ interface BulkEditDialogProps {
   onClose: () => void;
   count: number;
   categories: Category[];
-  onSubmit: (result: ComputedPatchResult) => void;
+  /**
+   * Submit handler. May return void or a Promise — RHF tracks
+   * `formState.isSubmitting` for the duration of a returned promise so the
+   * Apply button and the Cmd/Ctrl+Enter chord can both refuse re-entry while
+   * a previous submit is still in-flight (Task 9 will plug in an async
+   * `bulkUpdate` mutation; the guard is in place ahead of that wiring).
+   */
+  onSubmit: (result: ComputedPatchResult) => void | Promise<void>;
 }
 
 export function BulkEditDialog({
@@ -81,13 +88,17 @@ export function BulkEditDialog({
   const canSubmit = !isPatchEmpty(computed);
   const tagsEmpty = !values.tags.trim();
   const dateEnabled = values.setDate;
+  const { isSubmitting } = form.formState;
 
-  const submit = form.handleSubmit(() => {
+  const submit = form.handleSubmit(async () => {
     // Re-compute at submit time off the latest values to avoid any stale-watch
     // edge case (defensive — the watch above already flushed pre-submit).
     const result = computePatch(form.getValues() as BulkEditFormValues);
     if (isPatchEmpty(result)) return;
-    onSubmit(result);
+    // Awaiting onSubmit lets RHF flip `formState.isSubmitting` for the
+    // duration — the Apply button + Cmd/Ctrl+Enter chord both observe this
+    // to refuse re-entry while a parent-side async submit is in-flight.
+    await onSubmit(result);
   });
 
   return (
@@ -105,9 +116,12 @@ export function BulkEditDialog({
           onSubmit={submit}
           onKeyDown={(e) => {
             // Spec §4.4 — Cmd/Ctrl+Enter submits from any focused field.
+            // Mirror the Apply button's enablement rule (canSubmit AND not
+            // already in-flight) so the chord never bypasses the disabled
+            // state during an async submit.
             if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
               e.preventDefault();
-              if (canSubmit) submit();
+              if (canSubmit && !isSubmitting) submit();
             }
           }}
           className="grid grid-cols-1 md:grid-cols-[120px_1fr_140px_1fr] gap-4"
@@ -240,11 +254,11 @@ export function BulkEditDialog({
             </Button>
             <Button
               type="submit"
-              disabled={!canSubmit}
+              disabled={!canSubmit || isSubmitting}
               // Spec §4.4 — full sentence for screen readers, compact visible
-              // text. The aria-label leads with "Apply to N transactions" so
-              // queries by visible-text regex still match the accessible name.
-              aria-label={`Apply to ${count} transactions`}
+              // text. Tests query the accessible name with a permissive
+              // /apply.*to N/i regex that matches the aria-label.
+              aria-label={`Apply changes to ${count} transactions`}
             >
               Apply to {count}
             </Button>

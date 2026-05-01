@@ -57,8 +57,10 @@ describe('BulkEditDialog', () => {
     // it; SelectContent items are present-but-hidden in the DOM, hence
     // getAllByText rather than getByText).
     expect(screen.getAllByText(/no change/i).length).toBeGreaterThan(0);
+    // Apply button: visible text is "Apply to 12", aria-label is the
+    // accessible name "Apply changes to 12 transactions" (spec §4.4).
     expect(
-      screen.getByRole('button', { name: /apply to 12/i }),
+      screen.getByRole('button', { name: /apply.*to 12/i }),
     ).toBeDisabled();
   });
 
@@ -76,7 +78,7 @@ describe('BulkEditDialog', () => {
     await user.click(option);
 
     expect(
-      screen.getByRole('button', { name: /apply to 12/i }),
+      screen.getByRole('button', { name: /apply.*to 12/i }),
     ).toBeEnabled();
   });
 
@@ -107,7 +109,7 @@ describe('BulkEditDialog', () => {
     await user.click(screen.getByRole('option', { name: /groceries/i }));
 
     await user.click(
-      screen.getByRole('button', { name: /apply to 12/i }),
+      screen.getByRole('button', { name: /apply.*to 12/i }),
     );
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -115,5 +117,39 @@ describe('BulkEditDialog', () => {
       expect.objectContaining({ patch: { category_id: 1 } }),
     );
     expect(onSubmit.mock.calls[0][0].tagsMode).toBeUndefined();
+  });
+
+  test('Cmd+Enter is a no-op while a previous submit is in-flight', async () => {
+    const user = userEvent.setup();
+    // Non-resolving promise pins RHF's isSubmitting=true after the first
+    // submit lands. The Cmd+Enter chord must not fire a second submit().
+    const onSubmit = vi.fn().mockImplementation(() => new Promise(() => {}));
+    renderDialog({ onSubmit });
+
+    // Make the patch non-empty so canSubmit=true.
+    const triggers = screen
+      .getAllByRole('combobox')
+      .filter((el) => el.tagName === 'BUTTON');
+    await user.click(triggers[0]);
+    await user.click(screen.getByRole('option', { name: /groceries/i }));
+
+    // Click Apply -> enters in-flight state.
+    await user.click(
+      screen.getByRole('button', { name: /apply.*to 12/i }),
+    );
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    // Apply button is now disabled (canSubmit && !isSubmitting -> false).
+    expect(
+      screen.getByRole('button', { name: /apply.*to 12/i }),
+    ).toBeDisabled();
+
+    // Cmd+Enter from a focused field should be ignored while in-flight.
+    const description = screen.getByLabelText(/description/i);
+    description.focus();
+    await user.keyboard('{Meta>}{Enter}{/Meta}');
+    await user.keyboard('{Control>}{Enter}{/Control}');
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
   });
 });
