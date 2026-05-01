@@ -1,11 +1,33 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
-import type { Transaction, PaginatedResponse } from '../api/types';
+import type {
+  Transaction,
+  PaginatedResponse,
+  BatchUpdateRequest,
+  BulkUpdateByFilterRequest,
+  BulkUpdateResponse,
+} from '../api/types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import {
   TRANSACTION_PAGE_SIZES,
   DEFAULT_TRANSACTIONS_PER_PAGE,
 } from '@/lib/constants';
+
+/**
+ * RefetchAfterMutationError flags a successful mutation followed by a
+ * failed list refetch. The page surfaces a different toast for this
+ * case so the user knows their data change landed even though the
+ * view is stale. See `2026-05-01-transactions-bulk-edit-design.md`
+ * §3.5 — the differentiated copy is the difference between "your edit
+ * didn't apply" and "your edit applied, but you need to reload to
+ * see it" and is load-bearing for trust in bulk edits.
+ */
+export class RefetchAfterMutationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'RefetchAfterMutationError';
+  }
+}
 
 export interface TransactionFilters {
   dateFrom: string;
@@ -65,6 +87,30 @@ interface UseTransactionsResult {
    * "delete all and re-import" workflow.
    */
   deleteByFilter: () => Promise<number>;
+  /**
+   * Patches a list of transactions by id (max 500 server-side) and
+   * refetches the visible page. The returned `visibleIds` is the id
+   * set the user can still see after the patch — the page intersects
+   * it with the current `selectedIds` to prune rows that no longer
+   * match the active filter. Throws `RefetchAfterMutationError` when
+   * the PATCH succeeded but the post-PATCH refetch failed (data
+   * changed, view stale).
+   */
+  bulkUpdate: (
+    args: BatchUpdateRequest,
+  ) => Promise<BulkUpdateResponse & { visibleIds: number[] }>;
+  /**
+   * Patches every transaction matching `filterQuery` (the same
+   * serialized filter querystring used by the list endpoint) and
+   * refetches. Filter-mode bypasses the prune step (per spec §3.5)
+   * because `selectionScope === 'all-matching'` is filter-defined and
+   * auto-corrects on refetch — no `visibleIds` echo needed. Throws
+   * `RefetchAfterMutationError` when the PATCH succeeded but the
+   * post-PATCH refetch failed.
+   */
+  bulkUpdateByFilter: (
+    args: BulkUpdateByFilterRequest & { filterQuery: string },
+  ) => Promise<BulkUpdateResponse>;
 }
 
 const defaultFilters: TransactionFilters = {
@@ -135,21 +181,44 @@ export function useTransactions(): UseTransactionsResult {
     return params.toString();
   }, [buildFilterQuery, page, perPage, sortBy, sortDir]);
 
-  const fetchTransactions = useCallback(() => {
+  // fetchTransactionsAsync is the awaitable sibling of fetchTransactions.
+  // The state-update side effects (setTransactions/setTotal/setError/
+  // setInitialLoad) are identical — the only difference is that callers
+  // can await the response to read the freshly-loaded ids (see
+  // bulkUpdate, which uses the post-PATCH refetch result for selection
+  // pruning per spec §3.5). On error the rejection re-throws so callers
+  // who awaited can distinguish refetch failure from PATCH failure.
+  const fetchTransactionsAsync = useCallback(async (): Promise<
+    PaginatedResponse<Transaction>
+  > => {
     setError('');
-    api
-      .get<PaginatedResponse<Transaction>>(`transactions?${buildQuery()}`)
-      .then((data) => {
-        setTransactions(data.transactions);
-        setTotal(data.total);
-      })
-      .catch((err) => {
-        setError(err instanceof Error ? err.message : 'Failed to load transactions');
-      })
-      .finally(() => {
-        setInitialLoad(false);
-      });
+    try {
+      const data = await api.get<PaginatedResponse<Transaction>>(
+        `transactions?${buildQuery()}`,
+      );
+      setTransactions(data.transactions);
+      setTotal(data.total);
+      return data;
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : 'Failed to load transactions',
+      );
+      throw err;
+    } finally {
+      setInitialLoad(false);
+    }
   }, [buildQuery]);
+
+  // Void-returning wrapper kept for the mount effect and the external
+  // `refetch` callers that fire-and-forget. Errors are already handled
+  // (setError) inside fetchTransactionsAsync; we swallow the rejection
+  // here so the void-returning shape doesn't leak unhandled promise
+  // rejections to callers who never opted into awaiting.
+  const fetchTransactions = useCallback(() => {
+    fetchTransactionsAsync().catch(() => {
+      // Intentionally empty — see comment above.
+    });
+  }, [fetchTransactionsAsync]);
 
   useEffect(() => {
     fetchTransactions();
@@ -244,6 +313,56 @@ export function useTransactions(): UseTransactionsResult {
     return result.deleted;
   }, [buildFilterQuery, fetchTransactions]);
 
+  const bulkUpdate = useCallback(
+    async (
+      args: BatchUpdateRequest,
+    ): Promise<BulkUpdateResponse & { visibleIds: number[] }> => {
+      const result = await api.post<BulkUpdateResponse>(
+        'transactions/batch-update',
+        args,
+      );
+      // Refetch via the awaitable sibling so we can read the freshly-
+      // loaded ids and echo them as visibleIds. A refetch failure here
+      // means the data change landed but the view is stale — the
+      // wrapped error tells the page to show the differentiated toast.
+      let refreshed: PaginatedResponse<Transaction>;
+      try {
+        refreshed = await fetchTransactionsAsync();
+      } catch (err) {
+        throw new RefetchAfterMutationError(
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      return { ...result, visibleIds: refreshed.transactions.map((t) => t.id) };
+    },
+    [fetchTransactionsAsync],
+  );
+
+  const bulkUpdateByFilter = useCallback(
+    async (
+      args: BulkUpdateByFilterRequest & { filterQuery: string },
+    ): Promise<BulkUpdateResponse> => {
+      const { filterQuery, ...body } = args;
+      // Filter-mode reuses the list endpoint's querystring serialization
+      // (caller passes it pre-built so the page can drop pagination/sort
+      // — same shape as deleteByFilter above). No prune for this path
+      // per spec §3.5: scope is filter-defined, not id-defined.
+      const result = await api.post<BulkUpdateResponse>(
+        `transactions/update-by-filter?${filterQuery}`,
+        body,
+      );
+      try {
+        await fetchTransactionsAsync();
+      } catch (err) {
+        throw new RefetchAfterMutationError(
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      return result;
+    },
+    [fetchTransactionsAsync],
+  );
+
   return {
     transactions,
     total,
@@ -265,5 +384,7 @@ export function useTransactions(): UseTransactionsResult {
     updateTransaction,
     deleteTransaction,
     deleteByFilter,
+    bulkUpdate,
+    bulkUpdateByFilter,
   };
 }
