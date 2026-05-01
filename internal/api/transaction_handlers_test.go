@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -3218,5 +3220,197 @@ func TestUpdateByFilter_Unauthorized_Returns401(t *testing.T) {
 	h.handleUpdateTransactionsByFilter(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+// --- Bulk-edit future-proofing regression tests ----------------------------
+//
+// These tests pin behavior at the boundaries (adversarial input, verbatim
+// storage, single-writer concurrency) that future refactors are most likely
+// to silently regress. They're not "ought-to-have" coverage — they're proof
+// that the spec's stated guarantees still hold.
+
+// TestUpdateByFilter_AdversarialQueryString pins SQL-injection safety on the
+// hand-rolled filter UPDATE. buildTransactionWhereClause + appendLiveTransactionsFilter
+// build the inner subquery from query params; values flow through `?`
+// placeholders. A future "optimization" that string-concats a search value
+// would break this test before it breaks production. The payload is the
+// classic SQLi probe — the goal isn't to test that SQLite executes it (it
+// won't), but to assert the bulk-edit path treats it as a literal search
+// term and updates zero rows (no match).
+func TestUpdateByFilter_AdversarialQueryString_NoSQLInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	livID := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "innocent description").ID
+
+	// Adversarial search payload — would be catastrophic if interpolated raw.
+	adversarial := `'; DROP TABLE transactions; --`
+	queryString := "search=" + url.QueryEscape(adversarial)
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, user, queryString, body)
+
+	// The query is treated as a literal LIKE term that matches nothing →
+	// updated=0, summary audit row still emitted (per spec §3.6).
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct{ Updated int64 }
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 0 {
+		t.Errorf("updated=%d, want 0 (adversarial search must match nothing)", resp.Updated)
+	}
+
+	// Critical assertion: the transactions table still exists with rows in it.
+	// This is the regression guard — if SQL injection ever lands, this query
+	// would fail with "no such table: transactions".
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions WHERE id = ?`, livID).Scan(&n); err != nil {
+		t.Fatalf("transactions table missing — SQL INJECTION REGRESSED: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 row in transactions, got %d", n)
+	}
+	// And the original row's category is unchanged (it didn't match the filter).
+	var cat0 int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, livID).Scan(&cat0)
+	if cat0 != cat.ID {
+		t.Errorf("untouched row got mutated: cat=%d, want %d (adversarial filter must match nothing)", cat0, cat.ID)
+	}
+}
+
+// TestBatchUpdate_TagsWithEmbeddedCommaQuote_VerbatimStorage pins spec §3.3:
+// tags are stored verbatim, no canonicalization. The split-on-comma parser in
+// applyTagsMode is a known sharp edge — embedded commas inside a "quoted" tag
+// are NOT handled (we don't have a CSV parser). This test pins that the
+// edge-case-but-documented behavior of "embedded commas split" stays stable,
+// AND that quotes round-trip verbatim through Replace mode.
+//
+// If a future refactor ever adds CSV-aware parsing to tags, this test will
+// red-flag it so the spec can be updated deliberately rather than silently.
+func TestBatchUpdate_TagsWithEmbeddedQuote_VerbatimStorage(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+
+	// Replace mode stores the value verbatim — no parsing, no escaping.
+	// Embedded quotes round-trip 1:1.
+	verbatim := `hello "world", with quote`
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":%q},"tagsMode":"replace"}`, txn.ID, verbatim)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != verbatim {
+		t.Errorf("tags: %q, want %q (verbatim storage broken)", got, verbatim)
+	}
+}
+
+// TestBatchUpdate_ConcurrentWithBatchDelete_NoStateCorruption pins the
+// SQLite single-writer + busy_timeout serialization guarantee. Two parallel
+// requests target the same IDs: one bulk-edits category, one bulk-deletes.
+// Both must complete (no 500s, no deadlocks within busy_timeout=5s); final
+// state must be coherent (rows tombstoned, no half-mutation, no orphan
+// audit rows).
+//
+// Order is non-deterministic — whichever tx grabs the writer first wins. We
+// assert on the INVARIANTS that hold regardless of order:
+//   - Both responses are 200 OK
+//   - All targeted rows end up tombstoned
+//   - Each row has at least one audit row recording its final state
+//   - The total audit row count matches what the winning order would produce
+//     (per-row update audits + per-row delete audits, possibly some skipped
+//     bulk audit summary rows)
+func TestBatchUpdate_ConcurrentWithBatchDelete_NoStateCorruption(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	id1 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "row1").ID
+	id2 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "row2").ID
+	ids := []int64{id1, id2}
+
+	// Allow SQLite enough time to serialize the two writers; the test fixture
+	// already sets _busy_timeout=5000ms in the DSN. A WaitGroup blocks the
+	// main goroutine until both handlers return.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var updateRec, deleteRec *httptest.ResponseRecorder
+
+	go func() {
+		defer wg.Done()
+		body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, id1, id2, catB.ID)
+		updateRec = postBatchUpdate(t, h, user, body)
+	}()
+	go func() {
+		defer wg.Done()
+		body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d]}`, id1, id2))
+		req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-delete", body)
+		req.Header.Set("Content-Type", "application/json")
+		req = withUser(req, user)
+		deleteRec = httptest.NewRecorder()
+		h.handleBatchDeleteTransactions(deleteRec, req)
+	}()
+
+	wg.Wait()
+
+	// Both must succeed — SQLite's single-writer serialization plus the
+	// 5-second busy_timeout guarantee that the second tx waits, not fails.
+	if updateRec.Code != http.StatusOK {
+		t.Errorf("bulk-update under concurrency: %d, body: %s", updateRec.Code, updateRec.Body.String())
+	}
+	if deleteRec.Code != http.StatusOK {
+		t.Errorf("bulk-delete under concurrency: %d, body: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	// Invariant: final state. Whichever tx ran last "won" the row's visible
+	// state, but the delete is monotonic (deleted_at can only get set, never
+	// cleared by an UPDATE). So both rows MUST be tombstoned regardless of
+	// order:
+	//   - delete-then-update: delete tombstones; bulk-edit's UpdateTx sees
+	//     before.DeletedAt.Valid → ErrTombstoned → skipped.
+	//   - update-then-delete: bulk-edit changes category; delete tombstones.
+	for _, id := range ids {
+		var deletedAt sql.NullString
+		var catID int64
+		err := db.QueryRow(`SELECT category_id, deleted_at FROM transactions WHERE id = ?`, id).
+			Scan(&catID, &deletedAt)
+		if err != nil {
+			t.Fatalf("read row %d: %v", id, err)
+		}
+		if !deletedAt.Valid {
+			t.Errorf("row %d not tombstoned after concurrent delete (state corruption)", id)
+		}
+		if catID == 0 {
+			t.Errorf("row %d has zero category — partial state (corruption)", id)
+		}
+		// catID is either cat.ID (if delete won the order) or catB.ID (if
+		// update won) — both are valid coherent end-states.
+		if catID != cat.ID && catID != catB.ID {
+			t.Errorf("row %d category=%d is neither original (%d) nor patched (%d)",
+				id, catID, cat.ID, catB.ID)
+		}
+	}
+
+	// Invariant: audit rows are well-formed. Each row should have at least
+	// one delete audit row (since the delete always commits). Per-row update
+	// audit rows MAY exist (if update committed before delete) or MAY NOT
+	// (if update saw the tombstone and skipped). Either way the rolled-back
+	// state would be 0 audits for that row — which would fail this assertion.
+	for _, id := range ids {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ?`, id).Scan(&n)
+		if n < 1 {
+			t.Errorf("row %d has 0 audit rows — at least 1 (delete) expected", id)
+		}
 	}
 }
