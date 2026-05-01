@@ -789,9 +789,30 @@ Concrete fixture helpers to add to `store_transaction_test.go` (top of file, aft
 ```go
 func newTestStore(t *testing.T) (*sql.DB, *TransactionStore, *Queries) {
     t.Helper()
-    db, err := sql.Open("sqlite3", ":memory:?cache=shared&_journal_mode=WAL&_busy_timeout=5000")
+    // _foreign_keys=on is REQUIRED — the rollback test in
+    // transaction_audit_test.go relies on FK enforcement to trigger a
+    // SQL error mid-batch. Without it, an UPDATE that points category_id
+    // at a nonexistent category silently succeeds (orphan FK), and the
+    // test passes for the wrong reason.
+    //
+    // Verify against the production DB initialization: if main.go opens
+    // SQLite without this pragma, FKs are silently disabled in prod too —
+    // raise a separate issue and fix prod alongside, since production
+    // FK enforcement is what keeps category_id from going dangling on
+    // category-delete.
+    db, err := sql.Open("sqlite3", ":memory:?cache=shared&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
     if err != nil { t.Fatalf("open db: %v", err) }
     t.Cleanup(func() { db.Close() })
+
+    // Belt-and-suspenders: PRAGMA explicitly even if DSN includes it.
+    if _, err := db.Exec(`PRAGMA foreign_keys = ON;`); err != nil {
+        t.Fatalf("enable FKs: %v", err)
+    }
+    var fkOn int
+    if err := db.QueryRow(`PRAGMA foreign_keys;`).Scan(&fkOn); err != nil || fkOn != 1 {
+        t.Fatalf("FK enforcement is OFF (got %d) — rollback test will pass for the wrong reason", fkOn)
+    }
+
     if err := RunMigrations(db); err != nil { t.Fatalf("migrate: %v", err) }
     q := New(db)
     return db, NewTransactionStore(db, q), q
@@ -1578,6 +1599,15 @@ func TestAudit_BatchUpdate_WithSkips_WritesSummaryRow(t *testing.T) {
 // exist) in the patch. SQLite's FK constraint rejects the UPDATE on the
 // first row, the deferred Rollback fires, and both data + audit rolls back
 // cleanly. Verifies the tx wrapper holds across both data and audit.
+//
+// PRECONDITION: PRAGMA foreign_keys = ON. If the handler test fixture's
+// DSN omits `_foreign_keys=on`, the UPDATE silently succeeds with an
+// orphan FK and this test passes for the wrong reason. Verify the api
+// package's test fixture (setupHandlerTest or its sibling) enables FKs
+// before running this test — see internal/database/store_transaction_test.go's
+// newTestStore helper for the canonical pattern. If the api fixture
+// doesn't, propagate the same DSN+PRAGMA-verify pattern there as part
+// of this task.
 func TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows(t *testing.T) {
     h, db, fix := setupHandlerTest(t)
     user := seedTestUser(t, fix.q, "alice")
@@ -1803,7 +1833,8 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
     }
 
     // Summary audit row — emitted unconditionally (count=0 is valid; spec §5.4).
-    summary := summarizePatch(toAPIPatch(patch))  // build a renderable view
+    // summarizePatch accepts database.UpdatePatch directly — no adapter needed.
+    summary := summarizePatch(patch)
     filterDesc := fmt.Sprintf("query=%q patch=%s", r.URL.RawQuery, summary)
     if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate,
         database.BulkAuditSummary{Count: updated, Filter: filterDesc}); err != nil {
@@ -1821,18 +1852,6 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
     }
 
     writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})
-}
-
-// toAPIPatch is a tiny adapter so summarizePatch (which expects the API-
-// layer UpdatePatch) can render a database.UpdatePatch.
-func toAPIPatch(p database.UpdatePatch) UpdatePatch {
-    return UpdatePatch{
-        Date:        p.Date,
-        Description: p.Description,
-        CategoryID:  p.CategoryID,
-        Tags:        p.Tags,
-        TagsMode:    p.TagsMode,
-    }
 }
 
 // runUpdateByFilterNoTags issues a single UPDATE inside the caller's tx.
