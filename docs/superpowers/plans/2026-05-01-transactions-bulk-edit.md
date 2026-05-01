@@ -125,7 +125,7 @@ Append to `internal/api/transaction_handlers_test.go`:
 
 ```go
 func TestSummarizePatch_FormatsAllFieldKindsInFixedOrder(t *testing.T) {
-    p := UpdatePatch{
+    p := database.UpdatePatch{
         Date:        ptrString("2026-04-30"),
         Description: ptrString(`ATM card #4839 cash`),
         CategoryID:  ptrInt64(5),
@@ -140,14 +140,14 @@ func TestSummarizePatch_FormatsAllFieldKindsInFixedOrder(t *testing.T) {
 }
 
 func TestSummarizePatch_OmitsAbsentFields(t *testing.T) {
-    p := UpdatePatch{CategoryID: ptrInt64(5)}
+    p := database.UpdatePatch{CategoryID: ptrInt64(5)}
     if got := summarizePatch(p); got != "category_id=5" {
         t.Errorf("summarizePatch() = %q, want %q", got, "category_id=5")
     }
 }
 
 func TestSummarizePatch_EscapesQuotesInDescription(t *testing.T) {
-    p := UpdatePatch{Description: ptrString(`he said "hi"`)}
+    p := database.UpdatePatch{Description: ptrString(`he said "hi"`)}
     got := summarizePatch(p)
     want := `description="he said \"hi\""`
     if got != want {
@@ -156,7 +156,7 @@ func TestSummarizePatch_EscapesQuotesInDescription(t *testing.T) {
 }
 
 func TestSummarizePatch_GrepBoundaryRegression_EmbeddedQuoteSemicolon(t *testing.T) {
-    p := UpdatePatch{Description: ptrString(`risky"; DROP TABLE`)}
+    p := database.UpdatePatch{Description: ptrString(`risky"; DROP TABLE`)}
     got := summarizePatch(p)
     want := `description="risky\"; DROP TABLE"`
     if got != want {
@@ -166,7 +166,7 @@ func TestSummarizePatch_GrepBoundaryRegression_EmbeddedQuoteSemicolon(t *testing
 
 func TestSummarizePatch_TruncatesAt1024Chars(t *testing.T) {
     long := strings.Repeat("x", 1100)
-    p := UpdatePatch{Description: ptrString(long)}
+    p := database.UpdatePatch{Description: ptrString(long)}
     got := summarizePatch(p)
     if !strings.HasSuffix(got, "…(truncated)") {
         t.Errorf("expected truncation suffix, got tail %q", got[len(got)-20:])
@@ -193,12 +193,16 @@ Expected: FAIL with `undefined: summarizePatch` and `undefined: UpdatePatch`.
 
 - [ ] **Step 1.5: Implement `UpdatePatch` struct + `summarizePatch`**
 
-Add to `internal/api/transaction_handlers.go` (after the existing `transactionRequest` block, around line ~70):
+`UpdatePatch` lives in `internal/database/store.go` (NOT in `internal/api`) — it's a data-shape consumed by the store, and putting it in `internal/api` would force the store to import the api package (cycle). The summary helpers stay in `internal/api`. The api package imports `database.UpdatePatch` and consumes it directly.
+
+Add to `internal/database/store.go` (near `BulkAuditSummary` around line ~281):
 
 ```go
-// UpdatePatch is the bulk-edit patch shape. Pointer fields mean "unset =
-// do not touch" (matching JSON-omitempty semantics on the wire). Both
-// batch-update and update-by-filter share this struct.
+// UpdatePatch is the bulk-edit patch shape consumed by TransactionStore.UpdateTx.
+// Pointer fields mean "unset = do not touch" (matching JSON-omitempty
+// semantics on the wire). Both batch-update and update-by-filter use this
+// struct; the api-layer patchRequest is the wire-format shape that
+// buildUpdatePatch lifts into UpdatePatch.
 type UpdatePatch struct {
     Date        *string
     Description *string
@@ -212,6 +216,11 @@ type UpdatePatch struct {
 func (p UpdatePatch) IsEmpty() bool {
     return p.Date == nil && p.Description == nil && p.CategoryID == nil && p.Tags == nil
 }
+```
+
+Then add to `internal/api/transaction_handlers.go`:
+
+```go
 
 const summarizePatchMaxLen = 1024
 
@@ -223,7 +232,7 @@ const summarizePatchMaxLen = 1024
 // quotes in description are escaped \"; semicolons left raw. Output is
 // capped at summarizePatchMaxLen so pathological input cannot bloat the
 // audit row's `before_json` envelope.
-func summarizePatch(p UpdatePatch) string {
+func summarizePatch(p database.UpdatePatch) string {
     var parts []string
     if p.Date != nil {
         parts = append(parts, "date="+*p.Date)
@@ -534,13 +543,13 @@ type patchRequest struct {
 var validTagsModes = map[string]struct{}{"add": {}, "remove": {}, "replace": {}}
 
 // buildUpdatePatch validates the wire-format patchRequest and lifts each
-// present field into UpdatePatch (the server-side struct). Validators are
-// the per-field validators from Task 1; no bulk-specific logic here.
+// present field into database.UpdatePatch (the server-side struct). Validators
+// are the per-field validators from Task 1; no bulk-specific logic here.
 //
 // Empty patch is NOT rejected here — IsEmpty() exists for that. The handler
 // chains buildUpdatePatch + IsEmpty + 400 so the error surface is clean.
-func buildUpdatePatch(req patchRequest, tagsMode *string) (UpdatePatch, error) {
-    var out UpdatePatch
+func buildUpdatePatch(req patchRequest, tagsMode *string) (database.UpdatePatch, error) {
+    var out database.UpdatePatch
     if req.Date != nil {
         d, err := validateDate(*req.Date)
         if err != nil {
@@ -856,33 +865,11 @@ docker run --rm -v spendrop-gomod:/go/pkg/mod -v spendrop-gobuild:/root/.cache/g
 
 Expected: FAIL — `undefined: ErrTombstoned`, `undefined: ErrNotOwned`, `undefined: ErrNotFound`, `(*TransactionStore).UpdateTx undefined`.
 
-- [ ] **Step 2.4: Add sentinel errors + `UpdatePatch` redeclaration consideration**
+- [ ] **Step 2.4: Add sentinel errors**
 
-The `UpdatePatch` struct from Task 1 lives in `internal/api`. The store cannot import `internal/api` (would create a cycle). So `UpdatePatch` must be defined in the database package OR a shared helper package.
+`UpdatePatch` is already in `internal/database/store.go` (added in Task 1, Step 1.5). This step only adds the three sentinel errors used by `UpdateTx` to signal skip-OK conditions.
 
-Decision: lift `UpdatePatch` into `internal/database` (it's a data-shape, not handler-specific). The handler keeps its `patchRequest` (wire format) and converts via `buildUpdatePatch` into `database.UpdatePatch`.
-
-Move/copy `UpdatePatch` and `IsEmpty` to `internal/database/store.go`:
-
-```go
-// UpdatePatch is the bulk-edit patch shape consumed by TransactionStore.UpdateTx.
-// Pointer fields mean "unset = do not touch". TagsMode is required iff Tags != nil.
-type UpdatePatch struct {
-    Date        *string
-    Description *string
-    CategoryID  *int64
-    Tags        *string
-    TagsMode    *string  // "add" | "remove" | "replace"
-}
-
-func (p UpdatePatch) IsEmpty() bool {
-    return p.Date == nil && p.Description == nil && p.CategoryID == nil && p.Tags == nil
-}
-```
-
-Then update `internal/api/transaction_handlers.go` to remove its local `UpdatePatch` and use `database.UpdatePatch` instead. `buildUpdatePatch` returns `database.UpdatePatch`. The validators still live in `internal/api`.
-
-Also add the sentinels to `internal/database/store.go` (near `ErrTokenNotFound` if present, or at the top of the file alongside other top-level vars):
+Add to `internal/database/store.go` (near `ErrTokenNotFound` if present, or at the top of the file alongside other top-level vars):
 
 ```go
 var (
@@ -893,6 +880,14 @@ var (
 ```
 
 - [ ] **Step 2.5: Implement `UpdateTx`**
+
+**Pre-flight: verify the sqlc-generated param shapes** before writing code. Inspect `internal/database/queries.sql.go` for:
+- `UpdateTransactionParams.Date` — likely `time.Time` (not `string`)
+- `UpdateTransactionParams.Tags` — `sql.NullString`
+- `GetTransactionByIDRow.Date` — `time.Time`
+- All other fields the merge will copy through
+
+If `Date` is `time.Time` (which it is — `queries.sql.go:589`), the patch's `*string` Date must be parsed before assigning to `params.Date`. Use `time.Parse("2006-01-02", *patch.Date)` and propagate parse errors. Validation in `validateDate` (Task 1) already enforces the format, so a parse error here is "should never happen" but still must be handled.
 
 Add to `internal/database/store.go` (after the existing `Update` method around line 130):
 
@@ -907,6 +902,14 @@ Add to `internal/database/store.go` (after the existing `Update` method around l
 // the handler does not write audit separately. If UpdateTx returns nil
 // (success), the audit row is committed alongside the data update; if it
 // returns any error, both are rolled back together.
+//
+// Admin-bypass is a HANDLER concern. The store enforces strict ownership;
+// the handler must short-circuit the ownership check upstream when the
+// caller is an admin. (Pattern: handler reads user.Role; if admin, calls
+// UpdateTx with a special actorUserID == before.UserID after a separate
+// GetTransactionByID lookup, OR keeps a single code path and accepts that
+// admin bulk-update enforces "modify only your own rows" — pick at impl
+// time, see Step 3.4 admin-bypass research.)
 func (s *TransactionStore) UpdateTx(
     ctx context.Context,
     tx *sql.Tx,
@@ -926,28 +929,34 @@ func (s *TransactionStore) UpdateTx(
     if before.DeletedAt.Valid {
         return before, after, ErrTombstoned
     }
-    // Admin-bypass is a HANDLER concern. The store enforces strict ownership;
-    // the handler-side check (`user.Role == RoleAdmin || existing.UserID == user.ID`)
-    // is what gives admins the bypass. UpdateTx itself rejects mismatch.
     if before.UserID != actorUserID {
         return before, after, ErrNotOwned
     }
 
     // Merge patch onto existing row → UpdateTransactionParams (full-replace shape).
+    // CRITICAL: Date in UpdateTransactionParams is time.Time (verified at
+    // queries.sql.go:589). The patch's *string Date must be parsed.
     params := UpdateTransactionParams{
         ID:               id,
-        Date:             before.Date,
+        Date:             before.Date,           // time.Time
         Description:      before.Description,
         CategoryID:       before.CategoryID,
-        Tags:             before.Tags,
+        Tags:             before.Tags,           // sql.NullString
         Notes:            before.Notes,
         Amount:           before.Amount,
         OriginalAmount:   before.OriginalAmount,
         OriginalCurrency: before.OriginalCurrency,
-        // ... copy all other fields from `before` so unset ≠ wipe
+        // ... copy ALL fields from `before` so unset ≠ wipe. Implementer:
+        // walk UpdateTransactionParams and copy each field that is NOT in
+        // the patch. Use go-staticcheck or zero-init detection to make sure
+        // nothing is missed.
     }
     if patch.Date != nil {
-        params.Date = *patch.Date
+        d, perr := time.Parse("2006-01-02", *patch.Date)
+        if perr != nil {
+            return before, after, fmt.Errorf("invalid date in patch (validateDate should have caught this): %w", perr)
+        }
+        params.Date = d
     }
     if patch.Description != nil {
         params.Description = *patch.Description
@@ -956,12 +965,9 @@ func (s *TransactionStore) UpdateTx(
         params.CategoryID = *patch.CategoryID
     }
     if patch.Tags != nil {
-        // Apply tag mode: this is the single-row bulk-edit path. The
-        // tagsMode set arithmetic happens in the handler for the filter
-        // path; here we just take the merged value the handler computed.
-        // For batch-update, the handler computes per-row "merged" tags
-        // before calling UpdateTx and passes the result via patch.Tags
-        // already-resolved. So: just assign.
+        // The handler computes per-row "merged" tags via applyTagsMode
+        // (Add/Remove/Replace set arithmetic) BEFORE calling UpdateTx.
+        // Here we just assign — the store stays dumb about set arithmetic.
         params.Tags = sql.NullString{String: *patch.Tags, Valid: *patch.Tags != ""}
     }
 
@@ -981,6 +987,8 @@ func (s *TransactionStore) UpdateTx(
 ```
 
 Note: the **batch-update handler** is responsible for computing the merged-tags string per row (Add/Remove/Replace set arithmetic) BEFORE calling `UpdateTx`. The store layer just writes whatever it's given. This keeps the store dumb and the tag-merge logic testable in handler-test land.
+
+**Fixture pre-flight:** the `seedTestTransaction` helper in Step 2.2 also passes `Date: date` (string). If `CreateTransactionParams.Date` is `time.Time`, the fixture must `time.Parse` the string first. Verify and adjust before running tests.
 
 - [ ] **Step 2.6: Run the tests**
 
@@ -1056,6 +1064,52 @@ func TestBatchUpdate_HappyPath_AllRowsUpdated(t *testing.T) {
         var got int64
         if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id).Scan(&got); err != nil { t.Fatal(err) }
         if got != catB { t.Errorf("id=%d category: %d, want %d", id, got, catB) }
+    }
+}
+
+// TestBatchUpdate_HidesTombstoned uses the CLAUDE.md canonical pattern:
+// seed a tombstoned row with a sentinel amount of 999, then assert that
+// 999 never appears in any post-update query result. Per CLAUDE.md soft-
+// delete invariant: "Every transactions read must filter `AND t.deleted_at
+// IS NULL`."
+func TestBatchUpdate_HidesTombstoned(t *testing.T) {
+    h, db, fix := setupHandlerTest(t)
+    user := seedTestUser(t, fix.q, "alice")
+    cat := seedTestCategory(t, fix.q, "Cat")
+    catB := seedTestCategory(t, fix.q, "CatB")
+    live := seedTestTransaction(t, fix.q, user, cat, "2026-04-01", "live", 10.0, "")
+    ts := seedTestTransaction(t, fix.q, user, cat, "2026-04-02", "tombstoned-sentinel", 999.0, "")
+    db.Exec(`UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, ts)
+
+    // Try to update both — the tombstoned row should be skipped, never touched.
+    body := map[string]any{
+        "ids":   []int64{live, ts},
+        "patch": map[string]any{"category_id": catB},
+    }
+    rec := postJSON(t, h, "/api/transactions/batch-update", body, withUser(user))
+    if rec.Code != 200 { t.Fatal(rec.Body.String()) }
+
+    var resp struct{ Updated, Skipped int64 }
+    json.Unmarshal(rec.Body.Bytes(), &resp)
+    if resp.Updated != 1 || resp.Skipped != 1 {
+        t.Errorf("got updated=%d skipped=%d, want 1 1", resp.Updated, resp.Skipped)
+    }
+
+    // Sentinel: tombstoned amount 999.0 must not appear in any "live" view.
+    // Verify the tombstoned row is still tombstoned and its category was NOT changed.
+    var tsCat int64
+    var tsAmount float64
+    var tsDeletedAt sql.NullString
+    db.QueryRow(`SELECT category_id, amount, deleted_at FROM transactions WHERE id = ?`, ts).
+        Scan(&tsCat, &tsAmount, &tsDeletedAt)
+    if tsCat != cat {
+        t.Errorf("tombstoned row's category got mutated: %d (want %d — must remain untouched)", tsCat, cat)
+    }
+    if tsAmount != 999.0 {
+        t.Errorf("tombstoned row's amount changed: %f (sentinel violated)", tsAmount)
+    }
+    if !tsDeletedAt.Valid {
+        t.Errorf("tombstoned row got resurrected: deleted_at is null")
     }
 }
 
@@ -1418,30 +1472,23 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 
 Verify the helper signatures it depends on (`earliestDate`, `verifyAffectedCheckpoints`, `database.AuditUpdate`, `database.BulkAuditSummary`) by reading their definitions; spec §5.3 lists them.
 
-For admins, the store-level ownership check (`ErrNotOwned`) needs to be bypassed. The spec says:
-> "Admin-bypass is a HANDLER concern."
+**Admin-bypass design (handler-side, NOT store-side).**
 
-So the handler should check `user.Role == RoleAdmin` and if true, pass a sentinel "any actor" to `UpdateTx`. The simplest way: add an alternate `UpdateTxAdmin` method on the store that skips the ownership check, OR add a `bypassOwnership bool` flag to `UpdateTx`. Pick the bool flag (simpler, no API split):
+The spec §5.2 fixes `UpdateTx` at five args: `(ctx, tx, actorUserID, id, patch)`. The store enforces strict ownership and returns `ErrNotOwned` on mismatch.
 
-Update `UpdateTx`'s signature to:
+**v1 decision: admins call `UpdateTx` exactly like non-admins do.** Cross-user IDs return `ErrNotOwned` and are skipped. This means bulk-edit does not support admin cross-user mutation. Single-row update (`PUT /api/transactions/{id}`) remains the admin path for cross-user edits. Document this in §11 as a known v1 limitation.
+
+Rationale: a hand-rolled admin bypass either (a) needs a 6th `bypassOwnership` arg on `UpdateTx` (contradicts spec §5.2), or (b) needs a parallel admin-only path that double-writes audit rows (one for the row owner, one for the admin actor). Both add complexity for a use case that isn't on the v1 critical path. Defer to a follow-up if/when cross-user bulk admin edits become a real workflow.
+
+Handler call site stays simple — five args, one branch:
+
 ```go
-func (s *TransactionStore) UpdateTx(ctx context.Context, tx *sql.Tx, actorUserID int64, id int64, patch UpdatePatch, bypassOwnership bool) (...)
+before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, rowPatch)
+// errors.Is(err, database.ErrNotOwned) → skipped++ (covers both non-admin
+// cross-user attempts and admin cross-user attempts; same skip semantics)
 ```
 
-And the ownership check becomes:
-```go
-if !bypassOwnership && before.UserID != actorUserID {
-    return before, after, ErrNotOwned
-}
-```
-
-Update Task 2's tests accordingly (the new param is `false` everywhere except a new `TestUpdateTx_AdminBypass_AllowsCrossUser`).
-
-In the handler, call:
-```go
-isAdmin := user.Role == RoleAdmin
-before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, rowPatch, isAdmin)
-```
+The `TestBatchUpdate_PartialSkip_TombstonedAndNonOwnedAreSkipped` test (Step 3.1) already covers this.
 
 - [ ] **Step 3.5: Wire the route**
 
@@ -1526,18 +1573,47 @@ func TestAudit_BatchUpdate_WithSkips_WritesSummaryRow(t *testing.T) {
     }
 }
 
+// TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows arranges a mid-batch
+// SQL failure by passing `category_id: 99999` (FK to a category that doesn't
+// exist) in the patch. SQLite's FK constraint rejects the UPDATE on the
+// first row, the deferred Rollback fires, and both data + audit rolls back
+// cleanly. Verifies the tx wrapper holds across both data and audit.
 func TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows(t *testing.T) {
-    // Force a SQL error mid-batch: poison the input by having one ID with
-    // a category_id that violates an FK constraint after fix-up
-    // implementation. Simplest poisoning: make UpdateTransaction fail by
-    // passing category_id = 0 in the merged params (the migration's
-    // CHECK constraint will reject).
-    //
-    // Implementation note: this requires arranging the failure. If a
-    // simple poison is hard, skip this test for v1 and rely on the
-    // existing TestAudit_BatchDelete_*_RollsBack as evidence the
-    // tx wrapper itself works. Document the skip with a SkipNow + reason.
-    t.Skip("requires SQL-poisoning fixture; covered structurally by store-level rollback test in store_transaction_test.go")
+    h, db, fix := setupHandlerTest(t)
+    user := seedTestUser(t, fix.q, "alice")
+    cat := seedTestCategory(t, fix.q, "Cat")
+    id1 := seedTestTransaction(t, fix.q, user, cat, "2026-04-01", "X", 10.0, "")
+    id2 := seedTestTransaction(t, fix.q, user, cat, "2026-04-02", "Y", 10.0, "")
+
+    // Snapshot pre-state.
+    auditsBefore := listAuditRows(t, db)
+    var c1Before, c2Before int64
+    db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id1).Scan(&c1Before)
+    db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id2).Scan(&c2Before)
+
+    // Poisoned patch: category 99999 doesn't exist → FK violation on UPDATE.
+    body := map[string]any{
+        "ids": []int64{id1, id2}, "patch": map[string]any{"category_id": 99999},
+    }
+    rec := postJSON(t, h, "/api/transactions/batch-update", body, withUser(user))
+    if rec.Code != 500 {
+        t.Errorf("expected 500 on FK violation, got %d", rec.Code)
+    }
+
+    // Both rows must be unchanged.
+    var c1After, c2After int64
+    db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id1).Scan(&c1After)
+    db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id2).Scan(&c2After)
+    if c1After != c1Before { t.Errorf("id1 mutated despite rollback: was %d, got %d", c1Before, c1After) }
+    if c2After != c2Before { t.Errorf("id2 mutated despite rollback: was %d, got %d", c2Before, c2After) }
+
+    // No new audit rows: the rolled-back transaction must not have committed
+    // any audit either. Compare audit-row count before vs after.
+    auditsAfter := listAuditRows(t, db)
+    if len(auditsAfter) != len(auditsBefore) {
+        t.Errorf("expected zero new audit rows after rollback, got %d new",
+            len(auditsAfter)-len(auditsBefore))
+    }
 }
 ```
 
