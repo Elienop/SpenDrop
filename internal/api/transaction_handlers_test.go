@@ -2523,6 +2523,312 @@ func TestBuildUpdatePatch_TrimsAndValidatesEachFieldSelectively(t *testing.T) {
 	}
 }
 
+// --- Bulk-edit Task 3: handleBatchUpdateTransactions -----------------------
+
+// postBatchUpdate is a small helper that builds the JSON body, sets the
+// authenticated user on the request, and invokes the handler directly.
+// We construct the request in the same shape as every existing handler
+// test in this file (no router wiring, just package-level Handler method
+// dispatch) so the tests stay isolated from chi routing and middleware.
+func postBatchUpdate(t *testing.T, h *Handler, user database.User, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBatchUpdateTransactions(rec, req)
+	return rec
+}
+
+func TestBatchUpdate_HappyPath_AllRowsUpdated(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	t1 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 10.0, "T1")
+	t2 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-02", 20.0, "T2")
+	t3 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-03", 30.0, "T3")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d],"patch":{"category_id":%d}}`, t1.ID, t2.ID, t3.ID, catB.ID)
+	rec := postBatchUpdate(t, h, user, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 3 || resp.Skipped != 0 {
+		t.Errorf("got updated=%d skipped=%d, want 3 0", resp.Updated, resp.Skipped)
+	}
+	for _, id := range []int64{t1.ID, t2.ID, t3.ID} {
+		var got int64
+		if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != catB.ID {
+			t.Errorf("id=%d category: %d, want %d", id, got, catB.ID)
+		}
+	}
+}
+
+// TestBatchUpdate_HidesTombstoned uses the CLAUDE.md canonical pattern:
+// seed a tombstoned row with a sentinel amount of 999, then assert that the
+// row is never touched. Per CLAUDE.md soft-delete invariant, the
+// tombstoned row must remain at its original category and amount and must
+// still have deleted_at set after the bulk update.
+func TestBatchUpdate_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	live := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 10.0, "live")
+	ts := seedTombstonedTestTransaction(t, q, user.ID, catA.ID, "2026-04-02", 999.0, "tombstoned-sentinel")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, live.ID, ts.ID, catB.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 1 || resp.Skipped != 1 {
+		t.Errorf("got updated=%d skipped=%d, want 1 1", resp.Updated, resp.Skipped)
+	}
+
+	// Sentinel: tombstoned row must remain untouched.
+	var tsCat int64
+	var tsAmount float64
+	var tsDeletedAt sql.NullString
+	if err := db.QueryRow(`SELECT category_id, amount, deleted_at FROM transactions WHERE id = ?`, ts.ID).
+		Scan(&tsCat, &tsAmount, &tsDeletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if tsCat != catA.ID {
+		t.Errorf("tombstoned row's category got mutated: %d (want %d — must remain untouched)", tsCat, catA.ID)
+	}
+	if tsAmount != 999.0 {
+		t.Errorf("tombstoned row's amount changed: %f (sentinel violated)", tsAmount)
+	}
+	if !tsDeletedAt.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+
+	// And the live row must have been updated.
+	var liveCat int64
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, live.ID).Scan(&liveCat); err != nil {
+		t.Fatal(err)
+	}
+	if liveCat != catB.ID {
+		t.Errorf("live row not updated: %d", liveCat)
+	}
+}
+
+func TestBatchUpdate_PartialSkip_TombstonedAndNonOwnedAreSkipped(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+
+	aliveAlice := seedTestTransaction(t, q, alice.ID, catA.ID, "2026-04-01", 10.0, "ok")
+	tombstonedAlice := seedTombstonedTestTransaction(t, q, alice.ID, catA.ID, "2026-04-02", 10.0, "ts")
+	aliveBob := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-03", 10.0, "bob")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d,99999],"patch":{"category_id":%d}}`,
+		aliveAlice.ID, tombstonedAlice.ID, aliveBob.ID, catB.ID)
+	rec := postBatchUpdate(t, h, alice, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 1 || resp.Skipped != 3 {
+		t.Errorf("got updated=%d skipped=%d, want 1 3", resp.Updated, resp.Skipped)
+	}
+
+	// Verify alice's row was the only one mutated.
+	var aliveAliceCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliveAlice.ID).Scan(&aliveAliceCat)
+	if aliveAliceCat != catB.ID {
+		t.Errorf("alice's live row not updated: %d", aliveAliceCat)
+	}
+	// Bob's row must not have been touched.
+	var bobCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliveBob.ID).Scan(&bobCat)
+	if bobCat != catA.ID {
+		t.Errorf("bob's row was wrongly touched: %d", bobCat)
+	}
+}
+
+func TestBatchUpdate_RejectsEmptyIDList(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	rec := postBatchUpdate(t, h, user, `{"ids":[],"patch":{"category_id":1}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty ids: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBatchUpdate_RejectsOversizedIDList(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	idsList := make([]string, MaxBatchUpdateIDs+1)
+	for i := range idsList {
+		idsList[i] = fmt.Sprintf("%d", i+1)
+	}
+	body := fmt.Sprintf(`{"ids":[%s],"patch":{"category_id":1}}`, strings.Join(idsList, ","))
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("oversized ids: got %d, want 400", rec.Code)
+	}
+}
+
+func TestBatchUpdate_RejectsEmptyPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{}}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty patch: got %d, want 400", rec.Code)
+	}
+}
+
+// TestBatchUpdate_DisallowUnknownFields_RejectsUserIDInjection pins the
+// mass-assignment guard from spec §5.5b: extra patch keys (`user_id`,
+// `deleted_at`, …) must error out with a 400, not be silently dropped onto
+// the typed struct. The current typed UpdatePatch shields this incidentally,
+// but DisallowUnknownFields makes the contract explicit so a future field
+// addition cannot widen the attack surface unreviewed.
+func TestBatchUpdate_DisallowUnknownFields_RejectsUserIDInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"user_id":99,"category_id":%d}}`, txn.ID, cat.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestBatchUpdate_TagsAdd_AppendsAndDeduplicates pins the spec §3.3 worked
+// example for Add mode: existing "Tax, receipt" + Add "tax,receipt" yields
+// "Tax, receipt, tax". Set arithmetic is byte-for-byte case-sensitive
+// ("Tax" != "tax"), and items already present in the existing set dedupe
+// ("receipt" stays once). The empty-existing case appends the input
+// verbatim with the canonical ", " join.
+func TestBatchUpdate_TagsAdd_AppendsAndDeduplicates(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "Tax, receipt")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"tags":"tax,receipt"},"tagsMode":"add"}`, t1.ID, t2.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got1 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	if got1 != "Tax, receipt, tax" {
+		t.Errorf("t1 tags: %q, want %q", got1, "Tax, receipt, tax")
+	}
+	var got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got2 != "tax, receipt" {
+		t.Errorf("t2 tags: %q, want %q", got2, "tax, receipt")
+	}
+}
+
+func TestBatchUpdate_TagsRemove_FiltersMatching(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "tax,personal,receipt")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"tax,personal"},"tagsMode":"remove"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "receipt" {
+		t.Errorf("tags: %q, want %q", got, "receipt")
+	}
+}
+
+func TestBatchUpdate_TagsReplace_OverwritesExisting(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "old1,old2,old3")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"fresh"},"tagsMode":"replace"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "fresh" {
+		t.Errorf("tags: %q, want %q", got, "fresh")
+	}
+}
+
+// TestBatchUpdate_TagsCaseSensitivePinning pins the exact case-sensitive
+// worked example from spec §3.3: row has "Tax, receipt"; user adds "tax";
+// result is "Tax, receipt, tax" (three distinct entries — "Tax" and "tax"
+// are different bytes).
+func TestBatchUpdate_TagsCaseSensitivePinning(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "Tax, receipt")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"tax"},"tagsMode":"add"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "Tax, receipt, tax" {
+		t.Errorf("tags: %q, want %q", got, "Tax, receipt, tax")
+	}
+}
+
 // ptrString / ptrInt64 are local test helpers used by the bulk-edit tests
 // above to construct the pointer-shaped fields on database.UpdatePatch /
 // patchRequest.

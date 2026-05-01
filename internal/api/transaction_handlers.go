@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"net/http"
@@ -1070,6 +1072,240 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
+}
+
+// batchUpdateRequest is the JSON input for /api/transactions/batch-update.
+// Pointer fields on Patch make absent keys mean "no change"; the wire shape
+// matches the patchRequest struct used by future filter-mode handlers.
+//
+// TagsMode lives at the top level (not nested inside patch) so the JSON
+// envelope mirrors the spec §6.1 wire format and matches Lidarr's
+// proven-in-production shape that the design is derived from.
+type batchUpdateRequest struct {
+	IDs      []int64      `json:"ids"`
+	Patch    patchRequest `json:"patch"`
+	TagsMode *string      `json:"tagsMode,omitempty"`
+}
+
+// bulkUpdateResponse is the success payload for both batch-update (always
+// emits skipped) and update-by-filter (omits skipped via omitempty since
+// filter-mode's WHERE clause already excluded skip-eligible rows).
+type bulkUpdateResponse struct {
+	Updated int64 `json:"updated"`
+	Skipped int64 `json:"skipped,omitempty"`
+}
+
+// applyTagsMode is the per-row tag set-arithmetic. Existing tags are split
+// on commas and trimmed of leading/trailing whitespace per item; new tags
+// are split the same way. Set arithmetic is byte-for-byte case-sensitive —
+// see spec §3.3 worked example: "Tax, receipt" + Add "tax" yields
+// "Tax, receipt, tax" (three distinct entries because "Tax" and "tax" are
+// different bytes).
+//
+// Mode = "replace" returns newTags verbatim — the spec deliberately does
+// NOT canonicalize replace-mode input, so casing and whitespace inside the
+// user's typed string survive the round-trip unchanged.
+//
+// Output for add/remove uses ", " (comma-space) as the join separator,
+// matching the canonical inline-edit output in the existing codebase.
+// Input parsing tolerates both "a,b" and "a, b" — the trim makes the
+// distinction invisible to set arithmetic.
+func applyTagsMode(existing, newTags, mode string) string {
+	if mode == "replace" {
+		return newTags
+	}
+	parse := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		parts := strings.Split(s, ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			t := strings.TrimSpace(p)
+			if t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	cur := parse(existing)
+	in := parse(newTags)
+	seen := make(map[string]struct{}, len(cur))
+	for _, t := range cur {
+		seen[t] = struct{}{}
+	}
+	switch mode {
+	case "add":
+		for _, t := range in {
+			if _, ok := seen[t]; !ok {
+				cur = append(cur, t)
+				seen[t] = struct{}{}
+			}
+		}
+	case "remove":
+		rm := make(map[string]struct{}, len(in))
+		for _, t := range in {
+			rm[t] = struct{}{}
+		}
+		out := cur[:0]
+		for _, t := range cur {
+			if _, drop := rm[t]; !drop {
+				out = append(out, t)
+			}
+		}
+		cur = out
+	}
+	return strings.Join(cur, ", ")
+}
+
+// handleBatchUpdateTransactions applies a partial-field patch to a list of
+// transaction IDs in one tx. Tombstoned / non-owned / missing rows are
+// skipped (consistent with handleBatchDeleteTransactions). Per-row audit
+// rows commit alongside the data updates; a summary audit row records
+// skipped count if any. Mid-batch SQL/constraint errors roll back the
+// entire tx — caller sees no partial progress.
+//
+// The handler uses dec.DisallowUnknownFields() as the mass-assignment guard
+// (spec §5.5b): an attacker-controlled body that injects user_id, deleted_at,
+// or any future-added field that bulk-edit hasn't been reviewed for must
+// 400 rather than be silently dropped onto the typed struct.
+//
+// Tag merge is computed per-row in this handler (NOT in the store): the
+// store stays dumb about set arithmetic. We pre-load each row's current
+// tags via h.queries.GetTransactionByID, run applyTagsMode, and pass the
+// resolved string to UpdateTx. The N+1 GetTransactionByID is acceptable at
+// MaxBatchUpdateIDs=500; the alternative (folding tag-merge into the store
+// API) complicates the store for one caller. GetTransactionByID
+// deliberately leaks tombstoned rows so we don't need to redo the live-row
+// check here — UpdateTx returns ErrTombstoned for the tombstoned row and
+// the switch below skips it.
+//
+// See spec docs/superpowers/specs/2026-05-01-transactions-bulk-edit-design.md
+// §5.3 for the design rationale.
+func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req batchUpdateRequest
+	r.Body = http.MaxBytesReader(w, r.Body, getMaxJSONBytes())
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // mass-assignment guard — spec §5.5b
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeError(w, http.StatusBadRequest, "at least one id is required")
+		return
+	}
+	if len(req.IDs) > MaxBatchUpdateIDs {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("batch size cannot exceed %d", MaxBatchUpdateIDs))
+		return
+	}
+	patch, err := buildUpdatePatch(req.Patch, req.TagsMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if patch.IsEmpty() {
+		writeError(w, http.StatusBadRequest, "patch must not be empty")
+		return
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
+	// qtx is used for the per-row tag pre-load when patch.Tags is set.
+	// UpdateTx itself reloads inside the same tx, but the merge happens
+	// HERE so we can pass an already-resolved Tags string into UpdateTx.
+	qtx := h.queries.WithTx(tx)
+
+	var updated, skipped int64
+	var minDate time.Time
+
+	for _, id := range req.IDs {
+		// Compute per-row patch. For non-replace tag modes we need the
+		// row's current tags to perform set arithmetic; for "replace"
+		// mode the new tags are passed through verbatim and no pre-load
+		// is needed.
+		rowPatch := patch
+		if patch.Tags != nil && *patch.TagsMode != "replace" {
+			existing, err := qtx.GetTransactionByID(r.Context(), id)
+			switch {
+			case errors.Is(err, sql.ErrNoRows):
+				skipped++
+				continue
+			case err != nil:
+				writeError(w, http.StatusInternalServerError, "failed to load existing tags")
+				return
+			}
+			// GetTransactionByID deliberately leaks tombstoned rows; let
+			// UpdateTx be the canonical place that maps tombstoned -> skip.
+			// We still pre-compute merged tags either way — the merged
+			// string is harmless if UpdateTx subsequently skips the row.
+			curTags := ""
+			if existing.Tags.Valid {
+				curTags = existing.Tags.String
+			}
+			merged := applyTagsMode(curTags, *patch.Tags, *patch.TagsMode)
+			rowPatch.Tags = &merged
+		}
+
+		before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, rowPatch)
+		switch {
+		case errors.Is(err, database.ErrTombstoned),
+			errors.Is(err, database.ErrNotOwned),
+			errors.Is(err, database.ErrNotFound):
+			skipped++
+		case err != nil:
+			// Any non-skip error rolls back the entire batch.
+			writeError(w, http.StatusInternalServerError, "internal server error")
+			return
+		default:
+			updated++
+			if patch.Date != nil {
+				// earliestDate is 2-arg; nest the call to fold three
+				// values into one floor.
+				minDate = earliestDate(minDate, earliestDate(before.Date, after.Date))
+			}
+		}
+	}
+
+	if skipped > 0 {
+		// Skip-summary RecordBulkTx is inside the data tx — rollback
+		// rolls both the data updates and this audit row back together.
+		// RecordBulkTx wraps the JSON envelope itself; pass the struct,
+		// not a marshalled string.
+		if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate,
+			database.BulkAuditSummary{
+				Count:  skipped,
+				Filter: fmt.Sprintf("skipped_during_batch_update:%d_of_%d", skipped, len(req.IDs)),
+			}); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to record audit")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit batch update")
+		return
+	}
+
+	// Phase 3.3 checkpoint hook: only fires when patch.Date was set AND at
+	// least one row was actually updated (minDate stays zero otherwise).
+	if patch.Date != nil && !minDate.IsZero() {
+		h.verifyAffectedCheckpoints(r.Context(), minDate)
+	}
+
+	writeJSON(w, http.StatusOK, bulkUpdateResponse{Updated: updated, Skipped: skipped})
 }
 
 // handleDeleteTransactionsByFilter deletes every transaction matching the
