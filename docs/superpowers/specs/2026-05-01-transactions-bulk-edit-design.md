@@ -142,10 +142,15 @@ try {
   setSelectedIds(newSelection);
   setBulkEditOpen(false);  // close the dialog on success
   const dropped = prevSize - newSelection.size;
-  toast.success(
-    `Updated ${updated}${skipped ? `, skipped ${skipped}` : ''} transactions` +
-    (dropped > 0 ? ` (selection cleared — rows no longer match the current filter)` : '')
-  );
+  // Toast composer handles pluralization + the no-update-but-skipped edge case.
+  const noun = (n: number) => `${n} transaction${n === 1 ? '' : 's'}`;
+  const head = updated === 0 && skipped > 0
+    ? `No matches updated; skipped ${noun(skipped)}`
+    : `Updated ${noun(updated)}${skipped ? `, skipped ${skipped}` : ''}`;
+  const tail = dropped > 0
+    ? ` (selection cleared — rows no longer match the current filter)`
+    : '';
+  toast.success(head + tail);
 } catch (err) {
   // Either the PATCH failed (data not changed) OR the post-PATCH refetch failed
   // (data changed, but the table view is stale). The hook re-throws either as
@@ -287,7 +292,7 @@ The dialog reads these on each render, so if the user toggles a checkbox in the 
 5. Dispatch `bulkUpdate` or `bulkUpdateByFilter` based on scope (the scope is captured at submit time, not re-read after).
 6. On success: see §3.5 for the full prune + close + toast flow.
 7. On failure: see §3.5 for the differentiated toast (PATCH-failure vs refetch-failure). Dialog stays open with form state preserved; selection untouched.
-8. On 401 (auth lost mid-session): the existing global error handler in `api/client.ts` already redirects to `/login`. Bulk-edit doesn't introduce a new auth-loss flow — its 401 path inherits from the client.
+8. On 401 (auth lost mid-session): `api/client.ts` throws on 401; the redirect is handled at the route boundary by `ProtectedRoute.tsx:25`. Bulk-edit doesn't introduce a new auth-loss flow — its 401 path inherits from the client + ProtectedRoute combination, which already covers every other route.
 
 ### 4.4 Accessibility
 
@@ -338,8 +343,8 @@ Internal flow per call:
 5. Per-field validation already happened in the handler (§3.8 / §5.5b) before reaching the store, so this step is just the merge — no additional validation here.
 6. `qtx.UpdateTransaction(ctx, merged)`.
 7. `qtx.GetTransactionByID(ctx, id)` again for the after-state.
-8. `writeUpdateAudit(ctx, qtx, actorID, before, after)`.
-9. Return the after-row.
+8. `writeUpdateAudit(ctx, qtx, actorID, id, before, after)` — note the `id int64` argument is positional between `actorID` and `before` per the real signature at `internal/database/store.go:350`.
+9. Return `(before, after, nil)`.
 
 The new `UpdatePatch` struct uses pointer fields so unset means "do not touch":
 
