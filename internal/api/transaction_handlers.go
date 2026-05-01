@@ -1513,22 +1513,22 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 	var minDate time.Time
 
 	if patch.Tags != nil {
-		// Tags read-then-write path — implemented in Task 5. Returning 501
-		// here is deliberate: silently routing a tags patch through the
-		// no-tags fast path would DROP the tag merge (the SET-clause
-		// builder doesn't include tags) and the user's intended
-		// add/remove/replace operation would silently no-op. The handler
-		// rather than the SQL builder is where this is gated so the error
-		// is loud and observable in the response code, not buried as a
-		// per-row no-op.
-		writeError(w, http.StatusNotImplemented, "tags filter path: implemented in Task 5")
-		return
-	}
-
-	updated, minDate, err = h.runUpdateByFilterNoTags(r, tx, user, patch)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update transactions")
-		return
+		// Tags read-then-write path: enumerate matching rows, compute new
+		// tags per row via applyTagsMode, and write them back. Mutually
+		// exclusive with the no-tags fast path at this gate — only one
+		// branch runs per request, so the summary audit row + checkpoint
+		// hook below fire exactly once.
+		updated, minDate, err = h.runUpdateByFilterTags(r, tx, user, patch)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update transactions")
+			return
+		}
+	} else {
+		updated, minDate, err = h.runUpdateByFilterNoTags(r, tx, user, patch)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update transactions")
+			return
+		}
 	}
 
 	// Summary audit row — emitted unconditionally (count=0 is valid; spec §5.4).
@@ -1640,6 +1640,146 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		return 0, time.Time{}, fmt.Errorf("read update result: %w", err)
 	}
 	return n, time.Time{}, nil
+}
+
+// runUpdateByFilterTags is the tags read-then-write branch of update-by-filter.
+// A single SQL UPDATE cannot express "for each row, compute new tags as old
+// ∪ new" (or set-difference / replace), so this enumerates matching live rows,
+// computes the merged tag string per row via applyTagsMode, and writes each
+// row's update inside the caller's tx. Rollback covers the whole batch.
+//
+// minDate is the earliest of (each row's pre-edit date, patch.Date) across
+// every enumerated row. The caller passes that floor into
+// verifyAffectedCheckpoints when patch.Date is set, so the post-commit hook
+// can scope its work precisely instead of conservatively reverifying every
+// checkpoint (the no-tags path's behavior).
+//
+// SQL scaffolding mirrors runUpdateByFilterNoTags exactly: same
+// buildTransactionWhereClause + non-admin user_id append +
+// appendLiveTransactionsFilter + JOIN categories. The inner statement is a
+// SELECT instead of an UPDATE; per-row UPDATEs follow.
+//
+// Path selection at the handler level (`if patch.Tags != nil`) makes this
+// MUTUALLY EXCLUSIVE with runUpdateByFilterNoTags — never both per request.
+// The audit summary fires exactly once per request as a result, and the
+// checkpoint hook fires at most once per request.
+func (h *Handler) runUpdateByFilterTags(r *http.Request, tx *sql.Tx, user database.User, patch database.UpdatePatch) (int64, time.Time, error) {
+	whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())
+	if user.Role != RoleAdmin {
+		if whereClause == "" {
+			whereClause = " WHERE t.user_id = ?"
+		} else {
+			whereClause += " AND t.user_id = ?"
+		}
+		whereArgs = append(whereArgs, user.ID)
+	}
+	liveClause := appendLiveTransactionsFilter(whereClause)
+
+	// SELECT t.id, t.tags, t.date for the read leg. The categories JOIN is
+	// required because buildTransactionWhereClause emits c.type predicates
+	// for the ?type=expense|income filter — skipping the JOIN would surface
+	// as `no such column: c.type` at runtime.
+	selectQuery := fmt.Sprintf(
+		`SELECT t.id, t.tags, t.date FROM transactions t JOIN categories c ON t.category_id = c.id %s`,
+		liveClause,
+	)
+
+	rows, err := tx.QueryContext(r.Context(), selectQuery, whereArgs...)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("select matching: %w", err)
+	}
+
+	type matchedRow struct {
+		id   int64
+		tags sql.NullString
+		date time.Time
+	}
+	var matched []matchedRow
+	for rows.Next() {
+		var rr matchedRow
+		if err := rows.Scan(&rr.id, &rr.tags, &rr.date); err != nil {
+			rows.Close()
+			return 0, time.Time{}, fmt.Errorf("scan: %w", err)
+		}
+		matched = append(matched, rr)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, time.Time{}, fmt.Errorf("rows.Err: %w", err)
+	}
+	// Explicit close so the next ExecContext doesn't fight for the same
+	// connection — SQLite serializes per-conn and an unfinished SELECT can
+	// stall a write under WAL.
+	rows.Close()
+
+	// Pre-parse patch.Date once so the per-row UPDATE doesn't re-parse on
+	// every iteration. validateDate already ran in buildUpdatePatch, but
+	// the canonical YYYY-MM-DD must be re-typed to time.Time so the driver
+	// writes the same TEXT layout every other handler produces.
+	var afterDate time.Time
+	if patch.Date != nil {
+		d, err := time.Parse("2006-01-02", *patch.Date)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("invalid date in patch: %w", err)
+		}
+		afterDate = d
+	}
+
+	var minDate time.Time
+	for _, m := range matched {
+		existing := ""
+		if m.tags.Valid {
+			existing = m.tags.String
+		}
+		// patch.TagsMode is guaranteed non-nil here: buildUpdatePatch
+		// rejects patch.Tags != nil with TagsMode == nil at the wire-decode
+		// boundary, so by the time we reach this point both pointers are
+		// set together.
+		merged := applyTagsMode(existing, *patch.Tags, *patch.TagsMode)
+
+		// Build the per-row UPDATE — also touch date / description /
+		// category_id when they're in the patch (combined patches are
+		// legal even though tags-only patches are the common case).
+		var setClauses []string
+		var setArgs []any
+		if patch.Date != nil {
+			setClauses = append(setClauses, "date = ?")
+			setArgs = append(setArgs, afterDate)
+		}
+		if patch.Description != nil {
+			setClauses = append(setClauses, "description = ?")
+			setArgs = append(setArgs, *patch.Description)
+		}
+		if patch.CategoryID != nil {
+			setClauses = append(setClauses, "category_id = ?")
+			setArgs = append(setArgs, *patch.CategoryID)
+		}
+		setClauses = append(setClauses, "tags = ?", "updated_at = CURRENT_TIMESTAMP")
+		setArgs = append(setArgs, merged, m.id)
+
+		// Defense-in-depth deleted_at IS NULL: the inner SELECT already
+		// scoped to live rows via appendLiveTransactionsFilter, but
+		// re-asserting on the per-row UPDATE makes the soft-delete
+		// invariant explicit at the SQL level — a row tombstoned in the
+		// microseconds between SELECT and UPDATE (impossible inside a
+		// single tx, but cheap to gate against) cannot be silently
+		// resurrected by this path.
+		upd := fmt.Sprintf(
+			"UPDATE transactions SET %s WHERE id = ? AND deleted_at IS NULL",
+			strings.Join(setClauses, ", "),
+		)
+		if _, err := tx.ExecContext(r.Context(), upd, setArgs...); err != nil {
+			return 0, time.Time{}, fmt.Errorf("update id=%d: %w", m.id, err)
+		}
+
+		if patch.Date != nil {
+			// Fold three values into one floor: previous minDate, this
+			// row's pre-edit date, and the patched date.
+			minDate = earliestDate(minDate, earliestDate(m.date, afterDate))
+		}
+	}
+
+	return int64(len(matched)), minDate, nil
 }
 
 // toNullString converts a string to sql.NullString, treating empty as NULL.

@@ -2976,21 +2976,220 @@ func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
 	}
 }
 
-// TestUpdateByFilter_TagsBranch_ReturnsNotImplemented pins that the tags
-// path is deliberately a 501 stub in Task 4. Task 5 will replace this with
-// a read-then-write enumeration. The stub guarantees we never accidentally
-// land on the no-tags fast path SQL when the patch carries tags (which
-// would silently DROP the tag merge — the SET clause builder doesn't
-// include tags, so the row's existing tags would be left as-is and the
-// user's intended tagsMode operation would silently no-op).
-func TestUpdateByFilter_TagsBranch_ReturnsNotImplemented(t *testing.T) {
+// TestUpdateByFilter_TagsAdd_PerRowReadThenWrite pins that the tags read-then-write
+// path enumerates each matching row, computes Add-mode set arithmetic per row,
+// and writes the merged tags back independently. Two rows seeded with different
+// existing tags must end up with each row's existing tags ∪ "fresh" — proving
+// the per-row read is happening (a single SQL UPDATE could not produce
+// row-dependent output).
+func TestUpdateByFilter_TagsAdd_PerRowReadThenWrite(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
-	body := `{"patch":{"tags":"foo"},"tagsMode":"add"}`
-	rec := postUpdateByFilter(t, h, user, "", body)
-	if rec.Code != http.StatusNotImplemented {
-		t.Errorf("tags branch: got %d, want 501; body=%s", rec.Code, rec.Body.String())
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "old1")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "old2")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 2 {
+		t.Errorf("updated=%d, want 2", resp.Updated)
+	}
+
+	var got1, got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got1 != "old1, fresh" {
+		t.Errorf("t1 tags: %q, want %q", got1, "old1, fresh")
+	}
+	if got2 != "old2, fresh" {
+		t.Errorf("t2 tags: %q, want %q", got2, "old2, fresh")
+	}
+}
+
+// TestUpdateByFilter_TagsRemove_DropsMatchingItems pins that Remove mode
+// performs set-difference on the existing tags. Seeded "tax,personal,receipt"
+// minus ["personal"] must yield "tax, receipt".
+func TestUpdateByFilter_TagsRemove_DropsMatchingItems(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "tax,personal,receipt")
+
+	body := `{"patch":{"tags":"personal"},"tagsMode":"remove"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "tax, receipt" {
+		t.Errorf("tags: %q, want %q", got, "tax, receipt")
+	}
+}
+
+// TestUpdateByFilter_TagsReplace_OverwritesAllRows pins that Replace mode
+// unconditionally overwrites the tags column with the provided value on
+// every matching row regardless of what was there before. Two rows with
+// different prior values both end up with the same replacement.
+func TestUpdateByFilter_TagsReplace_OverwritesAllRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "old1")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "old2,old3")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"replace"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got1, got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got1 != "fresh" {
+		t.Errorf("t1 tags: %q, want %q", got1, "fresh")
+	}
+	if got2 != "fresh" {
+		t.Errorf("t2 tags: %q, want %q", got2, "fresh")
+	}
+}
+
+// TestUpdateByFilter_TagsPath_StillWritesOneSummary pins spec §3.6: the
+// tags read-then-write loop must NOT emit per-row audit rows; it still
+// emits exactly one summary row with transaction_id=BulkAuditTransactionID.
+// Three matching rows touched + one summary audit = total 1 audit row.
+func TestUpdateByFilter_TagsPath_StillWritesOneSummary(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-03", 10.0, "T3", "")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var summaries int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 1 {
+		t.Errorf("expected exactly 1 summary audit row, got %d", summaries)
+	}
+
+	// Defensive: also assert no per-row audit rows snuck in.
+	var perRow int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id != ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&perRow); err != nil {
+		t.Fatal(err)
+	}
+	if perRow != 0 {
+		t.Errorf("expected 0 per-row update audit rows in tags-filter path, got %d", perRow)
+	}
+}
+
+// TestUpdateByFilter_Tags_HidesTombstoned uses the canonical CLAUDE.md
+// soft-delete sentinel pattern for the tags read-then-write SELECT path:
+// seed one live row + one tombstoned row, run tags Add, and assert the
+// tombstoned row is not enumerated nor mutated. The sentinel tag value
+// "should-not-touch" makes any leak visually loud.
+func TestUpdateByFilter_Tags_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	live := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "live", "existing")
+	ts := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 999.0, "ts-sentinel", "should-not-touch")
+	if err := q.SoftDeleteTransaction(context.Background(), ts.ID); err != nil {
+		t.Fatalf("soft-delete sentinel: %v", err)
+	}
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var liveTags, tsTags string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, live.ID).Scan(&liveTags)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, ts.ID).Scan(&tsTags)
+	if liveTags != "existing, fresh" {
+		t.Errorf("live row tags: %q, want %q", liveTags, "existing, fresh")
+	}
+	if tsTags != "should-not-touch" {
+		t.Errorf("tombstoned row was touched! tags: %q, want %q (must remain untouched)", tsTags, "should-not-touch")
+	}
+	// And the row must still be tombstoned (not resurrected).
+	var tsDel sql.NullString
+	db.QueryRow(`SELECT deleted_at FROM transactions WHERE id = ?`, ts.ID).Scan(&tsDel)
+	if !tsDel.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+}
+
+// TestUpdateByFilter_TagsAndDate_FiresCheckpointHookOnce pins spec §3.10's
+// mutual-exclusivity guarantee: a combined patch (tags Add + date) routes
+// through ONLY the tags read-then-write path, lands both updates, and emits
+// exactly one summary audit row (not one per branch). The checkpoint hook
+// is invoked at most once per request — verified via the audit count, since
+// double-fire would couple to a duplicate summary row in this code path.
+func TestUpdateByFilter_TagsAndDate_FiresCheckpointHookOnce(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "old")
+
+	body := `{"patch":{"tags":"fresh","date":"2026-05-01"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Both fields must have landed.
+	var gotTags, gotDate string
+	db.QueryRow(`SELECT tags, DATE(date) FROM transactions WHERE id = ?`, txn.ID).Scan(&gotTags, &gotDate)
+	if gotTags != "old, fresh" {
+		t.Errorf("tags: %q, want %q", gotTags, "old, fresh")
+	}
+	if gotDate != "2026-05-01" {
+		t.Errorf("date: %q, want %q", gotDate, "2026-05-01")
+	}
+
+	// And exactly one summary audit row — proves only the tags branch ran,
+	// not both paths.
+	var summaries int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 1 {
+		t.Errorf("expected exactly 1 summary audit row (mutual-exclusivity), got %d", summaries)
 	}
 }
 
