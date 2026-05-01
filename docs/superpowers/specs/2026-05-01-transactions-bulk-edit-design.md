@@ -70,11 +70,11 @@ There is no per-field "Apply this" checkbox. Lidarr's design has held up across 
 
 ### 3.3 Tags semantics — `Add` / `Remove` / `Replace` (Lidarr-derived)
 
-Tags in SpenDrop are stored as a comma-separated string (`tags TEXT`, normalized to lowercase, trimmed). Bulk-edit operations:
+Tags in SpenDrop are stored as a comma-separated string (`tags TEXT`, stored verbatim — see the verbatim-storage paragraph below for the canonical statement). Bulk-edit operations:
 
 - **Add:** for each target row, parse existing tags → set-union with new tags → re-serialize. Idempotent per row (re-running the same Add yields the same result).
 - **Remove:** for each target row, parse existing tags → set-difference with provided tags → re-serialize.
-- **Replace:** unconditionally overwrite the tags column with the provided value (after normalization).
+- **Replace:** unconditionally overwrite the tags column with the provided value as the user typed it (no canonicalization).
 
 Wire format: `{ tags: "tax,receipt", tagsMode: "add" }`. The mode is required iff `tags` is present. An empty `tags` field is rejected client-side (won't appear in the patch); an empty `tags` field with non-empty mode at the server is a 400.
 
@@ -184,7 +184,7 @@ Behavior:
 
 This is a v1 correctness gate, not a future enhancement. Tested explicitly per §7.
 
-### 3.12 No schema migration
+### 3.11 No schema migration
 
 This feature adds zero columns and zero tables. The existing `transactions` schema, the existing `transaction_audit` schema, and the existing `RecordBulkTx` helper are sufficient. No migration ordering, no backfill, no data migration risk on first boot after upgrade. This is deliberate — the "no schema change" path is the lowest-risk shape for a feature that operates over a critical data table.
 
@@ -408,7 +408,7 @@ Existing `validateTransactionRequest` at `transaction_handlers.go:629` is decomp
 
 - `validateDate(string) (string, error)` — returns the canonical YYYY-MM-DD form, errors on bad format.
 - `validateDescription(string) (string, error)` — trims, length-checks (≤ `MaxDescriptionLength`).
-- `validateCategoryID(int64) (int64, error)` — verifies the category exists and is `is_active = 1`. Categories are household-shared (`migrations/001_initial_schema.sql:24-33` — there is no `user_id` column on `categories`), so no per-user scoping check is needed.
+- `validateCategoryID(int64) (int64, error)` — verifies `id > 0`, matching the existing single-row laxity in `validateTransactionRequest:648-650`. Categories are household-shared (`migrations/001_initial_schema.sql:24-33` — there is no `user_id` column on `categories`), so no per-user scoping check is needed. The existence + `is_active` upgrade is **not** added in v1: doing so on bulk-edit alone would create a divergence where bulk-edit rejects `category_id = 47 (inactive)` but the single-row endpoint accepts it. If/when that check becomes a priority, both endpoints get the upgraded validator together as a separate cross-cutting story.
 - `validateTagsField(string) (string, error)` — length-checks (≤ `MaxTagsLength`); does NOT lowercase or trim individual items beyond what the existing single-row path already does (per §3.3).
 
 Each handler walks `req.Patch` and runs the matching validator only for present fields. Currency and amount validators are explicitly NOT called (those fields aren't in scope for v1). Empty patch returns 400.
@@ -417,31 +417,52 @@ Each handler walks `req.Patch` and runs the matching validator only for present 
 
 The batch path reuses the existing `UpdateTransaction` sqlc query (`queries.sql.go:UpdateTransaction`). The flow described in §5.2 (re-read → merge patch onto row → call `UpdateTransaction` with the merged params) means we can build complete `UpdateTransactionParams` from the patched row each iteration. No new sqlc query is needed for the batch path.
 
-The filter-mode no-tags fast path uses hand-written SQL inside the handler (matches `handleBulkRename` and `handleDeleteTransactionsByFilter` precedent). Hand-rolled because it's a "list of IDs" via subquery shape that sqlc doesn't model cleanly:
+The filter-mode no-tags fast path uses hand-written SQL inside the handler (matches `handleBulkRename` and `handleDeleteTransactionsByFilter:917-949` precedent verbatim). Hand-rolled because it's a "list of IDs" via subquery shape that sqlc doesn't model cleanly. The shape mirrors `handleDeleteTransactionsByFilter` — same helpers, same JOIN, same user_id append, same live-filter wrap:
 
 ```go
-// Pseudocode of the no-tags fast-path UPDATE assembly. Real code lives in the handler.
+// Build SET clauses from the patch
 var setClauses []string
 var args []any
-if patch.Date != nil       { setClauses = append(setClauses, "date = ?");        args = append(args, *patch.Date) }
+if patch.Date != nil        { setClauses = append(setClauses, "date = ?");        args = append(args, *patch.Date) }
 if patch.Description != nil { setClauses = append(setClauses, "description = ?"); args = append(args, *patch.Description) }
 if patch.CategoryID != nil  { setClauses = append(setClauses, "category_id = ?"); args = append(args, *patch.CategoryID) }
-// tags handled in the read-then-write loop branch above
+setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
+// (tags is handled in the read-then-write loop branch — never reaches this fast path.)
 
-setSQL := strings.Join(setClauses, ", ")
-filterSQL, filterArgs := buildTransactionWhereClause(filter, user)  // existing helper
-sqlStmt := fmt.Sprintf(
-    `UPDATE transactions SET %s
-     WHERE id IN (SELECT t.id FROM transactions t %s) AND deleted_at IS NULL`,
-    setSQL, filterSQL,
+// Build the filter subquery exactly like handleDeleteTransactionsByFilter:917-938
+whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())  // single arg, takes url.Values
+if user.Role != RoleAdmin {
+    if whereClause == "" {
+        whereClause = " WHERE t.user_id = ?"
+    } else {
+        whereClause += " AND t.user_id = ?"
+    }
+    whereArgs = append(whereArgs, user.ID)
+}
+liveClause := appendLiveTransactionsFilter(whereClause)  // appends " AND t.deleted_at IS NULL" (or " WHERE ..." when whereClause is empty)
+
+query := fmt.Sprintf(
+    `UPDATE transactions
+     SET %s
+     WHERE deleted_at IS NULL AND id IN (
+         SELECT t.id FROM transactions t
+         JOIN categories c ON t.category_id = c.id %s
+     )`,
+    strings.Join(setClauses, ", "),
+    liveClause,
 )
-res, err := tx.ExecContext(ctx, sqlStmt, append(args, filterArgs...)...)
+res, err := tx.ExecContext(ctx, query, append(args, whereArgs...)...)
 updated, _ := res.RowsAffected()
 ```
 
-The `AND deleted_at IS NULL` predicate on the outer UPDATE is defense-in-depth — `buildTransactionWhereClause` already filters tombstoned rows in its own WHERE assembly. Both layers must say it; removing either is a soft-delete invariant violation per CLAUDE.md.
+The soft-delete invariant requires both layers:
 
-The tags read-then-write path is described in §3.3 + §5.4 — it enumerates with `qtx.ListTransactionsByFilter` (existing query, scoped to user) and calls `qtx.UpdateTransaction` per row inside the same tx.
+1. `appendLiveTransactionsFilter` adds `t.deleted_at IS NULL` to the **inner** subquery so only live rows are even considered for the UPDATE — this is the load-bearing predicate.
+2. The `AND deleted_at IS NULL` on the **outer** UPDATE is defense-in-depth, mirroring `handleDeleteTransactionsByFilter:945-947`. Removing either layer is a CLAUDE.md soft-delete invariant violation.
+
+The `JOIN categories c ON t.category_id = c.id` is required because `buildTransactionWhereClause` emits predicates against `c.type` (when `?type=expense` is in the filter). Skipping the JOIN would surface as `no such column: c.type` at runtime when a `type=` filter is present.
+
+The tags read-then-write path uses the same scaffolding (same `buildTransactionWhereClause` + user_id append + `appendLiveTransactionsFilter` + categories JOIN) but emits a `SELECT t.id, t.tags FROM transactions t JOIN categories c ON t.category_id = c.id <liveClause>` first, computes new tags per row in Go, then issues `UPDATE transactions SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?` per row inside the same tx. There is no `qtx.ListTransactionsByFilter` sqlc query — both the SELECT and per-row UPDATE are hand-rolled, matching the no-tags fast path's pattern.
 
 ## 6. Wire Format
 
@@ -459,7 +480,7 @@ The tags read-then-write path is described in §3.3 + §5.4 — it enumerates wi
 ```
 
 - `ids`: required, non-empty, ≤ 500 entries, each int64.
-- `patch`: required, non-empty object. Keys are `date` (YYYY-MM-DD), `description` (≤ 500 chars), `category_id` (int64, validated against the user's accessible category set), `tags` (comma-separated; will be normalized).
+- `patch`: required, non-empty object. Keys are `date` (YYYY-MM-DD), `description` (≤ 500 chars), `category_id` (int64, validated as `> 0` matching existing single-row laxity), `tags` (comma-separated; stored verbatim per §3.3 — no case-folding, no trim beyond the per-item trim already done during Add/Remove set arithmetic).
 - `tagsMode`: required iff `patch.tags` is set; one of `add`, `remove`, `replace`.
 
 ### 6.2 Response — `200 OK`
@@ -494,6 +515,8 @@ Filter is the querystring; body is just the patch + optional `tagsMode`. `tagsMo
 ```json
 { "updated": 1247 }
 ```
+
+The `update-by-filter` response intentionally omits the `skipped` field that `batch-update` carries. Filter-mode's WHERE clause already excluded tombstoned and non-owned rows server-side, so there's no skip-and-continue surface; the `updated` count is the truth.
 
 ### 6.5 Error responses
 
@@ -537,7 +560,7 @@ Filter is the querystring; body is just the patch + optional `tagsMode`. `tagsMo
 
 ### 7.3 Store
 
-`internal/database/store_test.go` (or a sibling `store_update_test.go` if the file gets unwieldy — the existing convention puts new store tests next to existing ones; pick at plan time based on file size):
+New file: `internal/database/store_transaction_test.go` (mirrors the api-token sibling — `store_api_token_test.go`, `store_api_token_password_cascade_test.go`). The existing `TransactionStore` lives in `store.go` but currently has no dedicated `_test.go` file beside it; this is the right time to add one.
 
 - `TestStoreUpdateTx_AppliesOnlySetFields`
 - `TestStoreUpdateTx_RejectsTombstonedRow`
