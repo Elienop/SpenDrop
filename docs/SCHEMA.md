@@ -622,9 +622,3 @@ CREATE INDEX idx_api_token_audit_token ON api_token_audit(token_id);
 CREATE INDEX idx_api_token_audit_user  ON api_token_audit(user_id, created_at DESC);
 ````
 
-## Feature notes
-
-### Bulk-edit (2026-05-01)
-
-No schema changes were introduced. Both endpoints (`POST /api/transactions/batch-update` and `POST /api/transactions/update-by-filter`) reuse existing tables (`transactions`, `transaction_audit`) and the existing `RecordBulkTx` audit helper.
-
