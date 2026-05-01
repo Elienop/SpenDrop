@@ -3,6 +3,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { BulkEditDialog } from './Transactions.BulkEditDialog';
+import { BulkEditConfirmDialog } from './Transactions.BulkEditConfirmDialog';
 import type { Category } from '../api/types';
 
 const categories: Category[] = [
@@ -151,5 +152,49 @@ describe('BulkEditDialog', () => {
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BulkEditConfirmDialog', () => {
+  test('summarizes the patch + count', () => {
+    render(
+      <BulkEditConfirmDialog
+        open={true} onCancel={() => {}} onConfirm={() => {}}
+        count={1247}
+        patch={{ patch: { category_id: 5 }, tagsMode: undefined }}
+        categoryName={(id) => id === 5 ? 'Groceries' : 'unknown'}
+      />
+    );
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    expect(screen.getByText(/category/i)).toBeInTheDocument();
+    expect(screen.getByText(/groceries/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /apply.*to 1,?247/i })).toBeInTheDocument();
+  });
+
+  test('truncates long descriptions at 80 chars with ellipsis', () => {
+    const long = 'a'.repeat(120);
+    render(
+      <BulkEditConfirmDialog
+        open={true} onCancel={() => {}} onConfirm={() => {}}
+        count={5}
+        patch={{ patch: { description: long } }}
+        categoryName={() => ''}
+      />
+    );
+    const node = screen.getByText((content) => content.includes('…'));
+    expect(node).toBeInTheDocument();
+  });
+
+  test('confirm fires onConfirm', async () => {
+    const user = userEvent.setup();
+    const onConfirm = vi.fn();
+    render(
+      <BulkEditConfirmDialog
+        open={true} onCancel={() => {}} onConfirm={onConfirm}
+        count={3} patch={{ patch: { category_id: 5 } }} categoryName={() => 'Groceries'}
+      />
+    );
+    await user.click(screen.getByRole('button', { name: /apply.*to 3/i }));
+    expect(onConfirm).toHaveBeenCalled();
   });
 });
