@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -42,6 +42,9 @@ const mockUseTransactions = vi.fn();
 vi.mock('../api/client', () => ({
   api: {
     get: vi.fn().mockResolvedValue([]),
+    post: vi.fn().mockResolvedValue({}),
+    put: vi.fn().mockResolvedValue({}),
+    del: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -95,6 +98,11 @@ function defaultHookReturn(overrides = {}) {
     updateTransaction: vi.fn(),
     deleteTransaction: vi.fn(),
     deleteByFilter: vi.fn().mockResolvedValue(0),
+    bulkUpdate: vi
+      .fn()
+      .mockResolvedValue({ updated: 0, skipped: 0, visibleIds: [] }),
+    bulkUpdateByFilter: vi.fn().mockResolvedValue({ updated: 0 }),
+    buildFilterQuery: vi.fn().mockReturnValue(''),
     refetch: vi.fn(),
     ...overrides,
   };
@@ -665,6 +673,281 @@ describe('Transactions page', () => {
       expect(deleteByFilter).not.toHaveBeenCalled();
       expect(
         screen.getByText('All 137 matching transactions selected'),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe('bulk edit integration', () => {
+    function makeRows(n: number) {
+      return Array.from({ length: n }, (_, i) => ({
+        ...defaultTransaction,
+        id: i + 1,
+        description: `Row ${i + 1}`,
+      }));
+    }
+
+    // Pick the first Select trigger inside the BulkEditDialog (the only
+    // dialog mounted in these tests). Filtered to <button> because
+    // AutocompleteInputs render real <input role="combobox"> elements that
+    // can't be opened by clicking.
+    function categoryTriggerInDialog() {
+      const dialog = screen.getByRole('dialog', { name: /edit \d+ transactions/i });
+      return within(dialog)
+        .getAllByRole('combobox')
+        .filter((el) => el.tagName === 'BUTTON')[0];
+    }
+
+    it('Edit button is absent when no row is selected', () => {
+      render(<Transactions />);
+      expect(
+        screen.queryByRole('button', { name: /^edit \(/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('Edit button reads "Edit (N)" once rows are selected', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(3), total: 3 }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+
+      expect(
+        screen.getByRole('button', { name: /^edit \(2\)$/i }),
+      ).toBeInTheDocument();
+    });
+
+    it('Clicking Edit opens BulkEditDialog with N=selectedCount', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(3), total: 3 }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 3/i }));
+
+      await user.click(screen.getByRole('button', { name: /^edit \(3\)$/i }));
+
+      expect(
+        screen.getByRole('heading', { name: /edit 3 transactions/i }),
+      ).toBeInTheDocument();
+    });
+
+    it('page-mode submit dispatches bulkUpdate, NOT bulkUpdateByFilter', async () => {
+      const user = userEvent.setup();
+      const bulkUpdate = vi
+        .fn()
+        .mockResolvedValue({ updated: 2, skipped: 0, visibleIds: [1, 2] });
+      const bulkUpdateByFilter = vi.fn();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(3),
+          total: 3,
+          bulkUpdate,
+          bulkUpdateByFilter,
+        }),
+      );
+      // Categories — needed for the dialog's Select to have options.
+      const { api } = await import('../api/client');
+      (api.get as ReturnType<typeof vi.fn>).mockImplementation(
+        (path: string) => {
+          if (path === 'categories') {
+            return Promise.resolve([
+              {
+                id: 5,
+                name: 'Cleaning',
+                type: 'expense',
+                icon: null,
+                sort_order: 0,
+                is_active: true,
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('button', { name: /^edit \(2\)$/i }));
+
+      // Wait for categories to load before opening Select.
+      await waitFor(() =>
+        expect(api.get).toHaveBeenCalledWith('categories'),
+      );
+
+      // Pick the dialog's Category trigger and choose Cleaning.
+      const trigger = categoryTriggerInDialog();
+      await user.click(trigger);
+      const option = await screen.findByRole('option', { name: /cleaning/i });
+      await user.click(option);
+
+      // Click the Apply button in the dialog.
+      const dialog = screen.getByRole('dialog', { name: /edit 2 transactions/i });
+      await user.click(
+        within(dialog).getByRole('button', { name: /apply.*to 2/i }),
+      );
+
+      await waitFor(() => expect(bulkUpdate).toHaveBeenCalledTimes(1));
+      expect(bulkUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ids: [1, 2],
+          patch: expect.objectContaining({ category_id: 5 }),
+        }),
+      );
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+    });
+
+    it('all-matching mode submit routes through confirm dialog before firing PATCH', async () => {
+      const user = userEvent.setup();
+      const bulkUpdate = vi.fn();
+      const bulkUpdateByFilter = vi
+        .fn()
+        .mockResolvedValue({ updated: 137 });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 137,
+          bulkUpdate,
+          bulkUpdateByFilter,
+          buildFilterQuery: vi.fn().mockReturnValue('search=foo'),
+        }),
+      );
+      const { api } = await import('../api/client');
+      (api.get as ReturnType<typeof vi.fn>).mockImplementation(
+        (path: string) => {
+          if (path === 'categories') {
+            return Promise.resolve([
+              {
+                id: 9,
+                name: 'Cleaning',
+                type: 'expense',
+                icon: null,
+                sort_order: 0,
+                is_active: true,
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      );
+      render(<Transactions />);
+
+      // Escalate to all-matching scope.
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(
+        screen.getByRole('button', { name: /select all 137 matching/i }),
+      );
+
+      // Open BulkEditDialog (count is 137 in all-matching scope).
+      await user.click(screen.getByRole('button', { name: /^edit \(137\)$/i }));
+
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+
+      const trigger = categoryTriggerInDialog();
+      await user.click(trigger);
+      await user.click(await screen.findByRole('option', { name: /cleaning/i }));
+
+      // Apply in the form-mode dialog should open the confirm AlertDialog,
+      // NOT fire the PATCH.
+      const editDialog = screen.getByRole('dialog', {
+        name: /edit 137 transactions/i,
+      });
+      await user.click(
+        within(editDialog).getByRole('button', { name: /apply.*to 137/i }),
+      );
+
+      const confirm = await screen.findByRole('alertdialog');
+      expect(confirm).toBeInTheDocument();
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+
+      // Click Apply inside the confirm dialog.
+      await user.click(
+        within(confirm).getByRole('button', { name: /apply.*to 137/i }),
+      );
+
+      await waitFor(() =>
+        expect(bulkUpdateByFilter).toHaveBeenCalledTimes(1),
+      );
+      expect(bulkUpdateByFilter).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filterQuery: 'search=foo',
+          patch: expect.objectContaining({ category_id: 9 }),
+        }),
+      );
+    });
+
+    it('successful page-mode submit prunes selectedIds to the refetched ID set', async () => {
+      const user = userEvent.setup();
+      // bulkUpdate returns visibleIds: [1] — rows 2 and 3 fell out of the
+      // current filter after the patch and must be pruned from the
+      // selection. After submit, the Edit button re-reads "Edit (1)".
+      const bulkUpdate = vi
+        .fn()
+        .mockResolvedValue({ updated: 3, skipped: 0, visibleIds: [1] });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(3),
+          total: 3,
+          bulkUpdate,
+        }),
+      );
+      const { api } = await import('../api/client');
+      (api.get as ReturnType<typeof vi.fn>).mockImplementation(
+        (path: string) => {
+          if (path === 'categories') {
+            return Promise.resolve([
+              {
+                id: 7,
+                name: 'Cleaning',
+                type: 'expense',
+                icon: null,
+                sort_order: 0,
+                is_active: true,
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 3/i }));
+      await user.click(screen.getByRole('button', { name: /^edit \(3\)$/i }));
+
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+
+      const trigger = categoryTriggerInDialog();
+      await user.click(trigger);
+      await user.click(await screen.findByRole('option', { name: /cleaning/i }));
+
+      const dialog = screen.getByRole('dialog', { name: /edit 3 transactions/i });
+      await user.click(
+        within(dialog).getByRole('button', { name: /apply.*to 3/i }),
+      );
+
+      await waitFor(() => expect(bulkUpdate).toHaveBeenCalledTimes(1));
+
+      // After pruning, the Edit button should report 1 selected (only id=1
+      // remains in visibleIds), or vanish if the action bar is hidden.
+      await waitFor(() => {
+        expect(
+          screen.queryByRole('button', { name: /^edit \(3\)$/i }),
+        ).not.toBeInTheDocument();
+      });
+      expect(
+        screen.getByRole('button', { name: /^edit \(1\)$/i }),
       ).toBeInTheDocument();
     });
   });

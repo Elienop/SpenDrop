@@ -111,6 +111,14 @@ interface UseTransactionsResult {
   bulkUpdateByFilter: (
     args: BulkUpdateByFilterRequest & { filterQuery: string },
   ) => Promise<BulkUpdateResponse>;
+  /**
+   * Serialize the current filters into the same querystring shape the list
+   * endpoint uses (no pagination/sort). Exposed so the page can hand it to
+   * `bulkUpdateByFilter` without re-implementing the per-key serialization
+   * (which has subtle rules — `categoryIds` overrides `categoryId`, empty
+   * fields are omitted, etc.).
+   */
+  buildFilterQuery: () => string;
 }
 
 const defaultFilters: TransactionFilters = {
@@ -386,5 +394,6 @@ export function useTransactions(): UseTransactionsResult {
     deleteByFilter,
     bulkUpdate,
     bulkUpdateByFilter,
+    buildFilterQuery,
   };
 }
