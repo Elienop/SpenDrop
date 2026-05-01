@@ -197,9 +197,17 @@ export function BulkEditDialog({
             />
           </div>
 
-          {/* --- Tags column with mode radio above --- */}
+          {/* --- Tags column: input on the same row as the other inputs;
+               mode radio drops below so the four input controls align
+               horizontally. --- */}
           <div className="flex flex-col gap-2">
             <Label htmlFor="bulk-tags">Tags</Label>
+            <Input
+              id="bulk-tags"
+              type="text"
+              placeholder="comma,separated"
+              {...form.register('tags')}
+            />
             <Controller
               name="tagsMode"
               control={form.control}
@@ -239,12 +247,6 @@ export function BulkEditDialog({
                   </div>
                 </RadioGroup>
               )}
-            />
-            <Input
-              id="bulk-tags"
-              type="text"
-              placeholder="comma,separated"
-              {...form.register('tags')}
             />
           </div>
 
