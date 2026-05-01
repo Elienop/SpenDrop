@@ -115,6 +115,8 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/transactions/batch", h.handleBatchCreateTransactions)
 		r.Put("/transactions/bulk-rename", h.handleBulkRename)
 		r.Post("/transactions/batch-delete", h.handleBatchDeleteTransactions)
+		r.Post("/transactions/batch-update", h.handleBatchUpdateTransactions)
+		r.Post("/transactions/update-by-filter", h.handleUpdateTransactionsByFilter)
 		r.Post("/transactions/delete-by-filter", h.handleDeleteTransactionsByFilter)
 		r.Get("/transactions/suggestions", h.handleTransactionSuggestions)
 		r.Put("/transactions/{id}", h.handleUpdateTransaction)

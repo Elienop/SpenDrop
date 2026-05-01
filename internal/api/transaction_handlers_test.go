@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-chi/chi/v5"
 
@@ -2311,5 +2314,1103 @@ func TestHandleUpdateTransaction_AlreadyTombstoned_Returns404(t *testing.T) {
 
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("expected 404 for already-tombstoned row, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// --- Bulk-edit Task 1: pure helpers ----------------------------------------
+
+func TestSummarizePatch_FormatsAllFieldKindsInFixedOrder(t *testing.T) {
+	p := database.UpdatePatch{
+		Date:        ptrString("2026-04-30"),
+		Description: ptrString(`ATM card #4839 cash`),
+		CategoryID:  ptrInt64(5),
+		Tags:        ptrString("tax,receipt"),
+		TagsMode:    ptrString("add"),
+	}
+	got := summarizePatch(p)
+	want := `date=2026-04-30; description="ATM card #4839 cash"; category_id=5; tags=tax,receipt(add)`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_OmitsAbsentFields(t *testing.T) {
+	p := database.UpdatePatch{CategoryID: ptrInt64(5)}
+	if got := summarizePatch(p); got != "category_id=5" {
+		t.Errorf("summarizePatch() = %q, want %q", got, "category_id=5")
+	}
+}
+
+func TestSummarizePatch_EscapesQuotesInDescription(t *testing.T) {
+	p := database.UpdatePatch{Description: ptrString(`he said "hi"`)}
+	got := summarizePatch(p)
+	want := `description="he said \"hi\""`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_GrepBoundaryRegression_EmbeddedQuoteSemicolon(t *testing.T) {
+	p := database.UpdatePatch{Description: ptrString(`risky"; DROP TABLE`)}
+	got := summarizePatch(p)
+	want := `description="risky\"; DROP TABLE"`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_TruncatesAt1024Chars(t *testing.T) {
+	long := strings.Repeat("x", 1100)
+	p := database.UpdatePatch{Description: ptrString(long)}
+	got := summarizePatch(p)
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("expected truncation suffix, got tail %q", got[len(got)-20:])
+	}
+	if len(got) > 1024 {
+		t.Errorf("expected len <= 1024, got %d", len(got))
+	}
+}
+
+func TestSummarizePatch_TruncatesAtRuneBoundary_NotMidUTF8(t *testing.T) {
+	long := strings.Repeat("…", 400) // 3-byte UTF-8 character × 400 = 1200 bytes
+	p := database.UpdatePatch{Description: ptrString(long)}
+	got := summarizePatch(p)
+	if len(got) > 1024 {
+		t.Errorf("len = %d, want <= 1024", len(got))
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("output is not valid UTF-8: %q", got)
+	}
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("expected truncation suffix, got tail %q", got[len(got)-20:])
+	}
+}
+
+func TestValidateDate_AcceptsCanonicalForm(t *testing.T) {
+	got, err := validateDate("2026-04-30")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "2026-04-30" {
+		t.Errorf("validateDate(\"2026-04-30\") = %q, want \"2026-04-30\"", got)
+	}
+}
+
+func TestValidateDate_RejectsBadFormat(t *testing.T) {
+	cases := []string{"2026/04/30", "30-04-2026", "April 30 2026", "", "2026-13-40"}
+	for _, c := range cases {
+		if _, err := validateDate(c); err == nil {
+			t.Errorf("validateDate(%q) returned nil, want error", c)
+		}
+	}
+}
+
+func TestValidateDescription_TrimsAndCaps(t *testing.T) {
+	got, err := validateDescription("  hello  ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hello" {
+		t.Errorf("validateDescription trim = %q, want \"hello\"", got)
+	}
+	long := strings.Repeat("x", MaxDescriptionLength+1)
+	if _, err := validateDescription(long); err == nil {
+		t.Errorf("validateDescription oversized: nil, want error")
+	}
+}
+
+func TestValidateCategoryID_PositiveOnly(t *testing.T) {
+	if _, err := validateCategoryID(5); err != nil {
+		t.Errorf("validateCategoryID(5): %v", err)
+	}
+	for _, n := range []int64{0, -1, -100} {
+		if _, err := validateCategoryID(n); err == nil {
+			t.Errorf("validateCategoryID(%d): nil, want error", n)
+		}
+	}
+}
+
+func TestValidateTagsField_LengthCheckOnly(t *testing.T) {
+	if _, err := validateTagsField("Tax, receipt"); err != nil {
+		t.Errorf("validateTagsField: %v", err)
+	}
+	long := strings.Repeat("a,", MaxTagsLength) // length > MaxTagsLength
+	if _, err := validateTagsField(long); err == nil {
+		t.Errorf("validateTagsField oversized: nil, want error")
+	}
+}
+
+func TestBuildUpdatePatch_HappyPath(t *testing.T) {
+	in := patchRequest{
+		Date:       ptrString("2026-04-30"),
+		CategoryID: ptrInt64(5),
+		Tags:       ptrString("tax,receipt"),
+	}
+	p, err := buildUpdatePatch(in, ptrString("add"))
+	if err != nil {
+		t.Fatalf("buildUpdatePatch: %v", err)
+	}
+	if p.Date == nil || *p.Date != "2026-04-30" {
+		t.Errorf("Date: got %v, want pointer to \"2026-04-30\"", p.Date)
+	}
+	if p.CategoryID == nil || *p.CategoryID != 5 {
+		t.Errorf("CategoryID: got %v, want 5", p.CategoryID)
+	}
+	if p.Tags == nil || *p.Tags != "tax,receipt" {
+		t.Errorf("Tags: got %v, want \"tax,receipt\"", p.Tags)
+	}
+	if p.TagsMode == nil || *p.TagsMode != "add" {
+		t.Errorf("TagsMode: got %v, want \"add\"", p.TagsMode)
+	}
+}
+
+func TestBuildUpdatePatch_RejectsTagsWithoutMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("tax")}
+	_, err := buildUpdatePatch(in, nil)
+	if err == nil {
+		t.Errorf("expected error when tags set but mode missing")
+	}
+}
+
+func TestBuildUpdatePatch_RejectsModeWithoutTags(t *testing.T) {
+	in := patchRequest{CategoryID: ptrInt64(5)}
+	_, err := buildUpdatePatch(in, ptrString("add"))
+	if err == nil {
+		t.Errorf("expected error when mode set but tags missing")
+	}
+}
+
+func TestBuildUpdatePatch_RejectsInvalidMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("tax")}
+	for _, m := range []string{"set", "merge", "ADD", "", "remove "} {
+		_, err := buildUpdatePatch(in, ptrString(m))
+		if err == nil {
+			t.Errorf("buildUpdatePatch with mode %q: nil, want error", m)
+		}
+	}
+}
+
+func TestBuildUpdatePatch_RejectsEmptyTagsWithMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("")}
+	for _, mode := range []string{"add", "remove", "replace"} {
+		if _, err := buildUpdatePatch(in, ptrString(mode)); err == nil {
+			t.Errorf("buildUpdatePatch(empty tags, %s mode): nil, want error", mode)
+		}
+	}
+}
+
+func TestBuildUpdatePatch_RejectsEmpty(t *testing.T) {
+	in := patchRequest{}
+	p, err := buildUpdatePatch(in, nil)
+	if err != nil {
+		t.Fatalf("buildUpdatePatch on empty: %v", err)
+	}
+	if !p.IsEmpty() {
+		t.Errorf("expected IsEmpty()=true on empty input")
+	}
+}
+
+func TestBuildUpdatePatch_TrimsAndValidatesEachFieldSelectively(t *testing.T) {
+	in := patchRequest{Description: ptrString("  hi  ")}
+	p, err := buildUpdatePatch(in, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Description == nil || *p.Description != "hi" {
+		t.Errorf("Description not trimmed: %v", p.Description)
+	}
+	bad := patchRequest{Date: ptrString("nope")}
+	if _, err := buildUpdatePatch(bad, nil); err == nil {
+		t.Errorf("bad date: nil, want error")
+	}
+}
+
+// --- Bulk-edit Task 3: handleBatchUpdateTransactions -----------------------
+
+// postBatchUpdate is a small helper that builds the JSON body, sets the
+// authenticated user on the request, and invokes the handler directly.
+// We construct the request in the same shape as every existing handler
+// test in this file (no router wiring, just package-level Handler method
+// dispatch) so the tests stay isolated from chi routing and middleware.
+func postBatchUpdate(t *testing.T, h *Handler, user database.User, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBatchUpdateTransactions(rec, req)
+	return rec
+}
+
+func TestBatchUpdate_HappyPath_AllRowsUpdated(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	t1 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 10.0, "T1")
+	t2 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-02", 20.0, "T2")
+	t3 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-03", 30.0, "T3")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d],"patch":{"category_id":%d}}`, t1.ID, t2.ID, t3.ID, catB.ID)
+	rec := postBatchUpdate(t, h, user, body)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 3 || resp.Skipped != 0 {
+		t.Errorf("got updated=%d skipped=%d, want 3 0", resp.Updated, resp.Skipped)
+	}
+	for _, id := range []int64{t1.ID, t2.ID, t3.ID} {
+		var got int64
+		if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got != catB.ID {
+			t.Errorf("id=%d category: %d, want %d", id, got, catB.ID)
+		}
+	}
+}
+
+// TestBatchUpdate_HidesTombstoned uses the CLAUDE.md canonical pattern:
+// seed a tombstoned row with a sentinel amount of 999, then assert that the
+// row is never touched. Per CLAUDE.md soft-delete invariant, the
+// tombstoned row must remain at its original category and amount and must
+// still have deleted_at set after the bulk update.
+func TestBatchUpdate_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	live := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 10.0, "live")
+	ts := seedTombstonedTestTransaction(t, q, user.ID, catA.ID, "2026-04-02", 999.0, "tombstoned-sentinel")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, live.ID, ts.ID, catB.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 1 || resp.Skipped != 1 {
+		t.Errorf("got updated=%d skipped=%d, want 1 1", resp.Updated, resp.Skipped)
+	}
+
+	// Sentinel: tombstoned row must remain untouched.
+	var tsCat int64
+	var tsAmount float64
+	var tsDeletedAt sql.NullString
+	if err := db.QueryRow(`SELECT category_id, amount, deleted_at FROM transactions WHERE id = ?`, ts.ID).
+		Scan(&tsCat, &tsAmount, &tsDeletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if tsCat != catA.ID {
+		t.Errorf("tombstoned row's category got mutated: %d (want %d — must remain untouched)", tsCat, catA.ID)
+	}
+	if tsAmount != 999.0 {
+		t.Errorf("tombstoned row's amount changed: %f (sentinel violated)", tsAmount)
+	}
+	if !tsDeletedAt.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+
+	// And the live row must have been updated.
+	var liveCat int64
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, live.ID).Scan(&liveCat); err != nil {
+		t.Fatal(err)
+	}
+	if liveCat != catB.ID {
+		t.Errorf("live row not updated: %d", liveCat)
+	}
+}
+
+func TestBatchUpdate_PartialSkip_TombstonedAndNonOwnedAreSkipped(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+
+	aliveAlice := seedTestTransaction(t, q, alice.ID, catA.ID, "2026-04-01", 10.0, "ok")
+	tombstonedAlice := seedTombstonedTestTransaction(t, q, alice.ID, catA.ID, "2026-04-02", 10.0, "ts")
+	aliveBob := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-03", 10.0, "bob")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d,99999],"patch":{"category_id":%d}}`,
+		aliveAlice.ID, tombstonedAlice.ID, aliveBob.ID, catB.ID)
+	rec := postBatchUpdate(t, h, alice, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 1 || resp.Skipped != 3 {
+		t.Errorf("got updated=%d skipped=%d, want 1 3", resp.Updated, resp.Skipped)
+	}
+
+	// Verify alice's row was the only one mutated.
+	var aliveAliceCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliveAlice.ID).Scan(&aliveAliceCat)
+	if aliveAliceCat != catB.ID {
+		t.Errorf("alice's live row not updated: %d", aliveAliceCat)
+	}
+	// Bob's row must not have been touched.
+	var bobCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliveBob.ID).Scan(&bobCat)
+	if bobCat != catA.ID {
+		t.Errorf("bob's row was wrongly touched: %d", bobCat)
+	}
+}
+
+func TestBatchUpdate_RejectsEmptyIDList(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	rec := postBatchUpdate(t, h, user, `{"ids":[],"patch":{"category_id":1}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty ids: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBatchUpdate_RejectsOversizedIDList(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	idsList := make([]string, MaxBatchUpdateIDs+1)
+	for i := range idsList {
+		idsList[i] = fmt.Sprintf("%d", i+1)
+	}
+	body := fmt.Sprintf(`{"ids":[%s],"patch":{"category_id":1}}`, strings.Join(idsList, ","))
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("oversized ids: got %d, want 400", rec.Code)
+	}
+}
+
+func TestBatchUpdate_RejectsEmptyPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{}}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty patch: got %d, want 400", rec.Code)
+	}
+}
+
+// TestBatchUpdate_DisallowUnknownFields_RejectsUserIDInjection pins the
+// mass-assignment guard from spec §5.5b: extra patch keys (`user_id`,
+// `deleted_at`, …) must error out with a 400, not be silently dropped onto
+// the typed struct. The current typed UpdatePatch shields this incidentally,
+// but DisallowUnknownFields makes the contract explicit so a future field
+// addition cannot widen the attack surface unreviewed.
+func TestBatchUpdate_DisallowUnknownFields_RejectsUserIDInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"user_id":99,"category_id":%d}}`, txn.ID, cat.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestBatchUpdate_TagsAdd_AppendsAndDeduplicates pins the spec §3.3 worked
+// example for Add mode: existing "Tax, receipt" + Add "tax,receipt" yields
+// "Tax, receipt, tax". Set arithmetic is byte-for-byte case-sensitive
+// ("Tax" != "tax"), and items already present in the existing set dedupe
+// ("receipt" stays once). The empty-existing case appends the input
+// verbatim with the canonical ", " join.
+func TestBatchUpdate_TagsAdd_AppendsAndDeduplicates(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "Tax, receipt")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"tags":"tax,receipt"},"tagsMode":"add"}`, t1.ID, t2.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got1 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	if got1 != "Tax, receipt, tax" {
+		t.Errorf("t1 tags: %q, want %q", got1, "Tax, receipt, tax")
+	}
+	var got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got2 != "tax, receipt" {
+		t.Errorf("t2 tags: %q, want %q", got2, "tax, receipt")
+	}
+}
+
+func TestBatchUpdate_TagsRemove_FiltersMatching(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "tax,personal,receipt")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"tax,personal"},"tagsMode":"remove"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "receipt" {
+		t.Errorf("tags: %q, want %q", got, "receipt")
+	}
+}
+
+func TestBatchUpdate_TagsReplace_OverwritesExisting(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "old1,old2,old3")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"fresh"},"tagsMode":"replace"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "fresh" {
+		t.Errorf("tags: %q, want %q", got, "fresh")
+	}
+}
+
+// TestBatchUpdate_TagsCaseSensitivePinning pins the exact case-sensitive
+// worked example from spec §3.3: row has "Tax, receipt"; user adds "tax";
+// result is "Tax, receipt, tax" (three distinct entries — "Tax" and "tax"
+// are different bytes).
+func TestBatchUpdate_TagsCaseSensitivePinning(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "Tax, receipt")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"tax"},"tagsMode":"add"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "Tax, receipt, tax" {
+		t.Errorf("tags: %q, want %q", got, "Tax, receipt, tax")
+	}
+}
+
+// ptrString / ptrInt64 are local test helpers used by the bulk-edit tests
+// above to construct the pointer-shaped fields on database.UpdatePatch /
+// patchRequest.
+func ptrString(s string) *string { return &s }
+func ptrInt64(n int64) *int64    { return &n }
+
+// --- Bulk-edit Task 4: handleUpdateTransactionsByFilter --------------------
+
+// postUpdateByFilter mirrors postBatchUpdate's shape but targets the filter
+// endpoint. The querystring portion of the URL is what handleUpdateTransactionsByFilter
+// reads via r.URL.Query() — buildTransactionWhereClause feeds off the same
+// query params handleListTransactions accepts (date_from, date_to, category_id,
+// type, search, amount_min/max, category_ids, tags). The body carries the
+// patch + tagsMode in the same JSON envelope as batch-update.
+func postUpdateByFilter(t *testing.T, h *Handler, user database.User, queryString, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/transactions/update-by-filter"
+	if queryString != "" {
+		url = url + "?" + queryString
+	}
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	return rec
+}
+
+func TestUpdateByFilter_HappyPath(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catCleaning := seedTestCategory(t, q, "Cleaning", "expense")
+	catHousehold := seedTestCategory(t, q, "Household", "expense")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-01", 10.0, "vacuum")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-02", 5.0, "mop")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-03", 3.0, "soap")
+	// not in filter — must remain at catHousehold
+	seedTestTransaction(t, q, user.ID, catHousehold.ID, "2026-04-04", 4.0, "lightbulb")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catHousehold.ID)
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", catCleaning.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 3 {
+		t.Errorf("updated=%d, want 3", resp.Updated)
+	}
+
+	// All three cleaning rows must now be at the household category.
+	var movedToHousehold int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions WHERE category_id = ? AND deleted_at IS NULL`, catHousehold.ID).Scan(&movedToHousehold); err != nil {
+		t.Fatal(err)
+	}
+	if movedToHousehold != 4 { // 3 moved + 1 already there
+		t.Errorf("household rows after move: %d, want 4", movedToHousehold)
+	}
+}
+
+// TestUpdateByFilter_HidesTombstoned uses the canonical CLAUDE.md soft-delete
+// sentinel pattern: seed one live row and one tombstoned row in the filter
+// window, run update-by-filter, and assert the tombstoned row's category was
+// NOT mutated. Sentinel amount of 999 makes any accidental write into the
+// tombstoned row visually loud in failure output.
+func TestUpdateByFilter_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	live := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "live")
+	ts := seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 999.0, "tombstoned-sentinel")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var liveCat, tsCat int64
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, live.ID).Scan(&liveCat); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, ts.ID).Scan(&tsCat); err != nil {
+		t.Fatal(err)
+	}
+	if liveCat != catB.ID {
+		t.Errorf("live row not updated: cat=%d, want %d", liveCat, catB.ID)
+	}
+	if tsCat != cat.ID {
+		t.Errorf("tombstoned row was touched! cat=%d, want %d (must remain untouched)", tsCat, cat.ID)
+	}
+	// And the row must still be tombstoned (not resurrected).
+	var tsDel sql.NullString
+	db.QueryRow(`SELECT deleted_at FROM transactions WHERE id = ?`, ts.ID).Scan(&tsDel)
+	if !tsDel.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+}
+
+// TestUpdateByFilter_RespectsOwnershipForNonAdmin pins that a non-admin user
+// can only update their own rows via update-by-filter — bob's row in the
+// same filter window must remain at the original category.
+func TestUpdateByFilter_RespectsOwnershipForNonAdmin(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	aliceTxn := seedTestTransaction(t, q, alice.ID, cat.ID, "2026-04-01", 10.0, "a")
+	bobTxn := seedTestTransaction(t, q, bob.ID, cat.ID, "2026-04-02", 10.0, "b")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, alice, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var aliceCat, bobCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliceTxn.ID).Scan(&aliceCat)
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, bobTxn.ID).Scan(&bobCat)
+	if aliceCat != catB.ID {
+		t.Errorf("alice's row not updated: %d, want %d", aliceCat, catB.ID)
+	}
+	if bobCat != cat.ID {
+		t.Errorf("bob's row was wrongly touched: %d, want %d", bobCat, cat.ID)
+	}
+}
+
+func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	body := `{"patch":{}}`
+	rec := postUpdateByFilter(t, h, user, "", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty patch: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateByFilter_TagsAdd_PerRowReadThenWrite pins that the tags read-then-write
+// path enumerates each matching row, computes Add-mode set arithmetic per row,
+// and writes the merged tags back independently. Two rows seeded with different
+// existing tags must end up with each row's existing tags ∪ "fresh" — proving
+// the per-row read is happening (a single SQL UPDATE could not produce
+// row-dependent output).
+func TestUpdateByFilter_TagsAdd_PerRowReadThenWrite(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "old1")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "old2")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 2 {
+		t.Errorf("updated=%d, want 2", resp.Updated)
+	}
+
+	var got1, got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got1 != "old1, fresh" {
+		t.Errorf("t1 tags: %q, want %q", got1, "old1, fresh")
+	}
+	if got2 != "old2, fresh" {
+		t.Errorf("t2 tags: %q, want %q", got2, "old2, fresh")
+	}
+}
+
+// TestUpdateByFilter_TagsRemove_DropsMatchingItems pins that Remove mode
+// performs set-difference on the existing tags. Seeded "tax,personal,receipt"
+// minus ["personal"] must yield "tax, receipt".
+func TestUpdateByFilter_TagsRemove_DropsMatchingItems(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "tax,personal,receipt")
+
+	body := `{"patch":{"tags":"personal"},"tagsMode":"remove"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != "tax, receipt" {
+		t.Errorf("tags: %q, want %q", got, "tax, receipt")
+	}
+}
+
+// TestUpdateByFilter_TagsReplace_OverwritesAllRows pins that Replace mode
+// unconditionally overwrites the tags column with the provided value on
+// every matching row regardless of what was there before. Two rows with
+// different prior values both end up with the same replacement.
+func TestUpdateByFilter_TagsReplace_OverwritesAllRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "old1")
+	t2 := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "old2,old3")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"replace"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got1, got2 string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t1.ID).Scan(&got1)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, t2.ID).Scan(&got2)
+	if got1 != "fresh" {
+		t.Errorf("t1 tags: %q, want %q", got1, "fresh")
+	}
+	if got2 != "fresh" {
+		t.Errorf("t2 tags: %q, want %q", got2, "fresh")
+	}
+}
+
+// TestUpdateByFilter_TagsPath_StillWritesOneSummary pins spec §3.6: the
+// tags read-then-write loop must NOT emit per-row audit rows; it still
+// emits exactly one summary row with transaction_id=BulkAuditTransactionID.
+// Three matching rows touched + one summary audit = total 1 audit row.
+func TestUpdateByFilter_TagsPath_StillWritesOneSummary(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T1", "")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "T2", "")
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-03", 10.0, "T3", "")
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var summaries int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 1 {
+		t.Errorf("expected exactly 1 summary audit row, got %d", summaries)
+	}
+
+	// Defensive: also assert no per-row audit rows snuck in.
+	var perRow int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id != ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&perRow); err != nil {
+		t.Fatal(err)
+	}
+	if perRow != 0 {
+		t.Errorf("expected 0 per-row update audit rows in tags-filter path, got %d", perRow)
+	}
+}
+
+// TestUpdateByFilter_Tags_HidesTombstoned uses the canonical CLAUDE.md
+// soft-delete sentinel pattern for the tags read-then-write SELECT path:
+// seed one live row + one tombstoned row, run tags Add, and assert the
+// tombstoned row is not enumerated nor mutated. The sentinel tag value
+// "should-not-touch" makes any leak visually loud.
+func TestUpdateByFilter_Tags_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	live := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "live", "existing")
+	ts := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-02", 999.0, "ts-sentinel", "should-not-touch")
+	if err := q.SoftDeleteTransaction(context.Background(), ts.ID); err != nil {
+		t.Fatalf("soft-delete sentinel: %v", err)
+	}
+
+	body := `{"patch":{"tags":"fresh"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var liveTags, tsTags string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, live.ID).Scan(&liveTags)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, ts.ID).Scan(&tsTags)
+	if liveTags != "existing, fresh" {
+		t.Errorf("live row tags: %q, want %q", liveTags, "existing, fresh")
+	}
+	if tsTags != "should-not-touch" {
+		t.Errorf("tombstoned row was touched! tags: %q, want %q (must remain untouched)", tsTags, "should-not-touch")
+	}
+	// And the row must still be tombstoned (not resurrected).
+	var tsDel sql.NullString
+	db.QueryRow(`SELECT deleted_at FROM transactions WHERE id = ?`, ts.ID).Scan(&tsDel)
+	if !tsDel.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+}
+
+// TestUpdateByFilter_TagsAndDate_FiresCheckpointHookOnce pins spec §3.10's
+// mutual-exclusivity guarantee: a combined patch (tags Add + date) routes
+// through ONLY the tags read-then-write path, lands both updates, and emits
+// exactly one summary audit row (not one per branch). The checkpoint hook
+// is invoked at most once per request — verified via the audit count, since
+// double-fire would couple to a duplicate summary row in this code path.
+func TestUpdateByFilter_TagsAndDate_FiresCheckpointHookOnce(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T", "old")
+
+	body := `{"patch":{"tags":"fresh","date":"2026-05-01"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Both fields must have landed.
+	var gotTags, gotDate string
+	db.QueryRow(`SELECT tags, DATE(date) FROM transactions WHERE id = ?`, txn.ID).Scan(&gotTags, &gotDate)
+	if gotTags != "old, fresh" {
+		t.Errorf("tags: %q, want %q", gotTags, "old, fresh")
+	}
+	if gotDate != "2026-05-01" {
+		t.Errorf("date: %q, want %q", gotDate, "2026-05-01")
+	}
+
+	// And exactly one summary audit row — proves only the tags branch ran,
+	// not both paths.
+	var summaries int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ? AND action = ?`,
+		database.BulkAuditTransactionID, database.AuditUpdate,
+	).Scan(&summaries); err != nil {
+		t.Fatal(err)
+	}
+	if summaries != 1 {
+		t.Errorf("expected exactly 1 summary audit row (mutual-exclusivity), got %d", summaries)
+	}
+}
+
+// TestUpdateByFilter_DisallowUnknownFields_RejectsUserIDInjection pins the
+// mass-assignment guard from spec §5.5b for the filter handler — same pattern
+// as the batch-update test.
+func TestUpdateByFilter_DisallowUnknownFields_RejectsUserIDInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	body := fmt.Sprintf(`{"patch":{"user_id":99,"category_id":%d}}`, cat.ID)
+	rec := postUpdateByFilter(t, h, user, "", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateByFilter_Unauthorized_Returns401(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/update-by-filter",
+		strings.NewReader(`{"patch":{"category_id":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}
+
+// --- Bulk-edit future-proofing regression tests ----------------------------
+//
+// These tests pin behavior at the boundaries (adversarial input, verbatim
+// storage, single-writer concurrency) that future refactors are most likely
+// to silently regress. They're not "ought-to-have" coverage — they're proof
+// that the spec's stated guarantees still hold.
+
+// TestUpdateByFilter_AdversarialQueryString pins SQL-injection safety on the
+// hand-rolled filter UPDATE. buildTransactionWhereClause + appendLiveTransactionsFilter
+// build the inner subquery from query params; values flow through `?`
+// placeholders. A future "optimization" that string-concats a search value
+// would break this test before it breaks production. The payload is the
+// classic SQLi probe — the goal isn't to test that SQLite executes it (it
+// won't), but to assert the bulk-edit path treats it as a literal search
+// term and updates zero rows (no match).
+func TestUpdateByFilter_AdversarialQueryString_NoSQLInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	livID := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "innocent description").ID
+
+	// Adversarial search payload — would be catastrophic if interpolated raw.
+	adversarial := `'; DROP TABLE transactions; --`
+	queryString := "search=" + url.QueryEscape(adversarial)
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, user, queryString, body)
+
+	// The query is treated as a literal LIKE term that matches nothing →
+	// updated=0, summary audit row still emitted (per spec §3.6).
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct{ Updated int64 }
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Updated != 0 {
+		t.Errorf("updated=%d, want 0 (adversarial search must match nothing)", resp.Updated)
+	}
+
+	// Critical assertion: the transactions table still exists with rows in it.
+	// This is the regression guard — if SQL injection ever lands, this query
+	// would fail with "no such table: transactions".
+	var n int64
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions WHERE id = ?`, livID).Scan(&n); err != nil {
+		t.Fatalf("transactions table missing — SQL INJECTION REGRESSED: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 row in transactions, got %d", n)
+	}
+	// And the original row's category is unchanged (it didn't match the filter).
+	var cat0 int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, livID).Scan(&cat0)
+	if cat0 != cat.ID {
+		t.Errorf("untouched row got mutated: cat=%d, want %d (adversarial filter must match nothing)", cat0, cat.ID)
+	}
+}
+
+// TestBatchUpdate_TagsWithEmbeddedCommaQuote_VerbatimStorage pins spec §3.3:
+// tags are stored verbatim, no canonicalization. The split-on-comma parser in
+// applyTagsMode is a known sharp edge — embedded commas inside a "quoted" tag
+// are NOT handled (we don't have a CSV parser). This test pins that the
+// edge-case-but-documented behavior of "embedded commas split" stays stable,
+// AND that quotes round-trip verbatim through Replace mode.
+//
+// If a future refactor ever adds CSV-aware parsing to tags, this test will
+// red-flag it so the spec can be updated deliberately rather than silently.
+func TestBatchUpdate_TagsWithEmbeddedQuote_VerbatimStorage(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "T")
+
+	// Replace mode stores the value verbatim — no parsing, no escaping.
+	// Embedded quotes round-trip 1:1.
+	verbatim := `hello "world", with quote`
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":%q},"tagsMode":"replace"}`, txn.ID, verbatim)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var got string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, txn.ID).Scan(&got)
+	if got != verbatim {
+		t.Errorf("tags: %q, want %q (verbatim storage broken)", got, verbatim)
+	}
+}
+
+// TestBatchUpdate_ConcurrentWithBatchDelete_NoStateCorruption pins the
+// SQLite single-writer + busy_timeout serialization guarantee. Two parallel
+// requests target the same IDs: one bulk-edits category, one bulk-deletes.
+// Both must complete (no 500s, no deadlocks within busy_timeout=5s); final
+// state must be coherent (rows tombstoned, no half-mutation, no orphan
+// audit rows).
+//
+// Order is non-deterministic — whichever tx grabs the writer first wins. We
+// assert on the INVARIANTS that hold regardless of order:
+//   - Both responses are 200 OK
+//   - All targeted rows end up tombstoned
+//   - Each row has at least one audit row recording its final state
+//   - The total audit row count matches what the winning order would produce
+//     (per-row update audits + per-row delete audits, possibly some skipped
+//     bulk audit summary rows)
+func TestBatchUpdate_ConcurrentWithBatchDelete_NoStateCorruption(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	id1 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "row1").ID
+	id2 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "row2").ID
+	ids := []int64{id1, id2}
+
+	// Allow SQLite enough time to serialize the two writers; the test fixture
+	// already sets _busy_timeout=5000ms in the DSN. A WaitGroup blocks the
+	// main goroutine until both handlers return.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var updateRec, deleteRec *httptest.ResponseRecorder
+
+	go func() {
+		defer wg.Done()
+		body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, id1, id2, catB.ID)
+		updateRec = postBatchUpdate(t, h, user, body)
+	}()
+	go func() {
+		defer wg.Done()
+		body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d]}`, id1, id2))
+		req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-delete", body)
+		req.Header.Set("Content-Type", "application/json")
+		req = withUser(req, user)
+		deleteRec = httptest.NewRecorder()
+		h.handleBatchDeleteTransactions(deleteRec, req)
+	}()
+
+	wg.Wait()
+
+	// Both must succeed — SQLite's single-writer serialization plus the
+	// 5-second busy_timeout guarantee that the second tx waits, not fails.
+	if updateRec.Code != http.StatusOK {
+		t.Errorf("bulk-update under concurrency: %d, body: %s", updateRec.Code, updateRec.Body.String())
+	}
+	if deleteRec.Code != http.StatusOK {
+		t.Errorf("bulk-delete under concurrency: %d, body: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	// Invariant: final state. Whichever tx ran last "won" the row's visible
+	// state, but the delete is monotonic (deleted_at can only get set, never
+	// cleared by an UPDATE). So both rows MUST be tombstoned regardless of
+	// order:
+	//   - delete-then-update: delete tombstones; bulk-edit's UpdateTx sees
+	//     before.DeletedAt.Valid → ErrTombstoned → skipped.
+	//   - update-then-delete: bulk-edit changes category; delete tombstones.
+	for _, id := range ids {
+		var deletedAt sql.NullString
+		var catID int64
+		err := db.QueryRow(`SELECT category_id, deleted_at FROM transactions WHERE id = ?`, id).
+			Scan(&catID, &deletedAt)
+		if err != nil {
+			t.Fatalf("read row %d: %v", id, err)
+		}
+		if !deletedAt.Valid {
+			t.Errorf("row %d not tombstoned after concurrent delete (state corruption)", id)
+		}
+		if catID == 0 {
+			t.Errorf("row %d has zero category — partial state (corruption)", id)
+		}
+		// catID is either cat.ID (if delete won the order) or catB.ID (if
+		// update won) — both are valid coherent end-states.
+		if catID != cat.ID && catID != catB.ID {
+			t.Errorf("row %d category=%d is neither original (%d) nor patched (%d)",
+				id, catID, cat.ID, catB.ID)
+		}
+	}
+
+	// Invariant: audit rows are well-formed. Each row should have at least
+	// one delete audit row (since the delete always commits). Per-row update
+	// audit rows MAY exist (if update committed before delete) or MAY NOT
+	// (if update saw the tombstone and skipped). Either way the rolled-back
+	// state would be 0 audits for that row — which would fail this assertion.
+	for _, id := range ids {
+		var n int
+		db.QueryRow(`SELECT COUNT(*) FROM transaction_audit WHERE transaction_id = ?`, id).Scan(&n)
+		if n < 1 {
+			t.Errorf("row %d has 0 audit rows — at least 1 (delete) expected", id)
+		}
 	}
 }

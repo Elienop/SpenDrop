@@ -24,9 +24,22 @@ Real-time financial overview with KPI cards (total balance, income, expenses, sa
 
 ### Transaction Management
 
-Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
+Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete and bulk edit, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
 
 ![Transactions](docs/screenshots/02-transactions.png)
+
+### Bulk-edit
+
+Select multiple transactions (via checkboxes or the "Select all N matching" banner) and click **Edit (N)** in the selection action bar. The dialog lets you change Date, Description, Category, or Tags across every selected row in one round-trip.
+
+- Each field defaults to "no change". Only fields you explicitly modify are sent to the server.
+- Tags support **Add**, **Remove**, and **Replace** modes via a radio group above the tag input. Tag matching is byte-for-byte case-sensitive (e.g. `Tax` and `tax` are different).
+- **Page mode** (visible-page IDs only) fires immediately. **All-matching mode** (everything matching the current filter) opens a confirmation step listing the changes before submitting.
+- Selection is pruned after submit: rows that the edit kicks off the current filter naturally drop out of the selection. A toast tells you when this happens.
+
+API endpoints:
+- `POST /api/transactions/batch-update` — body `{ ids, patch, tagsMode? }`
+- `POST /api/transactions/update-by-filter?<querystring>` — body `{ patch, tagsMode? }`
 
 ### Multi-currency transactions
 
@@ -84,7 +97,7 @@ Simple username/password auth with bcrypt hashing and HTTP-only session cookies.
 - **Collapsible sidebar** with pin toggle, state persisted in localStorage
 - **Responsive layout** with max-width 1400px for wide-screen readability
 - **Saved filters** -- save and recall transaction filter presets
-- **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete
+- **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete or bulk field edit
 - **Find and replace** -- search transactions and replace descriptions in bulk
 - **Excel export** -- export all transactions, or by month/year, as `.xlsx` files
 
@@ -450,9 +463,9 @@ To restore from a migration snapshot, follow the same restore drill above but wi
 
 #### Mutation audit log
 
-Every change to a transaction — create, update, delete, batch create, batch delete, bulk rename, delete-by-filter — writes an append-only row to the `transaction_audit` table **in the same SQL transaction as the mutation**. The audit row exists if and only if the mutation committed: a rollback of either rolls back both. This means you always have a record of *who changed what, and when*, even if the row itself is later hard-deleted.
+Every change to a transaction — create, update, delete, batch create, batch delete, bulk rename, delete-by-filter, batch-update, update-by-filter — writes an append-only row to the `transaction_audit` table **in the same SQL transaction as the mutation**. The audit row exists if and only if the mutation committed: a rollback of either rolls back both. This means you always have a record of *who changed what, and when*, even if the row itself is later hard-deleted.
 
-The table stores the action (`insert` / `update` / `delete`), the acting user (`actor_user_id`, which is `ON DELETE SET NULL` so history outlives the account), the timestamp, and JSON blobs of the row state before and after the mutation. Single-row operations get one audit row per transaction touched. **Bulk operations get a single summary row** with `transaction_id = 0` and a payload like `{"bulk":true,"count":142,"filter":"..."}` — per-row diffs for an endpoint that can rename tens of thousands of rows in a single call would balloon the audit table and slow the operation the endpoint exists to serve.
+The table stores the action (`insert` / `update` / `delete`), the acting user (`actor_user_id`, which is `ON DELETE SET NULL` so history outlives the account), the timestamp, and JSON blobs of the row state before and after the mutation. Single-row operations get one audit row per transaction touched. **ID-list bulk operations** (`batch-delete`, `batch-update`) get one audit row per row touched plus a summary row when any IDs were skipped. **Filter-scoped bulk operations** (`delete-by-filter`, `update-by-filter`, `bulk-rename`) get a single summary row with `transaction_id = 0` and a payload like `{"bulk":true,"count":142,"filter":"..."}` — per-row diffs for an endpoint that can rename tens of thousands of rows in a single call would balloon the audit table and slow the operation the endpoint exists to serve.
 
 > The audit log is a **CLI-only operator tool**, not a user-facing feature. There is no REST endpoint that returns audit rows, no UI to browse them, and no per-user authorization check. Read access is via `docker exec` into the container — treat it like a database log, not like a timeline.
 
@@ -627,6 +640,8 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/batch` | Batch create transactions |
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
+| POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/non-owned/missing IDs skipped. Capped at 500 IDs. |
+| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
 | PUT | `/api/transactions/{id}` | Update a transaction |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 

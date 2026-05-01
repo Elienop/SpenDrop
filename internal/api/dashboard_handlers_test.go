@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 )
@@ -314,10 +315,13 @@ func TestHandleDashboardTrend_CustomMonths(t *testing.T) {
 
 func TestHandleDashboardTrend_IncludesTotals(t *testing.T) {
 	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
+	// Pin "now" to April 15, 2026 so the ?months=1 trend window covers the
+	// April-dated rows below regardless of the wall clock at test time.
+	// See helpers.go:38 for the fixedClock pattern.
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)})
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Seed transactions for the current month
+	// Seed transactions for the current month (anchored at April via fixedClock)
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 100.0, "Expense")
 	seedTestTransaction(t, q, user.ID, 15, "2026-04-01", 3000.0, "Income")
 
@@ -553,7 +557,10 @@ func TestHandleDashboardCategories_HidesTombstoned(t *testing.T) {
 
 func TestHandleDashboardTrend_HidesTombstoned(t *testing.T) {
 	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
+	// Pin "now" to April 15, 2026 so the ?months=1 trend window covers the
+	// April-dated rows below regardless of the wall clock at test time.
+	// See helpers.go:38 for the fixedClock pattern.
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)})
 	user := seedTestUser(t, q, "alice", "member")
 
 	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 100.0, "live")

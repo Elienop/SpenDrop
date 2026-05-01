@@ -8,6 +8,7 @@ import {
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  Pencil,
   Replace,
   Trash2,
   X,
@@ -18,6 +19,10 @@ import type { Category, SavedFilter } from '../api/types';
 import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { SortColumn } from '../hooks/useTransactions';
+import { RefetchAfterMutationError } from '../hooks/useTransactions';
+import { BulkEditDialog } from './Transactions.BulkEditDialog';
+import { BulkEditConfirmDialog } from './Transactions.BulkEditConfirmDialog';
+import type { ComputedPatchResult } from './Transactions.computePatch';
 import { useSavedFilters } from '../hooks/useSavedFilters';
 import { useSuggestions } from '../hooks/useSuggestions';
 import { TransactionToolbar } from '../components/TransactionToolbar';
@@ -349,6 +354,9 @@ export function Transactions() {
     updateTransaction,
     deleteTransaction,
     deleteByFilter,
+    bulkUpdate,
+    bulkUpdateByFilter,
+    buildFilterQuery,
     refetch,
   } = useTransactions();
 
@@ -373,6 +381,13 @@ export function Transactions() {
   // Per-page batch delete is treated as low-risk (user clicked each row),
   // but the filter-based path can wipe out 10k+ rows — always confirm.
   const [confirmAllMatchingOpen, setConfirmAllMatchingOpen] = useState(false);
+  // Bulk-edit dialog state. `bulkConfirm` holds the computed patch while we
+  // route the all-matching scope through the AlertDialog confirmation step
+  // (spec §3.4); page-mode skips this and dispatches immediately.
+  const [bulkEditOpen, setBulkEditOpen] = useState(false);
+  const [bulkConfirm, setBulkConfirm] = useState<ComputedPatchResult | null>(
+    null,
+  );
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
 
@@ -505,6 +520,77 @@ export function Transactions() {
     }
     void executeBulkDelete();
   }, [selectionCount, selectionScope, executeBulkDelete]);
+
+  // dispatchBulkEdit fires the actual PATCH and reconciles client state
+  // (selection prune, toast copy, dialog close). Per spec §3.5:
+  //   - Page mode echoes back `visibleIds`; we intersect `selectedIds`
+  //     with that set so rows kicked off the current filter drop out of
+  //     the selection silently. The toast names that drop count when it
+  //     happens so the user understands why their selection shrank.
+  //   - Filter mode skips the prune (scope is filter-defined; refetch
+  //     auto-corrects it) and clears selection wholesale.
+  // RefetchAfterMutationError gets a differentiated toast so the user
+  // knows the mutation landed even though the view is stale.
+  const dispatchBulkEdit = useCallback(
+    async (p: ComputedPatchResult) => {
+      const isFilterMode = selectionScope === 'all-matching';
+      try {
+        if (isFilterMode) {
+          const filterQuery = buildFilterQuery();
+          const { updated } = await bulkUpdateByFilter({ filterQuery, ...p });
+          const noun = (n: number) =>
+            `${n} transaction${n === 1 ? '' : 's'}`;
+          toast.success(`Updated ${noun(updated)}`);
+          handleClearSelection();
+        } else {
+          const { updated, skipped, visibleIds } = await bulkUpdate({
+            ids: [...selectedIds],
+            ...p,
+          });
+          const visible = new Set(visibleIds);
+          const prevSize = selectedIds.size;
+          const newSelection = new Set(
+            [...selectedIds].filter((id) => visible.has(id)),
+          );
+          setSelectedIds(newSelection);
+          const dropped = prevSize - newSelection.size;
+          const noun = (n: number) =>
+            `${n} transaction${n === 1 ? '' : 's'}`;
+          const head =
+            updated === 0 && skipped && skipped > 0
+              ? `No matches updated; skipped ${noun(skipped)}`
+              : `Updated ${noun(updated)}${skipped ? `, skipped ${skipped}` : ''}`;
+          const tail =
+            dropped > 0
+              ? ' (selection cleared — rows no longer match the current filter)'
+              : '';
+          toast.success(head + tail);
+        }
+        setBulkEditOpen(false);
+        setBulkConfirm(null);
+      } catch (err) {
+        if (err instanceof RefetchAfterMutationError) {
+          toast.error(
+            `Update applied, but refresh failed — please reload to see the latest. (${err.message})`,
+          );
+        } else {
+          toast.error(
+            `Update failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        // Dialog stays open on failure so the user can retry without
+        // re-entering their patch.
+      }
+    },
+    [
+      selectionScope,
+      selectedIds,
+      buildFilterQuery,
+      bulkUpdate,
+      bulkUpdateByFilter,
+      handleClearSelection,
+    ],
+  );
 
   const {
     savedFilters,
@@ -764,6 +850,16 @@ export function Transactions() {
                 </span>
                 <Button
                   type="button"
+                  size="sm"
+                  className="h-8 gap-1.5 text-xs"
+                  onClick={() => setBulkEditOpen(true)}
+                  disabled={deleting}
+                >
+                  <Pencil className="size-3.5" />
+                  Edit ({selectionCount})
+                </Button>
+                <Button
+                  type="button"
                   variant="destructive"
                   size="sm"
                   className="h-8 gap-1.5 text-xs"
@@ -933,6 +1029,42 @@ export function Transactions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/*
+        Bulk-edit dialog. Page mode dispatches the PATCH directly. All-
+        matching mode stages the patch into `bulkConfirm`, which renders a
+        BulkEditConfirmDialog summarizing the changes before firing — per
+        spec §3.4 the filter-defined scope is large and irrecoverable
+        enough to deserve a confirmation step.
+      */}
+      <BulkEditDialog
+        open={bulkEditOpen}
+        onClose={() => setBulkEditOpen(false)}
+        count={selectionCount}
+        categories={categories}
+        onSubmit={(p) => {
+          if (selectionScope === 'all-matching') {
+            setBulkConfirm(p);
+          } else {
+            void dispatchBulkEdit(p);
+          }
+        }}
+      />
+
+      {bulkConfirm && (
+        <BulkEditConfirmDialog
+          open={true}
+          onCancel={() => setBulkConfirm(null)}
+          onConfirm={() => {
+            void dispatchBulkEdit(bulkConfirm);
+          }}
+          count={selectionCount}
+          patch={bulkConfirm}
+          categoryName={(id) =>
+            categories.find((c) => c.id === id)?.name ?? ''
+          }
+        />
+      )}
     </div>
   );
 }

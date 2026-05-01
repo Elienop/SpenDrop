@@ -4,7 +4,22 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"time"
+)
+
+// Sentinel errors returned by TransactionStore.UpdateTx so a batch caller can
+// distinguish skip-OK conditions (not found, tombstoned, owned by someone
+// else) from hard errors that must roll back the entire batch. Handlers use
+// errors.Is to map these to per-row "skipped" counts vs. an HTTP 500.
+//
+// These mirror the placement of ErrTokenNotFound in store_api_token.go: same
+// package, exported, callers reach them as database.ErrTombstoned etc.
+var (
+	ErrTombstoned = errors.New("transaction is tombstoned")
+	ErrNotOwned   = errors.New("transaction is not owned by the actor")
+	ErrNotFound   = errors.New("transaction not found")
 )
 
 // Audit actions recorded by TransactionStore. These string literals MUST
@@ -112,6 +127,116 @@ func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTr
 		}
 		return writeUpdateAudit(ctx, qtx, actorID, p.ID, before, after)
 	})
+}
+
+// UpdateTx applies a partial-field update to a single transaction inside a
+// caller-owned *sql.Tx. The handler holds the tx so it can drive a multi-row
+// batch under one transactional boundary: if any row in the batch returns a
+// hard error, the deferred Rollback reverts every successful update + audit
+// row that came earlier in the same loop.
+//
+// Returns sentinel errors (ErrNotFound, ErrTombstoned, ErrNotOwned) for the
+// three skip-OK conditions so the caller can decide whether to skip-and-
+// continue or roll back. Anything else is wrapped with fmt.Errorf and is a
+// hard error.
+//
+// Per-row audit row is written via writeUpdateAudit inside this same tx —
+// the handler does not write audit separately. If UpdateTx returns nil
+// (success), the audit row is committed alongside the data update; if it
+// returns any error, both are rolled back together.
+//
+// Admin-bypass is a HANDLER concern. The store enforces strict ownership;
+// the handler does not pass admin sentinels through this surface. The v1
+// batch-update path does not support cross-user admin mutation; admins use
+// the single-row endpoint for that.
+func (s *TransactionStore) UpdateTx(
+	ctx context.Context,
+	tx *sql.Tx,
+	actorUserID int64,
+	id int64,
+	patch UpdatePatch,
+) (before, after GetTransactionByIDRow, err error) {
+	qtx := s.q.WithTx(tx)
+
+	before, err = qtx.GetTransactionByID(ctx, id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return before, after, ErrNotFound
+	}
+	if err != nil {
+		return before, after, fmt.Errorf("load before: %w", err)
+	}
+	if before.DeletedAt.Valid {
+		return before, after, ErrTombstoned
+	}
+	if before.UserID != actorUserID {
+		return before, after, ErrNotOwned
+	}
+
+	// Merge patch onto the existing row → UpdateTransactionParams (full-
+	// replace shape). Every field on UpdateTransactionParams is copied from
+	// `before` first so unset patch fields cannot zero-wipe the row; only
+	// the explicitly-set patch fields override the snapshot.
+	//
+	// CRITICAL: Date in UpdateTransactionParams is time.Time. The patch's
+	// *string Date is parsed via time.Parse("2006-01-02", …); validateDate
+	// (Task 1, in the api layer) already enforces the format at the handler
+	// boundary, so a parse error here is "should never happen" but is still
+	// surfaced as a wrapped error so the caller's tx rolls back.
+	//
+	// Amount / AmountCents / OriginalAmount / OriginalAmountCents /
+	// OriginalCurrency are copied through unchanged because the v1 batch-
+	// update patch deliberately does not expose them — bulk amount edits
+	// would require currency conversion and cents recomputation that the
+	// patch shape does not carry. content_hash is intentionally NOT
+	// rewritten here (UpdateTransaction itself does not touch it; see
+	// queries.sql.go:2067 — Phase 3.4 contract).
+	params := UpdateTransactionParams{
+		ID:                  id,
+		Date:                before.Date,
+		Amount:              before.Amount,
+		AmountCents:         before.AmountCents,
+		OriginalAmount:      before.OriginalAmount,
+		OriginalAmountCents: before.OriginalAmountCents,
+		OriginalCurrency:    before.OriginalCurrency,
+		Description:         before.Description,
+		CategoryID:          before.CategoryID,
+		Tags:                before.Tags,
+		Notes:               before.Notes,
+	}
+	if patch.Date != nil {
+		d, perr := time.Parse("2006-01-02", *patch.Date)
+		if perr != nil {
+			return before, after, fmt.Errorf("invalid date in patch (validateDate should have caught this): %w", perr)
+		}
+		params.Date = d
+	}
+	if patch.Description != nil {
+		params.Description = *patch.Description
+	}
+	if patch.CategoryID != nil {
+		params.CategoryID = *patch.CategoryID
+	}
+	if patch.Tags != nil {
+		// The handler computes the per-row "merged" tags string via
+		// applyTagsMode (Add / Remove / Replace set arithmetic) BEFORE
+		// calling UpdateTx. Here we just assign — the store stays dumb
+		// about set arithmetic. An empty string maps to NULL via Valid:false,
+		// matching the column's nullable contract.
+		params.Tags = sql.NullString{String: *patch.Tags, Valid: *patch.Tags != ""}
+	}
+
+	if err := qtx.UpdateTransaction(ctx, params); err != nil {
+		return before, after, fmt.Errorf("update transaction: %w", err)
+	}
+
+	after, err = qtx.GetTransactionByID(ctx, id)
+	if err != nil {
+		return before, after, fmt.Errorf("load after: %w", err)
+	}
+	if err := writeUpdateAudit(ctx, qtx, actorUserID, id, before, after); err != nil {
+		return before, after, fmt.Errorf("write audit: %w", err)
+	}
+	return before, after, nil
 }
 
 // Delete soft-deletes a transaction: it loads the live row, flips
@@ -281,6 +406,25 @@ func (s *TransactionStore) Purge(ctx context.Context, id int64) error {
 type BulkAuditSummary struct {
 	Count  int64
 	Filter string
+}
+
+// UpdatePatch is the bulk-edit patch shape consumed by TransactionStore.UpdateTx.
+// Pointer fields mean "unset = do not touch" (matching JSON-omitempty
+// semantics on the wire). Both batch-update and update-by-filter use this
+// struct; the api-layer patchRequest is the wire-format shape that
+// buildUpdatePatch lifts into UpdatePatch.
+type UpdatePatch struct {
+	Date        *string
+	Description *string
+	CategoryID  *int64
+	Tags        *string
+	TagsMode    *string // required iff Tags != nil ("add" / "remove" / "replace")
+}
+
+// IsEmpty reports whether the patch carries no field changes. Used as the
+// final "is the request actually doing anything?" gate before we dispatch.
+func (p UpdatePatch) IsEmpty() bool {
+	return p.Date == nil && p.Description == nil && p.CategoryID == nil && p.Tags == nil
 }
 
 // RecordBulkTx writes exactly one summary audit row for a bulk mutation

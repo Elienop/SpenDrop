@@ -680,3 +680,238 @@ func TestAudit_StoreCreate_CoCommitsDataAndAudit(t *testing.T) {
 		t.Errorf("action=%q, want insert", rows[0].Action)
 	}
 }
+
+// --- Bulk-edit Task 3 audit invariants -------------------------------------
+
+func TestAudit_BatchUpdate_WritesUpdateRowPerID_WithBeforeAndAfter(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	t1 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 10.0, "X")
+	t2 := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-02", 10.0, "Y")
+
+	body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, t1.ID, t2.ID, catB.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBatchUpdateTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch update: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var perRow []auditRowForAssert
+	for _, r := range rows {
+		if r.Action == database.AuditUpdate && r.TransactionID != database.BulkAuditTransactionID {
+			perRow = append(perRow, r)
+		}
+	}
+	if len(perRow) != 2 {
+		t.Fatalf("expected 2 per-row update audit rows, got %d (all rows: %d)", len(perRow), len(rows))
+	}
+	for _, r := range perRow {
+		if r.Before == nil {
+			t.Errorf("audit row id=%d missing before_json", r.TransactionID)
+		}
+		if r.After == nil {
+			t.Errorf("audit row id=%d missing after_json", r.TransactionID)
+		}
+	}
+	assertAllActorsEqual(t, perRow, user.ID)
+}
+
+func TestAudit_BatchUpdate_WithSkips_WritesSummaryRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "X")
+
+	body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,99999],"patch":{"category_id":%d}}`, t1.ID, cat.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBatchUpdateTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch update: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var summary []auditRowForAssert
+	for _, r := range rows {
+		if r.TransactionID == database.BulkAuditTransactionID && r.Action == database.AuditUpdate {
+			summary = append(summary, r)
+		}
+	}
+	if len(summary) != 1 {
+		t.Fatalf("expected 1 summary row, got %d (all rows: %d)", len(summary), len(rows))
+	}
+	if filter, _ := summary[0].Before["filter"].(string); !strings.Contains(filter, "skipped_during_batch_update:1_of_2") {
+		t.Errorf("summary filter: %q, want it to contain skipped_during_batch_update:1_of_2", filter)
+	}
+}
+
+// TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows triggers a mid-batch
+// FK violation (category 99999 doesn't exist) and asserts the entire
+// transaction rolls back: no data rows are mutated and no audit rows
+// (per-row or summary) are committed.
+//
+// PRECONDITION: SQLite's `PRAGMA foreign_keys = ON` must be enabled on the
+// connection — without it, an UPDATE that points at a nonexistent
+// category silently succeeds (orphan FK), the test passes for the wrong
+// reason, and the rollback invariant is unenforced. The api package's
+// setupTestDB DSN does NOT include `_foreign_keys=on`, so this test
+// enables FKs explicitly via PRAGMA, then verifies the readback. This
+// matches the pattern already established by
+// TestHandleDeleteCategory_WithTransactions_Returns409 in
+// category_handlers_test.go.
+func TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		t.Fatalf("enable foreign keys: %v", err)
+	}
+	var fkOn int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fkOn); err != nil || fkOn != 1 {
+		t.Fatalf("FK enforcement is OFF (got %d) — rollback test would pass for the wrong reason", fkOn)
+	}
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	t1 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "X")
+	t2 := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 10.0, "Y")
+
+	auditsBefore := countAuditRows(t, db)
+	var c1Before, c2Before int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, t1.ID).Scan(&c1Before)
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, t2.ID).Scan(&c2Before)
+
+	// Poisoned patch: category 99999 doesn't exist → FK violation on UPDATE.
+	body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":99999}}`, t1.ID, t2.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", body)
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleBatchUpdateTransactions(rec, req)
+	if rec.Code == http.StatusOK {
+		t.Fatalf("expected non-200 on FK violation, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Both rows must be unchanged.
+	var c1After, c2After int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, t1.ID).Scan(&c1After)
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, t2.ID).Scan(&c2After)
+	if c1After != c1Before {
+		t.Errorf("id=%d mutated despite rollback: was %d, got %d", t1.ID, c1Before, c1After)
+	}
+	if c2After != c2Before {
+		t.Errorf("id=%d mutated despite rollback: was %d, got %d", t2.ID, c2Before, c2After)
+	}
+
+	// No new audit rows committed.
+	auditsAfter := countAuditRows(t, db)
+	if auditsAfter != auditsBefore {
+		t.Errorf("expected zero new audit rows after rollback, got %d new (before=%d after=%d)",
+			auditsAfter-auditsBefore, auditsBefore, auditsAfter)
+	}
+}
+
+// --- Bulk-edit Task 4 audit invariants -------------------------------------
+
+// TestAudit_UpdateByFilter_WritesOneSummaryRow_WithFilterAndPatch pins spec
+// §5.4: update-by-filter emits exactly one summary audit row with
+// transaction_id = BulkAuditTransactionID, action='update', and a
+// before_json filter string that captures BOTH the original querystring
+// and the patch summary (so an operator replaying the audit log can
+// reconstruct the user's intent without needing a separate column).
+func TestAudit_UpdateByFilter_WritesOneSummaryRow_WithFilterAndPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "X")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	url := fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", cat.ID)
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var summaries []auditRowForAssert
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			summaries = append(summaries, a)
+		}
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected exactly 1 summary row, got %d (all rows: %d)", len(summaries), len(rows))
+	}
+	r := summaries[0]
+	if r.Before == nil {
+		t.Fatalf("summary row should carry before_json with bulk metadata")
+	}
+	if r.Before["bulk"] != true {
+		t.Errorf("before.bulk=%v, want true", r.Before["bulk"])
+	}
+	filter, _ := r.Before["filter"].(string)
+	if !strings.Contains(filter, fmt.Sprintf("category_id=%d", cat.ID)) {
+		t.Errorf("before.filter=%q should include the original querystring (category_id=%d)", filter, cat.ID)
+	}
+	if !strings.Contains(filter, fmt.Sprintf("category_id=%d", catB.ID)) {
+		t.Errorf("before.filter=%q should include the patch summary (category_id=%d)", filter, catB.ID)
+	}
+	assertAllActorsEqual(t, summaries, user.ID)
+}
+
+// TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary pins spec §5.4:
+// the summary row is emitted **unconditionally**, even when the filter
+// matched zero rows. The audit table records the user's *attempt* against
+// filter X, not just successful work — same precedent as
+// handleBulkRename's zero-match behaviour and handleDeleteTransactionsByFilter.
+func TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	// No transactions seeded — filter matches zero rows.
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	url := "/api/transactions/update-by-filter?search=nomatch"
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var count int
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("zero-match should still emit summary; got %d summary audit rows (all rows: %d)", count, len(rows))
+	}
+	// And the count in the summary must be zero, not the seed count.
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			if got := a.Before["count"].(float64); got != 0 {
+				t.Errorf("zero-match summary count=%v, want 0", got)
+			}
+		}
+	}
+}
