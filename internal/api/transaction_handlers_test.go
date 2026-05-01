@@ -2834,3 +2834,190 @@ func TestBatchUpdate_TagsCaseSensitivePinning(t *testing.T) {
 // patchRequest.
 func ptrString(s string) *string { return &s }
 func ptrInt64(n int64) *int64    { return &n }
+
+// --- Bulk-edit Task 4: handleUpdateTransactionsByFilter --------------------
+
+// postUpdateByFilter mirrors postBatchUpdate's shape but targets the filter
+// endpoint. The querystring portion of the URL is what handleUpdateTransactionsByFilter
+// reads via r.URL.Query() — buildTransactionWhereClause feeds off the same
+// query params handleListTransactions accepts (date_from, date_to, category_id,
+// type, search, amount_min/max, category_ids, tags). The body carries the
+// patch + tagsMode in the same JSON envelope as batch-update.
+func postUpdateByFilter(t *testing.T, h *Handler, user database.User, queryString, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	url := "/api/transactions/update-by-filter"
+	if queryString != "" {
+		url = url + "?" + queryString
+	}
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	return rec
+}
+
+func TestUpdateByFilter_HappyPath(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catCleaning := seedTestCategory(t, q, "Cleaning", "expense")
+	catHousehold := seedTestCategory(t, q, "Household", "expense")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-01", 10.0, "vacuum")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-02", 5.0, "mop")
+	seedTestTransaction(t, q, user.ID, catCleaning.ID, "2026-04-03", 3.0, "soap")
+	// not in filter — must remain at catHousehold
+	seedTestTransaction(t, q, user.ID, catHousehold.ID, "2026-04-04", 4.0, "lightbulb")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catHousehold.ID)
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", catCleaning.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 3 {
+		t.Errorf("updated=%d, want 3", resp.Updated)
+	}
+
+	// All three cleaning rows must now be at the household category.
+	var movedToHousehold int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions WHERE category_id = ? AND deleted_at IS NULL`, catHousehold.ID).Scan(&movedToHousehold); err != nil {
+		t.Fatal(err)
+	}
+	if movedToHousehold != 4 { // 3 moved + 1 already there
+		t.Errorf("household rows after move: %d, want 4", movedToHousehold)
+	}
+}
+
+// TestUpdateByFilter_HidesTombstoned uses the canonical CLAUDE.md soft-delete
+// sentinel pattern: seed one live row and one tombstoned row in the filter
+// window, run update-by-filter, and assert the tombstoned row's category was
+// NOT mutated. Sentinel amount of 999 makes any accidental write into the
+// tombstoned row visually loud in failure output.
+func TestUpdateByFilter_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	live := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "live")
+	ts := seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 999.0, "tombstoned-sentinel")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var liveCat, tsCat int64
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, live.ID).Scan(&liveCat); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, ts.ID).Scan(&tsCat); err != nil {
+		t.Fatal(err)
+	}
+	if liveCat != catB.ID {
+		t.Errorf("live row not updated: cat=%d, want %d", liveCat, catB.ID)
+	}
+	if tsCat != cat.ID {
+		t.Errorf("tombstoned row was touched! cat=%d, want %d (must remain untouched)", tsCat, cat.ID)
+	}
+	// And the row must still be tombstoned (not resurrected).
+	var tsDel sql.NullString
+	db.QueryRow(`SELECT deleted_at FROM transactions WHERE id = ?`, ts.ID).Scan(&tsDel)
+	if !tsDel.Valid {
+		t.Errorf("tombstoned row got resurrected: deleted_at is null")
+	}
+}
+
+// TestUpdateByFilter_RespectsOwnershipForNonAdmin pins that a non-admin user
+// can only update their own rows via update-by-filter — bob's row in the
+// same filter window must remain at the original category.
+func TestUpdateByFilter_RespectsOwnershipForNonAdmin(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	aliceTxn := seedTestTransaction(t, q, alice.ID, cat.ID, "2026-04-01", 10.0, "a")
+	bobTxn := seedTestTransaction(t, q, bob.ID, cat.ID, "2026-04-02", 10.0, "b")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, alice, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+
+	var aliceCat, bobCat int64
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliceTxn.ID).Scan(&aliceCat)
+	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, bobTxn.ID).Scan(&bobCat)
+	if aliceCat != catB.ID {
+		t.Errorf("alice's row not updated: %d, want %d", aliceCat, catB.ID)
+	}
+	if bobCat != cat.ID {
+		t.Errorf("bob's row was wrongly touched: %d, want %d", bobCat, cat.ID)
+	}
+}
+
+func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	body := `{"patch":{}}`
+	rec := postUpdateByFilter(t, h, user, "", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("empty patch: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateByFilter_TagsBranch_ReturnsNotImplemented pins that the tags
+// path is deliberately a 501 stub in Task 4. Task 5 will replace this with
+// a read-then-write enumeration. The stub guarantees we never accidentally
+// land on the no-tags fast path SQL when the patch carries tags (which
+// would silently DROP the tag merge — the SET clause builder doesn't
+// include tags, so the row's existing tags would be left as-is and the
+// user's intended tagsMode operation would silently no-op).
+func TestUpdateByFilter_TagsBranch_ReturnsNotImplemented(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	body := `{"patch":{"tags":"foo"},"tagsMode":"add"}`
+	rec := postUpdateByFilter(t, h, user, "", body)
+	if rec.Code != http.StatusNotImplemented {
+		t.Errorf("tags branch: got %d, want 501; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateByFilter_DisallowUnknownFields_RejectsUserIDInjection pins the
+// mass-assignment guard from spec §5.5b for the filter handler — same pattern
+// as the batch-update test.
+func TestUpdateByFilter_DisallowUnknownFields_RejectsUserIDInjection(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	body := fmt.Sprintf(`{"patch":{"user_id":99,"category_id":%d}}`, cat.ID)
+	rec := postUpdateByFilter(t, h, user, "", body)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 for unknown field; got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestUpdateByFilter_Unauthorized_Returns401(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/update-by-filter",
+		strings.NewReader(`{"patch":{"category_id":1}}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec.Code)
+	}
+}

@@ -1428,6 +1428,220 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
 }
 
+// updateByFilterRequest is the JSON wire shape for
+// /api/transactions/update-by-filter. Patch fields use the same
+// patchRequest shape as batch-update; TagsMode lives at the top level
+// (not nested in patch) so the JSON envelope mirrors the batch-update
+// wire format and matches Lidarr's proven-in-production shape.
+type updateByFilterRequest struct {
+	Patch    patchRequest `json:"patch"`
+	TagsMode *string      `json:"tagsMode,omitempty"`
+}
+
+// handleUpdateTransactionsByFilter applies a partial-field patch to every
+// transaction matching the filter querystring. It exists for the "Select all
+// X across pages" UI action where the user wants to bulk-edit thousands of
+// rows in one atomic operation — the ID-based batch-update endpoint would
+// require chunking and expose the user to partial-failure states.
+//
+// Atomicity: one *sql.Tx wraps the data update and the summary audit row,
+// so the audit row commits if and only if the data updates commit. Per spec
+// §5.4 the summary row is emitted **unconditionally** — even when the filter
+// matched zero rows. The audit table records the user's *attempt* against
+// filter X, not just successful work.
+//
+// Two SQL paths, mutually exclusive at the handler level:
+//   - patch.Tags == nil  → single SQL UPDATE (no-tags fast path; this task)
+//   - patch.Tags != nil  → enumerate-then-write loop (tags branch; Task 5)
+//
+// Mass-assignment guard: dec.DisallowUnknownFields() so an attacker-crafted
+// body carrying user_id, deleted_at, or any future-added field that
+// bulk-edit hasn't been reviewed for must 400 rather than be silently
+// dropped onto the typed struct (spec §5.5b).
+//
+// Soft-delete invariant (CLAUDE.md): both the inner appendLiveTransactionsFilter
+// and the outer "AND deleted_at IS NULL" predicate on the UPDATE are
+// load-bearing. The inner filter scopes the subquery to live rows; the outer
+// is defense-in-depth so a previously-tombstoned row cannot have its
+// deleted_at re-stamped. SQLite's snapshot isolation within a single
+// statement makes the inner sufficient in practice, but the outer guard
+// makes the invariant explicit at the SQL level for future maintainers.
+//
+// Race note: a deliberate TOCTOU window exists between the UI's `total`
+// read and this UPDATE — rows inserted into the filter window in that
+// interval are also updated. That's acceptable for the bulk-edit use case
+// this endpoint exists to serve (and matches handleDeleteTransactionsByFilter's
+// equivalent acceptance). The response echoes the real count.
+//
+// See spec docs/superpowers/specs/2026-05-01-transactions-bulk-edit-design.md
+// §3.6 (audit unconditional), §3.10 (checkpoint hook), §5.4 (handler shape),
+// §5.6 (filter SQL scaffolding).
+func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req updateByFilterRequest
+	r.Body = http.MaxBytesReader(w, r.Body, getMaxJSONBytes())
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields() // mass-assignment guard — spec §5.5b
+	if err := dec.Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	patch, err := buildUpdatePatch(req.Patch, req.TagsMode)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if patch.IsEmpty() {
+		writeError(w, http.StatusBadRequest, "patch must not be empty")
+		return
+	}
+
+	tx, err := h.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
+		return
+	}
+	defer tx.Rollback()
+
+	var updated int64
+	var minDate time.Time
+
+	if patch.Tags != nil {
+		// Tags read-then-write path — implemented in Task 5. Returning 501
+		// here is deliberate: silently routing a tags patch through the
+		// no-tags fast path would DROP the tag merge (the SET-clause
+		// builder doesn't include tags) and the user's intended
+		// add/remove/replace operation would silently no-op. The handler
+		// rather than the SQL builder is where this is gated so the error
+		// is loud and observable in the response code, not buried as a
+		// per-row no-op.
+		writeError(w, http.StatusNotImplemented, "tags filter path: implemented in Task 5")
+		return
+	}
+
+	updated, minDate, err = h.runUpdateByFilterNoTags(r, tx, user, patch)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update transactions")
+		return
+	}
+
+	// Summary audit row — emitted unconditionally (count=0 is valid; spec §5.4).
+	// The summary row carries BOTH the raw query string (so an operator
+	// replaying the audit log can rerun the filter) AND the patch summary
+	// (so the operator knows what change was attempted) in a single
+	// human-greppable Filter field. The raw URL.RawQuery is %q-quoted so
+	// trailing whitespace, embedded quotes, and escape characters survive
+	// a round-trip.
+	patchSummary := summarizePatch(patch)
+	filterDesc := fmt.Sprintf("update-by-filter query=%q patch=%s", r.URL.RawQuery, patchSummary)
+	if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate, database.BulkAuditSummary{
+		Count:  updated,
+		Filter: filterDesc,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to record audit")
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit update-by-filter")
+		return
+	}
+
+	// Phase 3.3 checkpoint hook (spec §3.10): only fires when patch.Date was
+	// set. The no-tags fast path doesn't enumerate per-row dates, so the
+	// hook is invoked with a zero time.Time — the verifier treats that as
+	// "walk all checkpoints regardless of date" (matches
+	// handleDeleteTransactionsByFilter's conservative reverify).
+	if patch.Date != nil {
+		h.verifyAffectedCheckpoints(r.Context(), minDate)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})
+}
+
+// runUpdateByFilterNoTags issues a single UPDATE inside the caller's tx.
+// SQL shape mirrors handleDeleteTransactionsByFilter — same helpers, same
+// JOIN, same user_id append, same live-filter wrap.
+//
+// Returns the rows-affected count and a zero time.Time (the no-tags path
+// does not enumerate per-row dates; the caller's checkpoint hook treats
+// zero as "reverify all").
+//
+// Soft-delete invariant: appendLiveTransactionsFilter adds the inner
+// "AND t.deleted_at IS NULL" predicate (load-bearing); the outer
+// "AND deleted_at IS NULL" on the UPDATE is defense-in-depth. Both are
+// required — see the long comment on handleUpdateTransactionsByFilter.
+func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user database.User, patch database.UpdatePatch) (int64, time.Time, error) {
+	// Build the SET clause from the patch. Field order (date, description,
+	// category_id) is fixed for query-plan stability; updated_at is always
+	// stamped last so a future patch field added between date and
+	// updated_at doesn't perturb the trailing comma.
+	var setClauses []string
+	var args []any
+	if patch.Date != nil {
+		// patch.Date is the canonical YYYY-MM-DD form returned by
+		// validateDate. Re-parse to a time.Time so the driver writes the
+		// same TEXT layout (ISO-8601 with timezone) that every other
+		// handler produces — passing the bare YYYY-MM-DD string would
+		// silently drift the storage format and break lex-ordered date
+		// comparisons in the existing list/export queries.
+		d, err := time.Parse("2006-01-02", *patch.Date)
+		if err != nil {
+			return 0, time.Time{}, fmt.Errorf("invalid date in patch: %w", err)
+		}
+		setClauses = append(setClauses, "date = ?")
+		args = append(args, d)
+	}
+	if patch.Description != nil {
+		setClauses = append(setClauses, "description = ?")
+		args = append(args, *patch.Description)
+	}
+	if patch.CategoryID != nil {
+		setClauses = append(setClauses, "category_id = ?")
+		args = append(args, *patch.CategoryID)
+	}
+	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
+
+	whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())
+	if user.Role != RoleAdmin {
+		if whereClause == "" {
+			whereClause = " WHERE t.user_id = ?"
+		} else {
+			whereClause += " AND t.user_id = ?"
+		}
+		whereArgs = append(whereArgs, user.ID)
+	}
+	liveClause := appendLiveTransactionsFilter(whereClause)
+
+	// SQLite does not allow UPDATE with a JOIN directly; the subquery form
+	// matches handleDeleteTransactionsByFilter exactly. The categories JOIN
+	// is needed because buildTransactionWhereClause emits c.type predicates
+	// for the ?type=expense|income filter.
+	query := fmt.Sprintf(
+		`UPDATE transactions SET %s WHERE deleted_at IS NULL AND id IN (
+			SELECT t.id FROM transactions t JOIN categories c ON t.category_id = c.id %s
+		)`,
+		strings.Join(setClauses, ", "),
+		liveClause,
+	)
+
+	res, err := tx.ExecContext(r.Context(), query, append(args, whereArgs...)...)
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("exec update: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, time.Time{}, fmt.Errorf("read update result: %w", err)
+	}
+	return n, time.Time{}, nil
+}
+
 // toNullString converts a string to sql.NullString, treating empty as NULL.
 func toNullString(s string) sql.NullString {
 	if s == "" {

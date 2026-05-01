@@ -818,3 +818,100 @@ func TestAudit_BatchUpdate_OnRollback_LeavesNoOrphanRows(t *testing.T) {
 			auditsAfter-auditsBefore, auditsBefore, auditsAfter)
 	}
 }
+
+// --- Bulk-edit Task 4 audit invariants -------------------------------------
+
+// TestAudit_UpdateByFilter_WritesOneSummaryRow_WithFilterAndPatch pins spec
+// §5.4: update-by-filter emits exactly one summary audit row with
+// transaction_id = BulkAuditTransactionID, action='update', and a
+// before_json filter string that captures BOTH the original querystring
+// and the patch summary (so an operator replaying the audit log can
+// reconstruct the user's intent without needing a separate column).
+func TestAudit_UpdateByFilter_WritesOneSummaryRow_WithFilterAndPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "X")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	url := fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", cat.ID)
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var summaries []auditRowForAssert
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			summaries = append(summaries, a)
+		}
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("expected exactly 1 summary row, got %d (all rows: %d)", len(summaries), len(rows))
+	}
+	r := summaries[0]
+	if r.Before == nil {
+		t.Fatalf("summary row should carry before_json with bulk metadata")
+	}
+	if r.Before["bulk"] != true {
+		t.Errorf("before.bulk=%v, want true", r.Before["bulk"])
+	}
+	filter, _ := r.Before["filter"].(string)
+	if !strings.Contains(filter, fmt.Sprintf("category_id=%d", cat.ID)) {
+		t.Errorf("before.filter=%q should include the original querystring (category_id=%d)", filter, cat.ID)
+	}
+	if !strings.Contains(filter, fmt.Sprintf("category_id=%d", catB.ID)) {
+		t.Errorf("before.filter=%q should include the patch summary (category_id=%d)", filter, catB.ID)
+	}
+	assertAllActorsEqual(t, summaries, user.ID)
+}
+
+// TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary pins spec §5.4:
+// the summary row is emitted **unconditionally**, even when the filter
+// matched zero rows. The audit table records the user's *attempt* against
+// filter X, not just successful work — same precedent as
+// handleBulkRename's zero-match behaviour and handleDeleteTransactionsByFilter.
+func TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catB := seedTestCategory(t, q, "CatB", "expense")
+	// No transactions seeded — filter matches zero rows.
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	url := "/api/transactions/update-by-filter?search=nomatch"
+	req := httptest.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rows := listAuditRows(t, db)
+	var count int
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("zero-match should still emit summary; got %d summary audit rows (all rows: %d)", count, len(rows))
+	}
+	// And the count in the summary must be zero, not the seed count.
+	for _, a := range rows {
+		if a.TransactionID == database.BulkAuditTransactionID && a.Action == database.AuditUpdate {
+			if got := a.Before["count"].(float64); got != 0 {
+				t.Errorf("zero-match summary count=%v, want 0", got)
+			}
+		}
+	}
+}
