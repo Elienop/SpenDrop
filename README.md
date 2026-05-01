@@ -463,9 +463,9 @@ To restore from a migration snapshot, follow the same restore drill above but wi
 
 #### Mutation audit log
 
-Every change to a transaction — create, update, delete, batch create, batch delete, bulk rename, delete-by-filter — writes an append-only row to the `transaction_audit` table **in the same SQL transaction as the mutation**. The audit row exists if and only if the mutation committed: a rollback of either rolls back both. This means you always have a record of *who changed what, and when*, even if the row itself is later hard-deleted.
+Every change to a transaction — create, update, delete, batch create, batch delete, bulk rename, delete-by-filter, batch-update, update-by-filter — writes an append-only row to the `transaction_audit` table **in the same SQL transaction as the mutation**. The audit row exists if and only if the mutation committed: a rollback of either rolls back both. This means you always have a record of *who changed what, and when*, even if the row itself is later hard-deleted.
 
-The table stores the action (`insert` / `update` / `delete`), the acting user (`actor_user_id`, which is `ON DELETE SET NULL` so history outlives the account), the timestamp, and JSON blobs of the row state before and after the mutation. Single-row operations get one audit row per transaction touched. **Bulk operations get a single summary row** with `transaction_id = 0` and a payload like `{"bulk":true,"count":142,"filter":"..."}` — per-row diffs for an endpoint that can rename tens of thousands of rows in a single call would balloon the audit table and slow the operation the endpoint exists to serve.
+The table stores the action (`insert` / `update` / `delete`), the acting user (`actor_user_id`, which is `ON DELETE SET NULL` so history outlives the account), the timestamp, and JSON blobs of the row state before and after the mutation. Single-row operations get one audit row per transaction touched. **ID-list bulk operations** (`batch-delete`, `batch-update`) get one audit row per row touched plus a summary row when any IDs were skipped. **Filter-scoped bulk operations** (`delete-by-filter`, `update-by-filter`, `bulk-rename`) get a single summary row with `transaction_id = 0` and a payload like `{"bulk":true,"count":142,"filter":"..."}` — per-row diffs for an endpoint that can rename tens of thousands of rows in a single call would balloon the audit table and slow the operation the endpoint exists to serve.
 
 > The audit log is a **CLI-only operator tool**, not a user-facing feature. There is no REST endpoint that returns audit rows, no UI to browse them, and no per-user authorization check. Read access is via `docker exec` into the container — treat it like a database log, not like a timeline.
 
@@ -640,6 +640,8 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/batch` | Batch create transactions |
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
+| POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/non-owned/missing IDs skipped. Capped at 500 IDs. |
+| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
 | PUT | `/api/transactions/{id}` | Update a transaction |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
