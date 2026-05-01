@@ -41,7 +41,11 @@ const (
 	// literal reference at the call site so the symmetry is visible
 	// in code review and a future split (if the two ever diverge) is
 	// a one-line change here.
-	MaxBatchRestoreIDs     = MaxBatchDeleteIDs
+	MaxBatchRestoreIDs = MaxBatchDeleteIDs
+	// MaxBatchUpdateIDs caps the size of the ID list accepted by
+	// /api/transactions/batch-update. Pinned to MaxBatchDeleteIDs because
+	// every bulk mutation should share the same per-request blast radius.
+	MaxBatchUpdateIDs      = MaxBatchDeleteIDs
 	MaxCategoryReorder     = 200
 	MaxImportRows          = 10000
 	MaxSavedFilters        = 50

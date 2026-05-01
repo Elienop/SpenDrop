@@ -2313,3 +2313,193 @@ func TestHandleUpdateTransaction_AlreadyTombstoned_Returns404(t *testing.T) {
 		t.Errorf("expected 404 for already-tombstoned row, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+// --- Bulk-edit Task 1: pure helpers ----------------------------------------
+
+func TestSummarizePatch_FormatsAllFieldKindsInFixedOrder(t *testing.T) {
+	p := database.UpdatePatch{
+		Date:        ptrString("2026-04-30"),
+		Description: ptrString(`ATM card #4839 cash`),
+		CategoryID:  ptrInt64(5),
+		Tags:        ptrString("tax,receipt"),
+		TagsMode:    ptrString("add"),
+	}
+	got := summarizePatch(p)
+	want := `date=2026-04-30; description="ATM card #4839 cash"; category_id=5; tags=tax,receipt(add)`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_OmitsAbsentFields(t *testing.T) {
+	p := database.UpdatePatch{CategoryID: ptrInt64(5)}
+	if got := summarizePatch(p); got != "category_id=5" {
+		t.Errorf("summarizePatch() = %q, want %q", got, "category_id=5")
+	}
+}
+
+func TestSummarizePatch_EscapesQuotesInDescription(t *testing.T) {
+	p := database.UpdatePatch{Description: ptrString(`he said "hi"`)}
+	got := summarizePatch(p)
+	want := `description="he said \"hi\""`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_GrepBoundaryRegression_EmbeddedQuoteSemicolon(t *testing.T) {
+	p := database.UpdatePatch{Description: ptrString(`risky"; DROP TABLE`)}
+	got := summarizePatch(p)
+	want := `description="risky\"; DROP TABLE"`
+	if got != want {
+		t.Errorf("summarizePatch() = %q, want %q", got, want)
+	}
+}
+
+func TestSummarizePatch_TruncatesAt1024Chars(t *testing.T) {
+	long := strings.Repeat("x", 1100)
+	p := database.UpdatePatch{Description: ptrString(long)}
+	got := summarizePatch(p)
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("expected truncation suffix, got tail %q", got[len(got)-20:])
+	}
+	if len(got) > 1024 {
+		t.Errorf("expected len <= 1024, got %d", len(got))
+	}
+}
+
+func TestValidateDate_AcceptsCanonicalForm(t *testing.T) {
+	got, err := validateDate("2026-04-30")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "2026-04-30" {
+		t.Errorf("validateDate(\"2026-04-30\") = %q, want \"2026-04-30\"", got)
+	}
+}
+
+func TestValidateDate_RejectsBadFormat(t *testing.T) {
+	cases := []string{"2026/04/30", "30-04-2026", "April 30 2026", "", "2026-13-40"}
+	for _, c := range cases {
+		if _, err := validateDate(c); err == nil {
+			t.Errorf("validateDate(%q) returned nil, want error", c)
+		}
+	}
+}
+
+func TestValidateDescription_TrimsAndCaps(t *testing.T) {
+	got, err := validateDescription("  hello  ")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "hello" {
+		t.Errorf("validateDescription trim = %q, want \"hello\"", got)
+	}
+	long := strings.Repeat("x", MaxDescriptionLength+1)
+	if _, err := validateDescription(long); err == nil {
+		t.Errorf("validateDescription oversized: nil, want error")
+	}
+}
+
+func TestValidateCategoryID_PositiveOnly(t *testing.T) {
+	if _, err := validateCategoryID(5); err != nil {
+		t.Errorf("validateCategoryID(5): %v", err)
+	}
+	for _, n := range []int64{0, -1, -100} {
+		if _, err := validateCategoryID(n); err == nil {
+			t.Errorf("validateCategoryID(%d): nil, want error", n)
+		}
+	}
+}
+
+func TestValidateTagsField_LengthCheckOnly(t *testing.T) {
+	if _, err := validateTagsField("Tax, receipt"); err != nil {
+		t.Errorf("validateTagsField: %v", err)
+	}
+	long := strings.Repeat("a,", MaxTagsLength) // length > MaxTagsLength
+	if _, err := validateTagsField(long); err == nil {
+		t.Errorf("validateTagsField oversized: nil, want error")
+	}
+}
+
+func TestBuildUpdatePatch_HappyPath(t *testing.T) {
+	in := patchRequest{
+		Date:       ptrString("2026-04-30"),
+		CategoryID: ptrInt64(5),
+		Tags:       ptrString("tax,receipt"),
+	}
+	p, err := buildUpdatePatch(in, ptrString("add"))
+	if err != nil {
+		t.Fatalf("buildUpdatePatch: %v", err)
+	}
+	if p.Date == nil || *p.Date != "2026-04-30" {
+		t.Errorf("Date: got %v, want pointer to \"2026-04-30\"", p.Date)
+	}
+	if p.CategoryID == nil || *p.CategoryID != 5 {
+		t.Errorf("CategoryID: got %v, want 5", p.CategoryID)
+	}
+	if p.Tags == nil || *p.Tags != "tax,receipt" {
+		t.Errorf("Tags: got %v, want \"tax,receipt\"", p.Tags)
+	}
+	if p.TagsMode == nil || *p.TagsMode != "add" {
+		t.Errorf("TagsMode: got %v, want \"add\"", p.TagsMode)
+	}
+}
+
+func TestBuildUpdatePatch_RejectsTagsWithoutMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("tax")}
+	_, err := buildUpdatePatch(in, nil)
+	if err == nil {
+		t.Errorf("expected error when tags set but mode missing")
+	}
+}
+
+func TestBuildUpdatePatch_RejectsModeWithoutTags(t *testing.T) {
+	in := patchRequest{CategoryID: ptrInt64(5)}
+	_, err := buildUpdatePatch(in, ptrString("add"))
+	if err == nil {
+		t.Errorf("expected error when mode set but tags missing")
+	}
+}
+
+func TestBuildUpdatePatch_RejectsInvalidMode(t *testing.T) {
+	in := patchRequest{Tags: ptrString("tax")}
+	for _, m := range []string{"set", "merge", "ADD", "", "remove "} {
+		_, err := buildUpdatePatch(in, ptrString(m))
+		if err == nil {
+			t.Errorf("buildUpdatePatch with mode %q: nil, want error", m)
+		}
+	}
+}
+
+func TestBuildUpdatePatch_RejectsEmpty(t *testing.T) {
+	in := patchRequest{}
+	p, err := buildUpdatePatch(in, nil)
+	if err != nil {
+		t.Fatalf("buildUpdatePatch on empty: %v", err)
+	}
+	if !p.IsEmpty() {
+		t.Errorf("expected IsEmpty()=true on empty input")
+	}
+}
+
+func TestBuildUpdatePatch_TrimsAndValidatesEachFieldSelectively(t *testing.T) {
+	in := patchRequest{Description: ptrString("  hi  ")}
+	p, err := buildUpdatePatch(in, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p.Description == nil || *p.Description != "hi" {
+		t.Errorf("Description not trimmed: %v", p.Description)
+	}
+	bad := patchRequest{Date: ptrString("nope")}
+	if _, err := buildUpdatePatch(bad, nil); err == nil {
+		t.Errorf("bad date: nil, want error")
+	}
+}
+
+// ptrString / ptrInt64 are local test helpers used by the bulk-edit tests
+// above to construct the pointer-shaped fields on database.UpdatePatch /
+// patchRequest.
+func ptrString(s string) *string { return &s }
+func ptrInt64(n int64) *int64    { return &n }

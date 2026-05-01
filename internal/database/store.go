@@ -283,6 +283,25 @@ type BulkAuditSummary struct {
 	Filter string
 }
 
+// UpdatePatch is the bulk-edit patch shape consumed by TransactionStore.UpdateTx.
+// Pointer fields mean "unset = do not touch" (matching JSON-omitempty
+// semantics on the wire). Both batch-update and update-by-filter use this
+// struct; the api-layer patchRequest is the wire-format shape that
+// buildUpdatePatch lifts into UpdatePatch.
+type UpdatePatch struct {
+	Date        *string
+	Description *string
+	CategoryID  *int64
+	Tags        *string
+	TagsMode    *string // required iff Tags != nil ("add" / "remove" / "replace")
+}
+
+// IsEmpty reports whether the patch carries no field changes. Used as the
+// final "is the request actually doing anything?" gate before we dispatch.
+func (p UpdatePatch) IsEmpty() bool {
+	return p.Date == nil && p.Description == nil && p.CategoryID == nil && p.Tags == nil
+}
+
 // RecordBulkTx writes exactly one summary audit row for a bulk mutation
 // that touched N rows. The row has transaction_id = BulkAuditTransactionID
 // and its before_json carries {"bulk":true,"count":N,"filter":...}. This is

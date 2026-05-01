@@ -625,28 +625,75 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, results)
 }
 
+// validateDate parses YYYY-MM-DD and returns the canonical form. Mirrors
+// validateTransactionRequest:633-635 but isolated so bulk-edit can call it
+// without forcing all-fields validation.
+func validateDate(s string) (string, error) {
+	t, err := time.Parse("2006-01-02", s)
+	if err != nil {
+		return "", fmt.Errorf("date must be in YYYY-MM-DD format")
+	}
+	return t.Format("2006-01-02"), nil
+}
+
+// validateDescription trims, then length-checks against MaxDescriptionLength.
+// Mirrors validateTransactionRequest:636-641.
+func validateDescription(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", fmt.Errorf("description must not be empty")
+	}
+	if len(s) > MaxDescriptionLength {
+		return "", fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
+	}
+	return s, nil
+}
+
+// validateCategoryID matches the existing single-row laxity in
+// validateTransactionRequest:648-649 — id > 0 only. The is_active /
+// existence check is deliberately NOT added here; doing so on bulk-edit
+// alone would create a divergence with the single-row endpoint. See
+// docs/superpowers/specs/2026-05-01-transactions-bulk-edit-design.md §5.5b.
+func validateCategoryID(id int64) (int64, error) {
+	if id <= 0 {
+		return 0, fmt.Errorf("category_id is required")
+	}
+	return id, nil
+}
+
+// validateTagsField length-checks against MaxTagsLength. Tags storage is
+// verbatim — no lowercase, no canonical normalization. See spec §3.3.
+func validateTagsField(s string) (string, error) {
+	if len(s) > MaxTagsLength {
+		return "", fmt.Errorf("tags must be %d characters or less", MaxTagsLength)
+	}
+	return s, nil
+}
+
 // validateTransactionRequest checks required fields on a transaction request.
+// Composes the per-field validators above so bulk-edit and single-row paths
+// share the same error wording and length caps.
 func validateTransactionRequest(req transactionRequest) error {
 	if req.Date == "" {
 		return fmt.Errorf("date is required")
 	}
-	if _, err := time.Parse("2006-01-02", req.Date); err != nil {
-		return fmt.Errorf("date must be in YYYY-MM-DD format")
+	if _, err := validateDate(req.Date); err != nil {
+		return err
 	}
 	if req.Description == "" {
 		return fmt.Errorf("description is required")
 	}
-	if len(req.Description) > MaxDescriptionLength {
-		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
+	if _, err := validateDescription(req.Description); err != nil {
+		return err
 	}
-	if len(req.Tags) > MaxTagsLength {
-		return fmt.Errorf("tags must be %d characters or less", MaxTagsLength)
+	if _, err := validateTagsField(req.Tags); err != nil {
+		return err
 	}
 	if len(req.Notes) > MaxNotesLength {
 		return fmt.Errorf("notes must be %d characters or less", MaxNotesLength)
 	}
-	if req.CategoryID <= 0 {
-		return fmt.Errorf("category_id is required")
+	if _, err := validateCategoryID(req.CategoryID); err != nil {
+		return err
 	}
 	// Amount validation: if no foreign currency, amount must be positive.
 	// If foreign currency is specified, original_amount is checked in resolveCurrency.
@@ -660,6 +707,116 @@ func validateTransactionRequest(req transactionRequest) error {
 		return fmt.Errorf("original_amount exceeds maximum allowed value")
 	}
 	return nil
+}
+
+// patchRequest is the JSON wire shape for the bulk-edit `patch` field.
+// Pointer fields mean "unset = do not touch" (json-omitempty semantics).
+// buildUpdatePatch lifts this into database.UpdatePatch after per-field
+// validation; the wire shape lives in api so the database package stays
+// free of HTTP/JSON concerns.
+type patchRequest struct {
+	Date        *string `json:"date,omitempty"`
+	Description *string `json:"description,omitempty"`
+	CategoryID  *int64  `json:"category_id,omitempty"`
+	Tags        *string `json:"tags,omitempty"`
+}
+
+// validTagsModes pins the three accepted tag-merge modes per spec §3.3.
+// "add", "remove", and "replace" are the only legal values; case-sensitive
+// and trimmed-equal — surrounding whitespace or different casing must
+// 400 because that's almost certainly a client bug rather than a typo we
+// can helpfully recover from.
+var validTagsModes = map[string]struct{}{"add": {}, "remove": {}, "replace": {}}
+
+// buildUpdatePatch validates the wire-format patchRequest and lifts each
+// present field into database.UpdatePatch. Validators are the per-field
+// validators above; no bulk-specific logic here. Empty patch is NOT
+// rejected here — IsEmpty() exists for that, and the handler decides
+// whether an empty patch is a 400 or a no-op (current spec: 400).
+//
+// tagsMode is paired with patch.Tags: required iff tags is set, rejected
+// if set without tags. The cross-field check lives here so neither
+// caller (batch or filter handler) has to repeat it.
+func buildUpdatePatch(req patchRequest, tagsMode *string) (database.UpdatePatch, error) {
+	var out database.UpdatePatch
+	if req.Date != nil {
+		d, err := validateDate(*req.Date)
+		if err != nil {
+			return out, err
+		}
+		out.Date = &d
+	}
+	if req.Description != nil {
+		d, err := validateDescription(*req.Description)
+		if err != nil {
+			return out, err
+		}
+		out.Description = &d
+	}
+	if req.CategoryID != nil {
+		c, err := validateCategoryID(*req.CategoryID)
+		if err != nil {
+			return out, err
+		}
+		out.CategoryID = &c
+	}
+	if req.Tags != nil {
+		if tagsMode == nil {
+			return out, fmt.Errorf("tagsMode required when tags is set")
+		}
+		if _, ok := validTagsModes[*tagsMode]; !ok {
+			return out, fmt.Errorf("tagsMode must be one of: add, remove, replace")
+		}
+		t, err := validateTagsField(*req.Tags)
+		if err != nil {
+			return out, err
+		}
+		out.Tags = &t
+		out.TagsMode = tagsMode
+	} else if tagsMode != nil {
+		return out, fmt.Errorf("tags required when tagsMode is set")
+	}
+	return out, nil
+}
+
+// summarizePatchMaxLen caps the audit-summary string so pathological input
+// (e.g. a 100KB description) cannot bloat the audit row's `before_json`
+// envelope. See spec §5.4.
+const summarizePatchMaxLen = 1024
+
+// summarizePatch renders the patch as a stable, human-readable string for
+// audit-table greppability. Stable format pinned by the spec — see
+// docs/superpowers/specs/2026-05-01-transactions-bulk-edit-design.md §5.4.
+//
+// Field order is fixed: date, description, category_id, tags. Embedded
+// quotes in description are escaped \"; semicolons left raw (the audit
+// consumer is human/grep, not a parser). Output is capped at
+// summarizePatchMaxLen with a "…(truncated)" suffix on overflow.
+func summarizePatch(p database.UpdatePatch) string {
+	var parts []string
+	if p.Date != nil {
+		parts = append(parts, "date="+*p.Date)
+	}
+	if p.Description != nil {
+		escaped := strings.ReplaceAll(*p.Description, `"`, `\"`)
+		parts = append(parts, fmt.Sprintf(`description="%s"`, escaped))
+	}
+	if p.CategoryID != nil {
+		parts = append(parts, fmt.Sprintf("category_id=%d", *p.CategoryID))
+	}
+	if p.Tags != nil {
+		mode := ""
+		if p.TagsMode != nil {
+			mode = *p.TagsMode
+		}
+		parts = append(parts, fmt.Sprintf("tags=%s(%s)", *p.Tags, mode))
+	}
+	out := strings.Join(parts, "; ")
+	if len(out) > summarizePatchMaxLen {
+		const suffix = "…(truncated)"
+		out = out[:summarizePatchMaxLen-len(suffix)] + suffix
+	}
+	return out
 }
 
 // bulkRenameRequest is the JSON input for bulk-renaming transaction descriptions.
