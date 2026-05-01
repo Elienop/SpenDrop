@@ -24,9 +24,22 @@ Real-time financial overview with KPI cards (total balance, income, expenses, sa
 
 ### Transaction Management
 
-Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
+Full CRUD for transactions with sortable columns (date, description, category, amount), search with find-and-replace, bulk selection with batch delete and bulk edit, inline editing, category badges, tag support, and pagination. Export to Excel at any time.
 
 ![Transactions](docs/screenshots/02-transactions.png)
+
+### Bulk-edit
+
+Select multiple transactions (via checkboxes or the "Select all N matching" banner) and click **Edit (N)** in the selection action bar. The dialog lets you change Date, Description, Category, or Tags across every selected row in one round-trip.
+
+- Each field defaults to "no change". Only fields you explicitly modify are sent to the server.
+- Tags support **Add**, **Remove**, and **Replace** modes via a radio group above the tag input. Tag matching is byte-for-byte case-sensitive (e.g. `Tax` and `tax` are different).
+- **Page mode** (visible-page IDs only) fires immediately. **All-matching mode** (everything matching the current filter) opens a confirmation step listing the changes before submitting.
+- Selection is pruned after submit: rows that the edit kicks off the current filter naturally drop out of the selection. A toast tells you when this happens.
+
+API endpoints:
+- `POST /api/transactions/batch-update` — body `{ ids, patch, tagsMode? }`
+- `POST /api/transactions/update-by-filter?<querystring>` — body `{ patch, tagsMode? }`
 
 ### Multi-currency transactions
 
@@ -84,7 +97,7 @@ Simple username/password auth with bcrypt hashing and HTTP-only session cookies.
 - **Collapsible sidebar** with pin toggle, state persisted in localStorage
 - **Responsive layout** with max-width 1400px for wide-screen readability
 - **Saved filters** -- save and recall transaction filter presets
-- **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete
+- **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete or bulk field edit
 - **Find and replace** -- search transactions and replace descriptions in bulk
 - **Excel export** -- export all transactions, or by month/year, as `.xlsx` files
 

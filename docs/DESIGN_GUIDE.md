@@ -508,6 +508,19 @@ Introduced on `pages/Settings.tsx` → `ApiTokensSection` as the sixth tab (`api
 - **Create button is "Create token", not "+ New token".** The `+` prefix implied a plural-of-many and is an icon-as-text antipattern; `data-icon` or a real `Plus` icon is the correct pattern if an icon is ever needed here.
 - **Empty state is plain prose, no illustration.** "No API tokens yet. Create one to connect a script, dashboard, or other tool to SpenDrop." Generic wording — no single integration is named. Matches other settings-tab empty states (Savings with no goals, Currencies before the base is set).
 
+### Bulk-edit dialog pattern
+
+The Transactions bulk-edit dialog uses the `'noChange'` sentinel pattern (Lidarr-derived):
+
+- shadcn `Select` first option is `— No change —`.
+- Free-form inputs (text) default to empty + placeholder `— Keep same —`.
+- Native `<input type="date">` ignores `placeholder`, so a leading "Set date" `<Checkbox>` gates the date picker — unchecked = no change.
+- Multi-value fields (tags) get an additional Add / Remove / Replace radio above the input. The radio is disabled while the input is empty to prevent the "I selected Replace but the input is empty" footgun.
+
+Layout: `grid grid-cols-1 md:grid-cols-[120px_1fr_140px_1fr]` collapses to a vertical stack below the `md:` breakpoint.
+
+The confirm AlertDialog (all-matching scope only) uses the **default primary** palette, NOT `destructiveActionClass` — bulk-edit is recoverable from the audit trail, unlike `delete-by-filter`.
+
 ---
 
 ## Quick Reference
