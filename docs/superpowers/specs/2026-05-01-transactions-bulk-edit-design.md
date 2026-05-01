@@ -39,7 +39,7 @@ This spec mirrors the Lidarr (Sonarr-lineage) bulk-edit pattern that has shipped
 
 ## 3. Key Decisions
 
-### 3.1 Dialog field layout — horizontal 4-column grid
+### 3.1 Dialog field layout — horizontal 4-column grid (responsive)
 
 Mirrors the non-amount columns of the inline edit row in `web/src/components/TransactionRow.tsx:166-309` (the inline editor renders five fields total — Date | Description | Category | Tags | Amount+Currency — but Amount/Currency are deliberately out of v1 scope per §2):
 
@@ -47,9 +47,11 @@ Mirrors the non-amount columns of the inline edit row in `web/src/components/Tra
 | Date | Description | Category | Tags |
 ```
 
-- Dialog `max-w-3xl` (~768 px) — wider than the standard `max-w-lg` to fit four side-by-side fields without crowding.
-- Column widths: Date 120 px (fixed), Description `1fr`, Category 140 px (fixed), Tags `1fr`. Same distribution as the inline-edit row.
-- Footer: Cancel (`variant="outline"`) + `Apply to ${N}` (primary). Submit disabled when no fields are dirty.
+- Dialog `max-w-3xl` (~768 px) on `md:` and wider — wider than the standard `max-w-lg` to fit four side-by-side fields without crowding.
+- Column widths on `md:` and wider: Date 120 px (fixed), Description `1fr`, Category 140 px (fixed), Tags `1fr`. Same distribution as the inline-edit row.
+- **Below `md:` (under 768 px viewport — narrow laptops with the sidebar open, tablets in portrait):** the grid collapses to a single vertical column. Fields stack in the same order (Date → Description → Category → Tags), each taking full dialog width. Tailwind: `grid grid-cols-1 md:grid-cols-[120px_1fr_140px_1fr]`.
+- Tags' Add/Remove/Replace radio group sits inside the Tags grid cell, **above** the tag input. The radio + input wrapper is its own vertical flex stack within the cell — the radio doesn't spill outside the cell on either layout.
+- Footer: Cancel (`variant="outline"`) + `Apply to ${N}` (primary). Submit disabled when no fields are dirty (see §4.3 for the precise dirty rule).
 
 The user explicitly preferred horizontal mirroring over a stacked vertical form — it preserves muscle memory from inline-edit and avoids the "tall form, lots of scrolling" problem that Lidarr's vertical FormGroup layout has on a 27" monitor.
 
@@ -60,9 +62,9 @@ Per field type:
 | Field | Idiom | Implementation |
 |---|---|---|
 | Category | First option `— No change —` (always preselected) | shadcn `Select`, value `'noChange'` (string sentinel), submit excludes when value === `'noChange'` |
-| Date | Empty string = no change | `<Input type="date">`, placeholder `— Keep same —`, submit excludes when value is `''` |
+| Date | "Set date" toggle gates the date picker | A small leading checkbox (`<Checkbox>` labelled "Set date"). Unchecked = no change (date input disabled, visually greyed out). Checked = user picks a date via `<Input type="date">`. Submit excludes when toggle is unchecked. Native `<Input type="date">` does NOT render `placeholder` text — using a toggle is the cleanest way to say "do nothing" without inventing a non-native control. |
 | Description | Empty string = no change | `<Input type="text">`, placeholder `— Keep same —`, submit excludes when trimmed value is `''` |
-| Tags | Empty input = no change, regardless of mode | `TagInput`, plus an `Add` / `Remove` / `Replace` radio group above. Submit excludes when tags array is empty |
+| Tags | Empty input = no change, regardless of mode | `TagInput`, plus an `Add` / `Remove` / `Replace` radio group above. Default mode is **`Add`** (least destructive). The radio group is **disabled** while the tag input is empty (visually greyed) and enabled the moment the user types one character — preventing the footgun where a user thinks the radio alone does something. Submit excludes when tags array is empty regardless of radio state. |
 
 The single-source-of-truth signal is "is this field's value still the no-change sentinel/empty?". On submit the form walks fields, builds the `patch` object with only the dirty ones, and rejects an empty patch client-side (greys the Apply button) and server-side (400).
 
@@ -81,6 +83,14 @@ Wire format: `{ tags: "tax,receipt", tagsMode: "add" }`. The mode is required if
 **v1 limitation — no bulk-clear of tags.** Because empty `tags` is rejected, a user cannot bulk-set tags to "" on N rows. The workaround is `Remove` mode listing the tags they want to clear, which works in practice for finite tag vocabularies. A first-class "Clear all tags" affordance is deferred to v2 if needed; the wire shape `{ tags: "", tagsMode: "replace" }` is reserved as the future signal.
 
 **Tag value storage is verbatim — no lowercase / no trim.** The current single-row update path stores tags exactly as the user typed them (length-only validation in `validateTransactionRequest:642-643`). Bulk-edit follows the same convention — input is split on commas and trimmed of leading/trailing whitespace per item only for de-duplication purposes during `Add` / `Remove` set arithmetic, but the final stored string preserves user casing. Introducing canonicalization would create rows whose tags differ by case from rows touched only by the single-row endpoint, violating the "consistent with existing convention" rule. If/when normalization becomes a priority, it's a separate cross-cutting story that retrofits both endpoints together.
+
+**Set-arithmetic key comparison is byte-for-byte (case-sensitive).** Worked example: row has `tags = "Tax, receipt"`, user does `Add ["tax"]`.
+
+- After whitespace-trim per item, the existing-tags set is `{"Tax", "receipt"}` and the to-add set is `{"tax"}`.
+- Set union (case-sensitive) = `{"Tax", "receipt", "tax"}` — three distinct entries.
+- Stored result: `"Tax, receipt, tax"` (order preserved: existing items first, then newly-added items in input order).
+
+This is consistent with the verbatim-storage rule (case is part of the value). Users who want to merge the two casings use `Remove ["Tax"]` then `Add ["tax"]` (two separate bulk-edits), which is the documented workaround. A unit test pins this exact example and is part of task #5 in §11.
 
 **Read-then-write requirement for `update-by-filter` + tags.** A single SQL UPDATE cannot express "for each row, compute new tags as old tags ∪ new tags". The filter-path therefore degrades to a server-side enumerate-then-update inside one tx when `tags` is in the patch:
 
@@ -103,9 +113,9 @@ Mirrors existing precedent:
 Bulk-edit follows the same rule:
 
 - `selectionScope === 'page'` → submit fires the request directly.
-- `selectionScope === 'all-matching'` → an `AlertDialog` opens listing the changed fields ("Date → 2026-04-30", "Category → Groceries"), with `Cancel` / `Apply to ${N} transactions` actions. The `AlertDialogAction` uses the existing `destructiveActionClass` palette.
+- `selectionScope === 'all-matching'` → an `AlertDialog` opens listing the changed fields ("Date → 2026-04-30", "Category → Groceries"), with `Cancel` / `Apply to ${N} transactions` actions. The action button uses the **default primary** palette (not `destructiveActionClass`) — bulk-edit is recoverable from the per-row audit trail; an alarming destructive-red button miscommunicates risk vs the truly destructive `delete-by-filter` confirm.
 
-The confirm dialog text reads the count from the live `total` field on the filter response (server-truth), not from `selectedIds.size` (which is only meaningful in page mode).
+The confirm dialog text reads the count from the live `total` field on the filter response (server-truth), not from `selectedIds.size` (which is only meaningful in page mode). Long description patches in the summary line are truncated at 80 chars with `…` suffix so the dialog body stays scannable; the full description is still in the audit table for forensic recovery.
 
 ### 3.5 Selection prune — intersect with refetched IDs
 
@@ -124,13 +134,37 @@ This requires a small refactor: `fetchTransactions` is split into the existing v
 The page then prunes after `bulkUpdate` resolves:
 
 ```ts
-const { updated, skipped, visibleIds } = await bulkUpdate({ ids, patch });
-const visible = new Set(visibleIds);
-setSelectedIds(prev => new Set([...prev].filter(id => visible.has(id))));
-toast.success(`Updated ${updated}${skipped ? `, skipped ${skipped}` : ''} transactions`);
+try {
+  const { updated, skipped, visibleIds } = await bulkUpdate({ ids, patch });
+  const visible = new Set(visibleIds);
+  const prevSize = selectedIds.size;
+  const newSelection = new Set([...selectedIds].filter(id => visible.has(id)));
+  setSelectedIds(newSelection);
+  setBulkEditOpen(false);  // close the dialog on success
+  const dropped = prevSize - newSelection.size;
+  toast.success(
+    `Updated ${updated}${skipped ? `, skipped ${skipped}` : ''} transactions` +
+    (dropped > 0 ? ` (selection cleared — rows no longer match the current filter)` : '')
+  );
+} catch (err) {
+  // Either the PATCH failed (data not changed) OR the post-PATCH refetch failed
+  // (data changed, but the table view is stale). The hook re-throws either as
+  // a single error — the page can't tell them apart structurally, so the toast
+  // wording acknowledges both possibilities. Dialog stays open so the user
+  // sees their form state and can retry; selection is left untouched.
+  toast.error(
+    err instanceof RefetchAfterMutationError
+      ? `Update applied, but refresh failed — please reload to see the latest. (${err.message})`
+      : `Update failed: ${err.message}`
+  );
+}
 ```
 
-Prune fires only on a successful response; on failure (caught by the page's try/catch around `bulkUpdate`), `selectedIds` is left untouched and the dialog stays open with the user's form state intact.
+The toast adds the "(selection cleared — rows no longer match the current filter)" hint when prune actually dropped IDs — without this the silent toolbar collapse reads like a UI bug.
+
+`bulkUpdate` distinguishes the two failure modes by tagging the refetch error: if `api.post(...)` succeeds but `fetchTransactionsAsync()` throws, the hook wraps it in a `RefetchAfterMutationError` so the page can surface the right message. The user is reassured that their data change landed even though the view is stale.
+
+Prune and dialog-close fire only on a successful end-to-end response; on failure, `selectedIds` is left untouched and the dialog stays open with the user's form state intact.
 
 Behavior under each scenario:
 
@@ -179,8 +213,10 @@ Every existing transaction mutation handler that touches `date` calls `h.verifyA
 Behavior:
 
 - **`batch-update`**: when the patch includes `date`, the handler tracks `minDate` across all successfully-updated rows as `earliestDate(before.Date, after.Date)` per row, and after the tx commits calls `h.verifyAffectedCheckpoints(ctx, minDate)`. When `date` is not in the patch, the hook is skipped entirely.
-- **`update-by-filter` (no-tags fast path)**: the single SQL UPDATE doesn't enumerate dates, so the handler passes the conservative `time.Time{}` sentinel to `verifyAffectedCheckpoints` (matching `handleDeleteTransactionsByFilter:1003`), which triggers a full reverification. Skipped when `date` is not in the patch.
-- **`update-by-filter` (tags read-then-write loop)**: the loop already enumerates rows and reads `before.Date`. The handler tracks `minDate = earliestDate(minDate, before.Date, after.Date)` per row and passes it after commit. Skipped when `date` is not in the patch (which it isn't for tags-only patches anyway, since tags doesn't change date).
+- **`update-by-filter`**: the no-tags fast path and the tags read-then-write path are mutually exclusive at the handler level (selected via `if patch.Tags != nil`). Whichever path runs, the checkpoint hook fires **at most once** per request, with `minDate`:
+  - **No-tags fast path**: the single SQL UPDATE doesn't enumerate dates, so `minDate = time.Time{}` (sentinel for "reverify all checkpoints", matching `handleDeleteTransactionsByFilter:1003`).
+  - **Tags read-then-write path**: the loop already enumerates rows and reads `before.Date`, so `minDate` is the precise floor across all rows touched. (Tags-only patches don't change date — but `{tags, date}` in the same patch does, and the per-row scan provides the right floor.)
+  - In both subcases, the hook is skipped entirely when `patch.Date == nil`.
 
 This is a v1 correctness gate, not a future enhancement. Tested explicitly per §7.
 
@@ -224,23 +260,45 @@ const bulkEditSchema = z.object({
 
 The `category_id: z.literal('noChange') | z.number()` discriminated union is the only field where the sentinel is a non-empty string (because the `Select` value cannot be `''`). **The string sentinel is a client-side-only signal — it never reaches the wire.** §4.3 step 2 explicitly excludes it from the patch object before submission, so the server only ever sees `category_id` as `int64` (matching §6.1).
 
-### 4.3 Submit flow
+### 4.3 Submit flow + Apply button enablement
+
+**Dirty rule for the Apply button (`isPatchNonEmpty`):**
+
+The Apply button is disabled iff the computed patch object is empty. This is **stricter than RHF's built-in `isDirty`**: a user who picks a category and then reverts to `— No change —` produces RHF-dirty=true but patch-empty=true. We use the patch-emptiness check, not RHF dirty, so the user can't submit a no-op.
+
+```ts
+const dirtyPatch = computePatch(form.watch());
+const canSubmit = Object.keys(dirtyPatch).length > 0;
+```
+
+**Submit-count source of truth** for the "Apply to ${N}" button text:
+
+- `selectionScope === 'page'` → `N = selectedIds.size` (live, observed via the existing selection state).
+- `selectionScope === 'all-matching'` → `N = total` from the most recent transactions response.
+
+The dialog reads these on each render, so if the user toggles a checkbox in the underlying table while the dialog is open, the button count tracks. The dialog does NOT lock the selection on open — Radix's modal overlay already prevents click-through to underlying checkboxes, but if the user closes the dialog (Esc/Cancel) and toggles selection without losing focus, the count is correct on re-open.
+
+**Step-by-step:**
 
 1. RHF `handleSubmit(values)` fires.
-2. Build `patch` by walking values: include `date` if non-empty, `description` if non-empty (after trim), `category_id` if not `'noChange'`, `tags` + `tagsMode` if `tags` is non-empty.
-3. If `Object.keys(patch).length === 0`, abort with no-op (Apply button is already disabled, this is a defensive guard).
+2. Build `patch` via `computePatch(values)`: include `date` if the "Set date" toggle is on AND value is a valid YYYY-MM-DD string; include `description` if non-empty after trim; include `category_id` if not `'noChange'`; include `tags` + `tagsMode` if `tags` is non-empty.
+3. If `Object.keys(patch).length === 0`, abort with no-op (defensive guard — Apply button should already be disabled).
 4. If `selectionScope === 'all-matching'`, open `BulkEditConfirmDialog`. Otherwise straight to step 5.
-5. Dispatch `bulkUpdate` or `bulkUpdateByFilter` based on scope.
-6. On success: close dialog, `refetch()`, prune `selectedIds`, toast `Updated ${updated} transactions${skipped > 0 ? \`, skipped ${skipped}\` : ''}`.
-7. On failure: toast `error.message`, leave dialog open, keep form state.
+5. Dispatch `bulkUpdate` or `bulkUpdateByFilter` based on scope (the scope is captured at submit time, not re-read after).
+6. On success: see §3.5 for the full prune + close + toast flow.
+7. On failure: see §3.5 for the differentiated toast (PATCH-failure vs refetch-failure). Dialog stays open with form state preserved; selection untouched.
+8. On 401 (auth lost mid-session): the existing global error handler in `api/client.ts` already redirects to `/login`. Bulk-edit doesn't introduce a new auth-loss flow — its 401 path inherits from the client.
 
 ### 4.4 Accessibility
 
 - Dialog uses shadcn `Dialog` (not `AlertDialog`) — same as `delete-by-filter` confirm precedent — so it has `aria-labelledby` and `aria-describedby` automatically wired.
 - Each field has a visible `<Label>` and matching `htmlFor`/`id`.
-- Tags radio group uses shadcn `RadioGroup` for proper roving-tabindex behavior.
-- `Apply to ${N}` button has `aria-label` echoing the count for screen readers.
+- Tags radio group uses shadcn `RadioGroup`. **shadcn `radio-group` is not currently installed** (`web/src/components/ui/radio-group.tsx` does not exist) — task #6 in §11 runs `pnpm dlx shadcn@latest add radio-group` before any TSX referencing it. The group has an explicit `aria-labelledby` pointing at a visible legend "Tag operation" so screen readers announce the group purpose, and individual radios are labelled `Add`, `Remove`, `Replace`.
+- `Apply to ${N}` button has `aria-label="Apply changes to ${N} transactions"` (full sentence) for screen readers, while the visible text stays compact (`Apply to ${N}`).
 - `Esc` closes the dialog (Radix default), guarded against when an in-flight request is pending.
+- **Focus order** (explicit, set via DOM order in the markup): "Set date" toggle → date input → description → category select → tags-mode radio group → tags input → Cancel → Apply. The order matches the visual reading order on both wide and narrow layouts.
+- **Cmd/Ctrl+Enter** submits the form from any focused field — implemented via a single `onKeyDown` handler at the form root checking `e.metaKey || e.ctrlKey`. Same pattern as the inline edit row's keyboard shortcuts (`web/src/pages/Transactions/inline-edit-keyboard-shortcuts` precedent).
+- Field-level validation errors render below each input via shadcn `FormMessage`, never as toast-only — screen reader users need the error text in the form's accessibility tree, not in an ephemeral toast.
 
 ## 5. Backend Design
 
@@ -264,10 +322,10 @@ func (s *TransactionStore) UpdateTx(
     actorID int64,
     id int64,
     patch UpdatePatch,
-) (before, after Transaction, err error)
+) (before, after database.GetTransactionByIDRow, err error)
 ```
 
-Returning both `before` and `after` lets the caller compute `earliestDate(before.Date, after.Date)` for the checkpoint hook (§3.10). Mirrors the existing single-row `Update` shape (`store.go:100`) which already loads both snapshots internally.
+Returns `GetTransactionByIDRow` (the joined row type that includes `category_type`), not `Transaction` — `writeUpdateAudit` at `store.go:350` requires this exact type. Caller reads `before.Date` / `after.Date` for the checkpoint hook (§3.10). Mirrors the existing single-row `Update` shape (`store.go:100`) which already loads both `GetTransactionByIDRow` snapshots internally.
 
 The three sentinel errors `ErrTombstoned`, `ErrNotOwned`, `ErrNotFound` are exported from `internal/database` (placed alongside the existing `database.ErrTokenNotFound` in `store_api_token.go` — same package, same naming convention). The handler imports them as `database.ErrTombstoned` etc., matching the api-token precedent.
 
@@ -318,37 +376,53 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
         updated, skipped int64
         minDate          time.Time  // zero unless patch.Date is set
     )
-    err = h.txnStore.WithTx(r.Context(), func(tx *sql.Tx) error {
-        for _, id := range req.IDs {
-            before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, patch)
-            switch {
-            case errors.Is(err, database.ErrTombstoned),
-                 errors.Is(err, database.ErrNotOwned),
-                 errors.Is(err, database.ErrNotFound):
-                skipped++
-            case err != nil:
-                return err  // SQL/constraint error rolls back the entire tx
-            default:
-                updated++
-                if patch.Date != nil {
-                    minDate = earliestDate(minDate, before.Date, after.Date)
-                }
+    // Open the tx directly via h.db, mirroring handleBatchDeleteTransactions:805-815.
+    // TransactionStore does not expose a public WithTx (its withTx is private and
+    // single-row-scoped); the handler owns the multi-row tx and passes it to UpdateTx.
+    tx, err := h.db.BeginTx(r.Context(), nil)
+    if err != nil { writeError(w, 500, "begin tx"); return }
+    defer tx.Rollback()
+
+    for _, id := range req.IDs {
+        before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, patch)
+        switch {
+        case errors.Is(err, database.ErrTombstoned),
+             errors.Is(err, database.ErrNotOwned),
+             errors.Is(err, database.ErrNotFound):
+            skipped++
+        case err != nil:
+            // ANY non-skip error rolls back the entire batch — successful rows
+            // already updated in this tx are reverted on the deferred Rollback.
+            // Caller sees no partial progress.
+            writeError(w, 500, "internal server error")
+            return
+        default:
+            updated++
+            if patch.Date != nil {
+                // earliestDate is 2-arg per checkpoint_handlers.go:224. Nest the call
+                // to fold three values into one.
+                minDate = earliestDate(minDate, earliestDate(before.Date, after.Date))
             }
         }
-        if skipped > 0 {
-            // RecordBulkTx wraps the JSON envelope itself — pass a struct, not a marshalled string.
-            return h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate,
-                database.BulkAuditSummary{
-                    Count:  skipped,
-                    Filter: fmt.Sprintf("skipped_during_batch_update:%d_of_%d", skipped, len(req.IDs)),
-                })
+    }
+    if skipped > 0 {
+        // Skip-summary RecordBulkTx is inside the data tx — rollback rolls both
+        // the data updates AND this audit row back together. RecordBulkTx wraps
+        // the JSON envelope itself; pass a struct, not a marshalled string.
+        if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate,
+            database.BulkAuditSummary{
+                Count:  skipped,
+                Filter: fmt.Sprintf("skipped_during_batch_update:%d_of_%d", skipped, len(req.IDs)),
+            }); err != nil {
+            writeError(w, 500, "internal server error")
+            return
         }
-        return nil
-    })
-    if err != nil { writeError(w, 500, "internal server error"); return }
-
-    // Checkpoint reverification fires after commit. minDate is zero when patch.Date is unset,
-    // which means "no date changed" and the hook is skipped.
+    }
+    if err := tx.Commit(); err != nil {
+        writeError(w, 500, "commit"); return
+    }
+    // Checkpoint reverification fires after commit. minDate is zero when patch.Date
+    // is unset, which means "no date changed" and the hook is skipped.
     if patch.Date != nil && !minDate.IsZero() {
         h.verifyAffectedCheckpoints(r.Context(), minDate)
     }
@@ -357,10 +431,11 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 }
 ```
 
-Two notes the plan must preserve:
+Three notes the plan must preserve:
 
 1. `RecordBulkTx` is called with a `BulkAuditSummary{Count, Filter}` struct — the helper already JSON-encodes the envelope `{bulk:true, count, filter}` itself (`store.go:296-300`). Passing a pre-marshalled string here would double-wrap.
-2. `WithTx` (or an equivalent helper) is what the handler uses to scope the multi-row update inside one tx. If `TransactionStore` doesn't already expose `WithTx` publicly, the plan adds it (mirroring the pattern in `store_api_token.go`'s `RevokeAllForUser` which also drives a multi-row mutation under one tx). The exact name is a plan-time decision; what matters here is the tx scoping shape.
+2. The handler owns the multi-row tx via `h.db.BeginTx(...)` + deferred `Rollback` + explicit `Commit`, mirroring `handleBatchDeleteTransactions:805-815`. `TransactionStore.withTx` is private and single-row-scoped; the public surface is the new `UpdateTx(ctx, tx, ...)` method which accepts the caller-owned tx.
+3. Mid-batch SQL/constraint errors trigger the deferred `Rollback`. Rows successfully updated earlier in the batch are reverted; the caller sees no partial progress. This is by design and matches `handleBatchDeleteTransactions` exactly.
 
 ### 5.4 `handleUpdateTransactionsByFilter`
 
@@ -371,7 +446,9 @@ Two SQL paths inside one tx:
 - **Tags absent** (only date/description/category_id in patch): one `UPDATE transactions SET ... WHERE id IN (SELECT t.id FROM transactions t JOIN ... WHERE <filter>)`. Mirrors `handleDeleteTransactionsByFilter:945-949`.
 - **Tags present**: enumerate matching rows (`SELECT id, tags FROM transactions WHERE <filter>`), compute new tags per row, run N small `UPDATE WHERE id = ?` statements. Documented in handler comment as the trade-off for tags semantics.
 
-Both paths emit one `RecordBulkTx` summary audit row at the end. The patch is embedded into the `Filter` string (matching `handleBulkRename` and `handleDeleteTransactionsByFilter` precedent — those handlers use the `Filter` field as a free-form descriptor, not a JSON struct) so that `RecordBulkTx`'s built-in `{bulk, count, filter}` envelope captures everything in one place without double-encoding:
+Both paths emit one `RecordBulkTx` summary audit row at the end **unconditionally** — even when `count = 0` (the filter matched nothing). This matches `handleDeleteTransactionsByFilter:983` and `handleBulkRename` precedent, which both write the summary row without a guard on count: the audit table records the user's *attempt* against filter X, not just successful work. A test pins this (`TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary` in §7.2).
+
+The patch is embedded into the `Filter` string (matching `handleBulkRename` and `handleDeleteTransactionsByFilter` precedent — those handlers use the `Filter` field as a free-form descriptor, not a JSON struct) so that `RecordBulkTx`'s built-in `{bulk, count, filter}` envelope captures everything in one place without double-encoding:
 
 ```go
 patchSummary := summarizePatch(patch)  // e.g. "category_id=5; tags=tax,receipt(add)"
@@ -397,21 +474,30 @@ Rules:
 
 A unit test pins this format and is part of task #1 in the implementation plan.
 
-After the commit, `verifyAffectedCheckpoints` fires when `patch.Date != nil`:
+After the commit, `verifyAffectedCheckpoints` fires when `patch.Date != nil`. The two SQL paths (no-tags fast path vs tags read-then-write) are **mutually exclusive at the handler level** — the path is chosen exactly once via `if patch.Tags != nil`, so the checkpoint hook is also invoked exactly once per request:
 
 ```go
-// No-tags fast path: single SQL UPDATE doesn't enumerate dates,
-// so reverify conservatively (matches handleDeleteTransactionsByFilter:1003).
-if patch.Date != nil {
-    h.verifyAffectedCheckpoints(r.Context(), time.Time{})
+if patch.Tags != nil {
+    // Tags read-then-write path: enumerate matching rows, compute new tags
+    // per row, write them, accumulate minDate from each row's date column.
+    // (Tags-only patches don't change date — but tags+date in the same patch
+    // does, and minDate is the precise floor.)
+    minDate, updated, err = h.runTagsFilterPath(...)
+    if err != nil { writeError(w, 500, ...); return }
+} else {
+    // No-tags fast path: single SQL UPDATE doesn't enumerate dates, so the
+    // hook reverifies conservatively (matches handleDeleteTransactionsByFilter:1003).
+    minDate = time.Time{}  // sentinel "reverify all checkpoints"
+    updated, err = h.runNoTagsFilterPath(...)
+    if err != nil { writeError(w, 500, ...); return }
 }
 
-// Tags read-then-write path: the loop already touched each row's date,
-// so a precise minDate is in hand.
-if patch.Date != nil && !minDate.IsZero() {
-    h.verifyAffectedCheckpoints(r.Context(), minDate)
+if patch.Date != nil {
+    h.verifyAffectedCheckpoints(r.Context(), minDate)  // single call, runs at most once per request
 }
 ```
+
+The structural guarantee comes from the path selector: `patch.Tags != nil` flips between the two branches, never both. Mutual exclusivity is the simplest invariant — no flag, no bookkeeping, no risk of double-fire.
 
 ### 5.5 Audit payload redaction (none in v1)
 
@@ -425,10 +511,12 @@ Existing `validateTransactionRequest` at `transaction_handlers.go:629` is decomp
 
 - `validateDate(string) (string, error)` — returns the canonical YYYY-MM-DD form, errors on bad format.
 - `validateDescription(string) (string, error)` — trims, length-checks (≤ `MaxDescriptionLength`).
-- `validateCategoryID(int64) (int64, error)` — verifies `id > 0`, matching the existing single-row laxity in `validateTransactionRequest:648-650`. Categories are household-shared (`migrations/001_initial_schema.sql:24-33` — there is no `user_id` column on `categories`), so no per-user scoping check is needed. The existence + `is_active` upgrade is **not** added in v1: doing so on bulk-edit alone would create a divergence where bulk-edit rejects `category_id = 47 (inactive)` but the single-row endpoint accepts it. If/when that check becomes a priority, both endpoints get the upgraded validator together as a separate cross-cutting story.
+- `validateCategoryID(int64) (int64, error)` — verifies `id > 0`, matching the existing single-row laxity in `validateTransactionRequest:648-649`. Categories are household-shared (`migrations/001_initial_schema.sql:24-33` — there is no `user_id` column on `categories`), so no per-user scoping check is needed. The existence + `is_active` upgrade is **not** added in v1: doing so on bulk-edit alone would create a divergence where bulk-edit rejects `category_id = 47 (inactive)` but the single-row endpoint accepts it. If/when that check becomes a priority, both endpoints get the upgraded validator together as a separate cross-cutting story.
 - `validateTagsField(string) (string, error)` — length-checks (≤ `MaxTagsLength`); does NOT lowercase or trim individual items beyond what the existing single-row path already does (per §3.3).
 
 Each handler walks `req.Patch` and runs the matching validator only for present fields. Currency and amount validators are explicitly NOT called (those fields aren't in scope for v1). Empty patch returns 400.
+
+**Mass-assignment guard (security-critical).** The JSON decoder for both endpoints uses `dec.DisallowUnknownFields()` so that extra patch keys (e.g. `{"patch":{"user_id":99,"amount_cents":0,"deleted_at":null}}`) error out with a 400 instead of being silently dropped. The current typed `UpdatePatch` struct shields this incidentally, but that's a side-effect, not a contract — a future field addition (e.g. `Notes *string`) would silently widen the bulk-edit attack surface to fields not reviewed for bulk semantics. `DisallowUnknownFields` makes the contract explicit. A test asserts `{"patch":{"user_id":99}}` returns 400 and is part of task #3 in §11.
 
 ### 5.6 sqlc additions
 
@@ -637,17 +725,18 @@ None — all design decisions are settled. Ready for implementation plan.
 
 ## 11. Implementation Sequencing (high-level)
 
-The implementation plan (separate doc) will decompose this into ~10 tasks. Audit tests are co-located with each handler step (TDD-first) — they drive the audit row shape, so writing them after the handler invites the kind of "audit emits but the JSON envelope is wrong" bug the §3.6 + §5.4 discussion is meant to prevent.
+The implementation plan (separate doc) will decompose this into ~11 tasks. Audit tests are co-located with each handler step (TDD-first) — they drive the audit row shape, so writing them after the handler invites the kind of "audit emits but the JSON envelope is wrong" bug the §3.6 + §5.4 discussion is meant to prevent.
 
-1. Backend constants + per-field validators (`MaxBatchUpdateIDs` to `internal/api/limits.go`; `validateDate` / `validateDescription` / `validateCategoryID` / `validateTagsField` extracted from `validateTransactionRequest`).
-2. Backend store — `UpdateTx`, `UpdatePatch`, errors (`ErrTombstoned`, `ErrNotOwned`, `ErrNotFound`); store tests covering soft-delete + ownership invariants.
-3. Backend handler — `handleBatchUpdateTransactions` + types (`BatchUpdateRequest`, `BulkUpdateResponse`); per-row audit invariant test; partial-skip test; checkpoint hook test.
-4. Backend handler — `handleUpdateTransactionsByFilter` (no-tags fast path); summary audit invariant test; soft-delete `*_HidesTombstoned` test; checkpoint hook test.
-5. Backend handler — `handleUpdateTransactionsByFilter` (tags read-then-write loop); audit-still-summary test; tags Add/Remove/Replace tests.
-6. Frontend types + `useTransactions.bulkUpdate` / `bulkUpdateByFilter` + the `fetchTransactionsAsync` refactor (§3.5).
-7. Frontend `BulkEditDialog` + zod schema + RHF wiring.
-8. Frontend `BulkEditConfirmDialog` (all-matching scope only).
-9. Frontend `Transactions.tsx` integration: trigger button, scope dispatch, prune-on-refetch.
-10. Frontend tests + docs (README + DESIGN_GUIDE updates).
+1. Backend constants + per-field validators (`MaxBatchUpdateIDs` to `internal/api/limits.go:35` next to `MaxBatchDeleteIDs`; `validateDate` / `validateDescription` / `validateCategoryID` / `validateTagsField` extracted from `validateTransactionRequest`). Includes `summarizePatch` helper + its unit test pinning the format from §5.4 (with grep-boundary regression cases for embedded `";`).
+2. Backend store — `UpdateTx`, `UpdatePatch`, sentinel errors (`ErrTombstoned`, `ErrNotOwned`, `ErrNotFound` exported from `internal/database`); store tests covering soft-delete + ownership invariants in new file `internal/database/store_transaction_test.go`.
+3. Backend handler — `handleBatchUpdateTransactions` + types (`BatchUpdateRequest`, `BulkUpdateResponse`). **Includes `dec.DisallowUnknownFields()` mass-assignment guard + test** (§5.5b). Per-row audit invariant test; partial-skip test; checkpoint hook test (`patch.Date` set vs unset); admin-bypass-ownership test.
+4. Backend handler — `handleUpdateTransactionsByFilter` (no-tags fast path); summary audit invariant test (incl. `TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary`); soft-delete `*_HidesTombstoned` test; checkpoint hook test passing `time.Time{}`.
+5. Backend handler — `handleUpdateTransactionsByFilter` (tags read-then-write loop); audit-still-summary test; tags Add/Remove/Replace tests pinning byte-for-byte case-sensitive comparison (§3.3); `TestUpdateByFilter_Tags_HidesTombstoned` test for the read-then-write SELECT path; checkpoint hook test using `minDate` from the per-row scan.
+6. Frontend prerequisites — install shadcn `radio-group` (`pnpm dlx shadcn@latest add radio-group`) + `checkbox` if not already present. Add types in `web/src/api/types.ts` (`BulkUpdateRequest`, `BulkUpdateByFilterRequest`, `BulkUpdateResponse`).
+7. Frontend hook — `useTransactions.bulkUpdate` / `bulkUpdateByFilter` + the `fetchTransactionsAsync` refactor (§3.5) + `RefetchAfterMutationError` differentiation.
+8. Frontend `BulkEditDialog` + zod schema + RHF wiring + `computePatch` helper. Tests cover the dirty rule (RHF-dirty vs patch-empty divergence), Set-date toggle gating, tags radio enablement, Cmd/Ctrl+Enter submit.
+9. Frontend `BulkEditConfirmDialog` (all-matching scope only) + truncation rule for long description summaries.
+10. Frontend `Transactions.tsx` integration: trigger button, scope dispatch, prune-on-refetch with explanatory toast, refetch-failure toast.
+11. Frontend tests + docs (README + DESIGN_GUIDE updates).
 
 Each task follows the project's existing TDD discipline: failing test → minimal implementation → green → commit. Conventional-commit prefix per CLAUDE.md (e.g. `feat(api): add batch-update handler`).
