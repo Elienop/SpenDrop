@@ -170,7 +170,7 @@ Per-field validators are decomposed out of `validateTransactionRequest` so the b
 
 - Both endpoints sit behind `auth.RequireAuthOrAPIToken` + `requireJSONContentType` (`router.go:109`, `:308-333`). Bearer tokens and session cookies both work.
 - Per-user ownership: enforced at SQL for filter-mode (`WHERE user_id = ?` in the existing `buildTransactionWhereClause`); enforced at the per-row check for batch-update (`existing.UserID != user.ID` skip — same as `batch-delete`). Admin (`user.Role == RoleAdmin`) bypass matches existing transaction handlers.
-- Rate limiting: not introduced. The `MaxBatchUpdateIDs = 500` cap mirrors `MaxBatchDeleteIDs` and is added to `internal/api/limits.go` alongside its sibling. Filter-mode is single-statement and its cost is bounded by the database. A dedicated rate-limit bucket is unnecessary at v1 scale.
+- Rate limiting: not introduced. The `MaxBatchUpdateIDs = 500` cap mirrors `MaxBatchDeleteIDs` and is added to `internal/api/limits.go:35` alongside its sibling (also next to `MaxBatchRestoreIDs` which is already pinned to `MaxBatchDeleteIDs` for the same reason). Filter-mode is single-statement and its cost is bounded by the database. A dedicated rate-limit bucket is unnecessary at v1 scale.
 
 ### 3.10 Checkpoint reverification hook
 
@@ -268,6 +268,8 @@ func (s *TransactionStore) UpdateTx(
 ```
 
 Returning both `before` and `after` lets the caller compute `earliestDate(before.Date, after.Date)` for the checkpoint hook (§3.10). Mirrors the existing single-row `Update` shape (`store.go:100`) which already loads both snapshots internally.
+
+The three sentinel errors `ErrTombstoned`, `ErrNotOwned`, `ErrNotFound` are exported from `internal/database` (placed alongside the existing `database.ErrTokenNotFound` in `store_api_token.go` — same package, same naming convention). The handler imports them as `database.ErrTombstoned` etc., matching the api-token precedent.
 
 Internal flow per call:
 
@@ -379,6 +381,21 @@ err = h.txnStore.RecordBulkTx(ctx, tx, user.ID, database.AuditUpdate,
 ```
 
 `summarizePatch` is a small helper alongside `buildUpdatePatch` — it formats the patch as a stable, human-readable string for audit-table greppability. Plaintext description in the patch summary is consistent with `handleBulkRename`'s plaintext-search-and-replacement pattern (no new exposure surface — see §5.5).
+
+**Stable format pinned for audit-table greppability:**
+
+```
+category_id=5; date=2026-04-30; description="ATM card #4839"; tags=tax,receipt(add)
+```
+
+Rules:
+- Fields appear in fixed order: `date`, `description`, `category_id`, `tags`.
+- Only fields present in the patch render; others are omitted (no `category_id=null` placeholders).
+- `description` is double-quoted; embedded `"` is escaped `\"`; embedded `;` is left raw (the parsing convention is "split on `; ` with quote-awareness", but the audit consumer is human / grep, not a parser).
+- `tags` always renders the mode in parentheses: `tags=...(add)` / `tags=...(remove)` / `tags=...(replace)`.
+- `summarizePatch` output is capped at 1024 chars; longer outputs truncate with `…(truncated)` suffix to keep the audit row's `before_json` envelope bounded on pathological inputs.
+
+A unit test pins this format and is part of task #1 in the implementation plan.
 
 After the commit, `verifyAffectedCheckpoints` fires when `patch.Date != nil`:
 
