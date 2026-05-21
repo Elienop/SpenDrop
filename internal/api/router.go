@@ -100,6 +100,14 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// Bearer token so headless scripts can introspect their own
 		// identity.
 		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).Get("/me", h.handleMe)
+
+		// Self-service password change. Auth-required (any user) and
+		// JSON-only (requireJSONContentType blocks cross-site form POSTs).
+		// Rotates the caller's password and cascades a token revoke +
+		// session wipe, so the caller is signed out everywhere on success.
+		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).
+			With(requireJSONContentType).
+			Post("/password", h.handleChangePassword)
 	})
 
 	// Authenticated API routes. Accepts either session cookie OR Bearer
@@ -178,6 +186,10 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Post("/", h.handleCreateUser)
 			r.Put("/{id}", h.handleUpdateUser)
 			r.Delete("/{id}", h.handleDeleteUser)
+			// Admin resets another user's password. No current-password
+			// check — the admin's authority is the authorization. Cascades
+			// a token revoke + session wipe for the TARGET user.
+			r.Post("/{id}/reset-password", h.handleAdminResetPassword)
 		})
 
 		// Trash view (admin only). Mounted as a chi.Group rather than a

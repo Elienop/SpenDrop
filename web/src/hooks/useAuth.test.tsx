@@ -170,4 +170,33 @@ describe('useAuth', () => {
     });
     expect(mockedApi.post).toHaveBeenCalledWith('auth/logout');
   });
+
+  test('logout clears user state even when the logout POST rejects with 401', async () => {
+    // Session check returns a user (we are logged in).
+    mockedApi.get.mockResolvedValueOnce({
+      id: 1,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    // The server already killed the session (e.g. right after a password
+    // change), so the logout POST rejects with 401.
+    mockedApi.post.mockRejectedValueOnce(new Error('Unauthorized'));
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+
+    await user.click(screen.getByText('Logout'));
+
+    // Local auth state must still be cleared despite the rejected POST.
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    expect(mockedApi.post).toHaveBeenCalledWith('auth/logout');
+  });
 });

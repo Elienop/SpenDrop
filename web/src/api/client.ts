@@ -8,6 +8,21 @@ const API_BASE_URL = (
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api'
 ).replace(/\/+$/, '');
 
+// Error thrown for every non-OK API response. It extends the built-in
+// Error additively: `.message` keeps the legacy contract (the bare string
+// 'Unauthorized' for 401s, the server `{error}` body otherwise) so existing
+// message-based checks keep working, while `.status` exposes the raw HTTP
+// status so callers can branch on it robustly instead of matching strings.
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
 class ApiClient {
   private async request<T>(
     path: string,
@@ -23,7 +38,7 @@ class ApiClient {
     });
 
     if (response.status === 401) {
-      throw new Error('Unauthorized');
+      throw new ApiError('Unauthorized', 401);
     }
 
     if (!response.ok) {
@@ -31,8 +46,9 @@ class ApiClient {
       const error = await response
         .json()
         .catch(() => null);
-      throw new Error(
+      throw new ApiError(
         (error as { error?: string } | null)?.error || fallback,
+        response.status,
       );
     }
 
@@ -85,7 +101,7 @@ class ApiClient {
     });
 
     if (response.status === 401) {
-      throw new Error('Unauthorized');
+      throw new ApiError('Unauthorized', 401);
     }
 
     if (!response.ok) {
@@ -93,8 +109,9 @@ class ApiClient {
       const error = await response
         .json()
         .catch(() => null);
-      throw new Error(
+      throw new ApiError(
         (error as { error?: string } | null)?.error || fallback,
+        response.status,
       );
     }
 

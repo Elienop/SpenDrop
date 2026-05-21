@@ -73,8 +73,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(async () => {
-    await api.post('auth/logout');
-    setUser(null);
+    // Always clear local auth state, even if the logout POST fails. A 401
+    // here is routine — e.g. right after a password change the server has
+    // already killed this session, so the POST rejects. Swallowing it and
+    // clearing state in `finally` keeps the client and server in sync
+    // instead of leaving a stale user object behind.
+    try {
+      await api.post('auth/logout');
+    } catch {
+      // Ignore — the session is gone one way or another.
+    } finally {
+      setUser(null);
+    }
     navigate('/login');
   }, [navigate]);
 
