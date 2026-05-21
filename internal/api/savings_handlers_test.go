@@ -19,13 +19,13 @@ func TestHandleGetSavingsGoals_ReturnsAll(t *testing.T) {
 
 	// Seed savings goals. Phase 3.1a: dual-write target_amount_cents.
 	err := q.UpsertSavingsGoal(context.Background(), database.UpsertSavingsGoalParams{
-		Year: 2026, TargetAmount: 12000, TargetAmountCents: dollarsToCents(12000),
+		Year: 2026, TargetAmountCents: dollarsToCents(12000),
 	})
 	if err != nil {
 		t.Fatalf("seed savings goal: %v", err)
 	}
 	err = q.UpsertSavingsGoal(context.Background(), database.UpsertSavingsGoalParams{
-		Year: 2025, TargetAmount: 10000, TargetAmountCents: dollarsToCents(10000),
+		Year: 2025, TargetAmountCents: dollarsToCents(10000),
 	})
 	if err != nil {
 		t.Fatalf("seed savings goal: %v", err)
@@ -84,8 +84,8 @@ func TestHandleSetSavingsGoal_UpsertsGoal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get savings goal: %v", err)
 	}
-	if goal.TargetAmount != 15000 {
-		t.Errorf("expected target_amount 15000, got %v", goal.TargetAmount)
+	if goal.TargetAmountCents != dollarsToCents(15000) {
+		t.Errorf("expected target_amount_cents %d, got %v", dollarsToCents(15000), goal.TargetAmountCents)
 	}
 }
 

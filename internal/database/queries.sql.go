@@ -227,24 +227,22 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 
 const createTransaction = `-- name: CreateTransaction :one
 
-INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, amount, original_amount, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, date, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash
 `
 
 type CreateTransactionParams struct {
-	UserID              int64           `json:"user_id"`
-	Date                time.Time       `json:"date"`
-	Amount              float64         `json:"amount"`
-	AmountCents         int64           `json:"amount_cents"`
-	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
-	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
-	OriginalCurrency    sql.NullString  `json:"original_currency"`
-	Description         string          `json:"description"`
-	CategoryID          int64           `json:"category_id"`
-	Tags                sql.NullString  `json:"tags"`
-	Notes               sql.NullString  `json:"notes"`
-	ContentHash         sql.NullString  `json:"content_hash"`
+	UserID              int64          `json:"user_id"`
+	Date                time.Time      `json:"date"`
+	AmountCents         int64          `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString `json:"original_currency"`
+	Description         string         `json:"description"`
+	CategoryID          int64          `json:"category_id"`
+	Tags                sql.NullString `json:"tags"`
+	Notes               sql.NullString `json:"notes"`
+	ContentHash         sql.NullString `json:"content_hash"`
 }
 
 // Transactions
@@ -260,10 +258,10 @@ type CreateTransactionParams struct {
 //
 // When adding a new transactions read, place it in queries.sql (not raw
 // SQL in a handler) and add AND t.deleted_at IS NULL by default.
-// Dual-write contract (Phase 3.1a): writers populate BOTH the legacy REAL
-// columns (amount, original_amount) AND the new INTEGER _cents columns until
-// migration 010 drops the legacy columns. Keep the caller math local -
-// amount_cents = int64(math.Round(amount*100)) at the call site.
+// Phase 3.1b: the legacy REAL columns (amount, original_amount) were dropped
+// in migration 010. Writers populate the INTEGER _cents columns only; the
+// caller computes cents from the float at the wire edge
+// (amount_cents = int64(math.Round(amount*100))).
 //
 // Phase 3.4: content_hash is nullable. Import callers pass the SHA-256
 // over the normalized row (database.ComputeContentHash); manual-entry
@@ -273,9 +271,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
 		arg.Date,
-		arg.Amount,
 		arg.AmountCents,
-		arg.OriginalAmount,
 		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
 		arg.Description,
@@ -289,8 +285,6 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.ID,
 		&i.UserID,
 		&i.Date,
-		&i.Amount,
-		&i.OriginalAmount,
 		&i.OriginalCurrency,
 		&i.Description,
 		&i.CategoryID,
@@ -407,7 +401,7 @@ func (q *Queries) DeleteUser(ctx context.Context, id int64) (sql.Result, error) 
 
 const getBudget = `-- name: GetBudget :one
 
-SELECT id, year, month, amount, updated_at, amount_cents FROM budgets WHERE year = ? AND month = ?
+SELECT id, year, month, updated_at, amount_cents FROM budgets WHERE year = ? AND month = ?
 `
 
 type GetBudgetParams struct {
@@ -423,7 +417,6 @@ func (q *Queries) GetBudget(ctx context.Context, arg GetBudgetParams) (Budget, e
 		&i.ID,
 		&i.Year,
 		&i.Month,
-		&i.Amount,
 		&i.UpdatedAt,
 		&i.AmountCents,
 	)
@@ -492,7 +485,7 @@ func (q *Queries) GetCurrency(ctx context.Context, code string) (Currency, error
 
 const getSavingsGoal = `-- name: GetSavingsGoal :one
 
-SELECT id, year, target_amount, updated_at, target_amount_cents FROM savings_goals WHERE year = ?
+SELECT id, year, updated_at, target_amount_cents FROM savings_goals WHERE year = ?
 `
 
 // Savings Goals
@@ -502,7 +495,6 @@ func (q *Queries) GetSavingsGoal(ctx context.Context, year int64) (SavingsGoal, 
 	err := row.Scan(
 		&i.ID,
 		&i.Year,
-		&i.TargetAmount,
 		&i.UpdatedAt,
 		&i.TargetAmountCents,
 	)
@@ -577,29 +569,27 @@ func (q *Queries) GetTransactionByContentHash(ctx context.Context, contentHash s
 }
 
 const getTransactionByID = `-- name: GetTransactionByID :one
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?
 `
 
 type GetTransactionByIDRow struct {
-	ID                  int64           `json:"id"`
-	UserID              int64           `json:"user_id"`
-	Date                time.Time       `json:"date"`
-	Amount              float64         `json:"amount"`
-	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency    sql.NullString  `json:"original_currency"`
-	Description         string          `json:"description"`
-	CategoryID          int64           `json:"category_id"`
-	Tags                sql.NullString  `json:"tags"`
-	Notes               sql.NullString  `json:"notes"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
-	DeletedAt           sql.NullTime    `json:"deleted_at"`
-	AmountCents         int64           `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
-	CategoryType        string          `json:"category_type"`
+	ID                  int64          `json:"id"`
+	UserID              int64          `json:"user_id"`
+	Date                time.Time      `json:"date"`
+	OriginalCurrency    sql.NullString `json:"original_currency"`
+	Description         string         `json:"description"`
+	CategoryID          int64          `json:"category_id"`
+	Tags                sql.NullString `json:"tags"`
+	Notes               sql.NullString `json:"notes"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	DeletedAt           sql.NullTime   `json:"deleted_at"`
+	AmountCents         int64          `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
+	CategoryType        string         `json:"category_type"`
 }
 
 // Mutation-only caller: used by TransactionStore.Update/Delete to emit the
@@ -614,8 +604,6 @@ func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransact
 		&i.ID,
 		&i.UserID,
 		&i.Date,
-		&i.Amount,
-		&i.OriginalAmount,
 		&i.OriginalCurrency,
 		&i.Description,
 		&i.CategoryID,
@@ -799,7 +787,7 @@ func (q *Queries) ListAllDeletedTransactionIDs(ctx context.Context) ([]int64, er
 }
 
 const listBudgetsByYear = `-- name: ListBudgetsByYear :many
-SELECT id, year, month, amount, updated_at, amount_cents FROM budgets WHERE year = ? ORDER BY month
+SELECT id, year, month, updated_at, amount_cents FROM budgets WHERE year = ? ORDER BY month
 `
 
 func (q *Queries) ListBudgetsByYear(ctx context.Context, year int64) ([]Budget, error) {
@@ -815,7 +803,6 @@ func (q *Queries) ListBudgetsByYear(ctx context.Context, year int64) ([]Budget, 
 			&i.ID,
 			&i.Year,
 			&i.Month,
-			&i.Amount,
 			&i.UpdatedAt,
 			&i.AmountCents,
 		); err != nil {
@@ -1005,7 +992,7 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 }
 
 const listDeletedTransactions = `-- name: ListDeletedTransactions :many
-SELECT t.id, t.user_id, t.date, t.amount, t.original_amount, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.deleted_at IS NOT NULL
@@ -1019,23 +1006,21 @@ type ListDeletedTransactionsParams struct {
 }
 
 type ListDeletedTransactionsRow struct {
-	ID                  int64           `json:"id"`
-	UserID              int64           `json:"user_id"`
-	Date                time.Time       `json:"date"`
-	Amount              float64         `json:"amount"`
-	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency    sql.NullString  `json:"original_currency"`
-	Description         string          `json:"description"`
-	CategoryID          int64           `json:"category_id"`
-	Tags                sql.NullString  `json:"tags"`
-	Notes               sql.NullString  `json:"notes"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
-	DeletedAt           sql.NullTime    `json:"deleted_at"`
-	AmountCents         int64           `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
-	CategoryName        string          `json:"category_name"`
-	CategoryType        string          `json:"category_type"`
+	ID                  int64          `json:"id"`
+	UserID              int64          `json:"user_id"`
+	Date                time.Time      `json:"date"`
+	OriginalCurrency    sql.NullString `json:"original_currency"`
+	Description         string         `json:"description"`
+	CategoryID          int64          `json:"category_id"`
+	Tags                sql.NullString `json:"tags"`
+	Notes               sql.NullString `json:"notes"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	DeletedAt           sql.NullTime   `json:"deleted_at"`
+	AmountCents         int64          `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
+	CategoryName        string         `json:"category_name"`
+	CategoryType        string         `json:"category_type"`
 }
 
 func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTransactionsParams) ([]ListDeletedTransactionsRow, error) {
@@ -1051,8 +1036,6 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 			&i.ID,
 			&i.UserID,
 			&i.Date,
-			&i.Amount,
-			&i.OriginalAmount,
 			&i.OriginalCurrency,
 			&i.Description,
 			&i.CategoryID,
@@ -1157,7 +1140,7 @@ func (q *Queries) ListSavedFilters(ctx context.Context, userID int64) ([]SavedFi
 }
 
 const listSavingsGoals = `-- name: ListSavingsGoals :many
-SELECT id, year, target_amount, updated_at, target_amount_cents FROM savings_goals ORDER BY year DESC
+SELECT id, year, updated_at, target_amount_cents FROM savings_goals ORDER BY year DESC
 `
 
 func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
@@ -1172,7 +1155,6 @@ func (q *Queries) ListSavingsGoals(ctx context.Context) ([]SavingsGoal, error) {
 		if err := rows.Scan(
 			&i.ID,
 			&i.Year,
-			&i.TargetAmount,
 			&i.UpdatedAt,
 			&i.TargetAmountCents,
 		); err != nil {
@@ -2042,27 +2024,25 @@ func (q *Queries) UpdateSavedFilter(ctx context.Context, arg UpdateSavedFilterPa
 
 const updateTransaction = `-- name: UpdateTransaction :exec
 UPDATE transactions
-SET date = ?, amount = ?, amount_cents = ?, original_amount = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 `
 
 type UpdateTransactionParams struct {
-	Date                time.Time       `json:"date"`
-	Amount              float64         `json:"amount"`
-	AmountCents         int64           `json:"amount_cents"`
-	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
-	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
-	OriginalCurrency    sql.NullString  `json:"original_currency"`
-	Description         string          `json:"description"`
-	CategoryID          int64           `json:"category_id"`
-	Tags                sql.NullString  `json:"tags"`
-	Notes               sql.NullString  `json:"notes"`
-	ID                  int64           `json:"id"`
+	Date                time.Time      `json:"date"`
+	AmountCents         int64          `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString `json:"original_currency"`
+	Description         string         `json:"description"`
+	CategoryID          int64          `json:"category_id"`
+	Tags                sql.NullString `json:"tags"`
+	Notes               sql.NullString `json:"notes"`
+	ID                  int64          `json:"id"`
 }
 
-// Dual-write contract (Phase 3.1a): see CreateTransaction above. Both the
-// legacy REAL column and the new INTEGER cents column are rewritten on every
-// edit. The caller computes cents from the float amount before invoking.
+// Phase 3.1b: the legacy REAL columns were dropped in migration 010; only the
+// INTEGER cents columns are written. The caller computes cents from the float
+// amount before invoking.
 //
 // Phase 3.4 note: UpdateTransaction deliberately does NOT touch content_hash.
 // An edited row keeps the hash it was imported with, so a reimport of the
@@ -2071,9 +2051,7 @@ type UpdateTransactionParams struct {
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
-		arg.Amount,
 		arg.AmountCents,
-		arg.OriginalAmount,
 		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
 		arg.Description,
@@ -2137,29 +2115,25 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPassword
 }
 
 const upsertBudget = `-- name: UpsertBudget :exec
-INSERT INTO budgets (year, month, amount, amount_cents)
-VALUES (?, ?, ?, ?)
+INSERT INTO budgets (year, month, amount_cents)
+VALUES (?, ?, ?)
 ON CONFLICT(year, month) DO UPDATE SET
-    amount = excluded.amount,
     amount_cents = excluded.amount_cents,
     updated_at = CURRENT_TIMESTAMP
 `
 
 type UpsertBudgetParams struct {
-	Year        int64   `json:"year"`
-	Month       int64   `json:"month"`
-	Amount      float64 `json:"amount"`
-	AmountCents int64   `json:"amount_cents"`
+	Year        int64 `json:"year"`
+	Month       int64 `json:"month"`
+	AmountCents int64 `json:"amount_cents"`
 }
 
-// Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
-// REAL column and the new INTEGER cents column are populated on every
-// upsert. Caller computes cents from the float amount.
+// Phase 3.1b: the legacy REAL amount column was dropped in migration 010;
+// only amount_cents is written. Caller computes cents from the float amount.
 func (q *Queries) UpsertBudget(ctx context.Context, arg UpsertBudgetParams) error {
 	_, err := q.db.ExecContext(ctx, upsertBudget,
 		arg.Year,
 		arg.Month,
-		arg.Amount,
 		arg.AmountCents,
 	)
 	return err
@@ -2196,25 +2170,23 @@ func (q *Queries) UpsertCurrency(ctx context.Context, arg UpsertCurrencyParams) 
 }
 
 const upsertSavingsGoal = `-- name: UpsertSavingsGoal :exec
-INSERT INTO savings_goals (year, target_amount, target_amount_cents)
-VALUES (?, ?, ?)
+INSERT INTO savings_goals (year, target_amount_cents)
+VALUES (?, ?)
 ON CONFLICT(year) DO UPDATE SET
-    target_amount = excluded.target_amount,
     target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP
 `
 
 type UpsertSavingsGoalParams struct {
-	Year              int64   `json:"year"`
-	TargetAmount      float64 `json:"target_amount"`
-	TargetAmountCents int64   `json:"target_amount_cents"`
+	Year              int64 `json:"year"`
+	TargetAmountCents int64 `json:"target_amount_cents"`
 }
 
-// Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
-// REAL column and the new INTEGER cents column are populated on every
-// upsert. Caller computes cents from the float target amount.
+// Phase 3.1b: the legacy REAL target_amount column was dropped in migration
+// 010; only target_amount_cents is written. Caller computes cents from the
+// float target amount.
 func (q *Queries) UpsertSavingsGoal(ctx context.Context, arg UpsertSavingsGoalParams) error {
-	_, err := q.db.ExecContext(ctx, upsertSavingsGoal, arg.Year, arg.TargetAmount, arg.TargetAmountCents)
+	_, err := q.db.ExecContext(ctx, upsertSavingsGoal, arg.Year, arg.TargetAmountCents)
 	return err
 }
 

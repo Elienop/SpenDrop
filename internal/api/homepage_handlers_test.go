@@ -108,8 +108,8 @@ func seedIncomeCategory(t *testing.T, q *database.Queries, name string) int64 {
 }
 
 // seedExpenseRow creates an expense transaction for userID at the given date
-// with the given amount in cents. The legacy REAL amount column is
-// dual-written to satisfy the NOT NULL constraint from Phase 3.1a.
+// with the given amount in cents. Phase 3.1b: the legacy REAL amount column
+// was dropped in migration 010, so amount_cents is the only money column.
 func seedExpenseRow(t *testing.T, q *database.Queries, userID, categoryID int64, date string, cents int64) database.Transaction {
 	t.Helper()
 	d, err := time.Parse("2006-01-02", date)
@@ -119,7 +119,6 @@ func seedExpenseRow(t *testing.T, q *database.Queries, userID, categoryID int64,
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      centsToDollars(cents),
 		AmountCents: cents,
 		Description: "test-expense",
 		CategoryID:  categoryID,
@@ -141,7 +140,6 @@ func seedIncomeRow(t *testing.T, q *database.Queries, userID, categoryID int64, 
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      centsToDollars(cents),
 		AmountCents: cents,
 		Description: "test-income",
 		CategoryID:  categoryID,

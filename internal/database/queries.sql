@@ -109,10 +109,10 @@ ON CONFLICT(code) DO UPDATE SET
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 
 -- name: CreateTransaction :one
--- Dual-write contract (Phase 3.1a): writers populate BOTH the legacy REAL
--- columns (amount, original_amount) AND the new INTEGER _cents columns until
--- migration 010 drops the legacy columns. Keep the caller math local -
--- amount_cents = int64(math.Round(amount*100)) at the call site.
+-- Phase 3.1b: the legacy REAL columns (amount, original_amount) were dropped
+-- in migration 010. Writers populate the INTEGER _cents columns only; the
+-- caller computes cents from the float at the wire edge
+-- (amount_cents = int64(math.Round(amount*100))).
 --
 -- Phase 3.4: content_hash is nullable. The import path populates it with
 -- SHA-256 over the normalized row (see database.ComputeContentHash); the
@@ -120,8 +120,8 @@ ON CONFLICT(code) DO UPDATE SET
 -- idempotent imports. Manual entries and test fixtures may pass
 -- sql.NullString{} — the index ignores NULL rows, so they coexist with
 -- hashed import rows without collision.
-INSERT INTO transactions (user_id, date, amount, amount_cents, original_amount, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: GetTransactionByID :one
@@ -136,11 +136,11 @@ JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?;
 
 -- name: UpdateTransaction :exec
--- Dual-write contract (Phase 3.1a): see CreateTransaction above. Both the
--- legacy REAL column and the new INTEGER cents column are rewritten on every
--- edit. The caller computes cents from the float amount before invoking.
+-- Phase 3.1b: the legacy REAL columns were dropped in migration 010; only the
+-- INTEGER cents columns are written. The caller computes cents from the float
+-- amount before invoking.
 UPDATE transactions
-SET date = ?, amount = ?, amount_cents = ?, original_amount = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
 -- name: SoftDeleteTransaction :exec
@@ -261,13 +261,11 @@ UPDATE transactions SET content_hash = ? WHERE id = ?;
 SELECT * FROM budgets WHERE year = ? AND month = ?;
 
 -- name: UpsertBudget :exec
--- Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
--- REAL column and the new INTEGER cents column are populated on every
--- upsert. Caller computes cents from the float amount.
-INSERT INTO budgets (year, month, amount, amount_cents)
-VALUES (?, ?, ?, ?)
+-- Phase 3.1b: the legacy REAL amount column was dropped in migration 010;
+-- only amount_cents is written. Caller computes cents from the float amount.
+INSERT INTO budgets (year, month, amount_cents)
+VALUES (?, ?, ?)
 ON CONFLICT(year, month) DO UPDATE SET
-    amount = excluded.amount,
     amount_cents = excluded.amount_cents,
     updated_at = CURRENT_TIMESTAMP;
 
@@ -280,13 +278,12 @@ SELECT * FROM budgets WHERE year = ? ORDER BY month;
 SELECT * FROM savings_goals WHERE year = ?;
 
 -- name: UpsertSavingsGoal :exec
--- Dual-write contract (Phase 3.1a): see CreateTransaction. Both the legacy
--- REAL column and the new INTEGER cents column are populated on every
--- upsert. Caller computes cents from the float target amount.
-INSERT INTO savings_goals (year, target_amount, target_amount_cents)
-VALUES (?, ?, ?)
+-- Phase 3.1b: the legacy REAL target_amount column was dropped in migration
+-- 010; only target_amount_cents is written. Caller computes cents from the
+-- float target amount.
+INSERT INTO savings_goals (year, target_amount_cents)
+VALUES (?, ?)
 ON CONFLICT(year) DO UPDATE SET
-    target_amount = excluded.target_amount,
     target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP;
 

@@ -25,13 +25,12 @@ func setupTestDB(t *testing.T) (*Queries, *sql.DB) {
 }
 
 // dollarsToCents converts a float dollar amount to int64 cents using
-// half-away-from-zero rounding. Phase 3.1a tests dual-write amount_cents
-// alongside the legacy REAL amount column so any aggregation that now
-// reads from amount_cents (SumExpensesByMonth, SumByCategoryForMonth,
-// etc.) returns the same value as the legacy path did. The api layer has
-// an equivalent helper — keeping this one file-local avoids exposing a
-// public money-conversion surface from the database package just for
-// test scaffolding.
+// half-away-from-zero rounding. Phase 3.1b: amount_cents is the only money
+// column (the legacy REAL columns were dropped in migration 010); tests use
+// this helper to seed the cents column the same way the api layer does at
+// the wire edge. The api layer has an equivalent helper — keeping this one
+// file-local avoids exposing a public money-conversion surface from the
+// database package just for test scaffolding.
 func dollarsToCents(d float64) int64 {
 	if d < 0 {
 		return -int64(-d*100 + 0.5)
@@ -431,7 +430,6 @@ func TestTransactions(t *testing.T) {
 	txn, err := q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        txnDate,
-		Amount:      42.50,
 		AmountCents: dollarsToCents(42.50),
 		Description: "Groceries",
 		CategoryID:  1,
@@ -439,8 +437,8 @@ func TestTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateTransaction: %v", err)
 	}
-	if txn.Amount != 42.50 {
-		t.Errorf("expected amount 42.50, got %f", txn.Amount)
+	if txn.AmountCents != dollarsToCents(42.50) {
+		t.Errorf("expected amount_cents %d, got %d", dollarsToCents(42.50), txn.AmountCents)
 	}
 
 	got, err := q.GetTransactionByID(ctx, txn.ID)
@@ -459,7 +457,6 @@ func TestTransactions(t *testing.T) {
 	err = q.UpdateTransaction(ctx, UpdateTransactionParams{
 		ID:          txn.ID,
 		Date:        updatedDate,
-		Amount:      50.00,
 		AmountCents: dollarsToCents(50.00),
 		Description: "Updated groceries",
 		CategoryID:  1,
@@ -472,8 +469,8 @@ func TestTransactions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetTransactionByID after update: %v", err)
 	}
-	if updated.Amount != 50.00 {
-		t.Errorf("expected amount 50.00, got %f", updated.Amount)
+	if updated.AmountCents != dollarsToCents(50.00) {
+		t.Errorf("expected amount_cents %d, got %d", dollarsToCents(50.00), updated.AmountCents)
 	}
 
 	// Soft-delete transaction: row survives, deleted_at is set, and the
@@ -541,7 +538,6 @@ func TestBudgets(t *testing.T) {
 	err := q.UpsertBudget(ctx, UpsertBudgetParams{
 		Year:        2026,
 		Month:       4,
-		Amount:      3000.00,
 		AmountCents: dollarsToCents(3000.00),
 	})
 	if err != nil {
@@ -555,15 +551,14 @@ func TestBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBudget: %v", err)
 	}
-	if budget.Amount != 3000.00 {
-		t.Errorf("expected amount 3000.00, got %f", budget.Amount)
+	if budget.AmountCents != dollarsToCents(3000.00) {
+		t.Errorf("expected amount_cents %d, got %d", dollarsToCents(3000.00), budget.AmountCents)
 	}
 
 	// Upsert updates existing
 	err = q.UpsertBudget(ctx, UpsertBudgetParams{
 		Year:        2026,
 		Month:       4,
-		Amount:      3500.00,
 		AmountCents: dollarsToCents(3500.00),
 	})
 	if err != nil {
@@ -577,15 +572,14 @@ func TestBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetBudget after upsert: %v", err)
 	}
-	if budget2.Amount != 3500.00 {
-		t.Errorf("expected updated amount 3500.00, got %f", budget2.Amount)
+	if budget2.AmountCents != dollarsToCents(3500.00) {
+		t.Errorf("expected updated amount_cents %d, got %d", dollarsToCents(3500.00), budget2.AmountCents)
 	}
 
 	// ListBudgetsByYear
 	err = q.UpsertBudget(ctx, UpsertBudgetParams{
 		Year:        2026,
 		Month:       5,
-		Amount:      2800.00,
 		AmountCents: dollarsToCents(2800.00),
 	})
 	if err != nil {
@@ -607,7 +601,6 @@ func TestSavingsGoals(t *testing.T) {
 
 	err := q.UpsertSavingsGoal(ctx, UpsertSavingsGoalParams{
 		Year:              2026,
-		TargetAmount:      10000.00,
 		TargetAmountCents: dollarsToCents(10000.00),
 	})
 	if err != nil {
@@ -618,8 +611,8 @@ func TestSavingsGoals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSavingsGoal: %v", err)
 	}
-	if goal.TargetAmount != 10000.00 {
-		t.Errorf("expected target 10000.00, got %f", goal.TargetAmount)
+	if goal.TargetAmountCents != dollarsToCents(10000.00) {
+		t.Errorf("expected target_amount_cents %d, got %d", dollarsToCents(10000.00), goal.TargetAmountCents)
 	}
 
 	goals, err := q.ListSavingsGoals(ctx)
@@ -697,7 +690,6 @@ func TestDashboardAggregations(t *testing.T) {
 	_, err = q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      100.00,
 		AmountCents: dollarsToCents(100.00),
 		Description: "Groceries",
 		CategoryID:  1, // Food
@@ -709,7 +701,6 @@ func TestDashboardAggregations(t *testing.T) {
 	_, err = q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 15, 0, 0, 0, 0, time.UTC),
-		Amount:      50.00,
 		AmountCents: dollarsToCents(50.00),
 		Description: "Birthday gift",
 		CategoryID:  2, // Gifts
@@ -722,7 +713,6 @@ func TestDashboardAggregations(t *testing.T) {
 	_, err = q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      3000.00,
 		AmountCents: dollarsToCents(3000.00),
 		Description: "April salary",
 		CategoryID:  15, // Paycheck
@@ -1029,7 +1019,6 @@ func TestListRecentTransactionAudit_SmokeTest(t *testing.T) {
 	txn, err := store.Create(ctx, user.ID, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      12.50,
 		AmountCents: dollarsToCents(12.50),
 		Description: "audit smoke probe",
 		CategoryID:  1,
@@ -1095,7 +1084,6 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 	txn, err := store.Create(ctx, user.ID, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      5.00,
 		AmountCents: dollarsToCents(5.00),
 		Description: "by-id smoke probe",
 		CategoryID:  1,
@@ -1108,7 +1096,6 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 	if err := store.Update(ctx, user.ID, UpdateTransactionParams{
 		ID:          txn.ID,
 		Date:        time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      6.00,
 		AmountCents: dollarsToCents(6.00),
 		Description: "by-id smoke probe (updated)",
 		CategoryID:  1,
@@ -1147,21 +1134,26 @@ func TestListTransactionAuditByID_SmokeTest(t *testing.T) {
 // historical row's cents column will be off by one compared to the
 // dual-write path and dashboard totals will disagree with the exports.
 //
-// Strategy: because migration 006 has already run against the test DB by
-// the time setupTestDB returns, we can't re-trigger the migration itself.
-// Instead we seed rows via raw SQL that leave amount_cents at its NOT NULL
-// DEFAULT 0 (bypassing the dual-write contract), then execute the exact
-// backfill expression from 006 and compare against dollarsToCents. The
-// fixture values cover the drift-prone cases: .005 boundary rounds,
-// negative cents placeholders (the schema disallows them today but the
-// ROUND semantics must still match), and amounts whose float64
-// representation is not exact.
+// Strategy: migration 010 (Phase 3.1b) dropped the legacy REAL `amount`
+// column, so we can no longer seed `amount` against the fully-migrated DB.
+// Instead we stand up the schema at the PRE-006 version (through migration
+// 005), where the REAL `amount` column still exists and `amount_cents` does
+// not. We seed rows with `amount`, then apply migration 006 itself — which
+// adds `amount_cents` and runs its backfill UPDATE — and compare the
+// resulting cents against dollarsToCents. This exercises the actual 006
+// migration SQL, not a hand-copied expression, so the test cannot drift from
+// the migration it pins. The fixture values cover the drift-prone cases:
+// .005 boundary rounds and amounts whose float64 representation is not exact.
 func TestAmountCentsBackfillEqualsCents(t *testing.T) {
-	_, db := setupTestDB(t)
+	db, _ := openTestDB(t)
 	ctx := context.Background()
 
+	// Stand up the schema at the pre-006 version (001..005). At this point
+	// transactions has the REAL `amount` column and no `amount_cents`.
+	applyMigrationsThrough(t, db, "005_transactions_soft_delete.sql")
+
 	// Pristine user + the seeded Food category (id=1). Direct SQL keeps
-	// the test decoupled from sqlc-generated dual-writes.
+	// the test decoupled from sqlc-generated writes.
 	if _, err := db.ExecContext(ctx, `INSERT INTO users (username, password_hash, display_name, role)
 		VALUES ('backfill_probe', '$2a$10$fake', 'Backfill Probe', 'member')`); err != nil {
 		t.Fatalf("seed user: %v", err)
@@ -1189,8 +1181,8 @@ func TestAmountCentsBackfillEqualsCents(t *testing.T) {
 		1234567.89,
 	}
 
-	// Insert each fixture with amount_cents defaulted to 0 so the
-	// backfill UPDATE has actual work to do.
+	// Insert each fixture into the pre-006 schema (REAL `amount` only, no
+	// amount_cents column yet).
 	for _, amt := range fixtures {
 		if _, err := db.ExecContext(ctx, `INSERT INTO transactions (user_id, date, amount, description, category_id)
 			VALUES (?, '2026-04-01', ?, 'backfill fixture', 1)`, userID, amt); err != nil {
@@ -1198,13 +1190,12 @@ func TestAmountCentsBackfillEqualsCents(t *testing.T) {
 		}
 	}
 
-	// Execute the exact backfill expression from migration 006 against
-	// the rows we just inserted. Scoping to amount_cents = 0 avoids
-	// touching the rows the migration backfilled when setupTestDB ran.
-	if _, err := db.ExecContext(ctx, `UPDATE transactions
-		SET amount_cents = CAST(ROUND(amount * 100) AS INTEGER)
-		WHERE amount_cents = 0 AND user_id = ?`, userID); err != nil {
-		t.Fatalf("re-run backfill: %v", err)
+	// Apply migration 006 itself: it adds amount_cents and runs the backfill
+	// UPDATE over the rows we just inserted. Running the real migration SQL
+	// (rather than a hand-copied expression) keeps this test pinned to the
+	// migration it guards.
+	if _, err := db.ExecContext(ctx, readMigration(t, "006_amount_cents_add.sql")); err != nil {
+		t.Fatalf("apply migration 006: %v", err)
 	}
 
 	// Pull every backfilled row back and compare against dollarsToCents,
@@ -1285,8 +1276,8 @@ func TestSumExpensesByMonth_NoFloatDrift(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin bulk insert tx: %v", err)
 	}
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO transactions (user_id, date, amount, amount_cents, description, category_id)
-		VALUES (?, ?, ?, ?, 'drift fixture', 1)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO transactions (user_id, date, amount_cents, description, category_id)
+		VALUES (?, ?, ?, 'drift fixture', 1)`)
 	if err != nil {
 		_ = tx.Rollback()
 		t.Fatalf("prepare bulk insert: %v", err)
@@ -1295,7 +1286,7 @@ func TestSumExpensesByMonth_NoFloatDrift(t *testing.T) {
 	for i := 0; i < repeats; i++ {
 		for _, amt := range fixtures {
 			cents := dollarsToCents(amt)
-			if _, err := stmt.ExecContext(ctx, user.ID, txnDate, amt, cents); err != nil {
+			if _, err := stmt.ExecContext(ctx, user.ID, txnDate, cents); err != nil {
 				_ = stmt.Close()
 				_ = tx.Rollback()
 				t.Fatalf("exec bulk insert: %v", err)

@@ -43,7 +43,6 @@ func seedBoundaryTransaction(t *testing.T, q *database.Queries, userID, category
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: "boundary-day row",
 		CategoryID:  categoryID,
@@ -234,7 +233,6 @@ func TestExports_IncludeRowAtEndOfBoundaryDay_YearlyMonthlyTotalsSheet(t *testin
 	if _, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: "end-of-year boundary",
 		CategoryID:  1,
@@ -288,7 +286,6 @@ func TestExports_IncludeRowAtEndOfBoundaryDay_YearlyCategoryTotalsSheet(t *testi
 	if _, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: "end-of-year boundary",
 		CategoryID:  1,
@@ -348,7 +345,6 @@ func seedNextDayTransaction(t *testing.T, q *database.Queries, userID, categoryI
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: "next-day row",
 		CategoryID:  categoryID,
@@ -567,7 +563,6 @@ func seedTombstonedBoundaryTransaction(t *testing.T, q *database.Queries, userID
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: "tombstoned boundary",
 		CategoryID:  categoryID,

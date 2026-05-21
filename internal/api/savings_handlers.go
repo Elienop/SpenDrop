@@ -70,12 +70,11 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Phase 3.1a: dual-write target_amount_cents alongside the legacy REAL
-	// target_amount. The cents value is derived once from the client-supplied
-	// float so the two columns stay in lockstep on every upsert.
+	// Phase 3.1b: the legacy REAL target_amount column was dropped in
+	// migration 010; only target_amount_cents is written. The cents value is
+	// derived once from the client-supplied float at the wire edge.
 	err = h.queries.UpsertSavingsGoal(r.Context(), database.UpsertSavingsGoalParams{
 		Year:              year,
-		TargetAmount:      req.TargetAmount,
 		TargetAmountCents: dollarsToCents(req.TargetAmount),
 	})
 	if err != nil {

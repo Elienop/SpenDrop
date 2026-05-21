@@ -111,9 +111,9 @@ func seedTestCurrency(t *testing.T, q *database.Queries, code string, rate float
 	}
 }
 
-// seedTestTransaction creates a transaction directly via sqlc. Phase 3.1a:
-// dual-writes amount_cents alongside the legacy REAL amount so any test that
-// reads through a *_cents aggregation sees the same value the handler-path
+// seedTestTransaction creates a transaction directly via sqlc. Phase 3.1b:
+// the legacy REAL amount column was dropped in migration 010, so the row
+// carries amount_cents only — the same single money column the handler-path
 // inserts produce in production.
 func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amount float64, desc string) database.Transaction {
 	t.Helper()
@@ -121,7 +121,6 @@ func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID i
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: desc,
 		CategoryID:  categoryID,
@@ -133,14 +132,13 @@ func seedTestTransaction(t *testing.T, q *database.Queries, userID, categoryID i
 }
 
 // seedTestTransactionWithTags creates a transaction with tags set. Phase
-// 3.1a: dual-writes amount_cents (see seedTestTransaction).
+// 3.1b: writes amount_cents only (see seedTestTransaction).
 func seedTestTransactionWithTags(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amount float64, desc, tags string) database.Transaction {
 	t.Helper()
 	d, _ := time.Parse("2006-01-02", date)
 	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: desc,
 		CategoryID:  categoryID,
@@ -2608,18 +2606,20 @@ func TestBatchUpdate_HidesTombstoned(t *testing.T) {
 	}
 
 	// Sentinel: tombstoned row must remain untouched.
+	// Phase 3.1b: the legacy REAL amount column was dropped in migration 010,
+	// so the sentinel is checked against amount_cents ($999.00 -> 99900 cents).
 	var tsCat int64
-	var tsAmount float64
+	var tsAmountCents int64
 	var tsDeletedAt sql.NullString
-	if err := db.QueryRow(`SELECT category_id, amount, deleted_at FROM transactions WHERE id = ?`, ts.ID).
-		Scan(&tsCat, &tsAmount, &tsDeletedAt); err != nil {
+	if err := db.QueryRow(`SELECT category_id, amount_cents, deleted_at FROM transactions WHERE id = ?`, ts.ID).
+		Scan(&tsCat, &tsAmountCents, &tsDeletedAt); err != nil {
 		t.Fatal(err)
 	}
 	if tsCat != catA.ID {
 		t.Errorf("tombstoned row's category got mutated: %d (want %d — must remain untouched)", tsCat, catA.ID)
 	}
-	if tsAmount != 999.0 {
-		t.Errorf("tombstoned row's amount changed: %f (sentinel violated)", tsAmount)
+	if tsAmountCents != 99900 {
+		t.Errorf("tombstoned row's amount_cents changed: %d (sentinel violated)", tsAmountCents)
 	}
 	if !tsDeletedAt.Valid {
 		t.Errorf("tombstoned row got resurrected: deleted_at is null")
