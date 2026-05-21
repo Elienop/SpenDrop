@@ -201,7 +201,6 @@ func loadFixture(t *testing.T, name string) *fixtureResult {
 		params := database.CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        d,
-			Amount:      tx.Amount,
 			AmountCents: dollarsToCents(tx.Amount),
 			Description: tx.Description,
 			CategoryID:  cat.ID,

@@ -135,7 +135,6 @@ func TestBackfillContentHashes_AllRowsMatchRecomputed(t *testing.T) {
 		txn, err := q.CreateTransaction(ctx, CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        d,
-			Amount:      amount,
 			AmountCents: cents,
 			Description: desc,
 			CategoryID:  foodID,
@@ -238,7 +237,6 @@ func TestBackfillContentHashes_Idempotent(t *testing.T) {
 	_, err = q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
-		Amount:      10,
 		AmountCents: 1000,
 		Description: "Idem row",
 		CategoryID:  foodID,
@@ -306,7 +304,6 @@ func TestGetTransactionByContentHash_HidesTombstoned(t *testing.T) {
 	txn, err := q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        date,
-		Amount:      999,
 		AmountCents: 99900,
 		Description: "Ghost row",
 		CategoryID:  foodID,
@@ -390,7 +387,6 @@ func TestBackfillContentHashes_ToleratesLegitimateCollisions(t *testing.T) {
 	first, err := q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        date,
-		Amount:      5,
 		AmountCents: 500,
 		Description: "Coffee",
 		CategoryID:  foodID,
@@ -402,7 +398,6 @@ func TestBackfillContentHashes_ToleratesLegitimateCollisions(t *testing.T) {
 	second, err := q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        date,
-		Amount:      5,
 		AmountCents: 500,
 		Description: "Coffee",
 		CategoryID:  foodID,
@@ -414,7 +409,6 @@ func TestBackfillContentHashes_ToleratesLegitimateCollisions(t *testing.T) {
 	third, err := q.CreateTransaction(ctx, CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        date,
-		Amount:      10,
 		AmountCents: 1000,
 		Description: "Lunch",
 		CategoryID:  foodID,
@@ -508,7 +502,6 @@ func TestBackfillContentHashes_CollisionSkipped_IsStableAcrossReboots(t *testing
 		if _, err := q.CreateTransaction(ctx, CreateTransactionParams{
 			UserID:      user.ID,
 			Date:        date,
-			Amount:      5,
 			AmountCents: 500,
 			Description: "Coffee",
 			CategoryID:  foodID,

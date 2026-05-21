@@ -201,11 +201,15 @@ func TestAudit_UpdateTransaction_WritesUpdateRowWithBeforeAndAfter(t *testing.T)
 	if r.After["description"] != "updated" {
 		t.Errorf("after.description=%v, want %q", r.After["description"], "updated")
 	}
-	if r.Before["amount"].(float64) != 10.0 {
-		t.Errorf("before.amount=%v, want 10", r.Before["amount"])
+	// Phase 3.1b: the audit before/after JSON marshals the database.Transaction
+	// struct, whose monetary field is amount_cents (int64) since the legacy
+	// REAL amount column was dropped in migration 010. The before row was
+	// seeded at $10.00 (1000 cents) and the update set $25.00 (2500 cents).
+	if r.Before["amount_cents"].(float64) != 1000 {
+		t.Errorf("before.amount_cents=%v, want 1000", r.Before["amount_cents"])
 	}
-	if r.After["amount"].(float64) != 25.0 {
-		t.Errorf("after.amount=%v, want 25", r.After["amount"])
+	if r.After["amount_cents"].(float64) != 2500 {
+		t.Errorf("after.amount_cents=%v, want 2500", r.After["amount_cents"])
 	}
 	assertAllActorsEqual(t, rows, user.ID)
 }
@@ -650,7 +654,6 @@ func TestAudit_StoreCreate_CoCommitsDataAndAudit(t *testing.T) {
 	created, err := store.Create(context.Background(), user.ID, database.CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        mustParseDate(t, "2026-04-01"),
-		Amount:      7.50,
 		AmountCents: dollarsToCents(7.50),
 		Description: "store direct",
 		CategoryID:  1,

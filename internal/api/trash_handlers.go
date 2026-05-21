@@ -120,7 +120,7 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 			ID:           row.ID,
 			UserID:       row.UserID,
 			Date:         row.Date.Format("2006-01-02"),
-			Amount:       row.Amount,
+			Amount:       centsToDollars(row.AmountCents),
 			Description:  row.Description,
 			CategoryID:   row.CategoryID,
 			CreatedAt:    row.CreatedAt.Format(time.RFC3339),
@@ -136,8 +136,8 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 		if row.DeletedAt.Valid {
 			tr.DeletedAt = row.DeletedAt.Time.Format(time.RFC3339)
 		}
-		if row.OriginalAmount.Valid {
-			v := row.OriginalAmount.Float64
+		if row.OriginalAmountCents.Valid {
+			v := centsToDollars(row.OriginalAmountCents.Int64)
 			tr.OriginalAmount = &v
 		}
 		if row.OriginalCurrency.Valid {

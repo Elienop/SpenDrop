@@ -183,19 +183,18 @@ func (s *TransactionStore) UpdateTx(
 	// boundary, so a parse error here is "should never happen" but is still
 	// surfaced as a wrapped error so the caller's tx rolls back.
 	//
-	// Amount / AmountCents / OriginalAmount / OriginalAmountCents /
-	// OriginalCurrency are copied through unchanged because the v1 batch-
-	// update patch deliberately does not expose them — bulk amount edits
-	// would require currency conversion and cents recomputation that the
-	// patch shape does not carry. content_hash is intentionally NOT
-	// rewritten here (UpdateTransaction itself does not touch it; see
-	// queries.sql.go:2067 — Phase 3.4 contract).
+	// AmountCents / OriginalAmountCents / OriginalCurrency are copied through
+	// unchanged because the v1 batch-update patch deliberately does not expose
+	// them — bulk amount edits would require currency conversion and cents
+	// recomputation that the patch shape does not carry. The legacy REAL
+	// amount / original_amount columns were dropped in migration 010 (Phase
+	// 3.1b), so only the cents columns flow through. content_hash is
+	// intentionally NOT rewritten here (UpdateTransaction itself does not
+	// touch it — Phase 3.4 contract).
 	params := UpdateTransactionParams{
 		ID:                  id,
 		Date:                before.Date,
-		Amount:              before.Amount,
 		AmountCents:         before.AmountCents,
-		OriginalAmount:      before.OriginalAmount,
 		OriginalAmountCents: before.OriginalAmountCents,
 		OriginalCurrency:    before.OriginalCurrency,
 		Description:         before.Description,

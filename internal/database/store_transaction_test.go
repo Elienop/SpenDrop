@@ -112,9 +112,9 @@ func seedTestStoreCategory(t *testing.T, q *Queries, name string) int64 {
 // caller convenience; it is parsed to time.Time before insert because
 // CreateTransactionParams.Date is time.Time.
 //
-// AmountCents is dual-written (Phase 3.1a contract) using the local
-// dollarsToCents helper from queries_test.go so the inserted row
-// satisfies the same invariant production rows do.
+// AmountCents is set via the local dollarsToCents helper from
+// queries_test.go so the inserted row satisfies the same invariant
+// production rows do (Phase 3.1b: cents is the only money column).
 func seedTestStoreTransaction(t *testing.T, q *Queries, userID, categoryID int64, date, desc string, amount float64, tags string) int64 {
 	t.Helper()
 	d, err := time.Parse("2006-01-02", date)
@@ -124,7 +124,6 @@ func seedTestStoreTransaction(t *testing.T, q *Queries, userID, categoryID int64
 	tt, err := q.CreateTransaction(context.Background(), CreateTransactionParams{
 		UserID:      userID,
 		Date:        d,
-		Amount:      amount,
 		AmountCents: dollarsToCents(amount),
 		Description: desc,
 		CategoryID:  categoryID,
@@ -203,9 +202,6 @@ func TestUpdateTx_HappyPath_AppliesOnlySetFields(t *testing.T) {
 	}
 	if after.Description != "Original" {
 		t.Errorf("description leaked: %q (should preserve)", after.Description)
-	}
-	if after.Amount != 10.0 {
-		t.Errorf("amount leaked: %v (should preserve)", after.Amount)
 	}
 	if after.AmountCents != 1000 {
 		t.Errorf("amount_cents leaked: %d (should preserve)", after.AmountCents)
@@ -349,9 +345,6 @@ func TestUpdateTx_PreservesUnsetFields(t *testing.T) {
 	}
 	if !after.Tags.Valid || after.Tags.String != "tag1,tag2" {
 		t.Errorf("Tags leaked: %+v (want valid string 'tag1,tag2')", after.Tags)
-	}
-	if after.Amount != 10.0 {
-		t.Errorf("Amount leaked: %v", after.Amount)
 	}
 	if after.AmountCents != 1000 {
 		t.Errorf("AmountCents leaked: %d", after.AmountCents)

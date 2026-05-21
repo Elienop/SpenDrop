@@ -1571,7 +1571,6 @@ func TestHandleImportUpload_HidesTombstonedFromDbMatch(t *testing.T) {
 	created, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
 		UserID:      user.ID,
 		Date:        date,
-		Amount:      999.00,
 		AmountCents: 99900,
 		Description: "Starbucks",
 		CategoryID:  foodID,
@@ -2064,7 +2063,6 @@ func TestHandleImportPatchRow_HidesTombstonedFromDbMatch(t *testing.T) {
 		UserID:      user.ID,
 		CategoryID:  cat.ID,
 		Date:        liveDate,
-		Amount:      5.00,
 		AmountCents: 500,
 		Description: "Starbucks",
 		ContentHash: sql.NullString{String: liveHash, Valid: true},
@@ -2081,7 +2079,6 @@ func TestHandleImportPatchRow_HidesTombstonedFromDbMatch(t *testing.T) {
 		UserID:      user.ID,
 		CategoryID:  cat.ID,
 		Date:        tombstoneDate,
-		Amount:      999.00,
 		AmountCents: 99900,
 		Description: "Starbucks",
 		ContentHash: sql.NullString{String: tombstoneHash, Valid: true},

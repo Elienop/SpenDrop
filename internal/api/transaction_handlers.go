@@ -97,13 +97,12 @@ type transactionListResponse struct {
 }
 
 // toTransactionResponse converts a database.Transaction into the JSON wire
-// shape. Phase 3.1a: reads t.AmountCents / t.OriginalAmountCents (the new
+// shape. Phase 3.1a/3.1b: reads t.AmountCents / t.OriginalAmountCents (the
 // integer cents columns) and converts to dollars exactly once via
-// centsToDollars. The legacy t.Amount / t.OriginalAmount REAL columns stay
-// populated by every writer until migration 010, but we deliberately ignore
-// them on the read side so the handler path never touches a float sum -
-// the whole point of Phase 3.1a is to make float drift impossible by
-// construction for every aggregation that flows through this function.
+// centsToDollars. The legacy t.amount / t.original_amount REAL columns were
+// dropped in migration 010 — integer cents are now the only money columns,
+// so the handler path cannot touch a float sum and float drift is impossible
+// by construction for every aggregation that flows through this function.
 func toTransactionResponse(t database.Transaction) transactionResponse {
 	resp := transactionResponse{
 		ID:          t.ID,
@@ -236,12 +235,11 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 
 	// Data query
 	//
-	// Phase 3.1a: reads t.amount_cents (int64) rather than t.amount (float64).
-	// The legacy REAL column is still populated by every writer (dual-write
-	// contract in queries.sql), but the aggregation/list path consumes cents
-	// only and converts to dollars exactly once at the wire edge via
-	// centsToDollars. This eliminates the per-row float round-trip that
-	// would otherwise reintroduce IEEE-754 drift into the list endpoint.
+	// Reads t.amount_cents (int64); the legacy REAL amount column was dropped
+	// in migration 010 (Phase 3.1b), so cents is the only money column. The
+	// list path consumes cents and converts to dollars exactly once at the
+	// wire edge via centsToDollars — no per-row float round-trip, so no
+	// IEEE-754 drift in the list endpoint.
 	offset := (page - 1) * perPage
 	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount_cents, t.original_amount_cents, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
@@ -347,9 +345,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
-		Amount:              amount,
 		AmountCents:         dollarsToCents(amount),
-		OriginalAmount:      origAmt,
 		OriginalAmountCents: nullableDollarsToCents(origAmt),
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
@@ -450,9 +446,7 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 
 	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
 		Date:                date,
-		Amount:              amount,
 		AmountCents:         dollarsToCents(amount),
-		OriginalAmount:      origAmt,
 		OriginalAmountCents: nullableDollarsToCents(origAmt),
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
@@ -592,9 +586,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
 			UserID:              user.ID,
 			Date:                date,
-			Amount:              amount,
 			AmountCents:         dollarsToCents(amount),
-			OriginalAmount:      origAmt,
 			OriginalAmountCents: nullableDollarsToCents(origAmt),
 			OriginalCurrency:    origCur,
 			Description:         req.Description,

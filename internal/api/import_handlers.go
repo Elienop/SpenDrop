@@ -1477,10 +1477,10 @@ func processImportRows(
 		// (the Excel "Amount (USD)" column). Original amount/currency are
 		// stored as-is for reference; no conversion is applied during import.
 		//
-		// Phase 3.1a: dual-write amount_cents alongside the legacy REAL
-		// amount. The cents value is derived from the same float parsed
-		// out of the spreadsheet so a round-trip export->import is
-		// lossless for any representable money amount.
+		// Phase 3.1b: the legacy REAL amount column was dropped in migration
+		// 010; only amount_cents is written. The cents value is derived from
+		// the same float parsed out of the spreadsheet so a round-trip
+		// export->import is lossless for any representable money amount.
 		//
 		// Phase 3.4: content_hash is populated from the resolved row
 		// identity computed above. The partial unique index guarantees
@@ -1489,7 +1489,6 @@ func processImportRows(
 		params := database.CreateTransactionParams{
 			UserID:      in.UserID,
 			Date:        date,
-			Amount:      amount,
 			AmountCents: amountCents,
 			Description: description,
 			CategoryID:  categoryID,
@@ -1499,7 +1498,6 @@ func processImportRows(
 		}
 		if row.OriginalAmount != 0 {
 			origAmt := math.Abs(row.OriginalAmount)
-			params.OriginalAmount = sql.NullFloat64{Float64: origAmt, Valid: true}
 			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(origAmt), Valid: true}
 		}
 		if row.OriginalCurrency != "" {

@@ -57,7 +57,6 @@ type Budget struct {
 	ID          int64     `json:"id"`
 	Year        int64     `json:"year"`
 	Month       int64     `json:"month"`
-	Amount      float64   `json:"amount"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	AmountCents int64     `json:"amount_cents"`
 }
@@ -93,7 +92,6 @@ type SavedFilter struct {
 type SavingsGoal struct {
 	ID                int64     `json:"id"`
 	Year              int64     `json:"year"`
-	TargetAmount      float64   `json:"target_amount"`
 	UpdatedAt         time.Time `json:"updated_at"`
 	TargetAmountCents int64     `json:"target_amount_cents"`
 }
@@ -106,22 +104,20 @@ type Session struct {
 }
 
 type Transaction struct {
-	ID                  int64           `json:"id"`
-	UserID              int64           `json:"user_id"`
-	Date                time.Time       `json:"date"`
-	Amount              float64         `json:"amount"`
-	OriginalAmount      sql.NullFloat64 `json:"original_amount"`
-	OriginalCurrency    sql.NullString  `json:"original_currency"`
-	Description         string          `json:"description"`
-	CategoryID          int64           `json:"category_id"`
-	Tags                sql.NullString  `json:"tags"`
-	Notes               sql.NullString  `json:"notes"`
-	CreatedAt           time.Time       `json:"created_at"`
-	UpdatedAt           time.Time       `json:"updated_at"`
-	DeletedAt           sql.NullTime    `json:"deleted_at"`
-	AmountCents         int64           `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
-	ContentHash         sql.NullString  `json:"content_hash"`
+	ID                  int64          `json:"id"`
+	UserID              int64          `json:"user_id"`
+	Date                time.Time      `json:"date"`
+	OriginalCurrency    sql.NullString `json:"original_currency"`
+	Description         string         `json:"description"`
+	CategoryID          int64          `json:"category_id"`
+	Tags                sql.NullString `json:"tags"`
+	Notes               sql.NullString `json:"notes"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	DeletedAt           sql.NullTime   `json:"deleted_at"`
+	AmountCents         int64          `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
+	ContentHash         sql.NullString `json:"content_hash"`
 }
 
 type TransactionAudit struct {

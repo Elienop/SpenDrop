@@ -17,17 +17,17 @@ func TestHandleGetBudgets_ReturnsBudgetsForYear(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	// Seed some budgets. Phase 3.1a: dual-write amount_cents so the
-	// get handler (which reads via ListBudgetsByYear) sees the same
-	// value in both columns.
+	// Seed some budgets. amount_cents is the only money column (the legacy
+	// REAL amount was dropped in migration 010); the get handler reads it
+	// back via ListBudgetsByYear.
 	err := q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 1, Amount: 2500, AmountCents: dollarsToCents(2500),
+		Year: 2026, Month: 1, AmountCents: dollarsToCents(2500),
 	})
 	if err != nil {
 		t.Fatalf("seed budget: %v", err)
 	}
 	err = q.UpsertBudget(context.Background(), database.UpsertBudgetParams{
-		Year: 2026, Month: 2, Amount: 3000, AmountCents: dollarsToCents(3000),
+		Year: 2026, Month: 2, AmountCents: dollarsToCents(3000),
 	})
 	if err != nil {
 		t.Fatalf("seed budget: %v", err)
@@ -102,8 +102,8 @@ func TestHandleSetBudget_UpsertsBudget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get budget: %v", err)
 	}
-	if b.Amount != 2500 {
-		t.Errorf("expected amount 2500, got %v", b.Amount)
+	if b.AmountCents != dollarsToCents(2500) {
+		t.Errorf("expected amount_cents %d, got %v", dollarsToCents(2500), b.AmountCents)
 	}
 }
 
