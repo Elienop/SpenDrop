@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { api } from './client';
+import { api, ApiError } from './client';
 
 const originalFetch = globalThis.fetch;
 
@@ -81,6 +81,44 @@ describe('ApiClient.request', () => {
     expect(fetchMock).toHaveBeenCalledOnce();
     const [, options] = fetchMock.mock.calls[0];
     expect(options.credentials).toBe('include');
+  });
+
+  it('throws an ApiError carrying status 401 on a 401 response, keeping message "Unauthorized"', async () => {
+    mockFetch({
+      ok: false,
+      status: 401,
+    });
+
+    const err = await api.get('test').then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    // Backward compat: existing checks key off the bare message string.
+    expect((err as ApiError).message).toBe('Unauthorized');
+  });
+
+  it('throws an ApiError carrying the HTTP status and server message on other non-ok responses', async () => {
+    mockFetch({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ error: 'password too short' }),
+    });
+
+    const err = await api.post('test', {}).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(400);
+    expect((err as ApiError).message).toBe('password too short');
   });
 });
 
@@ -168,7 +206,7 @@ describe('ApiClient.upload', () => {
     await expect(api.upload('imports', file)).rejects.toThrow('HTTP 500');
   });
 
-  it('throws Unauthorized on 401 status', async () => {
+  it('throws an ApiError with status 401 and message "Unauthorized" on 401 status', async () => {
     mockFetch({
       status: 401,
       ok: false,
@@ -176,7 +214,16 @@ describe('ApiClient.upload', () => {
 
     const file = new File(['data'], 'test.csv', { type: 'text/csv' });
 
-    await expect(api.upload('imports', file)).rejects.toThrow('Unauthorized');
+    const err = await api.upload('imports', file).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).status).toBe(401);
+    expect((err as ApiError).message).toBe('Unauthorized');
   });
 
   it('returns parsed JSON response on success', async () => {

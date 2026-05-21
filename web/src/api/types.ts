@@ -407,6 +407,50 @@ export interface RevokeAllResponse {
   revoked: number;
 }
 
+// ---------- Password change / reset ----------
+
+/**
+ * Body for `POST /api/auth/password` (self-service change). The caller
+ * proves possession of the account by supplying its current password;
+ * the server verifies it before any mutation. A wrong current password
+ * comes back as 401 (`invalid credentials`), a too-short / too-long new
+ * password as 400 with the bound message in `{error}`.
+ */
+export interface ChangePasswordRequest {
+  current_password: string;
+  new_password: string;
+}
+
+/**
+ * Body for `POST /api/users/{id}/reset-password` (admin reset). No
+ * current-password check — the admin's authority is the authorization.
+ */
+export interface ResetPasswordRequest {
+  new_password: string;
+}
+
+/**
+ * Response body for `POST /api/auth/password`. The cascade revokes every
+ * live API token and deletes every session for the caller (including the
+ * one making this request), so the frontend must log out + redirect to
+ * /login on success. `tokens_revoked` is surfaced in the success toast so
+ * the user knows how many integrations they just broke.
+ */
+export interface ChangePasswordResponse {
+  status: 'password_changed';
+  tokens_revoked: number;
+}
+
+/**
+ * Response body for `POST /api/users/{id}/reset-password`. Same cascade as
+ * the self-service change, run against the target user: the target is
+ * signed out everywhere and their API tokens revoked.
+ */
+export interface ResetPasswordResponse {
+  status: 'password_reset';
+  tokens_revoked: number;
+}
+
 // ---------- Bulk-edit ----------
 
 // BulkUpdatePatch is the partial-update payload. Keys absent = no change.
