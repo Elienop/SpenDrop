@@ -15,9 +15,10 @@ type Handler struct {
 	db       *sql.DB
 	txnStore *database.TransactionStore
 
-	apiTokenStore       *database.ApiTokenStore
-	loginFailureLimiter *ratelimit.Bucket // keyed by client IP, consumed only by /api/auth/login failures
-	createTokenLimiter  *ratelimit.Bucket // keyed by user id (as string), 5 hits / rolling hour
+	apiTokenStore             *database.ApiTokenStore
+	loginFailureLimiter       *ratelimit.Bucket // keyed by client IP, consumed only by /api/auth/login failures
+	createTokenLimiter        *ratelimit.Bucket // keyed by user id (as string), 5 hits / rolling hour
+	passwordChangeFailLimiter *ratelimit.Bucket // keyed by user id (as string), 5 wrong-current-password attempts / 15 min
 
 	// clock is the time source every reports/dashboard handler reads for
 	// "current date" decisions (year-over-year default year, rolling
@@ -81,14 +82,15 @@ func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 	clock := ratelimit.RealClock()
 	appClock := realClock{}
 	return &Handler{
-		queries:             queries,
-		db:                  db,
-		txnStore:            database.NewTransactionStore(db, queries),
-		apiTokenStore:       database.NewApiTokenStore(db, queries),
-		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, clock),
-		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, clock),
-		clock:               appClock,
-		summaryCache:        newSummaryCache(appClock),
+		queries:                   queries,
+		db:                        db,
+		txnStore:                  database.NewTransactionStore(db, queries),
+		apiTokenStore:             database.NewApiTokenStore(db, queries),
+		loginFailureLimiter:       ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, clock),
+		createTokenLimiter:        ratelimit.NewBucket(5, time.Hour, clock),
+		passwordChangeFailLimiter: ratelimit.NewBucket(5, 15*time.Minute, clock),
+		clock:                     appClock,
+		summaryCache:              newSummaryCache(appClock),
 	}
 }
 
@@ -100,14 +102,15 @@ func NewHandler(queries *database.Queries, db *sql.DB) *Handler {
 func NewHandlerWithClock(queries *database.Queries, db *sql.DB, clock Clock) *Handler {
 	limiterClock := ratelimit.RealClock()
 	return &Handler{
-		queries:             queries,
-		db:                  db,
-		txnStore:            database.NewTransactionStore(db, queries),
-		apiTokenStore:       database.NewApiTokenStore(db, queries),
-		loginFailureLimiter: ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, limiterClock),
-		createTokenLimiter:  ratelimit.NewBucket(5, time.Hour, limiterClock),
-		clock:               clock,
-		summaryCache:        newSummaryCache(clock), // use caller's clock so tests can control TTL expiry
+		queries:                   queries,
+		db:                        db,
+		txnStore:                  database.NewTransactionStore(db, queries),
+		apiTokenStore:             database.NewApiTokenStore(db, queries),
+		loginFailureLimiter:       ratelimit.NewBucket(getRateLimitMax(), rateLimitTickerWindow, limiterClock),
+		createTokenLimiter:        ratelimit.NewBucket(5, time.Hour, limiterClock),
+		passwordChangeFailLimiter: ratelimit.NewBucket(5, 15*time.Minute, limiterClock),
+		clock:                     clock,
+		summaryCache:              newSummaryCache(clock), // use caller's clock so tests can control TTL expiry
 	}
 }
 

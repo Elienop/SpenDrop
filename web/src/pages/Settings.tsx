@@ -15,18 +15,20 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { formatDistanceToNowStrict } from 'date-fns';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import type {
   ApiToken,
   Budget,
   Category,
   CategoryBudget,
+  ChangePasswordResponse,
   CreateTokenResponse,
   Currency,
   ImportPreview,
   ListTokensResponse,
   PatchRowRequest,
+  ResetPasswordResponse,
   RevokeAllResponse,
   RevokeOneResponse,
   SavingsGoal,
@@ -109,6 +111,7 @@ import { TYPE_EXPENSE } from '@/lib/transaction-types';
 
 const VALID_TABS = [
   'general',
+  'account',
   'currencies',
   'savings',
   'users',
@@ -122,6 +125,7 @@ type SettingsTab = (typeof VALID_TABS)[number];
 // them...") rather than showing a bare slug.
 const TAB_LABELS: Record<SettingsTab, string> = {
   general: 'General',
+  account: 'Account',
   currencies: 'Currencies',
   savings: 'Savings',
   users: 'Users',
@@ -1201,6 +1205,176 @@ function CategoryLimitsSection({
   );
 }
 
+/* ---------- Account Tab ---------- */
+
+// Client-side floor for a new password. The backend enforces its own
+// runtime-configured bounds (and a 400 surfaces the server's exact message
+// on the new-password field), but a sane min here gives instant feedback
+// before a round-trip. Kept conservative so it never *exceeds* the server
+// minimum and pre-rejects a password the server would actually accept.
+const MIN_PASSWORD_LENGTH = 8;
+
+const changePasswordSchema = z
+  .object({
+    current_password: z.string().min(1, 'Current password is required'),
+    new_password: z
+      .string()
+      .min(
+        MIN_PASSWORD_LENGTH,
+        `New password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      ),
+    confirm_password: z.string().min(1, 'Please confirm your new password'),
+  })
+  .refine((data) => data.new_password === data.confirm_password, {
+    message: 'Passwords do not match',
+    path: ['confirm_password'],
+  });
+type ChangePasswordValues = z.infer<typeof changePasswordSchema>;
+
+function AccountSection() {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+
+  const form = useForm<ChangePasswordValues>({
+    resolver: zodResolver(changePasswordSchema),
+    defaultValues: {
+      current_password: '',
+      new_password: '',
+      confirm_password: '',
+    },
+  });
+
+  async function onSubmit(values: ChangePasswordValues) {
+    try {
+      const res = await api.post<ChangePasswordResponse>('auth/password', {
+        current_password: values.current_password,
+        new_password: values.new_password,
+      });
+      const n = res.tokens_revoked;
+      toast.success(
+        n > 0
+          ? `Password changed — ${n} API token${n === 1 ? '' : 's'} revoked. Sign in again.`
+          : 'Password changed. Sign in again.',
+      );
+      // The server killed every session for this user, including the one
+      // that made this request. Clear local auth state and bounce to
+      // /login. Prefer useAuth().logout (which POSTs auth/logout, resets
+      // the user, and navigates) — if that POST 401s (session already
+      // dead) it rejects, so fall back to a hard navigate.
+      try {
+        await logout();
+      } catch {
+        navigate('/login');
+      }
+    } catch (err) {
+      // Branch on the HTTP status, not the message text. The api client
+      // returns 401 only when the current password is wrong, so map that to
+      // a field-level error on the current-password input. Every other
+      // status (e.g. the 400 with a bound-message body) lands on the
+      // new-password field using the server-provided message.
+      if (err instanceof ApiError && err.status === 401) {
+        form.setError('current_password', {
+          message: 'Current password is incorrect',
+        });
+      } else {
+        const msg =
+          err instanceof Error ? err.message : 'Failed to change password';
+        form.setError('new_password', { message: msg });
+      }
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Change password</CardTitle>
+        <CardDescription>
+          Update the password you use to sign in to SpenDrop.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <Alert variant="warning">
+          <AlertTriangle className="h-4 w-4" />
+          <AlertTitle>This signs you out everywhere</AlertTitle>
+          <AlertDescription>
+            Changing your password ends every active session and revokes all
+            your API tokens. You'll need to sign in again here and recreate
+            any tokens your scripts or dashboards depend on.
+          </AlertDescription>
+        </Alert>
+        <Form {...form}>
+          <form
+            onSubmit={(e) => void form.handleSubmit(onSubmit)(e)}
+            className="flex max-w-md flex-col gap-4"
+            noValidate
+          >
+            <FormField
+              control={form.control}
+              name="current_password"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Current password</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="password"
+                      autoComplete="current-password"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="new_password"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>New password</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="password"
+                      autoComplete="new-password"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name="confirm_password"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Confirm new password</FormLabel>
+                  <FormControl>
+                    <Input
+                      type="password"
+                      autoComplete="new-password"
+                      {...field}
+                    />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <Button
+              type="submit"
+              className="w-fit"
+              disabled={form.formState.isSubmitting}
+            >
+              {form.formState.isSubmitting
+                ? 'Changing…'
+                : 'Change password'}
+            </Button>
+          </form>
+        </Form>
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ---------- Currencies Tab ---------- */
 
 const newCurrencySchema = z.object({
@@ -1645,9 +1819,38 @@ const newUserSchema = z.object({
 });
 type NewUserValues = z.infer<typeof newUserSchema>;
 
+const resetPasswordSchema = z
+  .object({
+    new_password: z
+      .string()
+      .min(
+        MIN_PASSWORD_LENGTH,
+        `New password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+      ),
+    confirm_password: z.string().min(1, 'Please confirm the new password'),
+  })
+  .refine((data) => data.new_password === data.confirm_password, {
+    message: 'Passwords do not match',
+    path: ['confirm_password'],
+  });
+type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
+
 function UsersSection() {
+  const { user: currentUser } = useAuth();
   const [users, setUsers] = useState<User[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  // The user currently targeted by the reset-password dialog. Null = closed.
+  const [resettingUser, setResettingUser] = useState<User | null>(null);
+  // Sticky display-name so the dialog title can keep showing the target's
+  // name through Radix's close-exit animation after resettingUser flips to
+  // null. Mirrors the revoke-one pattern in ApiTokensSection.
+  const [resettingUserName, setResettingUserName] = useState('');
+  const [resetting, setResetting] = useState(false);
+
+  const resetForm = useForm<ResetPasswordValues>({
+    resolver: zodResolver(resetPasswordSchema),
+    defaultValues: { new_password: '', confirm_password: '' },
+  });
 
   const form = useForm<NewUserValues>({
     resolver: zodResolver(newUserSchema),
@@ -1715,7 +1918,37 @@ function UsersSection() {
     }
   }
 
+  function openReset(u: User) {
+    resetForm.reset();
+    setResettingUserName(u.display_name);
+    setResettingUser(u);
+  }
+
+  async function onConfirmReset(values: ResetPasswordValues) {
+    if (!resettingUser) return;
+    setResetting(true);
+    try {
+      const res = await api.post<ResetPasswordResponse>(
+        `users/${resettingUser.id}/reset-password`,
+        { new_password: values.new_password },
+      );
+      const n = res.tokens_revoked;
+      toast.success(
+        n > 0
+          ? `Password reset for ${resettingUser.display_name} — signed out, ${n} API token${n === 1 ? '' : 's'} revoked.`
+          : `Password reset for ${resettingUser.display_name} — signed out everywhere.`,
+      );
+      setResettingUser(null);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to reset password';
+      resetForm.setError('new_password', { message: msg });
+    } finally {
+      setResetting(false);
+    }
+  }
+
   return (
+    <>
     <Card>
       <CardHeader className="flex flex-row items-center justify-between">
         <CardTitle className="text-base">Users</CardTitle>
@@ -1853,15 +2086,32 @@ function UsersSection() {
                   </Select>
                 </TableCell>
                 <TableCell className="text-right">
-                  <Button
-                    type="button"
-                    variant="destructive"
-                    size="sm"
-                    onClick={() => void handleDeleteUser(u.id)}
-                    aria-label={`Delete ${u.username}`}
-                  >
-                    Delete
-                  </Button>
+                  <div className="flex items-center justify-end gap-2">
+                    {/* Reset is hidden on the admin's own row — they
+                        rotate their own password from the Account tab,
+                        which runs the same cascade with a current-password
+                        check (the admin reset deliberately has none). */}
+                    {currentUser && u.id !== currentUser.id && (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => openReset(u)}
+                        aria-label={`Reset password for ${u.username}`}
+                      >
+                        Reset password
+                      </Button>
+                    )}
+                    <Button
+                      type="button"
+                      variant="destructive"
+                      size="sm"
+                      onClick={() => void handleDeleteUser(u.id)}
+                      aria-label={`Delete ${u.username}`}
+                    >
+                      Delete
+                    </Button>
+                  </div>
                 </TableCell>
               </TableRow>
             ))}
@@ -1869,6 +2119,87 @@ function UsersSection() {
         </Table>
       </CardContent>
     </Card>
+      <AlertDialog
+        open={resettingUser !== null}
+        onOpenChange={(open) => {
+          if (resetting) return;
+          if (!open) setResettingUser(null);
+        }}
+      >
+        <AlertDialogContent>
+          <Form {...resetForm}>
+            <form
+              onSubmit={(e) => void resetForm.handleSubmit(onConfirmReset)(e)}
+              className="grid gap-4"
+              noValidate
+            >
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  Reset password for{' '}
+                  <span className="font-mono">{resettingUserName}</span>?
+                </AlertDialogTitle>
+                <AlertDialogDescription>
+                  This signs {resettingUserName} out of every device and
+                  revokes all of their API tokens. They'll need the new
+                  password to sign back in. This cannot be undone.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <FormField
+                control={resetForm.control}
+                name="new_password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>New password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="new-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={resetForm.control}
+                name="confirm_password"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Confirm new password</FormLabel>
+                    <FormControl>
+                      <Input
+                        type="password"
+                        autoComplete="new-password"
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <AlertDialogFooter>
+                <AlertDialogCancel type="button" disabled={resetting}>
+                  Cancel
+                </AlertDialogCancel>
+                {/* Plain submit Button, not AlertDialogAction: the action
+                    component auto-closes the dialog on click, which would
+                    tear down the form before validation/submit could run.
+                    Keeping it a submit button lets react-hook-form gate the
+                    POST behind the confirm-match + min-length checks. */}
+                <Button
+                  type="submit"
+                  disabled={resetting}
+                  className={destructiveActionClass}
+                >
+                  {resetting ? 'Resetting…' : 'Reset password'}
+                </Button>
+              </AlertDialogFooter>
+            </form>
+          </Form>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 
@@ -2974,6 +3305,7 @@ export function Settings() {
       >
         <TabsList>
           <TabsTrigger value="general">General</TabsTrigger>
+          <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="currencies">Currencies</TabsTrigger>
           <TabsTrigger value="savings">Savings</TabsTrigger>
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}
@@ -2988,6 +3320,9 @@ export function Settings() {
               dirtyCountRef={categoryLimitsDirtyCountRef}
             />
           </div>
+        </TabsContent>
+        <TabsContent value="account" className="mt-6">
+          <AccountSection />
         </TabsContent>
         <TabsContent value="currencies" className="mt-6">
           <CurrenciesSection />
