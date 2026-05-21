@@ -71,11 +71,6 @@ import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { TRANSACTION_PAGE_SIZES } from '@/lib/constants';
 
-// TODO(post-migration): Bulk select + bulk categorize (Checkbox column + Dialog)
-// are deferred. They require a new `useTransactions` hook method and a new
-// backend endpoint — spec §3 line 305 flags this as out of scope for the
-// migration. Do not add here without extending the hook.
-
 interface ActiveChip {
   key: string;
   label: string;
