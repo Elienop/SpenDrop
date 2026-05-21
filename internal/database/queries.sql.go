@@ -2139,6 +2139,95 @@ func (q *Queries) UpsertBudget(ctx context.Context, arg UpsertBudgetParams) erro
 	return err
 }
 
+// Category Budgets (Gap 2). HAND-WRITTEN: sqlc cannot generate this repo
+// (parser fails on RETURNING/window funcs), so these three funcs are written
+// by hand modelling the Budget funcs above. The CategoryBudget struct lives in
+// models.go. SELECT * column order is: id, year, month, category_id,
+// amount_cents, updated_at (the on-disk order from migration 012).
+
+const upsertCategoryBudget = `-- name: UpsertCategoryBudget :exec
+INSERT INTO category_budgets (year, month, category_id, amount_cents)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(year, month, category_id) DO UPDATE SET
+    amount_cents = excluded.amount_cents,
+    updated_at = CURRENT_TIMESTAMP
+`
+
+type UpsertCategoryBudgetParams struct {
+	Year        int64 `json:"year"`
+	Month       int64 `json:"month"`
+	CategoryID  int64 `json:"category_id"`
+	AmountCents int64 `json:"amount_cents"`
+}
+
+func (q *Queries) UpsertCategoryBudget(ctx context.Context, arg UpsertCategoryBudgetParams) error {
+	_, err := q.db.ExecContext(ctx, upsertCategoryBudget,
+		arg.Year,
+		arg.Month,
+		arg.CategoryID,
+		arg.AmountCents,
+	)
+	return err
+}
+
+const listCategoryBudgetsByMonth = `-- name: ListCategoryBudgetsByMonth :many
+SELECT id, year, month, category_id, amount_cents, updated_at FROM category_budgets WHERE year = ? AND month = ? ORDER BY category_id
+`
+
+type ListCategoryBudgetsByMonthParams struct {
+	Year  int64 `json:"year"`
+	Month int64 `json:"month"`
+}
+
+func (q *Queries) ListCategoryBudgetsByMonth(ctx context.Context, arg ListCategoryBudgetsByMonthParams) ([]CategoryBudget, error) {
+	rows, err := q.db.QueryContext(ctx, listCategoryBudgetsByMonth, arg.Year, arg.Month)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []CategoryBudget{}
+	for rows.Next() {
+		var i CategoryBudget
+		if err := rows.Scan(
+			&i.ID,
+			&i.Year,
+			&i.Month,
+			&i.CategoryID,
+			&i.AmountCents,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deleteCategoryBudget = `-- name: DeleteCategoryBudget :exec
+DELETE FROM category_budgets WHERE year = ? AND month = ? AND category_id = ?
+`
+
+type DeleteCategoryBudgetParams struct {
+	Year       int64 `json:"year"`
+	Month      int64 `json:"month"`
+	CategoryID int64 `json:"category_id"`
+}
+
+func (q *Queries) DeleteCategoryBudget(ctx context.Context, arg DeleteCategoryBudgetParams) error {
+	_, err := q.db.ExecContext(ctx, deleteCategoryBudget,
+		arg.Year,
+		arg.Month,
+		arg.CategoryID,
+	)
+	return err
+}
+
 const upsertCurrency = `-- name: UpsertCurrency :exec
 INSERT INTO currencies (code, name, symbol, rate_to_base, is_base)
 VALUES (?, ?, ?, ?, ?)

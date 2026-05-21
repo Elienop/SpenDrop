@@ -147,6 +147,11 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Get("/budgets", h.handleGetBudgets)
 		r.Put("/budgets/{year}/{month}", h.handleSetBudget)
 
+		// Category Budgets (Gap 2) — per-category monthly limits.
+		r.Get("/category-budgets", h.handleGetCategoryBudgets)
+		r.Put("/category-budgets/{year}/{month}/{categoryId}", h.handleSetCategoryBudget)
+		r.Delete("/category-budgets/{year}/{month}/{categoryId}", h.handleDeleteCategoryBudget)
+
 		// Savings Goals
 		r.Get("/savings-goals", h.handleGetSavingsGoals)
 		r.Put("/savings-goals/{year}", h.handleSetSavingsGoal)

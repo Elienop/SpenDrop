@@ -79,6 +79,30 @@ export interface Budget {
   updated_at: string;
 }
 
+/**
+ * A per-category spending limit for a single month, as returned by
+ * `GET /api/category-budgets?year=&month=`. `amount` is in whole dollars
+ * (the backend converts from its integer-cents storage on the wire), so
+ * the panel can bind it directly to a `<Input type="number">` without a
+ * /100 conversion. Categories with no limit set are simply absent from
+ * the array — there is no zero-amount row — so a missing `category_id`
+ * means "no limit", which the editor renders as a blank field.
+ */
+export interface CategoryBudget {
+  category_id: number;
+  amount: number;
+}
+
+/**
+ * Body for `PUT /api/category-budgets/{year}/{month}/{categoryId}`.
+ * `amount` is in whole dollars and must be strictly greater than 0 — the
+ * backend rejects `<= 0`, and clearing a limit is expressed by a DELETE
+ * rather than a PUT with `amount: 0`.
+ */
+export interface CategoryBudgetRequest {
+  amount: number;
+}
+
 export interface SavingsGoal {
   id: number;
   year: number;

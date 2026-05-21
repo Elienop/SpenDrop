@@ -21,6 +21,7 @@ import type {
   ApiToken,
   Budget,
   Category,
+  CategoryBudget,
   ChangePasswordResponse,
   CreateTokenResponse,
   Currency,
@@ -103,6 +104,8 @@ import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { ROLE_ADMIN, ROLE_MEMBER, isAdmin, type Role } from '@/lib/roles';
+import { Skeleton } from '@/components/ui/skeleton';
+import { TYPE_EXPENSE } from '@/lib/transaction-types';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -741,6 +744,453 @@ function GeneralSection({ dirtyCountRef }: GeneralSectionProps) {
           </Button>
         </form>
       </CardContent>
+      <DiscardEditsDialog
+        open={pendingYear !== null}
+        count={dirtyCount}
+        destinationLabel={pendingYear === null ? '' : String(pendingYear)}
+        onCancel={() => setPendingYear(null)}
+        onConfirm={() => {
+          if (pendingYear !== null) setYear(pendingYear);
+          setPendingYear(null);
+        }}
+      />
+    </Card>
+  );
+}
+
+/* ---------- Category Limits panel (within General tab) ---------- */
+
+interface CategoryLimitsSectionProps {
+  // Editing/saving is admin-only because the backend PUT/DELETE for
+  // category-budgets reject non-admins. Non-admins still get the read
+  // view (the limits matter to everyone who plans against them), but the
+  // dollar fields render as static text and the Save button is hidden so
+  // they can't trigger a request that would 403.
+  admin: boolean;
+  // Parent-held mirror of `dirtyCount` — see <GeneralSectionProps> for the
+  // ref-not-callback rationale. Lets the Settings-level tab switcher and
+  // sidebar-nav guard consult this section's dirty state before Radix
+  // unmounts the General tab and silently wipes in-progress edits.
+  dirtyCountRef?: MutableRefObject<number>;
+}
+
+/**
+ * A single-month per-category spending-limit editor. Mirrors the
+ * <GeneralSection> monthly-budgets editor's mechanics (year picker,
+ * string-keyed dirty tracking, per-item save loop, toasts) but pivots on
+ * categories instead of months and adds a month dropdown.
+ *
+ * Limits are keyed by category id. A blank field means "no limit": a
+ * row that started blank and stays blank is skipped; a row that had a
+ * limit and is cleared issues a DELETE; a row set to a positive value
+ * issues a PUT. Values are compared as strings (not numbers) for the
+ * same SQLite-REAL round-trip reason documented on `baselineRef` in
+ * <GeneralSection>.
+ */
+function CategoryLimitsSection({
+  admin,
+  dirtyCountRef,
+}: CategoryLimitsSectionProps) {
+  const baseCurrency = useBaseCurrency();
+  const now = useMemo(() => new Date(), []);
+  const initialYear = now.getFullYear();
+  const [year, setYear] = useState(initialYear);
+  const [month, setMonth] = useState(now.getMonth() + 1);
+
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [loading, setLoading] = useState(true);
+  // Per-category input strings keyed by category id. Strings (not
+  // numbers) so a cleared field stays empty rather than collapsing to
+  // "0", which the backend would reject.
+  const [editAmounts, setEditAmounts] = useState<Record<number, string>>({});
+  const [saving, setSaving] = useState(false);
+  // String baseline captured at the last successful fetch — see the
+  // <GeneralSection> baselineRef comment for the string-compare rationale.
+  const baselineRef = useRef<Record<number, string>>({});
+
+  const yearSelectOptions = useMemo(() => {
+    const opts: number[] = [];
+    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= MIN_YEAR; y--) {
+      opts.push(y);
+    }
+    return opts;
+  }, [initialYear]);
+
+  // Active expense categories only, expense-sorted by sort_order — the
+  // same ordering the Categories page uses within the expense group.
+  const expenseCategories = useMemo(
+    () =>
+      categories
+        .filter((c) => c.type === TYPE_EXPENSE && c.is_active)
+        .sort((a, b) => a.sort_order - b.sort_order),
+    [categories],
+  );
+
+  const fetchLimits = useCallback(async () => {
+    setLoading(true);
+    // Fetch categories and limits in parallel; both feed the editor.
+    const [cats, limits] = await Promise.all([
+      api.get<Category[]>('categories'),
+      api.get<CategoryBudget[]>(
+        `category-budgets?year=${year}&month=${month}`,
+      ),
+    ]);
+    const amounts: Record<number, string> = {};
+    for (const l of limits) amounts[l.category_id] = String(l.amount);
+    baselineRef.current = { ...amounts };
+    setCategories(cats);
+    setEditAmounts(amounts);
+    setLoading(false);
+  }, [year, month]);
+
+  useEffect(() => {
+    fetchLimits().catch((err) => {
+      baselineRef.current = {};
+      setCategories([]);
+      setEditAmounts({});
+      setLoading(false);
+      toast.error(
+        'Failed to load category limits: ' +
+          (err instanceof Error ? err.message : 'unknown'),
+      );
+    });
+  }, [fetchLimits]);
+
+  // When the user picks a different year/month while there are unsaved
+  // edits, we park the target here and open <DiscardEditsDialog> rather
+  // than letting the fetch effect overwrite `editAmounts`/`baselineRef`
+  // and silently discard the edits. Storing the target (not just a flag)
+  // lets us apply exactly what was picked on confirm and name the
+  // destination in the prompt body. Only one can be pending at a time —
+  // the pickers are disabled while `saving`, and a pending dialog blocks
+  // further interaction.
+  const [pendingYear, setPendingYear] = useState<number | null>(null);
+  const [pendingMonth, setPendingMonth] = useState<number | null>(null);
+
+  function handleYearSelect(value: string) {
+    const next = Number(value);
+    if (!Number.isInteger(next) || next < MIN_YEAR || next > MAX_YEAR) return;
+    if (next === year) return;
+    if (dirtyCount > 0) {
+      setPendingYear(next);
+      return;
+    }
+    setYear(next);
+  }
+
+  function handleMonthSelect(value: string) {
+    const next = Number(value);
+    if (!Number.isInteger(next) || next < 1 || next > 12) return;
+    if (next === month) return;
+    if (dirtyCount > 0) {
+      setPendingMonth(next);
+      return;
+    }
+    setMonth(next);
+  }
+
+  async function handleSave(e: FormEvent) {
+    e.preventDefault();
+
+    // Bucket each category row into puts (positive change), deletes
+    // (cleared from a previous value), invalid (block), or unchanged.
+    const puts: { id: number; amount: number }[] = [];
+    const deletes: number[] = [];
+    const invalidIds: number[] = [];
+    for (const cat of expenseCategories) {
+      const raw = (editAmounts[cat.id] ?? '').trim();
+      const baseline = (baselineRef.current[cat.id] ?? '').trim();
+      if (raw === baseline) continue;
+      if (raw === '') {
+        // Was set, now cleared → delete. (baseline must be non-empty
+        // here since raw !== baseline.)
+        deletes.push(cat.id);
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) {
+        invalidIds.push(cat.id);
+        continue;
+      }
+      puts.push({ id: cat.id, amount: n });
+    }
+
+    if (invalidIds.length > 0) {
+      const names = invalidIds
+        .map((id) => expenseCategories.find((c) => c.id === id)?.name ?? id)
+        .join(', ');
+      toast.error(`Amount must be greater than 0: ${names}`);
+      return;
+    }
+    if (puts.length === 0 && deletes.length === 0) {
+      toast.info('No changes to save');
+      return;
+    }
+
+    setSaving(true);
+    let failedName: string | null = null;
+    try {
+      for (const { id, amount } of puts) {
+        failedName = expenseCategories.find((c) => c.id === id)?.name ?? null;
+        await api.put(`category-budgets/${year}/${month}/${id}`, { amount });
+      }
+      for (const id of deletes) {
+        failedName = expenseCategories.find((c) => c.id === id)?.name ?? null;
+        await api.del(`category-budgets/${year}/${month}/${id}`);
+      }
+      failedName = null;
+      const total = puts.length + deletes.length;
+      toast.success(`Saved ${total} category limit${total === 1 ? '' : 's'}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to save';
+      toast.error(failedName !== null ? `${failedName}: ${msg}` : msg);
+    } finally {
+      try {
+        await fetchLimits();
+      } catch (err) {
+        toast.error(
+          'Refresh failed: ' +
+            (err instanceof Error ? err.message : 'unknown'),
+        );
+      }
+      setSaving(false);
+    }
+  }
+
+  // Count of rows whose value differs from baseline AND would produce a
+  // valid PUT/DELETE at save time — drives the "(N)" badge on Save and the
+  // month/year-change / tab-switch / beforeunload confirms, so it has to
+  // match "what would actually save" rather than "what's visually
+  // different".
+  //
+  // `baselineRef.current` is read on every render; React re-renders when
+  // `editAmounts` (or `expenseCategories`) changes, and every write to
+  // `baselineRef.current` in `fetchLimits` is paired with a
+  // `setEditAmounts`/`setCategories`, so this memo always sees the latest
+  // ref value. Do not add `baselineRef` to the deps — a ref is not a
+  // reactive dependency and listing it would mislead future readers.
+  const dirtyCount = useMemo(() => {
+    let count = 0;
+    for (const cat of expenseCategories) {
+      const raw = (editAmounts[cat.id] ?? '').trim();
+      const baseline = (baselineRef.current[cat.id] ?? '').trim();
+      if (raw === baseline) continue;
+      if (raw === '') {
+        count++;
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) continue;
+      count++;
+    }
+    return count;
+  }, [editAmounts, expenseCategories]);
+
+  // Mirror `dirtyCount` into the parent's ref so the Settings-level tab
+  // switcher and sidebar-nav guard can block leaving the General tab with
+  // unsaved category-limit edits. `TabsContent` unmounts inactive tabs by
+  // default, so without this the user's in-progress edits vanish silently.
+  // The cleanup resets to 0 on unmount so a stale count can't block a
+  // future tab change after this component is already gone.
+  useEffect(() => {
+    if (!dirtyCountRef) return;
+    dirtyCountRef.current = dirtyCount;
+    return () => {
+      dirtyCountRef.current = 0;
+    };
+  }, [dirtyCount, dirtyCountRef]);
+
+  // Block accidental browser close / reload while changes are unsaved.
+  // Mirrors <GeneralSection>'s handler; both sections live on the General
+  // tab, so either being dirty must arm the prompt.
+  useEffect(() => {
+    if (dirtyCount === 0) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', handler);
+    return () => window.removeEventListener('beforeunload', handler);
+  }, [dirtyCount]);
+
+  const monthLabel = MONTH_NAMES_FULL[month - 1];
+
+  return (
+    <Card>
+      <CardHeader className="flex flex-col gap-3">
+        <CardTitle className="text-base">Category Limits</CardTitle>
+        <CardDescription>
+          Set an optional monthly spending limit per expense category.
+          Leave a field blank for no limit.
+        </CardDescription>
+        <div className="flex flex-wrap items-end gap-3">
+          <div className="flex flex-col gap-1">
+            <Label
+              htmlFor="limits-month"
+              className="text-sm text-muted-foreground"
+            >
+              Month
+            </Label>
+            <Select
+              value={String(month)}
+              onValueChange={handleMonthSelect}
+              disabled={saving}
+            >
+              <SelectTrigger
+                id="limits-month"
+                className="w-36"
+                aria-label="Limits month"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {MONTH_NAMES_FULL.map((name, idx) => (
+                  <SelectItem key={idx + 1} value={String(idx + 1)}>
+                    {name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="flex flex-col gap-1">
+            <Label
+              htmlFor="limits-year"
+              className="text-sm text-muted-foreground"
+            >
+              Year
+            </Label>
+            <Select
+              value={String(year)}
+              onValueChange={handleYearSelect}
+              disabled={saving}
+            >
+              <SelectTrigger
+                id="limits-year"
+                className="w-28"
+                aria-label="Limits year"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {yearSelectOptions.map((y) => (
+                  <SelectItem key={y} value={String(y)}>
+                    {y}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          {admin && dirtyCount > 0 && (
+            <span
+              className="self-end text-sm text-amber-600 dark:text-amber-500"
+              aria-live="polite"
+              data-testid="category-limits-dirty-indicator"
+            >
+              {dirtyCount} unsaved change{dirtyCount === 1 ? '' : 's'}
+            </span>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent>
+        {loading ? (
+          <div className="flex flex-col gap-2">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-12 w-full" />
+            ))}
+          </div>
+        ) : expenseCategories.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No active expense categories.
+          </p>
+        ) : (
+          <form
+            onSubmit={(e) => void handleSave(e)}
+            className="flex flex-col gap-4"
+            noValidate
+          >
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Category</TableHead>
+                  <TableHead className="text-right">
+                    Limit ({baseCurrency})
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {expenseCategories.map((cat) => (
+                  <TableRow key={cat.id}>
+                    <TableCell className="font-medium">
+                      {cat.icon && (
+                        <span className="mr-2" aria-hidden="true">
+                          {cat.icon}
+                        </span>
+                      )}
+                      {cat.name}
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {admin ? (
+                        <Input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          placeholder="No limit"
+                          value={editAmounts[cat.id] ?? ''}
+                          onChange={(e) =>
+                            setEditAmounts((prev) => ({
+                              ...prev,
+                              [cat.id]: e.target.value,
+                            }))
+                          }
+                          onFocus={selectAllOnFocus}
+                          disabled={saving}
+                          aria-label={`Limit for ${cat.name} ${monthLabel} ${year} in ${baseCurrency}`}
+                          className="ml-auto max-w-[160px] text-right"
+                        />
+                      ) : (
+                        <span className="font-mono tabular-nums">
+                          {editAmounts[cat.id] &&
+                          Number.isFinite(Number(editAmounts[cat.id]))
+                            ? formatCurrency(
+                                Number(editAmounts[cat.id]),
+                                baseCurrency,
+                              )
+                            : '—'}
+                        </span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            {admin && (
+              <Button
+                type="submit"
+                className={`w-fit ${dirtyCount > 0 && !saving ? 'font-semibold' : ''}`}
+                disabled={saving}
+              >
+                {saving
+                  ? 'Saving...'
+                  : dirtyCount > 0
+                    ? `Save Category Limits (${dirtyCount})`
+                    : 'Save Category Limits'}
+              </Button>
+            )}
+          </form>
+        )}
+      </CardContent>
+      <DiscardEditsDialog
+        open={pendingMonth !== null}
+        count={dirtyCount}
+        destinationLabel={
+          pendingMonth === null ? '' : MONTH_NAMES_FULL[pendingMonth - 1]
+        }
+        onCancel={() => setPendingMonth(null)}
+        onConfirm={() => {
+          if (pendingMonth !== null) setMonth(pendingMonth);
+          setPendingMonth(null);
+        }}
+      />
       <DiscardEditsDialog
         open={pendingYear !== null}
         count={dirtyCount}
@@ -2739,6 +3189,10 @@ export function Settings() {
   // whole Settings tree on every keystroke. GeneralSection writes into
   // this ref via an effect and resets it on unmount.
   const generalDirtyCountRef = useRef(0);
+  // Same mirror for the Category Limits panel, which also lives on the
+  // General tab. Both refs are OR'd in the leave-guards below so a dirty
+  // category-limit edit blocks navigation just like a dirty budget edit.
+  const categoryLimitsDirtyCountRef = useRef(0);
 
   // Parked targets while the discard-edits dialog is open. Storing the
   // target (tab name or href) rather than a boolean lets the same dialog
@@ -2793,7 +3247,11 @@ export function Settings() {
       const url = new URL(anchor.href, window.location.href);
       if (url.origin !== window.location.origin) return;
       if (url.pathname === window.location.pathname) return;
-      if (generalDirtyCountRef.current <= 0) return;
+      if (
+        generalDirtyCountRef.current <= 0 &&
+        categoryLimitsDirtyCountRef.current <= 0
+      )
+        return;
       e.preventDefault();
       e.stopPropagation();
       setPendingHref(url.pathname + url.search + url.hash);
@@ -2805,11 +3263,17 @@ export function Settings() {
   function handleTabChange(v: string) {
     const next = v as SettingsTab;
     if (next === activeTab) return;
-    // Only the General tab owns unsaved budget edits today. If other
-    // sections grow their own dirty state, add parallel refs and OR
-    // them here rather than collapsing into a single shared counter —
-    // we want to report which tab is dirty in the prompt.
-    if (activeTab === 'general' && generalDirtyCountRef.current > 0) {
+    // The General tab hosts two editors with their own dirty state — the
+    // monthly-budgets section and the category-limits section. OR their
+    // refs so leaving the tab with either dirty prompts to discard. If a
+    // future section needs to report *which* editor is dirty in the
+    // prompt, split this into per-editor targets rather than collapsing
+    // into a single shared counter.
+    if (
+      activeTab === 'general' &&
+      (generalDirtyCountRef.current > 0 ||
+        categoryLimitsDirtyCountRef.current > 0)
+    ) {
       setPendingTab(next);
       return;
     }
@@ -2825,7 +3289,10 @@ export function Settings() {
     return ROUTE_LABELS[pathOnly] ?? pathOnly;
   }, [pendingHref]);
 
-  const dirtyCount = generalDirtyCountRef.current;
+  // Count shown in the leave-guard dialogs. Sum both General-tab editors
+  // so the prompt reflects the true number of edits the user would lose.
+  const dirtyCount =
+    generalDirtyCountRef.current + categoryLimitsDirtyCountRef.current;
 
   return (
     <div className="flex flex-col gap-6">
@@ -2846,7 +3313,13 @@ export function Settings() {
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="general" className="mt-6">
-          <GeneralSection dirtyCountRef={generalDirtyCountRef} />
+          <div className="flex flex-col gap-6">
+            <GeneralSection dirtyCountRef={generalDirtyCountRef} />
+            <CategoryLimitsSection
+              admin={admin}
+              dirtyCountRef={categoryLimitsDirtyCountRef}
+            />
+          </div>
         </TabsContent>
         <TabsContent value="account" className="mt-6">
           <AccountSection />

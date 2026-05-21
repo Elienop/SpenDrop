@@ -42,6 +42,63 @@ func TestHandleListCategories_ReturnsActiveCategories(t *testing.T) {
 	}
 }
 
+// Regression: icon must serialize as a plain JSON string (or null), never the
+// Go sql.NullString object {"String":...,"Valid":...}. Rendering that object as
+// a React child crashes the client with React error #31 — which is exactly
+// what the new CategoryLimitsSection (the first UI to render cat.icon) hit.
+func TestHandleListCategories_IconIsPlainStringNotNullStringObject(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Seed categories have NULL icons; set one so the test also exercises the
+	// Valid→string path. (A NULL NullString still serializes to the
+	// {"String":"","Valid":false} object, so the null-icon rows alone already
+	// prove the regression — but a real icon pins the happy path too.)
+	if _, err := db.Exec("UPDATE categories SET icon = '🛒' WHERE id = 1"); err != nil {
+		t.Fatalf("set icon on category 1: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/categories", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleListCategories(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp []map[string]any
+	decodeResponse(t, rec, &resp)
+	if len(resp) == 0 {
+		t.Fatal("expected seeded categories")
+	}
+
+	sawSetIcon := false
+	for _, cat := range resp {
+		icon, ok := cat["icon"]
+		if !ok {
+			t.Fatalf("category %v missing icon field", cat["name"])
+		}
+		if icon == nil {
+			continue // null = no icon set, acceptable
+		}
+		if _, isObject := icon.(map[string]any); isObject {
+			t.Fatalf("icon leaked as a sql.NullString object for %v: %v", cat["name"], icon)
+		}
+		s, isString := icon.(string)
+		if !isString {
+			t.Fatalf("icon should be a string, got %T (%v) for %v", icon, icon, cat["name"])
+		}
+		if s == "🛒" {
+			sawSetIcon = true
+		}
+	}
+	if !sawSetIcon {
+		t.Error("expected category id=1 to return its icon as the string \"🛒\"")
+	}
+}
+
 func TestHandleListCategories_IncludeInactive(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

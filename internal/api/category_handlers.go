@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -36,6 +37,39 @@ type reorderItem struct {
 	SortOrder int64 `json:"sort_order"`
 }
 
+// categoryResponse is the wire shape for a category. Icon is a plain
+// nullable string (JSON null when unset), NOT the Go sql.NullString object
+// {"String":...,"Valid":...} that leaks if a database.Category is serialized
+// directly. Rendering that object as a React child crashes the client
+// (React error #31 — "objects are not valid as a React child"); this DTO
+// mirrors the frontend Category type (icon: string | null).
+type categoryResponse struct {
+	ID        int64     `json:"id"`
+	Name      string    `json:"name"`
+	Type      string    `json:"type"`
+	Icon      *string   `json:"icon"`
+	SortOrder int64     `json:"sort_order"`
+	IsActive  bool      `json:"is_active"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func toCategoryResponse(c database.Category) categoryResponse {
+	var icon *string
+	if c.Icon.Valid {
+		s := c.Icon.String
+		icon = &s
+	}
+	return categoryResponse{
+		ID:        c.ID,
+		Name:      c.Name,
+		Type:      c.Type,
+		Icon:      icon,
+		SortOrder: c.SortOrder,
+		IsActive:  c.IsActive,
+		CreatedAt: c.CreatedAt,
+	}
+}
+
 // handleListCategories returns all active categories, or all categories if
 // include_inactive=true is passed as a query parameter.
 func (h *Handler) handleListCategories(w http.ResponseWriter, r *http.Request) {
@@ -57,7 +91,11 @@ func (h *Handler) handleListCategories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, categories)
+	out := make([]categoryResponse, 0, len(categories))
+	for _, c := range categories {
+		out = append(out, toCategoryResponse(c))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // handleCreateCategory creates a new category. Admin only.
@@ -101,7 +139,7 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, cat)
+	writeJSON(w, http.StatusCreated, toCategoryResponse(cat))
 }
 
 // handleUpdateCategory updates an existing category's name and icon.

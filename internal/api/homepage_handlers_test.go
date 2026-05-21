@@ -279,6 +279,67 @@ func TestSummary_HidesTombstoned(t *testing.T) {
 	}
 }
 
+// TestSummary_OverBudgetCategories_CountsHouseholdWideExceedances seeds two
+// expense categories with per-category limits and household-wide spend (split
+// across two users) and asserts only the category whose total spend exceeds its
+// limit is counted. The count is household-wide, NOT scoped to the token owner.
+func TestSummary_OverBudgetCategories_CountsHouseholdWideExceedances(t *testing.T) {
+	q, db := setupTestDB(t)
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	h := NewHandlerWithClock(q, db, fixedClock{t: now})
+	router := newHomepageTestRouter(t, h, q)
+
+	alice, aliceBearer := seedUserWithLiveToken(t, q, "alice")
+	bob, _ := seedUserWithLiveToken(t, q, "bob")
+
+	over := seedExpenseCategory(t, q, "Groceries")
+	under := seedExpenseCategory(t, q, "Transit")
+
+	// Limits: $1.00 each.
+	for _, cid := range []int64{over, under} {
+		if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+			Year: 2026, Month: 4, CategoryID: cid, AmountCents: 100,
+		}); err != nil {
+			t.Fatalf("seed limit: %v", err)
+		}
+	}
+
+	// "over": alice 60¢ + bob 50¢ = 110¢ > 100¢ limit (household-wide sum
+	// exceeds, even though neither user alone does).
+	seedExpenseRow(t, q, alice.ID, over, "2026-04-10", 60)
+	seedExpenseRow(t, q, bob.ID, over, "2026-04-11", 50)
+	// "under": alice 40¢ < 100¢ limit.
+	seedExpenseRow(t, q, alice.ID, under, "2026-04-10", 40)
+
+	rec := homepageRequest(t, router, aliceBearer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeSummary(t, rec)
+	if resp.OverBudgetCategories != 1 {
+		t.Errorf("OverBudgetCategories: want 1, got %d", resp.OverBudgetCategories)
+	}
+}
+
+// TestSummary_OverBudgetCategories_NoLimits_IsZero verifies that with no
+// per-category limits set, the count is 0 regardless of spend.
+func TestSummary_OverBudgetCategories_NoLimits_IsZero(t *testing.T) {
+	q, db := setupTestDB(t)
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	h := NewHandlerWithClock(q, db, fixedClock{t: now})
+	router := newHomepageTestRouter(t, h, q)
+
+	alice, aliceBearer := seedUserWithLiveToken(t, q, "alice")
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedExpenseRow(t, q, alice.ID, cat, "2026-04-10", 99999)
+
+	rec := homepageRequest(t, router, aliceBearer)
+	resp := decodeSummary(t, rec)
+	if resp.OverBudgetCategories != 0 {
+		t.Errorf("OverBudgetCategories: want 0 with no limits, got %d", resp.OverBudgetCategories)
+	}
+}
+
 // TestSummary_ScopedToTokenOwnerUser verifies that alice's token only sees
 // alice's transactions, not bob's.
 func TestSummary_ScopedToTokenOwnerUser(t *testing.T) {
@@ -680,10 +741,13 @@ func TestSummary_RevokedTokenReturns401_DoesNotServeStaleCache(t *testing.T) {
 	}
 }
 
-// TestSummary_OverBudgetCategoriesIsZeroUntilFeatureLands asserts that the
-// over_budget_categories field is always 0 while per-category budgets are not
-// yet implemented.
-func TestSummary_OverBudgetCategoriesIsZeroUntilFeatureLands(t *testing.T) {
+// TestSummary_OverBudgetCategories_IgnoresMonthLevelBudgetExceedance asserts
+// that over_budget_categories counts only per-category limit exceedances, fully
+// independent of the overall monthly (default) budget. Heavy spend across
+// several categories that blows past the month-level default budget must
+// contribute 0 to over_budget_categories when no per-category limits
+// (category_budgets rows) are set — the two budget concepts are independent.
+func TestSummary_OverBudgetCategories_IgnoresMonthLevelBudgetExceedance(t *testing.T) {
 	q, db := setupTestDB(t)
 	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
 	h := NewHandlerWithClock(q, db, fixedClock{t: now})
@@ -717,11 +781,83 @@ func TestSummary_OverBudgetCategoriesIsZeroUntilFeatureLands(t *testing.T) {
 	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
+	// No category_budgets rows exist, so despite blowing the month-level
+	// default budget, the per-category over-budget count must be 0.
 	if resp.OverBudgetCategories != 0 {
-		t.Errorf("OverBudgetCategories: want 0 (stub), got %d", resp.OverBudgetCategories)
+		t.Errorf("OverBudgetCategories: want 0 (no per-category limits set; month-level budget exceedance is independent), got %d", resp.OverBudgetCategories)
 	}
 	// Sanity: the field must be present in the response JSON.
 	if !strings.Contains(string(bodyBytes), `"over_budget_categories"`) {
 		t.Error("response JSON missing over_budget_categories field")
+	}
+}
+
+// TestSummary_OverBudgetCategories_HidesTombstoned pins that soft-deleted
+// transactions never inflate the per-category over-budget count. A category
+// has a 100¢ limit; its live spend (60¢) alone does not exceed it, while a
+// tombstoned 99999¢ sentinel in the same category/month would push it well
+// over if (incorrectly) counted. Asserts the count stays 0.
+func TestSummary_OverBudgetCategories_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	h := NewHandlerWithClock(q, db, fixedClock{t: now})
+	router := newHomepageTestRouter(t, h, q)
+
+	user, bearer := seedUserWithLiveToken(t, q, "alice")
+	catExp := seedExpenseCategory(t, q, "Food")
+
+	// Per-category limit of 100¢ for the current month.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 4, CategoryID: catExp, AmountCents: 100,
+	}); err != nil {
+		t.Fatalf("seed limit: %v", err)
+	}
+
+	// Live row: 60¢ — alone does NOT exceed the 100¢ limit.
+	seedExpenseRow(t, q, user.ID, catExp, "2026-04-10", 60)
+	// Tombstoned row: 99999¢ sentinel that must NOT leak into the spend sum.
+	txnTombstone := seedExpenseRow(t, q, user.ID, catExp, "2026-04-10", 99999)
+	if err := q.SoftDeleteTransaction(context.Background(), txnTombstone.ID); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	rec := homepageRequest(t, router, bearer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeSummary(t, rec)
+	if resp.OverBudgetCategories != 0 {
+		t.Errorf("OverBudgetCategories: want 0 (live 60¢ < 100¢ limit; tombstoned 99999¢ must be hidden), got %d", resp.OverBudgetCategories)
+	}
+}
+
+// TestSummary_OverBudgetCategories_SpendEqualToLimitIsNotCounted pins the
+// strict-greater-than boundary in countOverBudgetCategories: a category whose
+// month-to-date spend exactly equals its limit is NOT over budget. This guards
+// against a future refactor flipping `>` to `>=`.
+func TestSummary_OverBudgetCategories_SpendEqualToLimitIsNotCounted(t *testing.T) {
+	q, db := setupTestDB(t)
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	h := NewHandlerWithClock(q, db, fixedClock{t: now})
+	router := newHomepageTestRouter(t, h, q)
+
+	user, bearer := seedUserWithLiveToken(t, q, "alice")
+	catExp := seedExpenseCategory(t, q, "Food")
+
+	// Limit of 100¢; spend exactly 100¢ — equal, not over.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 4, CategoryID: catExp, AmountCents: 100,
+	}); err != nil {
+		t.Fatalf("seed limit: %v", err)
+	}
+	seedExpenseRow(t, q, user.ID, catExp, "2026-04-10", 100)
+
+	rec := homepageRequest(t, router, bearer)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	resp := decodeSummary(t, rec)
+	if resp.OverBudgetCategories != 0 {
+		t.Errorf("OverBudgetCategories: want 0 (spend == limit is not over budget; impl uses strict >), got %d", resp.OverBudgetCategories)
 	}
 }
