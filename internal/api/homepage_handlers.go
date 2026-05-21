@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -32,14 +33,12 @@ type homepageSummaryResponse struct {
 	// Currency is the base currency code from app_settings (e.g. "USD").
 	Currency string `json:"currency"`
 	// OverBudgetCategories is the count of expense categories whose
-	// month-to-date spend exceeds their per-category budget.
-	//
-	// TODO(per-category-budgets): per-category budget rows do not exist yet
-	// (the budgets table is month-level only). This field is stubbed to 0
-	// until the schema gains a category_budgets table and the corresponding
-	// query is written. Keeping the field in the response now lets the
-	// Homepage widget template reference it without a schema break later.
-	// Tracked in: feat/per-category-budgets (future milestone).
+	// household-wide month-to-date spend exceeds their per-category budget
+	// limit (category_budgets table, migration 012). It is computed
+	// household-wide — NOT scoped to the token owner — using
+	// SumByCategoryForMonth (which already filters tombstoned rows) joined to
+	// the limits for the current (year, month). Categories without a limit set
+	// never contribute to the count.
 	OverBudgetCategories int64 `json:"over_budget_categories"`
 	// AsOf is the UTC instant at which the aggregation was computed. On a
 	// cache hit this reflects the original computation time, NOT the time
@@ -139,6 +138,17 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// over_budget_categories: count expense categories whose household-wide
+	// month-to-date spend exceeds their per-category limit. Both inputs are
+	// scoped to the current (year, month). SumByCategoryForMonth already
+	// filters c.type='expense' and t.deleted_at IS NULL, so the spend side is
+	// tombstone-safe; only categories with a limit row participate.
+	overBudget, err := h.countOverBudgetCategories(ctx, int64(now.Year()), int64(now.Month()), yearStr, monthStr)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to compute over-budget categories")
+		return
+	}
+
 	currency := h.getBaseCurrency(ctx)
 
 	payload := homepageSummaryResponse{
@@ -147,7 +157,7 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 		MonthRemaining:       centsToDollars(budgetCents - monthSpentCents),
 		TxnCount:             txnCount,
 		Currency:             currency,
-		OverBudgetCategories: 0, // TODO(per-category-budgets): see field comment
+		OverBudgetCategories: overBudget,
 		AsOf:                 now.UTC().Format(time.RFC3339),
 	}
 
@@ -165,4 +175,48 @@ func (h *Handler) handleHomepageSummary(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(encoded)
+}
+
+// countOverBudgetCategories returns how many expense categories have a
+// per-category limit for (yearInt, monthInt) whose household-wide month-to-date
+// spend strictly exceeds that limit. yearStr/monthStr are the same instant
+// formatted for SumByCategoryForMonth (which keys on strftime text). Categories
+// with no limit row are never counted; categories with a limit but no spend
+// have spend 0 and therefore never exceed a positive limit.
+func (h *Handler) countOverBudgetCategories(ctx context.Context, yearInt, monthInt int64, yearStr, monthStr string) (int64, error) {
+	limits, err := h.queries.ListCategoryBudgetsByMonth(ctx, database.ListCategoryBudgetsByMonthParams{
+		Year:  yearInt,
+		Month: monthInt,
+	})
+	if err != nil {
+		return 0, err
+	}
+	if len(limits) == 0 {
+		return 0, nil
+	}
+
+	limitByCategory := make(map[int64]int64, len(limits))
+	for _, l := range limits {
+		limitByCategory[l.CategoryID] = l.AmountCents
+	}
+
+	spend, err := h.queries.SumByCategoryForMonth(ctx, database.SumByCategoryForMonthParams{
+		Year:  yearStr,
+		Month: monthStr,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	var count int64
+	for _, row := range spend {
+		limitCents, ok := limitByCategory[row.ID]
+		if !ok {
+			continue
+		}
+		if row.TotalCents > limitCents {
+			count++
+		}
+	}
+	return count, nil
 }

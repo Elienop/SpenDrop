@@ -272,6 +272,25 @@ ON CONFLICT(year, month) DO UPDATE SET
 -- name: ListBudgetsByYear :many
 SELECT * FROM budgets WHERE year = ? ORDER BY month;
 
+-- Category Budgets (Gap 2)
+-- Per-category monthly limits. Independent sub-caps; see migration 012 header.
+-- sqlc cannot generate this repo (parser fails on RETURNING/window funcs), so
+-- the matching Go in queries.sql.go is hand-written, modelled on the Budget
+-- funcs above. These statements are kept here for review parity only.
+
+-- name: UpsertCategoryBudget :exec
+INSERT INTO category_budgets (year, month, category_id, amount_cents)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(year, month, category_id) DO UPDATE SET
+    amount_cents = excluded.amount_cents,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- name: ListCategoryBudgetsByMonth :many
+SELECT * FROM category_budgets WHERE year = ? AND month = ? ORDER BY category_id;
+
+-- name: DeleteCategoryBudget :exec
+DELETE FROM category_budgets WHERE year = ? AND month = ? AND category_id = ?;
+
 -- Savings Goals
 
 -- name: GetSavingsGoal :one

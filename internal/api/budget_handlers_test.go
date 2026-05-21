@@ -46,7 +46,20 @@ func TestHandleGetBudgets_ReturnsBudgetsForYear(t *testing.T) {
 	var resp []map[string]any
 	decodeResponse(t, rec, &resp)
 	if len(resp) != 2 {
-		t.Errorf("expected 2 budgets, got %d", len(resp))
+		t.Fatalf("expected 2 budgets, got %d", len(resp))
+	}
+
+	// Wire contract: the budgets DTO emits `amount` in DOLLARS, never the raw
+	// `amount_cents` column. January was seeded at $2500.
+	jan := resp[0]
+	if jan["amount"] == nil {
+		t.Fatalf("expected `amount` (dollars) key in budgets response, got %v", jan)
+	}
+	if jan["amount"].(float64) != 2500 {
+		t.Errorf("amount: got %v want 2500 (dollars)", jan["amount"])
+	}
+	if _, leaked := jan["amount_cents"]; leaked {
+		t.Error("amount_cents must NOT leak in budgets response")
 	}
 }
 

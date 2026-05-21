@@ -61,6 +61,15 @@ type Budget struct {
 	AmountCents int64     `json:"amount_cents"`
 }
 
+type CategoryBudget struct {
+	ID          int64     `json:"id"`
+	Year        int64     `json:"year"`
+	Month       int64     `json:"month"`
+	CategoryID  int64     `json:"category_id"`
+	AmountCents int64     `json:"amount_cents"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
 type Category struct {
 	ID        int64          `json:"id"`
 	Name      string         `json:"name"`

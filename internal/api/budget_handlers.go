@@ -33,7 +33,7 @@ func (h *Handler) handleGetBudgets(w http.ResponseWriter, r *http.Request) {
 	yearStr := r.URL.Query().Get("year")
 	var year int64
 	if yearStr == "" {
-		year = int64(time.Now().Year())
+		year = int64(h.clock.Now().Year())
 	} else {
 		parsed, err := strconv.ParseInt(yearStr, 10, 64)
 		if err != nil {
@@ -53,7 +53,32 @@ func (h *Handler) handleGetBudgets(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, budgets)
+	// Emit a DTO with `amount` in DOLLARS. The raw database.Budget row carries
+	// `amount_cents`, which the frontend does not understand (it expects
+	// `amount` in dollars like every other money endpoint). Returning the row
+	// directly leaked amount_cents under the wrong key.
+	out := make([]budgetDTO, 0, len(budgets))
+	for _, b := range budgets {
+		out = append(out, budgetDTO{
+			ID:        b.ID,
+			Year:      b.Year,
+			Month:     b.Month,
+			Amount:    centsToDollars(b.AmountCents),
+			UpdatedAt: b.UpdatedAt,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, out)
+}
+
+// budgetDTO is the wire shape for GET /api/budgets: `amount` in dollars, never
+// the raw amount_cents column.
+type budgetDTO struct {
+	ID        int64     `json:"id"`
+	Year      int64     `json:"year"`
+	Month     int64     `json:"month"`
+	Amount    float64   `json:"amount"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // handleSetBudget upserts a monthly budget for a given year and month. Admin only.
