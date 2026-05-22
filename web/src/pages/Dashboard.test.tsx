@@ -60,8 +60,8 @@ const defaultDashboardData = {
     { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
   ],
   categories: [
-    { id: 1, name: 'Food', total: 1200 },
-    { id: 2, name: 'Transport', total: 800 },
+    { id: 1, name: 'Food', total: 1200, limit: null, over: false },
+    { id: 2, name: 'Transport', total: 800, limit: null, over: false },
   ],
   loading: false,
   fetching: false,

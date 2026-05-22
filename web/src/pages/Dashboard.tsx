@@ -207,6 +207,8 @@ export function Dashboard() {
       name: cat.name,
       value: cat.total,
       color: getCategoryColorVar({ id: cat.id }),
+      limit: cat.limit,
+      over: cat.over,
     }));
   }, [categories, categoriesExpanded]);
 
