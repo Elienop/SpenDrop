@@ -38,6 +38,7 @@ import {
 } from '@/components/ui/table';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Badge } from '@/components/ui/badge';
+import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 import { formatCurrency, DEFAULT_LOCALE } from '@/lib/format';
@@ -458,7 +459,8 @@ export function Dashboard() {
             </div>
             <div className="flex items-center gap-2">
               {overBudgetCount > 0 && (
-                <Badge variant="destructive" className="text-xs">
+                <Badge variant="warning" className="gap-1">
+                  <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
                   {overBudgetCount} over budget
                 </Badge>
               )}
@@ -505,8 +507,9 @@ export function Dashboard() {
                               {formatFull(slice.value)} / {formatFull(slice.limit)} · {budgetPct}%
                             </span>
                             {slice.over && (
-                              <span className="font-medium text-destructive">
-                                ⚠ over {formatFull(slice.value - slice.limit)}
+                              <span className="flex items-center gap-1 font-medium text-amber-600 dark:text-amber-500">
+                                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                over {formatFull(slice.value - slice.limit)}
                               </span>
                             )}
                           </div>
@@ -514,7 +517,7 @@ export function Dashboard() {
                             <div
                               className={cn(
                                 'h-full rounded-full transition-all',
-                                slice.over ? 'bg-destructive' : 'bg-primary',
+                                slice.over ? 'bg-amber-500' : 'bg-primary',
                               )}
                               style={{ width: `${Math.min(budgetPct, 100)}%` }}
                             />

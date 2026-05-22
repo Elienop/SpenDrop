@@ -6,7 +6,7 @@ import type {
   CategoryBreakdownItem,
 } from '../api/types';
 
-interface UseDashboardResult {
+export interface UseDashboardResult {
   summary: DashboardSummary | null;
   trend: DashboardTrendItem[];
   categories: CategoryBreakdownItem[];
