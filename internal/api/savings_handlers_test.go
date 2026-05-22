@@ -44,7 +44,33 @@ func TestHandleGetSavingsGoals_ReturnsAll(t *testing.T) {
 	var resp []map[string]any
 	decodeResponse(t, rec, &resp)
 	if len(resp) != 2 {
-		t.Errorf("expected 2 savings goals, got %d", len(resp))
+		t.Fatalf("expected 2 savings goals, got %d", len(resp))
+	}
+
+	// The wire contract is `target_amount` in DOLLARS, like every other money
+	// endpoint — never the raw target_amount_cents column. Regression guard for
+	// the Reports → Savings tab (and Settings savings-goals panel) blank screen:
+	// migration 010 dropped the REAL target_amount column, so returning the raw
+	// database.SavingsGoal row leaked only target_amount_cents and the frontend's
+	// goal.target_amount was undefined → fmt(undefined) crashed the page.
+	byYear := make(map[float64]map[string]any, len(resp))
+	for _, g := range resp {
+		year, _ := g["year"].(float64)
+		byYear[year] = g
+	}
+	goal2026, ok := byYear[2026]
+	if !ok {
+		t.Fatalf("expected a 2026 goal in response; got %+v", resp)
+	}
+	amount, ok := goal2026["target_amount"].(float64)
+	if !ok {
+		t.Fatalf("expected target_amount (dollars) in response; goal 2026 = %+v", goal2026)
+	}
+	if amount != 12000 {
+		t.Errorf("expected target_amount 12000 dollars, got %v", amount)
+	}
+	if _, leaked := goal2026["target_amount_cents"]; leaked {
+		t.Errorf("response leaked target_amount_cents; the frontend reads target_amount (dollars)")
 	}
 }
 
