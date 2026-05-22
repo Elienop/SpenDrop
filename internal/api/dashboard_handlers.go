@@ -37,9 +37,11 @@ type trendEntry struct {
 
 // categoryEntry is a single category in the categories response.
 type categoryEntry struct {
-	ID    int64   `json:"id"`
-	Name  string  `json:"name"`
-	Total float64 `json:"total"`
+	ID    int64    `json:"id"`
+	Name  string   `json:"name"`
+	Total float64  `json:"total"`
+	Limit *float64 `json:"limit"` // dollars; null when no limit set
+	Over  bool     `json:"over"`  // false when no limit
 }
 
 // parseYearMonth extracts year and month from query params, defaulting to
@@ -304,13 +306,29 @@ func (h *Handler) handleDashboardCategories(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	limits, err := h.queries.ListCategoryBudgetsByMonth(r.Context(), database.ListCategoryBudgetsByMonthParams{
+		Year:  int64(year),
+		Month: int64(month),
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list category budgets")
+		return
+	}
+	status := overBudgetByCategory(rows, limits)
+
 	categories := make([]categoryEntry, len(rows))
 	for i, row := range rows {
-		categories[i] = categoryEntry{
+		entry := categoryEntry{
 			ID:    row.ID,
 			Name:  row.Name,
 			Total: centsToDollars(row.TotalCents),
 		}
+		if s, ok := status[row.ID]; ok {
+			limitDollars := centsToDollars(s.LimitCents)
+			entry.Limit = &limitDollars
+			entry.Over = s.Over
+		}
+		categories[i] = entry
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"categories": categories})
