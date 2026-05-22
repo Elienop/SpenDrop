@@ -591,3 +591,100 @@ func TestHandleDashboardTrend_HidesTombstoned(t *testing.T) {
 		t.Errorf("total_income=%v, want 3000", got)
 	}
 }
+
+func TestHandleDashboardCategories_IncludesBudgetStatus(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Category 1 = Food (expense): $612 spend vs a $500 limit -> over.
+	// Category 2 = Gifts (expense): $180 spend, NO limit -> limit null, over false.
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 612.0, "groceries")
+	seedTestTransaction(t, q, user.ID, 2, "2026-04-07", 180.0, "gift")
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 4, CategoryID: 1, AmountCents: 50000, // $500
+	}); err != nil {
+		t.Fatalf("seed limit: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/categories?year=2026&month=4", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardCategories(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Categories []map[string]any `json:"categories"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	byName := map[string]map[string]any{}
+	for _, c := range resp.Categories {
+		byName[c["name"].(string)] = c
+	}
+
+	food, ok := byName["Food"]
+	if !ok {
+		t.Fatalf("missing Food category in %+v", resp.Categories)
+	}
+	// limit must be DOLLARS (500), never the raw cents (50000) — Money Wire-Edge DTO discipline.
+	if food["limit"].(float64) != 500.0 {
+		t.Errorf("Food limit: want 500 (dollars), got %v", food["limit"])
+	}
+	if food["over"] != true {
+		t.Errorf("Food over: want true ($612 > $500), got %v", food["over"])
+	}
+	if _, leaked := food["limit_cents"]; leaked {
+		t.Error("response leaked limit_cents; wire contract is limit in dollars")
+	}
+
+	gifts, ok := byName["Gifts"]
+	if !ok {
+		t.Fatalf("missing Gifts category in %+v", resp.Categories)
+	}
+	if gifts["limit"] != nil {
+		t.Errorf("Gifts limit: want null (no limit set), got %v", gifts["limit"])
+	}
+	if gifts["over"] != false {
+		t.Errorf("Gifts over: want false (no limit), got %v", gifts["over"])
+	}
+}
+
+func TestHandleDashboardCategories_BudgetStatus_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Food (cat 1): live $40 (under a $100 limit) + tombstoned $999 that would
+	// flip it to over if the soft-delete filter leaked.
+	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 40.0, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-07", 999.0, "tombstoned")
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 4, CategoryID: 1, AmountCents: 10000, // $100
+	}); err != nil {
+		t.Fatalf("seed limit: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/categories?year=2026&month=4", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardCategories(rec, req)
+
+	var resp struct {
+		Categories []map[string]any `json:"categories"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	if len(resp.Categories) != 1 {
+		t.Fatalf("want 1 category, got %d", len(resp.Categories))
+	}
+	c := resp.Categories[0]
+	if c["total"].(float64) != 40.0 {
+		t.Errorf("total: want 40 (tombstoned 999 excluded), got %v", c["total"])
+	}
+	if c["over"] != false {
+		t.Errorf("over: want false ($40 live < $100 limit; tombstoned $999 must not flip it), got %v", c["over"])
+	}
+}

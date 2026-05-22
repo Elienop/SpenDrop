@@ -4,6 +4,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import React from 'react';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import type { UseDashboardResult } from '../hooks/useDashboard';
+import type { CategoryBreakdownItem } from '../api/types';
 
 // Recharts mock — Recharts ships as ES modules that don't render in jsdom
 // without a ResizeObserver, so every component is stubbed to a passthrough.
@@ -41,8 +43,10 @@ vi.mock('recharts', () => ({
   ReferenceLine: () => <div />,
 }));
 
-const defaultDashboardData = {
+const defaultDashboardData: UseDashboardResult = {
   summary: {
+    year: 2026,
+    month: 4,
     budget: 5000,
     total_spent: 3200,
     total_income: 4500,
@@ -60,15 +64,15 @@ const defaultDashboardData = {
     { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
   ],
   categories: [
-    { id: 1, name: 'Food', total: 1200 },
-    { id: 2, name: 'Transport', total: 800 },
+    { id: 1, name: 'Food', total: 1200, limit: null, over: false },
+    { id: 2, name: 'Transport', total: 800, limit: null, over: false },
   ],
   loading: false,
   fetching: false,
   error: '',
 };
 
-const mockUseDashboard = vi.fn(() => defaultDashboardData);
+const mockUseDashboard = vi.fn<() => UseDashboardResult>(() => defaultDashboardData);
 
 vi.mock('../hooks/useDashboard', () => ({
   useDashboard: (...args: unknown[]) => mockUseDashboard(...(args as [])),
@@ -119,6 +123,7 @@ import { Dashboard } from './Dashboard';
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseDashboard.mockReturnValue(defaultDashboardData);
   });
 
   test('renders welcome heading with user name', () => {
@@ -153,7 +158,7 @@ describe('Dashboard', () => {
     mockUseDashboard.mockReturnValue({
       ...defaultDashboardData,
       summary: {
-        ...defaultDashboardData.summary,
+        ...defaultDashboardData.summary!,
         total_income: 2000,
         total_spent: 3598.9,
         remaining: -1598.9,
@@ -237,6 +242,40 @@ describe('Dashboard', () => {
     expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
   });
 
+  test('shows a budget bar and an over-budget header badge for an over category', async () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      categories: [
+        { id: 1, name: 'Food', total: 612, limit: 500, over: true },
+        { id: 2, name: 'Transport', total: 180, limit: 300, over: false },
+      ],
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      // Passive header badge counts over-budget categories (1 of 2 here).
+      expect(screen.getByText('1 over budget')).toBeInTheDocument();
+      // Per-category budget percentage: 612/500 = 122%.
+      expect(screen.getByText(/122%/)).toBeInTheDocument();
+      // Under-budget category still shows its percentage: 180/300 = 60%.
+      expect(screen.getByText(/60%/)).toBeInTheDocument();
+    });
+  });
+
+  test('shows no over-budget badge when everything is within budget', async () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      categories: [
+        { id: 1, name: 'Food', total: 180, limit: 300, over: false },
+        { id: 2, name: 'Transport', total: 95, limit: null, over: false },
+      ],
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText(/60%/)).toBeInTheDocument(); // Food has a limit
+    });
+    expect(screen.queryByText(/over budget/)).not.toBeInTheDocument();
+  });
+
   describe('Today button', () => {
     beforeEach(() => {
       // Each test seeds localStorage with a specific month/year, so clear
@@ -277,15 +316,15 @@ describe('Dashboard', () => {
   });
 
   describe('with more than 6 categories', () => {
-    const manyCategories = [
-      { id: 1, name: 'Food', total: 1200 },
-      { id: 2, name: 'Transport', total: 800 },
-      { id: 3, name: 'Housing', total: 700 },
-      { id: 4, name: 'Entertainment', total: 500 },
-      { id: 5, name: 'Healthcare', total: 400 },
-      { id: 6, name: 'Utilities', total: 300 },
-      { id: 7, name: 'Shopping', total: 200 },
-      { id: 8, name: 'Education', total: 100 },
+    const manyCategories: CategoryBreakdownItem[] = [
+      { id: 1, name: 'Food', total: 1200, limit: null, over: false },
+      { id: 2, name: 'Transport', total: 800, limit: null, over: false },
+      { id: 3, name: 'Housing', total: 700, limit: null, over: false },
+      { id: 4, name: 'Entertainment', total: 500, limit: null, over: false },
+      { id: 5, name: 'Healthcare', total: 400, limit: null, over: false },
+      { id: 6, name: 'Utilities', total: 300, limit: null, over: false },
+      { id: 7, name: 'Shopping', total: 200, limit: null, over: false },
+      { id: 8, name: 'Education', total: 100, limit: null, over: false },
     ];
 
     beforeEach(() => {

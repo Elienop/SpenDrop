@@ -37,6 +37,8 @@ import {
   TableCell,
 } from '@/components/ui/table';
 import { ButtonGroup } from '@/components/ui/button-group';
+import { Badge } from '@/components/ui/badge';
+import { AlertTriangle } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
 import { formatCurrency, DEFAULT_LOCALE } from '@/lib/format';
@@ -195,6 +197,8 @@ export function Dashboard() {
 
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
 
+  const overBudgetCount = categories.filter((cat) => cat.over).length;
+
   const hasMoreCategories =
     categories.length > DASHBOARD_CATEGORY_COLLAPSED_LIMIT;
 
@@ -207,6 +211,8 @@ export function Dashboard() {
       name: cat.name,
       value: cat.total,
       color: getCategoryColorVar({ id: cat.id }),
+      limit: cat.limit,
+      over: cat.over,
     }));
   }, [categories, categoriesExpanded]);
 
@@ -451,9 +457,17 @@ export function Dashboard() {
                 {MONTH_NAMES_FULL[selectedMonth - 1]} {selectedYear}
               </CardDescription>
             </div>
-            <span className="font-mono text-lg font-semibold tabular-nums">
-              {formatFull(totalCategorySpent)}
-            </span>
+            <div className="flex items-center gap-2">
+              {overBudgetCount > 0 && (
+                <Badge variant="warning" className="gap-1">
+                  <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                  {overBudgetCount} over budget
+                </Badge>
+              )}
+              <span className="font-mono text-lg font-semibold tabular-nums">
+                {formatFull(totalCategorySpent)}
+              </span>
+            </div>
           </CardHeader>
           <CardContent>
             {gaugeData.length === 0 ? (
@@ -465,6 +479,9 @@ export function Dashboard() {
                 {gaugeData.map((slice) => {
                   const pct = totalCategorySpent > 0
                     ? (slice.value / totalCategorySpent) * 100
+                    : 0;
+                  const budgetPct = slice.limit != null && slice.limit > 0
+                    ? Math.round((slice.value / slice.limit) * 100)
                     : 0;
                   return (
                     <div key={slice.id} className="flex flex-col gap-2">
@@ -483,6 +500,30 @@ export function Dashboard() {
                           }}
                         />
                       </div>
+                      {slice.limit != null && (
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center justify-between text-xs text-muted-foreground">
+                            <span>
+                              {formatFull(slice.value)} / {formatFull(slice.limit)} · {budgetPct}%
+                            </span>
+                            {slice.over && (
+                              <span className="flex items-center gap-1 font-medium text-amber-600 dark:text-amber-500">
+                                <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
+                                over {formatFull(slice.value - slice.limit)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="h-1.5 w-full rounded-full bg-muted">
+                            <div
+                              className={cn(
+                                'h-full rounded-full transition-all',
+                                slice.over ? 'bg-amber-500' : 'bg-primary',
+                              )}
+                              style={{ width: `${Math.min(budgetPct, 100)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )}
                     </div>
                   );
                 })}

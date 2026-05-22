@@ -9,6 +9,7 @@ vi.mock('../api/client', () => ({
 
 import { api } from '../api/client';
 import { useDashboard } from './useDashboard';
+import type { CategoryBreakdownItem } from '../api/types';
 
 const mockedApi = vi.mocked(api);
 
@@ -30,9 +31,9 @@ const mockTrend = [
   { year: 2026, month: 4, total_spent: 1200, total_income: 4000 },
 ];
 
-const mockCategories = [
-  { id: 1, name: 'Food', total: 500 },
-  { id: 2, name: 'Rent', total: 700 },
+const mockCategories: CategoryBreakdownItem[] = [
+  { id: 1, name: 'Food', total: 500, limit: null, over: false },
+  { id: 2, name: 'Rent', total: 700, limit: null, over: false },
 ];
 
 describe('useDashboard', () => {

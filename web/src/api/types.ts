@@ -134,6 +134,8 @@ export interface CategoryBreakdownItem {
   id: number;
   name: string;
   total: number;
+  limit: number | null;
+  over: boolean;
 }
 
 export interface SavedFilter {
