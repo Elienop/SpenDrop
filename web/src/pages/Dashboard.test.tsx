@@ -119,6 +119,7 @@ import { Dashboard } from './Dashboard';
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockUseDashboard.mockReturnValue(defaultDashboardData);
   });
 
   test('renders welcome heading with user name', () => {
@@ -235,6 +236,40 @@ describe('Dashboard', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     expect(screen.queryByText('Other')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /show more/i })).not.toBeInTheDocument();
+  });
+
+  test('shows a budget bar and an over-budget header badge for an over category', async () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      categories: [
+        { id: 1, name: 'Food', total: 612, limit: 500, over: true },
+        { id: 2, name: 'Transport', total: 180, limit: 300, over: false },
+      ],
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      // Passive header badge counts over-budget categories (1 of 2 here).
+      expect(screen.getByText('1 over budget')).toBeInTheDocument();
+      // Per-category budget percentage: 612/500 = 122%.
+      expect(screen.getByText(/122%/)).toBeInTheDocument();
+      // Under-budget category still shows its percentage: 180/300 = 60%.
+      expect(screen.getByText(/60%/)).toBeInTheDocument();
+    });
+  });
+
+  test('shows no over-budget badge when everything is within budget', async () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      categories: [
+        { id: 1, name: 'Food', total: 180, limit: 300, over: false },
+        { id: 2, name: 'Transport', total: 95, limit: null, over: false },
+      ],
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    await waitFor(() => {
+      expect(screen.getByText(/60%/)).toBeInTheDocument(); // Food has a limit
+    });
+    expect(screen.queryByText(/over budget/)).not.toBeInTheDocument();
   });
 
   describe('Today button', () => {
