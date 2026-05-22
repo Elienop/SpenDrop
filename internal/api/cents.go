@@ -5,10 +5,11 @@ import (
 	"math"
 )
 
-// Phase 3.1a: every monetary value in the database is now stored as INTEGER
-// cents (int64) in the *_cents columns alongside the legacy REAL dollar
-// columns. Writers dual-populate both; readers consume _cents only and
-// convert to dollars exactly once, at the JSON wire edge, via centsToDollars.
+// Phase 3.1: every monetary value in the database is stored as INTEGER cents
+// (int64) in the *_cents columns. The legacy REAL dollar columns were dropped
+// in migration 010 (Phase 3.1b), so _cents is the sole money storage — there
+// is no longer any dual-population. Values convert to dollars exactly once, at
+// the JSON wire edge, via centsToDollars.
 //
 // Why helpers instead of inline math: keeping the conversion in a single
 // place makes the "convert at the wire edge" rule mechanically searchable
