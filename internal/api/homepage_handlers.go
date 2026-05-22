@@ -195,11 +195,6 @@ func (h *Handler) countOverBudgetCategories(ctx context.Context, yearInt, monthI
 		return 0, nil
 	}
 
-	limitByCategory := make(map[int64]int64, len(limits))
-	for _, l := range limits {
-		limitByCategory[l.CategoryID] = l.AmountCents
-	}
-
 	spend, err := h.queries.SumByCategoryForMonth(ctx, database.SumByCategoryForMonthParams{
 		Year:  yearStr,
 		Month: monthStr,
@@ -209,12 +204,8 @@ func (h *Handler) countOverBudgetCategories(ctx context.Context, yearInt, monthI
 	}
 
 	var count int64
-	for _, row := range spend {
-		limitCents, ok := limitByCategory[row.ID]
-		if !ok {
-			continue
-		}
-		if row.TotalCents > limitCents {
+	for _, s := range overBudgetByCategory(spend, limits) {
+		if s.Over {
 			count++
 		}
 	}
