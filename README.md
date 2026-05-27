@@ -64,6 +64,8 @@ Each save shows an **Undo** toast, remembers your last category/currency for the
 
 A **Recently added** list on the capture screen shows your last few entries (still-syncing and saved) so you can delete a wrong one in a tap and re-enter it -- no need to open the full app to fix a slip. Deleting a saved entry moves it to Trash (recoverable); a still-offline entry can be undone on the spot.
 
+**Installing it on your phone.** Open SpenDrop over **HTTPS** in your phone's browser, then add it to the home screen -- on **iOS** via Safari → Share → *Add to Home Screen* (it must be Safari), on **Android** via Chrome's install prompt or ⋮ → *Install app*. The icon launches straight into `/quick`. Note that home-screen install, the service worker, and offline capture only activate over a **secure origin** (HTTPS, or `localhost` for local testing) -- over plain `http://<lan-ip>` you still get the full web app online, just without install or offline. The [Caddy reverse proxy](#caddy-reverse-proxy) below provides that HTTPS automatically via Let's Encrypt.
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
@@ -333,6 +335,8 @@ environment:
 
 Without this, browsers drop the session cookie because it would otherwise be marked `Secure` on a non-HTTPS origin, causing a 401 on every request after login.
 
+The **installable PWA** (home-screen install, service worker, offline capture) does **not** activate over plain HTTP — browsers require a secure origin. Plain-HTTP LAN access still gives you the full web app while online; for the installable/offline mobile experience, serve SpenDrop over HTTPS (see [Caddy Reverse Proxy](#caddy-reverse-proxy)).
+
 **Behind an HTTPS reverse proxy** (Caddy, nginx, Traefik):
 
 ```yaml
@@ -391,7 +395,7 @@ spendrop.example.com {
 }
 ```
 
-Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start.
+Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start. That HTTPS origin is also what enables the installable PWA — home-screen install and offline capture both require a secure context (see [Mobile capture](#mobile-capture-installable-pwa)).
 
 ### Backup and Restore
 
