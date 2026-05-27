@@ -62,6 +62,8 @@ Each save shows an **Undo** toast, remembers your last category/currency for the
 
 **Works offline.** With no connection, a captured expense is saved on your device (you see a *"saved on this device"* note) and syncs automatically the moment you're back online -- and on the next app launch -- so a dead spot in a parking garage or basement never costs you an entry. The category and currency lists are cached for offline use, and an entry only ever creates one transaction (no duplicates on reconnect).
 
+A **Recently added** list on the capture screen shows your last few entries (still-syncing and saved) so you can delete a wrong one in a tap and re-enter it -- no need to open the full app to fix a slip. Deleting a saved entry moves it to Trash (recoverable); a still-offline entry can be undone on the spot.
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
