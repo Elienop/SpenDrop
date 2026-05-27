@@ -20,6 +20,7 @@ import { AmountCurrencyInput } from '@/components/AmountCurrencyInput';
 import { AutocompleteInput } from '@/components/AutocompleteInput';
 import { TagInput } from '@/components/TagInput';
 import { CategoryChips } from '@/components/CategoryChips';
+import { RecentlyAdded } from '@/components/RecentlyAdded';
 import { useCategories } from '@/hooks/useCategories';
 import { useCurrencies } from '@/hooks/useCurrencies';
 import { useQuickAdd, type QuickAddOutcome } from '@/hooks/useQuickAdd';
@@ -69,6 +70,8 @@ function getLastCurrency(fallback: string): string {
  */
 export function QuickAdd() {
   const [mode, setMode] = useState<QuickMode>(getStickyMode);
+  // Bumped after each successful add so the "Recently added" panel re-pulls.
+  const [recentRefreshKey, setRecentRefreshKey] = useState(0);
 
   const {
     categories,
@@ -83,7 +86,7 @@ export function QuickAdd() {
     loading: currenciesLoading,
   } = useCurrencies();
   const { create, undo, saving } = useQuickAdd();
-  const { count: pendingCount } = useOfflineQueue();
+  const { pending, count: pendingCount } = useOfflineQueue();
 
   // Expense categories only (quick-add captures spending). Surface the
   // sticky last-used category first so the common case is one tap away.
@@ -277,6 +280,7 @@ export function QuickAdd() {
       },
     );
 
+    setRecentRefreshKey((k) => k + 1);
     resetForNext();
   }, [
     canSubmit,
@@ -478,6 +482,13 @@ export function QuickAdd() {
             No rate configured for this currency. Set one in Settings.
           </p>
         )}
+
+        <RecentlyAdded
+          pending={pending}
+          categories={categories}
+          baseCode={baseCode}
+          refreshKey={recentRefreshKey}
+        />
       </main>
 
       <footer className="sticky bottom-0 flex flex-col gap-2 border-t border-border bg-background px-4 py-4 pb-[env(safe-area-inset-bottom)]">

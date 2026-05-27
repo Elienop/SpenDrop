@@ -130,12 +130,18 @@ vi.mock('../api/client', async (importOriginal) => ({
 // tests override these (e.g. asserting an enqueue, or a non-zero pending count).
 const enqueue = vi.fn();
 const removeQueued = vi.fn();
-const countQueued = vi.fn();
+const getAllQueued = vi.fn();
 vi.mock('@/lib/offline-queue', () => ({
   enqueue: (...args: unknown[]) => enqueue(...args),
   removeQueued: (...args: unknown[]) => removeQueued(...args),
-  countQueued: (...args: unknown[]) => countQueued(...args),
+  getAllQueued: (...args: unknown[]) => getAllQueued(...args),
   subscribe: () => () => {},
+}));
+
+// The "Recently added" panel has its own test; stub it here so QuickAdd's
+// tests don't depend on its recent-transactions fetch.
+vi.mock('@/components/RecentlyAdded', () => ({
+  RecentlyAdded: () => null,
 }));
 
 import { QuickAdd } from './QuickAdd';
@@ -165,7 +171,7 @@ beforeEach(() => {
   apiDel.mockResolvedValue({});
   enqueue.mockResolvedValue(1);
   removeQueued.mockResolvedValue(undefined);
-  countQueued.mockResolvedValue(0);
+  getAllQueued.mockResolvedValue([]);
 });
 
 describe('QuickAdd — Freeform mode', () => {
@@ -422,7 +428,7 @@ describe('QuickAdd — offline capture', () => {
   });
 
   test('renders the pending-sync banner when entries are queued', async () => {
-    countQueued.mockResolvedValue(2);
+    getAllQueued.mockResolvedValue([{ id: 1 }, { id: 2 }]);
     renderQuickAdd();
     expect(
       await screen.findByText(/2 entries saved on this device/i),
