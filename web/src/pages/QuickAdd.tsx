@@ -67,7 +67,12 @@ function getLastCurrency(fallback: string): string {
 export function QuickAdd() {
   const [mode, setMode] = useState<QuickMode>(getStickyMode);
 
-  const { categories } = useCategories();
+  const {
+    categories,
+    loading: categoriesLoading,
+    error: categoriesError,
+    refetch: refetchCategories,
+  } = useCategories();
   const {
     list: currencies,
     baseCode,
@@ -94,11 +99,11 @@ export function QuickAdd() {
   const parsed = useMemo(
     () =>
       parseQuickEntry(raw, {
-        categories,
+        categories: expenseCategories,
         currencies,
         baseCurrency: baseCode,
       }),
-    [raw, categories, currencies, baseCode],
+    [raw, expenseCategories, currencies, baseCode],
   );
 
   // --- Tap state -----------------------------------------------------------
@@ -120,24 +125,19 @@ export function QuickAdd() {
   // only source (Tap). `null` means "use parser / unset".
   const [pickedCategoryId, setPickedCategoryId] = useState<number | null>(null);
 
-  // Reset the manual pick whenever the freeform line changes — the parser's
-  // match becomes authoritative again until the user re-taps.
-  const prevRaw = useRef(raw);
-  useEffect(() => {
-    if (prevRaw.current !== raw) {
-      prevRaw.current = raw;
-      setPickedCategoryId(null);
-    }
-  }, [raw]);
-
   const inputRef = useRef<HTMLInputElement>(null);
   const tapAmountRef = useRef<HTMLInputElement>(null);
 
-  // Switch mode + persist the toggle.
+  // Switch mode + persist the toggle. Defer focus so the target input is
+  // mounted (mirrors the reset-focus idiom in `resetForNext`).
   const onModeChange = useCallback((next: string) => {
     const m: QuickMode = next === 'tap' ? 'tap' : 'freeform';
     setMode(m);
     localStorage.setItem(STORAGE_KEYS.quickAddMode, m);
+    setTimeout(() => {
+      if (m === 'tap') tapAmountRef.current?.focus();
+      else inputRef.current?.focus();
+    }, 0);
   }, []);
 
   // Effective values per mode.
@@ -171,7 +171,19 @@ export function QuickAdd() {
     !hasNoRate &&
     !saving;
 
-  const undoBufferRef = useRef<Transaction | null>(null);
+  // First unmet requirement, shown as a muted hint near Add so a disabled
+  // button is never a silent dead-end on touch.
+  const missingHint = !canSubmit
+    ? effective.amount <= 0
+      ? 'Enter an amount'
+      : effective.description.length === 0
+        ? 'Add a description'
+        : effective.categoryId == null || effective.categoryId <= 0
+          ? 'Pick a category'
+          : hasNoRate
+            ? 'Set a rate for this currency in Settings'
+            : null
+    : null;
 
   const resetForNext = useCallback(() => {
     setRaw('');
@@ -179,7 +191,6 @@ export function QuickAdd() {
     setTapDescription('');
     setTapTags('');
     setPickedCategoryId(null);
-    prevRaw.current = '';
     setTimeout(() => {
       if (mode === 'freeform') inputRef.current?.focus();
       else tapAmountRef.current?.focus();
@@ -226,20 +237,15 @@ export function QuickAdd() {
       effective.currency,
     );
 
-    undoBufferRef.current = saved;
+    // Capture this row's id in the toast's own closure so rapid successive
+    // saves each undo their own transaction (not just the most recent).
+    const savedId = saved.id;
     toast.success('Transaction saved', {
       duration: 4000,
       action: {
         label: 'Undo',
-        onClick: () => {
-          const buf = undoBufferRef.current;
-          if (!buf) return;
-          undoBufferRef.current = null;
-          void undo(buf.id).catch(() => toast.error('Could not undo'));
-        },
-      },
-      onAutoClose: () => {
-        undoBufferRef.current = null;
+        onClick: () =>
+          void undo(savedId).catch(() => toast.error('Could not undo')),
       },
     });
 
@@ -269,13 +275,14 @@ export function QuickAdd() {
   );
 
   const descriptionSuggestions = useMemo(
-    () => categories.map((c) => c.name),
-    [categories],
+    () => expenseCategories.map((c) => c.name),
+    [expenseCategories],
   );
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
       <header className="flex items-center justify-between border-b border-border px-4 py-3">
+        <h1 className="sr-only">Quick add</h1>
         <span className="text-lg font-semibold tracking-tight">SpenDrop</span>
         <Button asChild variant="ghost" size="sm">
           <Link to="/">
@@ -294,7 +301,7 @@ export function QuickAdd() {
         </Tabs>
 
         {mode === 'freeform' ? (
-          <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-4">
             <Input
               ref={inputRef}
               autoFocus
@@ -310,9 +317,15 @@ export function QuickAdd() {
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
                 <div
                   data-testid="quick-preview-amount"
-                  className="font-mono text-4xl font-semibold tabular-nums"
+                  className="font-mono text-3xl font-semibold tabular-nums"
                 >
-                  {formatCurrency(effective.amount, effective.currency)}
+                  {parsed.amount != null ? (
+                    formatCurrency(parsed.amount, effective.currency)
+                  ) : (
+                    <span className="text-base font-normal text-muted-foreground">
+                      Add an amount
+                    </span>
+                  )}
                 </div>
                 {effective.description && (
                   <p className="text-base text-muted-foreground">
@@ -332,7 +345,7 @@ export function QuickAdd() {
             )}
           </div>
         ) : (
-          <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-4">
             <div className="flex flex-col gap-2">
               <Label htmlFor="quick-tap-amount">Amount</Label>
               <AmountCurrencyInput
@@ -380,21 +393,51 @@ export function QuickAdd() {
 
         <div className="flex flex-col gap-2">
           <Label>Category</Label>
-          <CategoryChips
-            categories={expenseCategories}
-            selectedId={effective.categoryId}
-            onSelect={setPickedCategoryId}
-          />
+          {categoriesLoading && expenseCategories.length === 0 ? (
+            <p className="text-sm text-muted-foreground">Loading categories…</p>
+          ) : categoriesError ? (
+            <div className="flex flex-col items-start gap-2">
+              <p className="text-sm text-destructive" role="alert">
+                {categoriesError}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => refetchCategories()}
+              >
+                Retry
+              </Button>
+            </div>
+          ) : expenseCategories.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No expense categories yet —{' '}
+              <Link to="/categories" className="underline">
+                create one
+              </Link>
+            </p>
+          ) : (
+            <CategoryChips
+              categories={expenseCategories}
+              selectedId={effective.categoryId}
+              onSelect={setPickedCategoryId}
+            />
+          )}
         </div>
 
         {hasNoRate && (
-          <p className="text-sm text-destructive">
+          <p className="text-sm text-destructive" role="alert">
             No rate configured for this currency. Set one in Settings.
           </p>
         )}
       </main>
 
-      <footer className="sticky bottom-0 border-t border-border bg-background px-4 py-4">
+      <footer className="sticky bottom-0 flex flex-col gap-2 border-t border-border bg-background px-4 py-4 pb-[env(safe-area-inset-bottom)]">
+        {missingHint && (
+          <p className="text-center text-sm text-muted-foreground">
+            {missingHint}
+          </p>
+        )}
         <Button
           type="button"
           className="h-14 w-full text-base"

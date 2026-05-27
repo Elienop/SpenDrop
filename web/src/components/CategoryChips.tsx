@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { Check } from 'lucide-react';
 import { getCategoryColorVar } from '@/lib/chart-colors';
 import { cn } from '@/lib/utils';
 import type { Category } from '@/api/types';
@@ -39,13 +40,14 @@ export function CategoryChips({
             aria-pressed={selected}
             style={style}
             className={cn(
-              'inline-flex min-h-11 items-center rounded-full border px-4 text-sm font-medium transition-colors',
+              'inline-flex min-h-11 items-center gap-1.5 rounded-full border px-4 text-sm font-medium transition-colors',
               'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background',
               selected
                 ? 'border-transparent text-background [background-color:var(--chip-color)]'
                 : 'border-[color:color-mix(in_oklab,var(--chip-color)_40%,transparent)] text-[color:var(--chip-color)] [background-color:color-mix(in_oklab,var(--chip-color)_12%,transparent)]',
             )}
           >
+            {selected && <Check aria-hidden className="size-4" />}
             {cat.name}
           </button>
         );

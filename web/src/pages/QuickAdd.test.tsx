@@ -206,6 +206,97 @@ describe('QuickAdd — gating', () => {
   });
 });
 
+describe('QuickAdd — income scoping', () => {
+  test('an income category name in freeform does NOT auto-enable Add', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    // "Salary" is an INCOME category — it has no visible chip and must not
+    // be auto-matched by the parser (which now only sees expense categories).
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'salary 1000');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '1,000',
+      );
+    });
+
+    // No income chip is rendered.
+    expect(
+      screen.queryByRole('button', { name: /^salary$/i }),
+    ).not.toBeInTheDocument();
+
+    // Add stays disabled because no (expense) category matched.
+    expect(screen.getByRole('button', { name: /^add$/i })).toBeDisabled();
+  });
+});
+
+describe('QuickAdd — Freeform preview placeholder', () => {
+  test('shows "Add an amount" instead of $0.00 before an amount is typed', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    // A description but no amount yet.
+    await user.type(input, 'groceries');
+
+    await waitFor(() => {
+      const preview = screen.getByTestId('quick-preview-amount');
+      expect(preview).toHaveTextContent(/add an amount/i);
+      expect(preview).not.toHaveTextContent('0.00');
+    });
+  });
+});
+
+describe('QuickAdd — category states', () => {
+  test('shows an error with a Retry button when categories fail to load', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === 'categories')
+        return Promise.reject(new Error('boom'));
+      if (path === 'currencies') return Promise.resolve(currencies);
+      return Promise.resolve([]);
+    });
+
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    const retry = await screen.findByRole('button', { name: /retry/i });
+    expect(screen.getByText(/boom/i)).toBeInTheDocument();
+
+    // Retry refetches — now succeed.
+    apiGet.mockImplementation((path: string) => {
+      if (path === 'categories') return Promise.resolve(categories);
+      if (path === 'currencies') return Promise.resolve(currencies);
+      return Promise.resolve([]);
+    });
+    await user.click(retry);
+
+    await screen.findByRole('button', { name: /groceries/i });
+  });
+
+  test('shows an empty state linking to /categories when there are no expense categories', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === 'categories') return Promise.resolve([]);
+      if (path === 'currencies') return Promise.resolve(currencies);
+      return Promise.resolve([]);
+    });
+
+    renderQuickAdd();
+
+    const link = await screen.findByRole('link', { name: /create one/i });
+    expect(link).toHaveAttribute('href', '/categories');
+    expect(screen.getByText(/no expense categories yet/i)).toBeInTheDocument();
+
+    // Add stays disabled (no category possible).
+    expect(screen.getByRole('button', { name: /^add$/i })).toBeDisabled();
+  });
+});
+
 describe('QuickAdd — Tap mode', () => {
   test('amount + chip tap posts the right payload', async () => {
     const user = userEvent.setup();
