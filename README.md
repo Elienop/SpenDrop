@@ -51,6 +51,15 @@ Caveats:
 - The `~=` preview shown while typing is frontend-approximate; the persisted value is the backend's recomputed amount (they round identically so they agree to the cent).
 - Inactive currencies don't appear in the entry-row picker but remain selectable on edit so historical rows round-trip.
 
+### Mobile capture (installable PWA)
+
+SpenDrop installs to your phone's home screen as a PWA (web manifest + service worker) and opens straight into a focused **Quick Add** screen at `/quick`, built for logging an expense as fast as typing it into a chat. Two modes share one entry pipeline:
+
+- **Freeform** -- type a single line like `lunch 12.50 #work`; SpenDrop parses the amount, currency, `#tags`, and description, and auto-selects the matching expense category (you confirm it or tap another). It never guesses a category from a non-match -- you pick one with a tap.
+- **Tap** -- a large amount field plus one-tap category chips for thumb-only entry.
+
+Each save shows an **Undo** toast, remembers your last category/currency for the next entry, and refocuses for rapid logging -- reusing the same multi-currency conversion and validation as the desktop entry row. Reach it from the **Quick add** item in the sidebar, or install the app and launch its home-screen icon. It's served from your own origin (the same one you already expose, e.g. behind a reverse proxy or Cloudflare Tunnel), so your data never passes through a third-party service.
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
