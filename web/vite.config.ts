@@ -44,6 +44,28 @@ export default defineConfig({
         navigateFallback: 'index.html',
         // Never let the SW shadow API or health routes with the SPA shell.
         navigateFallbackDenylist: [/^\/api/, /^\/healthz/],
+        // Runtime-cache ONLY the two read-only reference lists the /quick
+        // capture screen needs to render offline: categories and currencies.
+        // Both change rarely, so StaleWhileRevalidate serves the last-known
+        // list instantly and refreshes it in the background on the next online
+        // load. Every other /api GET (dashboard, reports, transactions) is
+        // deliberately left uncached so those views never show stale figures —
+        // unmatched routes fall through to the network. Workbox runtimeCaching
+        // only intercepts GET by default, so POST/PUT/DELETE to these paths
+        // (e.g. creating a category) are untouched.
+        runtimeCaching: [
+          {
+            urlPattern: /\/api\/(categories|currencies)$/,
+            handler: 'StaleWhileRevalidate',
+            options: {
+              cacheName: 'spendrop-api-lists',
+              // 8 entries is ample headroom for 2 endpoints; the 7-day TTL
+              // bounds how stale an offline list can get before it is evicted.
+              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 7 },
+              cacheableResponse: { statuses: [200] },
+            },
+          },
+        ],
       },
     }),
   ],
