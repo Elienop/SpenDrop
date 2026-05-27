@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
+  Zap,
   LayoutGrid,
   ArrowLeftRight,
   ChartNoAxesColumnIncreasing,
@@ -37,6 +38,9 @@ interface MenuItem {
 }
 
 const menuItems: MenuItem[] = [
+  // Fast-capture entry. Routes to the full-screen /quick screen, which lives
+  // OUTSIDE AppShell (no sidebar) — the "Full app" link there returns here.
+  { path: '/quick', label: 'Quick add', icon: Zap },
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
