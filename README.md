@@ -60,6 +60,8 @@ SpenDrop installs to your phone's home screen as a PWA (web manifest + service w
 
 Each save shows an **Undo** toast, remembers your last category/currency for the next entry, and refocuses for rapid logging -- reusing the same multi-currency conversion and validation as the desktop entry row. Reach it from the **Quick add** item in the sidebar, or install the app and launch its home-screen icon. It's served from your own origin (the same one you already expose, e.g. behind a reverse proxy or Cloudflare Tunnel), so your data never passes through a third-party service.
 
+**Works offline.** With no connection, a captured expense is saved on your device (you see a *"saved on this device"* note) and syncs automatically the moment you're back online -- and on the next app launch -- so a dead spot in a parking garage or basement never costs you an entry. The category and currency lists are cached for offline use, and an entry only ever creates one transaction (no duplicates on reconnect).
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
