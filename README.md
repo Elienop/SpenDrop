@@ -51,6 +51,21 @@ Caveats:
 - The `~=` preview shown while typing is frontend-approximate; the persisted value is the backend's recomputed amount (they round identically so they agree to the cent).
 - Inactive currencies don't appear in the entry-row picker but remain selectable on edit so historical rows round-trip.
 
+### Mobile capture (installable PWA)
+
+SpenDrop installs to your phone's home screen as a PWA (web manifest + service worker) and opens straight into a focused **Quick Add** screen at `/quick`, built for logging an expense as fast as typing it into a chat. Two modes share one entry pipeline:
+
+- **Freeform** -- type a single line like `lunch 12.50 #work`; SpenDrop parses the amount, currency, `#tags`, and description, and auto-selects the matching expense category (you confirm it or tap another). It never guesses a category from a non-match -- you pick one with a tap.
+- **Tap** -- a large amount field plus one-tap category chips for thumb-only entry.
+
+Each save shows an **Undo** toast, remembers your last category/currency for the next entry, and refocuses for rapid logging -- reusing the same multi-currency conversion and validation as the desktop entry row. Reach it from the **Quick add** item in the sidebar, or install the app and launch its home-screen icon. It's served from your own origin (the same one you already expose, e.g. behind a reverse proxy or Cloudflare Tunnel), so your data never passes through a third-party service.
+
+**Works offline.** With no connection, a captured expense is saved on your device (you see a *"saved on this device"* note) and syncs automatically the moment you're back online -- and on the next app launch -- so a dead spot in a parking garage or basement never costs you an entry. The category and currency lists are cached for offline use, and an entry only ever creates one transaction (no duplicates on reconnect).
+
+A **Recently added** list on the capture screen shows your last few entries (still-syncing and saved) so you can delete a wrong one in a tap and re-enter it -- no need to open the full app to fix a slip. Deleting a saved entry moves it to Trash (recoverable); a still-offline entry can be undone on the spot.
+
+**Installing it on your phone.** Open SpenDrop over **HTTPS** in your phone's browser, then add it to the home screen -- on **iOS** via Safari → Share → *Add to Home Screen* (it must be Safari), on **Android** via Chrome's install prompt or ⋮ → *Install app*. The icon launches straight into `/quick`. Note that home-screen install, the service worker, and offline capture only activate over a **secure origin** (HTTPS, or `localhost` for local testing) -- over plain `http://<lan-ip>` you still get the full web app online, just without install or offline. The [Caddy reverse proxy](#caddy-reverse-proxy) below provides that HTTPS automatically via Let's Encrypt.
+
 ### Reports
 
 Four report tabs covering different angles of your finances:
@@ -320,6 +335,8 @@ environment:
 
 Without this, browsers drop the session cookie because it would otherwise be marked `Secure` on a non-HTTPS origin, causing a 401 on every request after login.
 
+The **installable PWA** (home-screen install, service worker, offline capture) does **not** activate over plain HTTP — browsers require a secure origin. Plain-HTTP LAN access still gives you the full web app while online; for the installable/offline mobile experience, serve SpenDrop over HTTPS (see [Caddy Reverse Proxy](#caddy-reverse-proxy)).
+
 **Behind an HTTPS reverse proxy** (Caddy, nginx, Traefik):
 
 ```yaml
@@ -378,7 +395,7 @@ spendrop.example.com {
 }
 ```
 
-Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start.
+Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start. That HTTPS origin is also what enables the installable PWA — home-screen install and offline capture both require a secure context (see [Mobile capture](#mobile-capture-installable-pwa)).
 
 ### Backup and Restore
 

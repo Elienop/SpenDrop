@@ -1,0 +1,237 @@
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { Category, Transaction } from '@/api/types';
+
+const apiGet = vi.fn();
+const apiDel = vi.fn();
+vi.mock('@/api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/client')>()),
+  api: {
+    get: (...args: unknown[]) => apiGet(...args),
+    del: (...args: unknown[]) => apiDel(...args),
+  },
+}));
+
+const removeQueued = vi.fn();
+const enqueue = vi.fn();
+vi.mock('@/lib/offline-queue', () => ({
+  removeQueued: (...args: unknown[]) => removeQueued(...args),
+  enqueue: (...args: unknown[]) => enqueue(...args),
+}));
+
+const toastSuccess = vi.fn();
+const toastError = vi.fn();
+vi.mock('sonner', () => ({
+  toast: Object.assign(() => undefined, {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: (...args: unknown[]) => toastError(...args),
+  }),
+}));
+
+import { RecentlyAdded } from './RecentlyAdded';
+import type { QueuedTransaction } from '@/lib/offline-queue';
+
+const categories: Category[] = [
+  {
+    id: 1,
+    name: 'Food',
+    type: 'expense',
+    icon: null,
+    sort_order: 0,
+    is_active: true,
+    created_at: '',
+  },
+];
+
+function queued(over: Partial<QueuedTransaction> = {}): QueuedTransaction {
+  return {
+    id: 1,
+    payload: {
+      date: '2026-05-27',
+      amount: 22.22,
+      description: 'sdpending',
+      category_id: 1,
+      tags: '',
+    },
+    queuedAt: 2000,
+    attempts: 0,
+    ...over,
+  };
+}
+
+function savedTxn(over: Partial<Transaction> = {}): Transaction {
+  return {
+    id: 5,
+    user_id: 1,
+    date: '2026-05-27',
+    amount: 10,
+    original_amount: null,
+    original_currency: null,
+    description: 'sdsaved',
+    category_id: 1,
+    category_name: 'Food',
+    category_type: 'expense',
+    tags: null,
+    notes: null,
+    created_at: '2026-05-27T10:00:00Z',
+    updated_at: '',
+    ...over,
+  };
+}
+
+function setOnline(value: boolean): void {
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value });
+}
+
+function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
+  return render(
+    <RecentlyAdded
+      pending={pending}
+      categories={categories}
+      baseCode="USD"
+      refreshKey={refreshKey}
+    />,
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  setOnline(true);
+  apiGet.mockResolvedValue({
+    transactions: [savedTxn()],
+    total: 1,
+    page: 1,
+    per_page: 5,
+  });
+  apiDel.mockResolvedValue(undefined);
+  removeQueued.mockResolvedValue(undefined);
+  enqueue.mockResolvedValue(2);
+});
+
+afterEach(() => setOnline(true));
+
+describe('RecentlyAdded', () => {
+  test('shows both pending and saved rows', async () => {
+    renderPanel([queued()]);
+
+    expect(await screen.findByText('sdsaved')).toBeInTheDocument();
+    expect(screen.getByText('sdpending')).toBeInTheDocument();
+    // Pending rows are labelled; saved rows are not.
+    expect(screen.getByText(/not synced/i)).toBeInTheDocument();
+  });
+
+  test('deleting a pending row drops it from the queue (no server call)', async () => {
+    const user = userEvent.setup();
+    renderPanel([queued()]);
+    await screen.findByText('sdpending');
+
+    await user.click(
+      screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
+    );
+
+    await waitFor(() => expect(removeQueued).toHaveBeenCalledWith(1));
+    expect(apiDel).not.toHaveBeenCalled();
+    expect(toastSuccess).toHaveBeenCalled();
+  });
+
+  test('deleting a saved row soft-deletes it on the server', async () => {
+    const user = userEvent.setup();
+    renderPanel([]);
+    await screen.findByText('sdsaved');
+
+    await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+
+    await waitFor(() => expect(apiDel).toHaveBeenCalledWith('transactions/5'));
+    expect(removeQueued).not.toHaveBeenCalled();
+  });
+
+  test('offline: shows pending + an offline note and never fetches saved', async () => {
+    setOnline(false);
+    renderPanel([queued()]);
+
+    expect(await screen.findByText('sdpending')).toBeInTheDocument();
+    expect(screen.getByText(/you're offline/i)).toBeInTheDocument();
+    expect(screen.queryByText('sdsaved')).not.toBeInTheDocument();
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  test('renders nothing when there is no recent or pending activity', async () => {
+    apiGet.mockResolvedValue({
+      transactions: [],
+      total: 0,
+      page: 1,
+      per_page: 5,
+    });
+    const { container } = renderPanel([]);
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalled());
+    expect(screen.queryByText(/recently added/i)).not.toBeInTheDocument();
+    expect(container.querySelector('section')).toBeNull();
+  });
+
+  test('Undo on a pending delete re-queues the captured payload', async () => {
+    const user = userEvent.setup();
+    renderPanel([queued()]);
+    await screen.findByText('sdpending');
+
+    await user.click(
+      screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
+    );
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    const [, opts] = toastSuccess.mock.calls[0] as [
+      string,
+      { action?: { label: string; onClick: () => void } },
+    ];
+    expect(opts.action?.label).toMatch(/undo/i);
+
+    opts.action?.onClick();
+    await waitFor(() => expect(enqueue).toHaveBeenCalled());
+    expect(enqueue.mock.calls[0][0]).toMatchObject({
+      description: 'sdpending',
+      amount: 22.22,
+    });
+  });
+
+  test('a failed pending removal surfaces an error toast', async () => {
+    removeQueued.mockRejectedValueOnce(new Error('idb'));
+    const user = userEvent.setup();
+    renderPanel([queued()]);
+    await screen.findByText('sdpending');
+
+    await user.click(
+      screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
+    );
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(toastSuccess).not.toHaveBeenCalled();
+  });
+
+  test('a failed saved delete surfaces an error toast', async () => {
+    apiDel.mockRejectedValueOnce(new Error('500'));
+    const user = userEvent.setup();
+    renderPanel([]);
+    await screen.findByText('sdsaved');
+
+    await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+  });
+
+  test('bumping refreshKey re-pulls the saved list', async () => {
+    const { rerender } = renderPanel([], 0);
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1));
+
+    rerender(
+      <RecentlyAdded
+        pending={[]}
+        categories={categories}
+        baseCode="USD"
+        refreshKey={1}
+      />,
+    );
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
+  });
+});

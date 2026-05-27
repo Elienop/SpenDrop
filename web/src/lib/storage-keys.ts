@@ -21,6 +21,8 @@ export const STORAGE_KEYS = {
   lastTransactionCategory: 'spendrop-last-category',
   /** Last currency used in the transaction entry row, for sticky default. */
   lastTransactionCurrency: 'spendrop-last-currency',
+  /** Quick-add capture screen mode toggle ('freeform' | 'tap'). */
+  quickAddMode: 'spendrop-quick-mode',
   /** Dashboard year filter persistence. */
   dashboardYear: 'spendrop-dash-year',
   /** Dashboard month filter persistence. */
