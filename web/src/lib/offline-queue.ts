@@ -37,8 +37,12 @@ export interface QueuedTransaction {
   id: number;
   /**
    * Exact wire payload to POST on replay. `amount` is dollars, per the Money
-   * Wire-Edge DTO discipline — the payload is built by `toCreatePayload` at
-   * capture time and stored verbatim, so replay re-sends the identical body.
+   * Wire-Edge DTO discipline — built by `toCreatePayload` at capture time and
+   * stored verbatim, so replay re-sends the identical body. For a non-base
+   * currency this freezes the exchange rate at capture time (the dollar
+   * `amount` is already converted; `original_amount`/`original_currency` carry
+   * what the user typed); replay re-sends that captured-rate value, matching
+   * the online entry form, which also converts at entry time.
    */
   payload: CreateTransactionInput;
   /** Capture time (ms epoch) — drives FIFO ordering. */
@@ -213,9 +217,11 @@ export async function drainQueue(): Promise<DrainResult> {
         break; // network error → retry on the next 'online'
       }
     }
+    // Compute the result while still holding the guard, so a concurrent
+    // drainQueue can't slip in between releasing it and this final read.
+    return { synced, remaining: await safeCount() };
   } finally {
     draining = false;
     notify();
   }
-  return { synced, remaining: await safeCount() };
 }

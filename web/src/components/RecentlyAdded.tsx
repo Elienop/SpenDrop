@@ -75,7 +75,7 @@ export function RecentlyAdded({
   // server's date-desc order. Nothing refetches unsolicited, so the list never
   // reshuffles between the moment the user reads a row and taps its delete.
   const pendingRows: RecentRow[] = [...pending]
-    .sort((a, b) => b.queuedAt - a.queuedAt)
+    .sort((a, b) => b.queuedAt - a.queuedAt || b.id - a.id)
     .map((q) => ({
       key: `q-${q.id}`,
       kind: 'pending',

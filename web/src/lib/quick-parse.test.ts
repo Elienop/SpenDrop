@@ -145,4 +145,23 @@ describe('parseQuickEntry', () => {
     // "foodie" must NOT match the "Food" category (whole-word only).
     expect(parseQuickEntry('foodie 9', opts).categoryId).toBeNull();
   });
+
+  it('does not adopt an ambiguous currency symbol shared by >1 currency', () => {
+    // Both USD and CAD use "$" — the symbol can't identify one currency, so a
+    // "$"-prefixed token is NOT treated as an amount (type a code instead).
+    const ambiguous: QuickParseOptions = {
+      categories,
+      currencies: [cur('USD', '$', true), cur('CAD', '$')],
+      baseCurrency: 'USD',
+    };
+    const r = parseQuickEntry('$50 coffee', ambiguous);
+    expect(r.amount).toBeNull();
+    expect(r.description).toBe('$50 coffee');
+    // …but an explicit code still resolves the currency.
+    expect(parseQuickEntry('50 CAD coffee', ambiguous)).toMatchObject({
+      amount: 50,
+      currency: 'CAD',
+      description: 'coffee',
+    });
+  });
 });
