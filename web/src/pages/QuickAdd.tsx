@@ -8,7 +8,9 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ArrowUpRight } from 'lucide-react';
+import { ArrowUpRight, CheckCircle2 } from 'lucide-react';
+import { ApiError } from '@/api/client';
+import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
@@ -20,7 +22,8 @@ import { TagInput } from '@/components/TagInput';
 import { CategoryChips } from '@/components/CategoryChips';
 import { useCategories } from '@/hooks/useCategories';
 import { useCurrencies } from '@/hooks/useCurrencies';
-import { useQuickAdd } from '@/hooks/useQuickAdd';
+import { useQuickAdd, type QuickAddOutcome } from '@/hooks/useQuickAdd';
+import { useOfflineQueue } from '@/hooks/useOfflineQueue';
 import { parseQuickEntry } from '@/lib/quick-parse';
 import { toCreatePayload } from '@/lib/currency';
 import { formatCurrency } from '@/lib/format';
@@ -28,7 +31,7 @@ import { formatYYYYMMDD } from '@/lib/dates';
 import { isExpense } from '@/lib/transaction-types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
-import type { Category, Transaction } from '@/api/types';
+import type { Category } from '@/api/types';
 
 type QuickMode = 'freeform' | 'tap';
 
@@ -80,6 +83,7 @@ export function QuickAdd() {
     loading: currenciesLoading,
   } = useCurrencies();
   const { create, undo, saving } = useQuickAdd();
+  const { count: pendingCount } = useOfflineQueue();
 
   // Expense categories only (quick-add captures spending). Surface the
   // sticky last-used category first so the common case is one tap away.
@@ -127,6 +131,9 @@ export function QuickAdd() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const tapAmountRef = useRef<HTMLInputElement>(null);
+  // Latest submit, so the error toast's Retry action can re-run it without
+  // making `submit` depend on itself.
+  const submitRef = useRef<() => void>(() => {});
 
   // Switch mode + persist the toggle. Defer focus so the target input is
   // mounted (mirrors the reset-focus idiom in `resetForNext`).
@@ -218,15 +225,30 @@ export function QuickAdd() {
       return;
     }
 
-    let saved: Transaction;
+    let outcome: QuickAddOutcome;
     try {
-      saved = await create(payload);
-    } catch {
-      toast.error('Failed to save transaction');
+      outcome = await create(payload);
+    } catch (err) {
+      // We only auto-queue when navigator reports the device is offline (see
+      // useQuickAdd) — there the request never leaves the device, so replay is
+      // dup-safe. A throw here means either the server was reached and rejected
+      // the write (ApiError) or the fetch failed while the browser still thinks
+      // it is online (ambiguous: the write may have landed). Neither is safe to
+      // silently queue, so prompt a retry instead.
+      toast.error(
+        err instanceof ApiError
+          ? err.message || 'Failed to save transaction'
+          : 'Couldn’t reach the server. Check your connection and try again.',
+        {
+          // The form is preserved on failure; Retry re-submits it so the user
+          // doesn't have to guess that re-tapping Add is the way back.
+          action: { label: 'Retry', onClick: () => submitRef.current() },
+        },
+      );
       return;
     }
 
-    // Sticky last-used values for the next entry.
+    // Sticky last-used values for the next entry (whether saved or queued).
     localStorage.setItem(
       STORAGE_KEYS.lastTransactionCategory,
       String(effective.categoryId),
@@ -237,17 +259,23 @@ export function QuickAdd() {
       effective.currency,
     );
 
-    // Capture this row's id in the toast's own closure so rapid successive
-    // saves each undo their own transaction (not just the most recent).
-    const savedId = saved.id;
-    toast.success('Transaction saved', {
-      duration: 4000,
-      action: {
-        label: 'Undo',
-        onClick: () =>
-          void undo(savedId).catch(() => toast.error('Could not undo')),
+    // Capture this outcome in the toast's own closure so rapid successive saves
+    // each undo their own entry — the server row, or the queued row by its
+    // queue id if it has not synced yet.
+    const undoThis = outcome;
+    toast.success(
+      undoThis.status === 'queued'
+        ? 'Saved offline — will sync when you’re back online'
+        : 'Transaction saved',
+      {
+        duration: 4000,
+        action: {
+          label: 'Undo',
+          onClick: () =>
+            void undo(undoThis).catch(() => toast.error('Could not undo')),
+        },
       },
-    });
+    );
 
     resetForNext();
   }, [
@@ -274,6 +302,11 @@ export function QuickAdd() {
     [submit],
   );
 
+  // Keep the error toast's Retry handler pointed at the current submit closure.
+  useEffect(() => {
+    submitRef.current = () => void submit();
+  }, [submit]);
+
   const descriptionSuggestions = useMemo(
     () => expenseCategories.map((c) => c.name),
     [expenseCategories],
@@ -293,6 +326,21 @@ export function QuickAdd() {
       </header>
 
       <main className="flex flex-1 flex-col gap-6 px-4 py-6">
+        {/* Offline-capture reassurance. A neutral "saved" receipt, NOT an
+            amber warning — capturing offline is the designed happy path, so
+            this confirms the entry is safe rather than flagging a problem.
+            aria-live="off" because the success toast already announces each
+            save; a live region here would double-narrate to screen readers. */}
+        {pendingCount > 0 && (
+          <Alert role="status" aria-live="off">
+            <CheckCircle2 className="h-4 w-4" />
+            <AlertDescription>
+              {pendingCount} {pendingCount === 1 ? 'entry' : 'entries'} saved on
+              this device · will sync when online
+            </AlertDescription>
+          </Alert>
+        )}
+
         <Tabs value={mode} onValueChange={onModeChange}>
           <TabsList className="grid w-full grid-cols-2">
             <TabsTrigger value="freeform">Freeform</TabsTrigger>

@@ -2,6 +2,7 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { ApiError } from '@/api/client';
 import type { Category, Currency, Transaction } from '../api/types';
 
 // --- Mocks ----------------------------------------------------------------
@@ -102,7 +103,10 @@ const apiGet = vi.fn();
 const apiPost = vi.fn();
 const apiDel = vi.fn();
 
-vi.mock('@/api/client', () => ({
+vi.mock('@/api/client', async (importOriginal) => ({
+  // Keep the real ApiError class so `err instanceof ApiError` in QuickAdd's
+  // submit handler discriminates server rejections from network failures.
+  ...(await importOriginal<typeof import('@/api/client')>()),
   api: {
     get: (...args: unknown[]) => apiGet(...args),
     post: (...args: unknown[]) => apiPost(...args),
@@ -112,13 +116,26 @@ vi.mock('@/api/client', () => ({
 }));
 
 // Re-export under the relative specifier some hooks use.
-vi.mock('../api/client', () => ({
+vi.mock('../api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/client')>()),
   api: {
     get: (...args: unknown[]) => apiGet(...args),
     post: (...args: unknown[]) => apiPost(...args),
     del: (...args: unknown[]) => apiDel(...args),
     put: vi.fn(),
   },
+}));
+
+// Stub the offline queue so component tests never touch IndexedDB. Individual
+// tests override these (e.g. asserting an enqueue, or a non-zero pending count).
+const enqueue = vi.fn();
+const removeQueued = vi.fn();
+const countQueued = vi.fn();
+vi.mock('@/lib/offline-queue', () => ({
+  enqueue: (...args: unknown[]) => enqueue(...args),
+  removeQueued: (...args: unknown[]) => removeQueued(...args),
+  countQueued: (...args: unknown[]) => countQueued(...args),
+  subscribe: () => () => {},
 }));
 
 import { QuickAdd } from './QuickAdd';
@@ -134,6 +151,11 @@ function renderQuickAdd() {
 beforeEach(() => {
   vi.clearAllMocks();
   localStorage.clear();
+  // Default to online; the offline describe flips this per-test.
+  Object.defineProperty(navigator, 'onLine', {
+    configurable: true,
+    value: true,
+  });
   apiGet.mockImplementation((path: string) => {
     if (path === 'categories') return Promise.resolve(categories);
     if (path === 'currencies') return Promise.resolve(currencies);
@@ -141,6 +163,9 @@ beforeEach(() => {
   });
   apiPost.mockResolvedValue(savedTransaction());
   apiDel.mockResolvedValue({});
+  enqueue.mockResolvedValue(1);
+  removeQueued.mockResolvedValue(undefined);
+  countQueued.mockResolvedValue(0);
 });
 
 describe('QuickAdd — Freeform mode', () => {
@@ -359,6 +384,93 @@ describe('QuickAdd — success toast', () => {
     // Invoking the Undo action deletes the saved row.
     opts.action?.onClick();
     await waitFor(() => expect(apiDel).toHaveBeenCalledWith('transactions/99'));
+  });
+});
+
+describe('QuickAdd — offline capture', () => {
+  test('queues the entry (no POST) and shows a "saved offline" toast', async () => {
+    Object.defineProperty(navigator, 'onLine', {
+      configurable: true,
+      value: false,
+    });
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '43',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    // Enqueued locally; the network POST is never attempted while offline.
+    await waitFor(() => expect(enqueue).toHaveBeenCalled());
+    expect(apiPost).not.toHaveBeenCalled();
+    const [queuedPayload] = enqueue.mock.calls[0];
+    expect(queuedPayload).toMatchObject({
+      amount: 43,
+      category_id: 1,
+      description: 'groceries',
+    });
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(toastSuccess.mock.calls[0][0]).toMatch(/offline/i);
+  });
+
+  test('renders the pending-sync banner when entries are queued', async () => {
+    countQueued.mockResolvedValue(2);
+    renderQuickAdd();
+    expect(
+      await screen.findByText(/2 entries saved on this device/i),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('QuickAdd — submit failure (online, never queues)', () => {
+  test('a server rejection (ApiError) shows the message and does NOT queue', async () => {
+    apiPost.mockRejectedValueOnce(new ApiError('bad request', 400));
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '43',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(toastError.mock.calls[0][0]).toMatch(/bad request/i);
+    // Critical dup-safety guarantee: an online failure must NOT be queued
+    // (the write may have landed — re-posting it would duplicate the row).
+    expect(enqueue).not.toHaveBeenCalled();
+  });
+
+  test('a network failure while "online" prompts retry and does NOT queue', async () => {
+    apiPost.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '43',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    expect(toastError.mock.calls[0][0]).toMatch(/reach the server/i);
+    expect(enqueue).not.toHaveBeenCalled();
   });
 });
 
