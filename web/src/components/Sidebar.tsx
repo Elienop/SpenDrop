@@ -256,17 +256,24 @@ export function Sidebar() {
           </div>
         </nav>
 
-        {/* Color theme select — above footer. p-4 matches sidebar rhythm. */}
+        {/*
+          Color theme select — above footer. Slightly more vertical
+          padding (py-5 = 20px vs the standard 16px elsewhere) because
+          the Select trigger and the avatar row below have shorter
+          content than the nav rows; the extra 4px lets these two
+          bottom blocks read at the same visual weight as the header
+          and the nav sections.
+        */}
         {expanded && (
-          <div className="p-4">
+          <div className="px-4 py-5">
             <ColorThemePicker />
           </div>
         )}
 
-        {/* Footer — p-4 matches sidebar rhythm (header / nav sections). */}
+        {/* Footer — same py-5 px-4 as the theme picker above. */}
         <div
           className={cn(
-            'flex items-center border-t border-border p-4',
+            'flex items-center border-t border-border px-4 py-5',
             expanded ? 'gap-3' : 'flex-col gap-2',
           )}
         >
