@@ -18,6 +18,7 @@ import {
 } from '@/components/ui/card';
 import {
   Dialog,
+  DialogClose,
   DialogContent,
   DialogDescription,
   DialogFooter,
@@ -55,13 +56,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { MIN_YEAR, MAX_YEAR } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-
-// Destructive action button classes. Inlined here rather than reaching
-// into Settings.tsx (the only other current call site) per the "don't
-// touch unrelated code" scope of the extraction PR; hoist to a shared
-// lib/styles.ts if a third call site lands.
-const destructiveActionClass =
-  'bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive';
+import { destructiveActionClass } from '@/lib/styles';
 
 const goalSchema = z.object({
   year: z.number().int().min(MIN_YEAR).max(MAX_YEAR),
@@ -103,7 +98,17 @@ function SavingsSection() {
   const watchedYear = useWatch({ control: form.control, name: 'year' });
   const existingGoal = useMemo(
     () =>
-      typeof watchedYear === 'number' && Number.isFinite(watchedYear)
+      // Require the watched year to be in-range before scanning goals.
+      // The year input's onChange writes `0` for an empty field (so the
+      // form's number type stays consistent), which would otherwise
+      // make this memo run `goals.find(g => g.year === 0)` on every
+      // keystroke that produces a sub-MIN_YEAR transient (typing
+      // "2026" passes through 2 → 20 → 202 → 2026). The schema
+      // rejects sub-MIN_YEAR on submit; matching it here keeps the
+      // warning consistent.
+      typeof watchedYear === 'number' &&
+      Number.isFinite(watchedYear) &&
+      watchedYear >= MIN_YEAR
         ? goals.find((g) => g.year === watchedYear)
         : undefined,
     [goals, watchedYear],
@@ -266,6 +271,17 @@ function SavingsSection() {
                   )}
                 />
                 <DialogFooter>
+                  {/* DialogClose calls onOpenChange(false), which the
+                      parent already wires to form.reset() — so Cancel
+                      cleanly resets the form. Important when the
+                      submit flips to destructive "Replace Goal", at
+                      which point the only visible mouse action would
+                      otherwise be destructive. */}
+                  <DialogClose asChild>
+                    <Button type="button" variant="ghost">
+                      Cancel
+                    </Button>
+                  </DialogClose>
                   <Button type="submit">
                     {existingGoal ? 'Replace Goal' : 'Add Goal'}
                   </Button>
@@ -285,7 +301,7 @@ function SavingsSection() {
             <div className="grid gap-1">
               <p className="text-sm font-medium">No savings goals yet</p>
               <p className="text-sm text-muted-foreground">
-                Add one to set a yearly target.
+                Add a goal to track your savings progress in Reports.
               </p>
             </div>
           </div>
@@ -302,7 +318,9 @@ function SavingsSection() {
               {goals.map((g) => (
                 <TableRow key={g.id}>
                   <TableCell>{g.year}</TableCell>
-                  <TableCell className="font-mono tabular-nums">
+                  {/* Match Budgets' Annual total cell: tabular-nums alone
+                      gives column alignment without the mono typeface. */}
+                  <TableCell className="tabular-nums">
                     {formatCurrency(g.target_amount, baseCurrency)}
                   </TableCell>
                   <TableCell className="text-right">

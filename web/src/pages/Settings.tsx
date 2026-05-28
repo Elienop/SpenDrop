@@ -99,6 +99,7 @@ import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
 import { ROLE_ADMIN, ROLE_MEMBER, isAdmin, type Role } from '@/lib/roles';
+import { destructiveActionClass } from '@/lib/styles';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -976,12 +977,6 @@ function UsersSection() {
 }
 
 /* ---------- API tokens tab ---------- */
-
-// destructiveActionClass paints an AlertDialogAction button with the
-// destructive palette. Extracted so both revoke-one and revoke-all dialogs
-// stay in sync if the token ever changes.
-const destructiveActionClass =
-  'bg-destructive text-destructive-foreground hover:bg-destructive/90';
 
 function ShowOnceReveal({
   token,
@@ -1947,13 +1942,44 @@ function DataSection() {
 
 /* ---------- Main Settings Page ---------- */
 
+// Old `?tab=…` values that no longer correspond to a Settings tab —
+// Budgets and Savings became their own top-level pages, and the old
+// General tab's contents split across /budgets (Monthly Budgets +
+// Category Limits) and the Account/Currencies tabs. Bookmarks pointing
+// here surface a one-shot toast with an Open action.
+const MOVED_TABS: Record<string, { route: string; label: string }> = {
+  savings: { route: '/savings', label: 'Savings' },
+  budgets: { route: '/budgets', label: 'Budgets' },
+  // General split across Budgets and the remaining Settings tabs —
+  // point at Budgets since that's where the monthly-budget editor lives.
+  general: { route: '/budgets', label: 'Budgets' },
+};
+
 export function Settings() {
   const { user } = useAuth();
   const admin = isAdmin(user);
   const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
   const initialTab = isValidTab(tabParam) ? tabParam : 'account';
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
+
+  // One-shot forwarding toast for `?tab=savings|budgets|general`
+  // bookmarks left over from before the page split. Runs on mount
+  // only — re-toasting on subsequent in-app tab clicks would be
+  // noisy.
+  useEffect(() => {
+    if (tabParam && MOVED_TABS[tabParam]) {
+      const moved = MOVED_TABS[tabParam];
+      toast.info(`${moved.label} has its own page now`, {
+        action: {
+          label: 'Open',
+          onClick: () => navigate(moved.route),
+        },
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
     if (isValidTab(tabParam) && tabParam !== activeTab) {

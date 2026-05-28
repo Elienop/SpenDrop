@@ -28,11 +28,13 @@ vi.mock('sonner', () => ({
 
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Settings } from './Settings';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 // The `sonner` module mock above is still required — Settings.tsx itself
 // imports `toast` and calls it in budget/currency/goals/users flows. The
 // old import-failure tests used to assert on `mockedToast.error`; 3.4b
@@ -305,6 +307,84 @@ describe('Settings', () => {
           role: 'member',
         });
       });
+    });
+  });
+
+  describe('forwarding toast for moved tabs', () => {
+    function renderAt(path: string) {
+      return render(
+        <MemoryRouter initialEntries={[path]}>
+          <Settings />
+        </MemoryRouter>,
+      );
+    }
+
+    beforeEach(() => {
+      mockedUseAuth.mockReturnValue({
+        user: {
+          id: 1,
+          username: 'alice',
+          display_name: 'Alice',
+          role: 'admin',
+          created_at: '2024-01-01',
+        },
+        loading: false,
+        login: vi.fn(),
+        register: vi.fn(),
+        logout: vi.fn(),
+      });
+    });
+
+    test('shows a forwarding toast for ?tab=savings naming the Savings page', () => {
+      renderAt('/settings?tab=savings');
+      expect(mockedToast.info).toHaveBeenCalledWith(
+        'Savings has its own page now',
+        expect.objectContaining({
+          action: expect.objectContaining({ label: 'Open' }),
+        }),
+      );
+    });
+
+    test('shows a forwarding toast for ?tab=budgets', () => {
+      renderAt('/settings?tab=budgets');
+      expect(mockedToast.info).toHaveBeenCalledWith(
+        'Budgets has its own page now',
+        expect.any(Object),
+      );
+    });
+
+    test('?tab=general forwards to Budgets (closest equivalent)', () => {
+      renderAt('/settings?tab=general');
+      expect(mockedToast.info).toHaveBeenCalledWith(
+        'Budgets has its own page now',
+        expect.any(Object),
+      );
+    });
+
+    test('does NOT toast for a valid Settings tab', () => {
+      renderAt('/settings?tab=account');
+      expect(mockedToast.info).not.toHaveBeenCalled();
+    });
+
+    test('does NOT toast when no ?tab param is present', () => {
+      renderAt('/settings');
+      expect(mockedToast.info).not.toHaveBeenCalled();
+    });
+
+    test('toast Open action navigates to the new page', () => {
+      renderAt('/settings?tab=savings');
+      // Read the action callback handed to toast.info and invoke it.
+      // We don't want to spy on react-router internally — just check
+      // the action is wired to a function and clicking it produces
+      // something callable.
+      const calls = mockedToast.info.mock.calls;
+      expect(calls.length).toBeGreaterThan(0);
+      const arg = calls[0][1] as { action?: { onClick: () => void } };
+      expect(typeof arg.action?.onClick).toBe('function');
+      // Calling it shouldn't throw — react-router's navigate inside
+      // MemoryRouter is a no-op for our purposes here; the contract
+      // is "Open action calls a function tied to the moved route".
+      arg.action!.onClick();
     });
   });
 

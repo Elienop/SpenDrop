@@ -73,6 +73,17 @@ describe('Sidebar', () => {
     expect(link).toHaveAttribute('aria-current', 'page');
   });
 
+  test('active route gets the bg-muted styling (not just aria-current)', () => {
+    // aria-current is set by NavLink internally — it can be present
+    // without our manual `isActive` className branch firing (e.g. if
+    // a future minifier mangles the className function). Assert on
+    // the actual class so we catch a regression in the styling
+    // contract, not just the ARIA contract.
+    renderSidebar('/transactions');
+    const link = screen.getByRole('link', { name: /transactions/i });
+    expect(link.className).toContain('bg-muted');
+  });
+
   test('displays user display name when expanded', async () => {
     const user = userEvent.setup();
     renderSidebar();

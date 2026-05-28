@@ -331,4 +331,24 @@ describe('Savings page', () => {
       'Savings goal replaced',
     );
   });
+
+  test('Cancel in the Add Goal dialog closes the dialog without a PUT', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderSavings();
+
+    await user.click(screen.getByRole('button', { name: /add goal/i }));
+    const dialog = await screen.findByRole('dialog');
+
+    // The Cancel button lives in the dialog footer next to the
+    // submit. `DialogClose` closes the dialog via the same
+    // onOpenChange callback that already resets the form.
+    await user.click(
+      await within(dialog).findByRole('button', { name: /^cancel$/i }),
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+    );
+    expect(mockedApi.put).not.toHaveBeenCalled();
+  });
 });

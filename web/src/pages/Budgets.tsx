@@ -54,6 +54,7 @@ import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { isAdmin } from '@/lib/roles';
 import { Skeleton } from '@/components/ui/skeleton';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
+import { destructiveActionClass } from '@/lib/styles';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -150,7 +151,7 @@ function DiscardEditsDialog({
             Keep editing
           </AlertDialogCancel>
           <AlertDialogAction
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive"
+            className={destructiveActionClass}
             onClick={onConfirm}
           >
             Discard changes

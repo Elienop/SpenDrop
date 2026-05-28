@@ -357,7 +357,7 @@ function SidebarLink({
         // the user's ColorThemePicker choice (Violet/Blue/etc.) AND keeps
         // the number readable — a soft `bg-primary/15` tint was too pale
         // to give the same-hue `text-primary` enough contrast.
-        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-primary px-1.5 pt-px text-xs font-medium leading-none tabular-nums text-primary-foreground">
+        <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 pt-px text-xs font-medium leading-none tabular-nums text-primary-foreground">
           {displayBadge}
         </span>
       )}
@@ -379,7 +379,9 @@ function SidebarLink({
   return (
     <Tooltip>
       <TooltipTrigger asChild>{link}</TooltipTrigger>
-      <TooltipContent side="right">{item.label}</TooltipContent>
+      <TooltipContent side="right">
+        {hasBadge ? `${item.label} · ${displayBadge}` : item.label}
+      </TooltipContent>
     </Tooltip>
   );
 }
