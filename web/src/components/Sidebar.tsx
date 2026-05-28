@@ -196,7 +196,15 @@ export function Sidebar() {
             ))}
           </div>
 
-          <Separator className="mx-2" />
+          {/*
+            Wrapper carries the horizontal inset; the Separator itself is
+            full-width inside it. Putting `mx-2` directly on Separator gives
+            `w-full + 8px*2` of margin, which overflows the 240px sidebar
+            and pops a horizontal scrollbar in the nav.
+          */}
+          <div className="px-2">
+            <Separator />
+          </div>
 
           {/*
             Bottom section — Settings + Log out. Pinned visually
@@ -319,25 +327,26 @@ function SidebarLink({
       </span>
       {showPill && (
         // Inline styled span rather than shadcn `Badge variant="secondary"`:
-        // when the row is active (`bg-muted`) the secondary variant's own
-        // `bg-secondary` reads very close to the row background. A
-        // `bg-muted-foreground/15` token gives a subtle pill that stays
-        // distinct on BOTH active and inactive rows without hand-rolling
-        // dark-mode overrides.
-        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-muted-foreground/15 px-1.5 text-xs font-medium tabular-nums text-foreground">
+        // on the active row (`bg-muted`) the secondary variant blends in.
+        // Using the primary accent at 15% gives a soft theme-tinted pill
+        // that stays distinct on both active and inactive rows AND tracks
+        // the user's ColorThemePicker choice (Violet/Blue/etc.) — the
+        // pill picks up the same hue as the active-route highlight in
+        // the rest of the app.
+        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-primary/15 px-1.5 text-xs font-medium tabular-nums text-primary">
           {displayBadge}
         </span>
       )}
       {showDot && (
-        // Collapsed-mode "needs attention" indicator. Red because in
-        // icon-only mode the dot is the *only* signal that the link
-        // has content; subdued colors get missed at the edge of vision.
-        // `ring-2 ring-card` halos the dot against the sidebar bg
-        // regardless of theme.
+        // Collapsed-mode "has content" indicator. Uses the primary accent
+        // so it tracks the user's chosen theme (Violet/Blue/etc.) instead
+        // of being a hardcoded red — matches the pill's hue above. The
+        // `ring-2 ring-card` halo keeps the dot legible against the
+        // sidebar background in any theme.
         <span
           data-testid="trash-dot"
           aria-hidden="true"
-          className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-destructive ring-2 ring-card"
+          className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-primary ring-2 ring-card"
         />
       )}
     </NavLink>
