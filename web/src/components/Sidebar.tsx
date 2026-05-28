@@ -187,7 +187,19 @@ export function Sidebar() {
             vertical rhythm, making the icon column look uneven across
             states.
           */}
-          <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
+          {/*
+            `pt-4` above the first nav item so the space below the header
+            border matches the 16px gap between the last item and the
+            section Separator (`p-2` bottom 8px + nav `gap-2` 8px).
+            Without this the header sat noticeably closer to Quick add
+            than the separator sat to Trash.
+          */}
+          <div
+            className={cn(
+              'flex flex-col gap-0.5 px-2 pb-2 pt-4',
+              !expanded && 'items-center',
+            )}
+          >
             {menuItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
@@ -332,7 +344,7 @@ function SidebarLink({
         // the user's ColorThemePicker choice (Violet/Blue/etc.) AND keeps
         // the number readable — a soft `bg-primary/15` tint was too pale
         // to give the same-hue `text-primary` enough contrast.
-        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-primary px-1.5 text-xs font-medium tabular-nums text-primary-foreground">
+        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-full bg-primary px-1.5 pt-px text-xs font-medium leading-none tabular-nums text-primary-foreground">
           {displayBadge}
         </span>
       )}
