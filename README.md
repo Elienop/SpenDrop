@@ -80,6 +80,21 @@ Four report tabs covering different angles of your finances:
 ![Reports Savings](docs/screenshots/05-reports-savings.png)
 ![Reports Patterns](docs/screenshots/06-reports-patterns.png)
 
+### Budgets
+
+Plan and track your spending limits on a dedicated page with two editors:
+
+- **Monthly Budgets** -- One row per month for the chosen year. Quick actions apply the same amount to every month or copy the previous year's plan; the year picker, sidebar clicks, and browser Back / Forward all prompt to discard before losing unsaved edits.
+- **Category Limits** -- Optional per-category monthly spending caps. Admins set them; everyone can read them. Compared against actual spend in Reports.
+
+![Budgets](docs/screenshots/11-budgets.png)
+
+### Savings
+
+Yearly **Savings Goals** are set on their own page and tracked under Reports → Savings. Picking a year that already has a goal surfaces a "Replace" warning -- title, button, and toast all flip so the new amount can't silently overwrite the old one. Deletes go through an explicit confirm dialog.
+
+![Savings](docs/screenshots/12-savings.png)
+
 ### Categories
 
 Manage expense and income categories with color-coded badges, type labels (Expense/Income), and per-row action menus (edit, deactivate, delete). Deactivated categories stay attached to past transactions but no longer appear in the entry dropdown.
@@ -88,12 +103,10 @@ Manage expense and income categories with color-coded badges, type labels (Expen
 
 ### Settings
 
-Tabbed settings page:
+Tabbed settings page covering account and system configuration. Monthly Budgets, Category Limits, and Savings Goals each have their own top-level page (see [Budgets](#budgets) and [Savings](#savings) above); old `?tab=budgets` / `?tab=savings` / `?tab=general` bookmarks land on Account with a one-shot toast offering to open the new page directly.
 
-- **General** -- Editable table of monthly budgets for any year (one row per month), plus **Category Limits**: optional per-category monthly spending caps for any month (admins set them; everyone can view).
 - **Account** -- Change your own password. Changing it signs you out everywhere and revokes all of your API tokens. Available to every user.
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
-- **Savings** -- Yearly savings goals
 - **Users** -- Admin user management (create, edit roles, delete, and reset a member's password)
 - **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Use them to authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session — see [Using API tokens](#using-api-tokens) for curl and Homepage examples.
 - **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
@@ -110,7 +123,8 @@ Simple username/password auth with bcrypt hashing and HTTP-only session cookies.
 ### Additional Features
 
 - **Dark and light themes** with system preference detection, toggle in sidebar
-- **Collapsible sidebar** with pin toggle, state persisted in localStorage
+- **Collapsible sidebar** with pin toggle, state persisted in localStorage. A small counter next to **Trash** shows how many transactions are waiting to be restored or purged (a colored dot in collapsed mode), tinted to the user's chosen accent theme
+- **Color theme picker** in the sidebar (Violet, Yellow, Blue, ...) -- the chosen accent flows through buttons, the active sidebar row, and the Trash counter so the whole app stays in palette
 - **Responsive layout** with max-width 1400px for wide-screen readability
 - **Saved filters** -- save and recall transaction filter presets
 - **Bulk operations** -- select transactions on the current page, or select every row matching the current filter across pages, for batch delete or bulk field edit
