@@ -370,3 +370,113 @@ func TestHandleReportIncomeExpenses_Fixture(t *testing.T) {
 	}
 	assertGoldenJSON(t, "income_expenses_basic", rec.Body.Bytes())
 }
+
+// TestHandleReportIncomeExpenses_DayEndAnchor_ContiguousMonths pins the fix for
+// the AddDate month-overflow bug on the income/expenses walk. With a day-31
+// anchor the unfixed handler emitted [Jan, Mar, Mar] for months=3 (February
+// dropped, March duplicated) because 2026-03-31 minus one month normalizes to
+// 2026-03-03. After anchoring to first-of-month the walk must be the strictly
+// contiguous, earliest-first [Jan, Feb, Mar] with each month's amount in its
+// own slot.
+func TestHandleReportIncomeExpenses_DayEndAnchor_ContiguousMonths(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)})
+	user := seedTestUser(t, q, "alice", "member")
+
+	// This handler walks earliest-first, so expect [Jan, Feb, Mar]. Seed one
+	// distinct expense per month on category 1 (expense in the default seed)
+	// so a dropped/duplicated slot is structurally detectable.
+	want := [][2]int{{2026, 1}, {2026, 2}, {2026, 3}}
+	amounts := map[[2]int]float64{
+		{2026, 1}: 11,
+		{2026, 2}: 22,
+		{2026, 3}: 33,
+	}
+	for _, ym := range want {
+		date := fmt.Sprintf("%04d-%02d-15", ym[0], ym[1])
+		seedTestTransaction(t, q, user.ID, 1, date, amounts[ym], "sentinel")
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/income-expenses?months=3", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleReportIncomeExpenses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	data := resp["data"].([]any)
+	if len(data) != 3 {
+		t.Fatalf("data len=%d, want 3", len(data))
+	}
+
+	seen := map[[2]int]bool{}
+	for idx, e := range data {
+		entry := e.(map[string]any)
+		ym := [2]int{int(entry["year"].(float64)), int(entry["month"].(float64))}
+		if ym != want[idx] {
+			t.Errorf("slot %d = %v, want %v (months must be contiguous earliest-first)", idx, ym, want[idx])
+		}
+		if seen[ym] {
+			t.Errorf("duplicate month %v in income/expenses walk: %v", ym, data)
+		}
+		seen[ym] = true
+		if got := entry["expenses"].(float64); got != amounts[ym] {
+			t.Errorf("slot %d (%v) expenses=%v, want %v", idx, ym, got, amounts[ym])
+		}
+	}
+}
+
+// TestHandleReportCategoryTrends_DayEndAnchor_LowerBound proves the narrower
+// lower-bound bug in category-trends: with a day-31 anchor and months=2 the
+// unfixed handler computed dateFrom from 2026-03-31.AddDate(0,-1,0)=2026-03-03,
+// yielding "2026-03-01" and silently excluding all of February. After
+// normalizing to first-of-month the window is Feb-01..Mar-31 and a Feb row
+// appears.
+func TestHandleReportCategoryTrends_DayEndAnchor_LowerBound(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC)})
+	user := seedTestUser(t, q, "alice", "member")
+
+	// A February row on category 1 (expense). months=2 should include February.
+	seedTestTransaction(t, q, user.ID, 1, "2026-02-15", 50.0, "feb expense")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/category-trends?months=2", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleReportCategoryTrends(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	cats, ok := resp["categories"].([]any)
+	if !ok {
+		t.Fatalf("categories missing or wrong type: %v", resp["categories"])
+	}
+
+	var found bool
+	for _, c := range cats {
+		cat := c.(map[string]any)
+		if int(cat["id"].(float64)) != 1 {
+			continue
+		}
+		for _, d := range cat["data"].([]any) {
+			entry := d.(map[string]any)
+			if int(entry["year"].(float64)) == 2026 && int(entry["month"].(float64)) == 2 {
+				found = true
+				if got := entry["total"].(float64); got != 50.0 {
+					t.Errorf("cat 1 2026-02 total=%v, want 50", got)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Errorf("February row excluded from category-trends window (lower bound shifted forward): %v", cats)
+	}
+}

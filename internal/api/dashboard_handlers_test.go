@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -686,5 +687,127 @@ func TestHandleDashboardCategories_BudgetStatus_HidesTombstoned(t *testing.T) {
 	}
 	if c["over"] != false {
 		t.Errorf("over: want false ($40 live < $100 limit; tombstoned $999 must not flip it), got %v", c["over"])
+	}
+}
+
+// TestHandleDashboardTrend_DayEndAnchor_ContiguousMonths pins the fix for the
+// AddDate month-overflow bug: anchoring the per-month walk to a day>=29 of a
+// 31-day month used to collapse a shorter target month (e.g. 2026-03-31 minus
+// one month normalizes 2026-02-31 -> 2026-03-03, back in March), dropping
+// February from the chart and double-counting March. The handler must anchor to
+// first-of-month before any AddDate so the walk produces strictly contiguous,
+// non-duplicated months.
+func TestHandleDashboardTrend_DayEndAnchor_ContiguousMonths(t *testing.T) {
+	cases := []struct {
+		name   string
+		anchor time.Time
+		// wantMonths is the expected descending (year, month) walk for months=3.
+		wantMonths [][2]int
+	}{
+		{
+			name:       "march 29",
+			anchor:     time.Date(2026, 3, 29, 12, 0, 0, 0, time.UTC),
+			wantMonths: [][2]int{{2026, 3}, {2026, 2}, {2026, 1}},
+		},
+		{
+			name:       "march 30",
+			anchor:     time.Date(2026, 3, 30, 12, 0, 0, 0, time.UTC),
+			wantMonths: [][2]int{{2026, 3}, {2026, 2}, {2026, 1}},
+		},
+		{
+			name:       "march 31",
+			anchor:     time.Date(2026, 3, 31, 12, 0, 0, 0, time.UTC),
+			wantMonths: [][2]int{{2026, 3}, {2026, 2}, {2026, 1}},
+		},
+		{
+			name:       "jan 31 looks back into prior year",
+			anchor:     time.Date(2026, 1, 31, 12, 0, 0, 0, time.UTC),
+			wantMonths: [][2]int{{2026, 1}, {2025, 12}, {2025, 11}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q, db := setupTestDB(t)
+			h := NewHandlerWithClock(q, db, fixedClock{t: tc.anchor})
+			user := seedTestUser(t, q, "alice", "member")
+
+			// Seed one distinct sentinel expense per expected month so a dropped
+			// or duplicated slot is detectable: month i carries (i+1)*11 dollars
+			// (11, 22, 33) on category 1 (an expense category in the default seed).
+			for i, ym := range tc.wantMonths {
+				amount := float64((i + 1) * 11)
+				date := fmt.Sprintf("%04d-%02d-15", ym[0], ym[1])
+				seedTestTransaction(t, q, user.ID, 1, date, amount, "sentinel")
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trend?months=3", nil)
+			req = withUser(req, user)
+			rec := httptest.NewRecorder()
+			h.handleDashboardTrend(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+
+			var resp struct {
+				Trend []map[string]any `json:"trend"`
+			}
+			decodeResponse(t, rec, &resp)
+
+			if len(resp.Trend) != 3 {
+				t.Fatalf("trend len=%d, want 3", len(resp.Trend))
+			}
+
+			seen := map[[2]int]bool{}
+			for idx, entry := range resp.Trend {
+				ym := [2]int{int(entry["year"].(float64)), int(entry["month"].(float64))}
+				if ym != tc.wantMonths[idx] {
+					t.Errorf("slot %d = %v, want %v (months must be contiguous descending)", idx, ym, tc.wantMonths[idx])
+				}
+				if seen[ym] {
+					t.Errorf("duplicate month %v in trend walk: %v", ym, resp.Trend)
+				}
+				seen[ym] = true
+				wantSpent := float64((idx + 1) * 11)
+				if got := entry["total_spent"].(float64); got != wantSpent {
+					t.Errorf("slot %d (%v) total_spent=%v, want %v (month's sentinel must land in exactly this slot)", idx, ym, got, wantSpent)
+				}
+			}
+		})
+	}
+}
+
+// TestHandleDashboardTrend_DayEndAnchor_DoesNotRegressMidMonth guards that the
+// first-of-month normalization is a no-op on the already-correct mid-month
+// path: a mid-month anchor produces the same contiguous months it always did.
+func TestHandleDashboardTrend_DayEndAnchor_DoesNotRegressMidMonth(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)})
+	user := seedTestUser(t, q, "alice", "member")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trend?months=3", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDashboardTrend(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Trend []map[string]any `json:"trend"`
+	}
+	decodeResponse(t, rec, &resp)
+
+	want := [][2]int{{2026, 4}, {2026, 3}, {2026, 2}}
+	if len(resp.Trend) != len(want) {
+		t.Fatalf("trend len=%d, want %d", len(resp.Trend), len(want))
+	}
+	for idx, entry := range resp.Trend {
+		ym := [2]int{int(entry["year"].(float64)), int(entry["month"].(float64))}
+		if ym != want[idx] {
+			t.Errorf("slot %d = %v, want %v", idx, ym, want[idx])
+		}
 	}
 }

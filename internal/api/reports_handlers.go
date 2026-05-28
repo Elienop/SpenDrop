@@ -126,9 +126,13 @@ func (h *Handler) handleReportCategoryTrends(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := h.clock.Now()
-	earliest := now.AddDate(0, -(months - 1), 0)
+	// Normalize to first-of-month so AddDate cannot overflow a short month and
+	// shift the lower bound forward (a day-31 anchor would otherwise exclude an
+	// entire prior month from the trend window).
+	base := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	earliest := base.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
-	dateTo := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	dateTo := time.Date(base.Year(), base.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 
 	rows, err := h.queries.SumByCategoryForRange(r.Context(), database.SumByCategoryForRangeParams{
 		DateFrom: dateFrom, DateTo: dateTo,
@@ -195,9 +199,13 @@ func (h *Handler) handleReportIncomeExpenses(w http.ResponseWriter, r *http.Requ
 	}
 
 	now := h.clock.Now()
-	earliest := now.AddDate(0, -(months - 1), 0)
+	// Normalize to first-of-month so AddDate cannot overflow a short month
+	// (a day-31 anchor would drop the shorter target month and duplicate the
+	// current month in the per-month walk below).
+	base := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	earliest := base.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
-	dateTo := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	dateTo := time.Date(base.Year(), base.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 
 	rows, err := h.queries.SumByMonthRange(r.Context(), database.SumByMonthRangeParams{
 		DateFrom: dateFrom, DateTo: dateTo,
@@ -215,7 +223,7 @@ func (h *Handler) handleReportIncomeExpenses(w http.ResponseWriter, r *http.Requ
 
 	entries := make([]incomeExpenseEntry, 0, months)
 	for i := months - 1; i >= 0; i-- {
-		t := now.AddDate(0, -i, 0)
+		t := base.AddDate(0, -i, 0)
 		y, m := t.Year(), int(t.Month())
 		entry := incomeExpenseEntry{Year: y, Month: m}
 		if row, ok := lookup[mk{y, m}]; ok {

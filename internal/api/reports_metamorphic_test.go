@@ -53,25 +53,16 @@ import (
 // visible to the handler's own query context.
 
 // metamorphicClockInstant is the fixed "now" every sample runs
-// against. Chosen mid-month (April 15, 2026) so time.AddDate does not
-// overflow across month boundaries: the handler uses
-// `now.AddDate(0, -i, 0)` inside the slot-filling loop, and on a
-// 31-day source month with a 30-day target (e.g. now=March 31,
-// i=1 → February 31 → March 3) that quirk would produce duplicate or
-// skipped slots in the handler's output.
-//
-// Why this matters for a METAMORPHIC test: the dumb reference
-// (reports_dumb_go_test.go) runs the IDENTICAL `now.AddDate(0, -i, 0)`
-// loop, so a quirk in one side is mirrored exactly on the other. The
-// danger is NOT a false failure — it's a shared blindspot that makes
-// the test silently pass on a corrupted slot list. Mid-month sidesteps
-// the quirk entirely so both sides compute a clean, correct month
-// sequence and the equality check is meaningful.
-//
-// If this test is ever parameterized over `now`, the clock must remain
-// in [1, 28] of its month or the handler's AddDate quirk has to be
-// fixed first — otherwise both sides drift the same way and the test
-// keeps passing while the production handler emits garbage.
+// against. Pinned mid-month (April 15, 2026) purely for stability: the
+// metamorphic test's job is handler-vs-reference equivalence, not
+// month-boundary coverage. The AddDate short-month overflow quirk that
+// once forced a [1,28] constraint here has been fixed — both the handler
+// (reports_handlers.go) and the dumb reference (reports_dumb_go_test.go)
+// now normalize `now` to the first day of its month before walking with
+// `base.AddDate(0, -i, 0)`, so neither side can drop or duplicate a slot
+// regardless of the day-of-month. The targeted day-29/30/31 unit tests
+// in dashboard_handlers_test.go and reports_handlers_test.go lock that
+// boundary; this clock can stay mid-month without re-introducing the bug.
 //
 // TREAT AS CONST. Go does not allow `time.Time` in a const declaration
 // because time.Time is a struct, so this has to be a var at the
