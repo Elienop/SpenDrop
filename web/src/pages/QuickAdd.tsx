@@ -20,9 +20,11 @@ import { AmountCurrencyInput } from '@/components/AmountCurrencyInput';
 import { AutocompleteInput } from '@/components/AutocompleteInput';
 import { TagInput } from '@/components/TagInput';
 import { CategoryChips } from '@/components/CategoryChips';
+import { QuickAddSuggestions } from '@/components/QuickAddSuggestions';
 import { RecentlyAdded } from '@/components/RecentlyAdded';
 import { useCategories } from '@/hooks/useCategories';
 import { useCurrencies } from '@/hooks/useCurrencies';
+import { useDescriptionHistory } from '@/hooks/useDescriptionHistory';
 import { useQuickAdd, type QuickAddOutcome } from '@/hooks/useQuickAdd';
 import { useOfflineQueue } from '@/hooks/useOfflineQueue';
 import { parseQuickEntry } from '@/lib/quick-parse';
@@ -87,6 +89,7 @@ export function QuickAdd() {
   } = useCurrencies();
   const { create, undo, saving } = useQuickAdd();
   const { pending, count: pendingCount } = useOfflineQueue();
+  const historyDescriptions = useDescriptionHistory();
 
   // Expense categories only (quick-add captures spending). Surface the
   // sticky last-used category first so the common case is one tap away.
@@ -100,6 +103,27 @@ export function QuickAdd() {
     const [last] = copy.splice(idx, 1);
     return [last, ...copy];
   }, [categories]);
+
+  // Filter the history list to suggestions that round-trip through the
+  // freeform parser as a *pure description* — no amount, no tags. If a past
+  // description like "test 2" was suggested as-is, tapping the chip would
+  // rewrite the input to "test 2 " and the parser would immediately split
+  // it back apart (description="test", amount=$2), reversing the user's
+  // intent. Keep only suggestions the parser leaves intact.
+  const safeDescriptions = useMemo(() => {
+    return historyDescriptions.filter((s) => {
+      const p = parseQuickEntry(s, {
+        categories: expenseCategories,
+        currencies,
+        baseCurrency: baseCode,
+      });
+      return (
+        p.amount == null &&
+        !p.tags &&
+        p.description.trim().toLowerCase() === s.trim().toLowerCase()
+      );
+    });
+  }, [historyDescriptions, expenseCategories, currencies, baseCode]);
 
   // --- Freeform state ------------------------------------------------------
   const [raw, setRaw] = useState('');
@@ -296,14 +320,61 @@ export function QuickAdd() {
     resetForNext,
   ]);
 
+  // Show the past-descriptions chip strip only while the user is still
+  // shaping the description (>=2 chars typed, no amount yet). Once an
+  // amount appears we assume they're committed and don't want the input
+  // rewritten under them.
+  const showSuggestions =
+    mode === 'freeform' &&
+    parsed.amount == null &&
+    parsed.description.trim().length >= 2;
+
+  // First chip that would render in the strip — used by the Tab accelerator
+  // below. Kept in sync with QuickAddSuggestions' own filter (prefix match,
+  // skip exact-no-extension) so Tab picks exactly the visible first chip.
+  const firstSuggestion: string | null = useMemo(() => {
+    if (!showSuggestions) return null;
+    const q = parsed.description.trim().toLowerCase();
+    if (q.length === 0) return null;
+    for (const s of safeDescriptions) {
+      const lower = s.toLowerCase();
+      if (!lower.startsWith(q)) continue;
+      if (lower === q) continue;
+      return s;
+    }
+    return null;
+  }, [showSuggestions, parsed.description, safeDescriptions]);
+
+  const onPickSuggestion = useCallback((suggestion: string) => {
+    setRaw(`${suggestion} `);
+    // Refocus + place caret at end so the user can keep typing the amount.
+    requestAnimationFrame(() => {
+      const el = inputRef.current;
+      if (el) {
+        el.focus();
+        const pos = el.value.length;
+        el.setSelectionRange(pos, pos);
+      }
+    });
+  }, []);
+
   const onFreeformKeyDown = useCallback(
     (e: KeyboardEvent<HTMLInputElement>) => {
       if (e.key === 'Enter') {
         e.preventDefault();
         void submit();
+        return;
+      }
+      // Tab accepts the first visible chip (desktop accelerator). Plain Tab
+      // only — Shift+Tab is normal reverse focus. Kept here (vs a window
+      // listener in the chip strip) so the behavior lives next to the input
+      // it targets.
+      if (e.key === 'Tab' && !e.shiftKey && firstSuggestion) {
+        e.preventDefault();
+        onPickSuggestion(firstSuggestion);
       }
     },
-    [submit],
+    [submit, firstSuggestion, onPickSuggestion],
   );
 
   // Keep the error toast's Retry handler pointed at the current submit closure.
@@ -364,6 +435,14 @@ export function QuickAdd() {
               aria-label="Quick entry"
               className="h-14 text-lg"
             />
+
+            {showSuggestions && (
+              <QuickAddSuggestions
+                suggestions={safeDescriptions}
+                query={parsed.description}
+                onPick={onPickSuggestion}
+              />
+            )}
 
             {raw.trim().length > 0 && (
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">

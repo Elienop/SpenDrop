@@ -144,6 +144,14 @@ vi.mock('@/components/RecentlyAdded', () => ({
   RecentlyAdded: () => null,
 }));
 
+// useDescriptionHistory has its own test; stub it here so QuickAdd tests
+// can deterministically inject a list (or empty) and skip the hook's
+// `transactions?...` fetch path.
+const historyMock = vi.fn<() => string[]>();
+vi.mock('@/hooks/useDescriptionHistory', () => ({
+  useDescriptionHistory: () => historyMock(),
+}));
+
 import { QuickAdd } from './QuickAdd';
 
 function renderQuickAdd() {
@@ -172,6 +180,9 @@ beforeEach(() => {
   enqueue.mockResolvedValue(1);
   removeQueued.mockResolvedValue(undefined);
   getAllQueued.mockResolvedValue([]);
+  // Default: no description history. Individual tests override via
+  // `historyMock.mockReturnValue([...])`.
+  historyMock.mockReturnValue([]);
 });
 
 describe('QuickAdd — Freeform mode', () => {
@@ -483,5 +494,135 @@ describe('QuickAdd — submit failure (online, never queues)', () => {
 describe('QuickAdd — anti-regression on within import', () => {
   test('within is available for scoped queries', () => {
     expect(typeof within).toBe('function');
+  });
+});
+
+describe('QuickAdd — description suggestions strip (freeform)', () => {
+  test('shows matching past descriptions as chips when typing a prefix', async () => {
+    historyMock.mockReturnValue(['lunch', 'lunchbox', 'coffee']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'lun');
+
+    expect(
+      await screen.findByRole('listbox', { name: /description suggestions/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'lunch' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'lunchbox' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'coffee' }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('filters out past descriptions that the freeform parser would re-split', async () => {
+    // A description like "test 2" looks fine in the history list but, if
+    // suggested as a chip, would set the input to "test 2 " — which the
+    // parser then re-splits into description="test" and amount=$2, the
+    // opposite of what the user just picked. The round-trip filter must
+    // drop these so only suggestions the parser leaves intact are shown.
+    historyMock.mockReturnValue(['tests', 'test 2', 'test #weekly']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'test');
+
+    expect(
+      await screen.findByRole('listbox', { name: /description suggestions/i }),
+    ).toBeInTheDocument();
+    // Clean suggestion survives the filter and renders.
+    expect(screen.getByRole('button', { name: 'tests' })).toBeInTheDocument();
+    // Parser-breaking suggestions (number-bearing, tag-bearing) are dropped.
+    expect(
+      screen.queryByRole('button', { name: 'test 2' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'test #weekly' }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('tapping a chip rewrites the input to "<suggestion> " (trailing space)', async () => {
+    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i) as HTMLInputElement;
+    await user.type(input, 'lun');
+
+    await user.click(screen.getByRole('button', { name: 'lunchbox' }));
+
+    expect(input.value).toBe('lunchbox ');
+    // Refocused for follow-on typing.
+    await waitFor(() => expect(document.activeElement).toBe(input));
+  });
+
+  test('the strip disappears once an amount is typed', async () => {
+    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'lun');
+    expect(
+      await screen.findByRole('listbox', { name: /description suggestions/i }),
+    ).toBeInTheDocument();
+
+    // Once an amount is parsed out, the suggestion strip vanishes — we don't
+    // want to rewrite the input after the user has committed numbers.
+    await user.type(input, 'ch 12');
+    await waitFor(() => {
+      expect(
+        screen.queryByRole('listbox', { name: /description suggestions/i }),
+      ).not.toBeInTheDocument();
+    });
+  });
+
+  test('Tab in the freeform input accepts the first chip when the strip is visible', async () => {
+    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i) as HTMLInputElement;
+    await user.type(input, 'lun');
+    await screen.findByRole('listbox', { name: /description suggestions/i });
+
+    // First chip = 'lunch' (prefix match of 'lun', exact-match-no-extension
+    // skip does not apply since the typed text is 'lun', not 'lunch').
+    await user.keyboard('{Tab}');
+    expect(input.value).toBe('lunch ');
+  });
+
+  test('switching to tap mode hides the strip (it is freeform-only)', async () => {
+    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'lun');
+    expect(
+      await screen.findByRole('listbox', { name: /description suggestions/i }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: /tap/i }));
+
+    expect(
+      screen.queryByRole('listbox', { name: /description suggestions/i }),
+    ).not.toBeInTheDocument();
   });
 });
