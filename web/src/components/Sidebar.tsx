@@ -4,6 +4,8 @@ import {
   Zap,
   LayoutGrid,
   ArrowLeftRight,
+  Wallet,
+  PiggyBank,
   ChartNoAxesColumnIncreasing,
   Tag,
   Settings as SettingsIcon,
@@ -43,6 +45,8 @@ const menuItems: MenuItem[] = [
   { path: '/quick', label: 'Quick add', icon: Zap },
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { path: '/budgets', label: 'Budgets', icon: Wallet },
+  { path: '/savings', label: 'Savings', icon: PiggyBank },
   { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
   { path: '/categories', label: 'Categories', icon: Tag },
 ];
