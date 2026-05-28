@@ -124,4 +124,39 @@ describe('useTrashCount', () => {
     // Prior value preserved, no thrown rejection bubbled out.
     expect(result.current.count).toBe(6);
   });
+
+  it('ignores a stale (out-of-order) response and keeps the newer count', async () => {
+    // Two refetches fire back-to-back; the FIRST resolves AFTER the
+    // SECOND (network reorder). The hook must keep the second
+    // response's count, not let the older one overwrite it.
+    let resolveFirst: ((v: { total: number }) => void) | null = null;
+    mockedGet
+      .mockReturnValueOnce(
+        new Promise<{ total: number }>((r) => {
+          resolveFirst = r;
+        }),
+      )
+      .mockResolvedValueOnce(trashListResponse(20));
+
+    const { result } = renderHook(() => useTrashCount(true));
+
+    // The mount-time fetch is in flight (unresolved). Dispatch fires
+    // the second fetch, which resolves immediately.
+    act(() => {
+      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
+    });
+
+    await waitFor(() => expect(result.current.count).toBe(20));
+
+    // Now resolve the original (older, slower) request with a stale 1.
+    act(() => {
+      resolveFirst!({ total: 1 });
+    });
+
+    // Give the resolved-then microtask a tick.
+    await new Promise((r) => setTimeout(r, 5));
+
+    // Count must stay at 20 — the stale 1 is dropped on the floor.
+    expect(result.current.count).toBe(20);
+  });
 });

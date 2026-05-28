@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm, useWatch } from 'react-hook-form';
 import * as z from 'zod';
-import { AlertCircle, PiggyBank } from 'lucide-react';
+import { AlertCircle, PiggyBank, Trash2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import type { SavingsGoal } from '../api/types';
@@ -306,14 +306,24 @@ function SavingsSection() {
                     {formatCurrency(g.target_amount, baseCurrency)}
                   </TableCell>
                   <TableCell className="text-right">
+                    {/*
+                      Icon-only delete to match the row-action pattern
+                      used elsewhere (Categories uses a MoreHorizontal
+                      dropdown, but Savings rows have only one action,
+                      so the dropdown wrapper would be overkill). aria-label
+                      keeps the assertion-by-name selector intact for tests.
+                    */}
                     <Button
                       type="button"
-                      variant="destructive"
-                      size="sm"
+                      variant="ghost"
+                      size="icon"
                       onClick={() => setConfirmDelete(g)}
                       aria-label={`Delete ${g.year} goal`}
                     >
-                      Delete
+                      <Trash2
+                        className="h-4 w-4 text-destructive"
+                        aria-hidden="true"
+                      />
                     </Button>
                   </TableCell>
                 </TableRow>

@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   Zap,
   LayoutGrid,
@@ -16,9 +16,9 @@ import {
 import { useAuth } from '../hooks/useAuth';
 import { useTrashCount } from '../hooks/useTrashCount';
 import { isAdmin } from '@/lib/roles';
-import { Badge } from '@/components/ui/badge';
 import { Logo } from '@/components/Logo';
 import { LogoWordmark } from '@/components/LogoWordmark';
+import { Separator } from '@/components/ui/separator';
 import {
   Tooltip,
   TooltipContent,
@@ -47,19 +47,28 @@ interface MenuItem {
   badge?: number;
 }
 
+// Flat top-section nav. Reports moves between Transactions and Budgets
+// (was after Savings) — Reports is a daily-review surface and the older
+// Menu/Admin/General triple-grouping (with hidden titles in collapsed
+// mode) gave inconsistent vertical rhythm across modes. A single
+// Separator below splits this section from the bottom-section
+// Settings + Log out without touching icon spacing.
 const menuItems: MenuItem[] = [
   // Fast-capture entry. Routes to the full-screen /quick screen, which lives
   // OUTSIDE AppShell (no sidebar) — the "Full app" link there returns here.
   { path: '/quick', label: 'Quick add', icon: Zap },
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
+  { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
   { path: '/budgets', label: 'Budgets', icon: Wallet },
   { path: '/savings', label: 'Savings', icon: PiggyBank },
-  { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
   { path: '/categories', label: 'Categories', icon: Tag },
 ];
 
-const generalItems: MenuItem[] = [
+// Settings lives in the bottom section, alongside the Log out button.
+// Kept as a separate constant so future bottom-section items (e.g. a
+// What's New link) slot in cleanly without restructuring the JSX.
+const bottomItems: MenuItem[] = [
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
@@ -170,32 +179,32 @@ export function Sidebar() {
           )}
           aria-label="Primary"
         >
-          {/* Menu group — matches SidebarGroup: p-2 */}
+          {/*
+            Top section — flat list of all primary nav items plus the
+            admin-only Trash entry (rendered inline; no section title or
+            separate group). The previous Menu/Admin/General grouping
+            hid its section titles in collapsed mode but still consumed
+            vertical rhythm, making the icon column look uneven across
+            states.
+          */}
           <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-            <SidebarSectionTitle expanded={expanded} title="Menu" />
             {menuItems.map((item) => (
+              <SidebarLink key={item.path} item={item} expanded={expanded} />
+            ))}
+            {visibleAdminItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
           </div>
 
-          {/*
-            Admin group — only rendered when there's at least one visible
-            admin item, so members (and any future role with no entries)
-            don't see a naked section title with nothing under it.
-          */}
-          {visibleAdminItems.length > 0 && (
-            <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-              <SidebarSectionTitle expanded={expanded} title="Admin" />
-              {visibleAdminItems.map((item) => (
-                <SidebarLink key={item.path} item={item} expanded={expanded} />
-              ))}
-            </div>
-          )}
+          <Separator className="mx-2" />
 
-          {/* General group */}
+          {/*
+            Bottom section — Settings + Log out. Pinned visually
+            beneath the divider, mirroring the canonical sidebar
+            "primary nav up top, app controls down bottom" pattern.
+          */}
           <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-            <SidebarSectionTitle expanded={expanded} title="General" />
-            {generalItems.map((item) => (
+            {bottomItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
             <Tooltip>
@@ -255,25 +264,6 @@ export function Sidebar() {
   );
 }
 
-function SidebarSectionTitle({
-  title,
-  expanded,
-}: {
-  title: string;
-  expanded: boolean;
-}) {
-  return (
-    <p
-      className={cn(
-        'h-8 px-3 text-xs font-medium tracking-wide text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
-        expanded ? 'pb-1' : '-mt-8 opacity-0',
-      )}
-    >
-      {title}
-    </p>
-  );
-}
-
 function SidebarLink({
   item,
   expanded,
@@ -282,46 +272,73 @@ function SidebarLink({
   expanded: boolean;
 }) {
   const Icon = item.icon;
-  // Badge is shown only in the expanded sidebar — the collapsed
-  // sidebar is icon-only and has no room for a number next to the
-  // label (user picked "next to label" placement).
-  const showBadge =
-    expanded && item.badge !== undefined && item.badge > 0;
+  const hasBadge = item.badge !== undefined && item.badge > 0;
+  // Numeric pill only renders in the expanded sidebar; in collapsed
+  // mode a tiny dot lives on the icon instead (no room for a number).
+  const showPill = expanded && hasBadge;
+  const showDot = !expanded && hasBadge;
   // Visible value is capped at "99+" so a 3+ digit count can't widen
-  // the badge and push the row out of alignment. aria-label below
+  // the pill and push the row out of alignment. aria-label below
   // keeps the real number so screen readers stay accurate.
   const displayBadge =
     item.badge !== undefined && item.badge > 99 ? '99+' : item.badge;
   // aria-label overrides the link's text-derived accessible name so
-  // SR users hear "Trash, 7 items" instead of the bare concatenation
-  // "Trash 7". Singular at exactly 1.
-  const ariaLabel = showBadge
+  // SR users hear "Trash, 7 items" instead of "Trash 7" or "Trash
+  // 99+". Active in BOTH collapsed and expanded modes so SR users
+  // get the count regardless of sidebar state.
+  const ariaLabel = hasBadge
     ? `${item.label}, ${item.badge} item${item.badge === 1 ? '' : 's'}`
     : undefined;
+  // Compute isActive ourselves rather than via NavLink's className function
+  // form. The function-form pattern (`className={({ isActive }) => ...}`)
+  // does not survive Vite's prod minification on this stack — the function
+  // is stringified into the class attribute literally instead of being
+  // called, so `relative` (which anchors the collapsed-mode dot) and the
+  // active-route highlight both silently fail in production. Passing a
+  // plain string keeps it deterministic.
+  const { pathname } = useLocation();
+  const isActive = item.end
+    ? pathname === item.path
+    : pathname === item.path || pathname.startsWith(item.path + '/');
+  const linkClassName = cn(
+    // `relative` anchors the absolute-positioned collapsed-mode dot.
+    'relative flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+    isActive && 'bg-muted text-foreground',
+    expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
+  );
   const link = (
     <NavLink
       to={item.path}
       end={item.end}
       aria-label={ariaLabel}
-      className={({ isActive }) =>
-        cn(
-          'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
-          isActive && 'bg-muted text-foreground',
-          expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
-        )
-      }
+      className={linkClassName}
     >
       <Icon aria-hidden="true" />
       <span className={expanded ? 'truncate' : 'sr-only'}>
         {item.label}
       </span>
-      {showBadge && (
-        <Badge
-          variant="secondary"
-          className="ml-auto h-5 min-w-[1.25rem] px-1.5 text-xs tabular-nums"
-        >
+      {showPill && (
+        // Inline styled span rather than shadcn `Badge variant="secondary"`:
+        // when the row is active (`bg-muted`) the secondary variant's own
+        // `bg-secondary` reads very close to the row background. A
+        // `bg-muted-foreground/15` token gives a subtle pill that stays
+        // distinct on BOTH active and inactive rows without hand-rolling
+        // dark-mode overrides.
+        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-muted-foreground/15 px-1.5 text-xs font-medium tabular-nums text-foreground">
           {displayBadge}
-        </Badge>
+        </span>
+      )}
+      {showDot && (
+        // Collapsed-mode "needs attention" indicator. Red because in
+        // icon-only mode the dot is the *only* signal that the link
+        // has content; subdued colors get missed at the edge of vision.
+        // `ring-2 ring-card` halos the dot against the sidebar bg
+        // regardless of theme.
+        <span
+          data-testid="trash-dot"
+          aria-hidden="true"
+          className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-destructive ring-2 ring-card"
+        />
       )}
     </NavLink>
   );

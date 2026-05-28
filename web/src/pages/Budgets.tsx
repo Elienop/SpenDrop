@@ -74,12 +74,28 @@ const ROUTE_LABELS: Record<string, string> = {
   '/settings': 'Settings',
 };
 
+/* ---------- Shared design tokens ---------- */
+
+// Amber is the canonical "attention without alarm" register per
+// docs/DESIGN_GUIDE.md (see `Alert variant="warning"`). Centralized
+// here so a future palette tweak (or migration to a future
+// `--warning` semantic token) is one edit, not a grep-and-replace
+// across every dirty-count indicator.
+const ATTENTION_TEXT_CLASS = 'text-amber-600 dark:text-amber-500';
+
 /* ---------- Shared: discard-edits confirm dialog ---------- */
 
 interface DiscardEditsDialogProps {
   open: boolean;
   count: number;
   destinationLabel: string;
+  /**
+   * Phrasing register. `'navigation'` (default) reads "Leaving for X"
+   * for sidebar/browser-back interruptions; `'switch'` reads
+   * "Switching to X" for the year/month dropdowns inside this page
+   * — the user isn't leaving the page, just swapping context.
+   */
+  mode?: 'navigation' | 'switch';
   onCancel: () => void;
   onConfirm: () => void;
 }
@@ -89,8 +105,8 @@ interface DiscardEditsDialogProps {
  * pop when a user tried to leave the Budgets page (year dropdown, month
  * dropdown, sidebar navigation, or browser-back) with unsaved budget
  * edits. One component for all call sites; the body reads "Discard
- * <N> unsaved change(s)? Leaving for <destinationLabel> will lose
- * them."
+ * <N> unsaved change(s)? <Leaving for | Switching to> <destinationLabel>
+ * will lose them."
  *
  * Uses AlertDialog (not Dialog) so Radix defaults focus to the Cancel
  * button — Enter dismisses safely. A destructive autoFocus would
@@ -101,9 +117,11 @@ function DiscardEditsDialog({
   open,
   count,
   destinationLabel,
+  mode = 'navigation',
   onCancel,
   onConfirm,
 }: DiscardEditsDialogProps) {
+  const verb = mode === 'switch' ? 'Switching to' : 'Leaving for';
   return (
     <AlertDialog
       open={open}
@@ -119,7 +137,7 @@ function DiscardEditsDialog({
             <span className="font-semibold text-foreground">
               {count} unsaved change{count === 1 ? '' : 's'}
             </span>
-            . Leaving for{' '}
+            . {verb}{' '}
             <span className="font-semibold text-foreground">
               {destinationLabel}
             </span>{' '}
@@ -546,7 +564,11 @@ function MonthlyBudgetsSection({
           </div>
         </div>
         {(preBulkSnapshot !== null || dirtyCount > 0) && (
-          <div className="flex items-center gap-2">
+          // `flex-wrap` so the row breaks on narrow viewports rather
+          // than crushing the badge into the dirty-count span;
+          // `sm:ml-auto` on the dirty-count pushes it to the right
+          // edge on >= sm so the bulk-change pill stays anchored left.
+          <div className="flex flex-wrap items-center gap-3">
             {preBulkSnapshot !== null && (
               <>
                 <Badge variant="secondary">Bulk change applied</Badge>
@@ -564,7 +586,7 @@ function MonthlyBudgetsSection({
             )}
             {dirtyCount > 0 && (
               <span
-                className="text-sm text-amber-600 dark:text-amber-500"
+                className={`text-sm sm:ml-auto ${ATTENTION_TEXT_CLASS}`}
                 aria-live="polite"
                 data-testid="budget-dirty-indicator"
               >
@@ -635,6 +657,7 @@ function MonthlyBudgetsSection({
       <DiscardEditsDialog
         open={pendingYear !== null}
         count={dirtyCount}
+        mode="switch"
         destinationLabel={pendingYear === null ? '' : String(pendingYear)}
         onCancel={() => setPendingYear(null)}
         onConfirm={() => {
@@ -971,7 +994,7 @@ function CategoryLimitsSection({
           </div>
           {admin && dirtyCount > 0 && (
             <span
-              className="self-end text-sm text-amber-600 dark:text-amber-500"
+              className={`self-end text-sm ${ATTENTION_TEXT_CLASS}`}
               aria-live="polite"
               data-testid="category-limits-dirty-indicator"
             >
@@ -1071,6 +1094,7 @@ function CategoryLimitsSection({
       <DiscardEditsDialog
         open={pendingMonth !== null}
         count={dirtyCount}
+        mode="switch"
         destinationLabel={
           pendingMonth === null ? '' : MONTH_NAMES_FULL[pendingMonth - 1]
         }
@@ -1083,6 +1107,7 @@ function CategoryLimitsSection({
       <DiscardEditsDialog
         open={pendingYear !== null}
         count={dirtyCount}
+        mode="switch"
         destinationLabel={pendingYear === null ? '' : String(pendingYear)}
         onCancel={() => setPendingYear(null)}
         onConfirm={() => {

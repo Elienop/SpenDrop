@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 
 /**
@@ -36,22 +36,31 @@ export const TRASH_CHANGED_EVENT = 'spendrop-trash-changed';
 export function useTrashCount(enabled: boolean) {
   const [count, setCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Monotonic generation counter for out-of-order response handling.
+  // Three rapid mutations fire three overlapping fetches; whichever
+  // resolves last would otherwise win, regardless of issue order. We
+  // increment per refetch and ignore any response whose generation
+  // doesn't match the current value.
+  const genRef = useRef(0);
 
   const refetch = useCallback(async () => {
     if (!enabled) return;
+    const gen = ++genRef.current;
     setLoading(true);
     try {
       // per_page=1 minimizes payload — we only read `total`.
       const res = await api.get<DeletedListResponse>(
         'transactions/deleted?page=1&per_page=1',
       );
+      if (gen !== genRef.current) return; // stale, newer fetch in flight
       setCount(res.total ?? 0);
     } catch {
       // Silent: the badge is non-critical. A failed fetch just leaves
       // the count at its previous value (or 0 on first load); the
       // Trash page itself surfaces real errors when the user opens it.
+      if (gen !== genRef.current) return; // ignore stale errors too
     } finally {
-      setLoading(false);
+      if (gen === genRef.current) setLoading(false);
     }
   }, [enabled]);
 

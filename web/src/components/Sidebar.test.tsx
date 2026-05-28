@@ -302,5 +302,101 @@ describe('Sidebar', () => {
         screen.getByRole('link', { name: 'Trash, 100 items' }),
       ).toHaveTextContent('99+');
     });
+
+    test('collapsed sidebar shows a dot indicator on Trash when count > 0', () => {
+      // Collapsed by default (localStorage cleared in beforeEach).
+      mockedUseTrashCount.mockReturnValue({
+        count: 3,
+        loading: false,
+        refetch: vi.fn(),
+      });
+      renderSidebar();
+      const trashLink = screen.getByRole('link', { name: /trash/i });
+      // The dot is a positioned span with data-testid for direct
+      // assertion (the number is suppressed in collapsed mode).
+      expect(
+        trashLink.querySelector('[data-testid="trash-dot"]'),
+      ).toBeInTheDocument();
+    });
+
+    test('collapsed sidebar does NOT show a dot when count is 0', () => {
+      mockedUseTrashCount.mockReturnValue({
+        count: 0,
+        loading: false,
+        refetch: vi.fn(),
+      });
+      renderSidebar();
+      const trashLink = screen.getByRole('link', { name: /trash/i });
+      expect(
+        trashLink.querySelector('[data-testid="trash-dot"]'),
+      ).not.toBeInTheDocument();
+    });
+
+    test('aria-label is set in collapsed mode too (so SR users still hear the count)', () => {
+      mockedUseTrashCount.mockReturnValue({
+        count: 4,
+        loading: false,
+        refetch: vi.fn(),
+      });
+      renderSidebar();
+      // Even collapsed, the link's accessible name includes the count.
+      expect(
+        screen.getByRole('link', { name: 'Trash, 4 items' }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe('layout', () => {
+    test('renders a Separator between the nav sections', () => {
+      // Separator divides the top section (nav + admin) from the
+      // bottom section (Settings + Logout). Shadcn's Separator
+      // renders role="none" (decorative) by default — query by the
+      // primitive's data-orientation attribute instead.
+      renderSidebar();
+      const separator = document.querySelector('[data-orientation="horizontal"]');
+      expect(separator).not.toBeNull();
+    });
+
+    test('Reports sits between Transactions and Budgets in the nav order', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+
+      const nav = screen.getByRole('navigation');
+      const links = Array.from(nav.querySelectorAll('a[href]')).map(
+        (a) => (a as HTMLAnchorElement).getAttribute('href'),
+      );
+      const tx = links.indexOf('/transactions');
+      const rep = links.indexOf('/reports');
+      const bud = links.indexOf('/budgets');
+      expect(tx).toBeGreaterThanOrEqual(0);
+      expect(rep).toBeGreaterThan(tx);
+      expect(bud).toBeGreaterThan(rep);
+    });
+
+    test('Settings sits in the bottom section AFTER the separator', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+
+      const nav = screen.getByRole('navigation');
+      const separator = nav.querySelector('[data-orientation="horizontal"]');
+      const settings = screen.getByRole('link', { name: /settings/i });
+      // compareDocumentPosition: bit 4 = "follows" (separator precedes settings).
+      const rel = separator!.compareDocumentPosition(settings);
+      expect(rel & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    test('no Menu / Admin / General section titles are rendered', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+
+      // The old grouping titles are gone — replaced by a single
+      // separator. Members never saw them collapsed either.
+      expect(screen.queryByText(/^Menu$/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^Admin$/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/^General$/)).not.toBeInTheDocument();
+    });
   });
 });
