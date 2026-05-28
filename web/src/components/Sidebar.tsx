@@ -135,11 +135,17 @@ export function Sidebar() {
           expanded ? 'w-60' : 'w-12',
         )}
       >
-        {/* Header — matches SidebarHeader: gap-2 p-2 */}
+        {/*
+          Header — explicit p-4 so the logo (and the slightly taller
+          collapse toggle, size-8 = 32px) sit with 16px above and
+          below, matching the 16px rhythm we use for the top-section
+          first item, the section separator's neighbours, and the
+          footer below.
+        */}
         <div
           className={cn(
-            'flex h-14 shrink-0 items-center border-b border-border p-2',
-            expanded ? 'justify-between px-4' : 'justify-center',
+            'flex shrink-0 items-center border-b border-border p-4',
+            expanded ? 'justify-between' : 'justify-center',
           )}
         >
           {expanded ? (
@@ -250,18 +256,18 @@ export function Sidebar() {
           </div>
         </nav>
 
-        {/* Color theme select — above footer */}
+        {/* Color theme select — above footer. p-4 matches sidebar rhythm. */}
         {expanded && (
-          <div className="px-3 py-3">
+          <div className="p-4">
             <ColorThemePicker />
           </div>
         )}
 
-        {/* Footer — matches SidebarFooter: gap-2 p-2 */}
+        {/* Footer — p-4 matches sidebar rhythm (header / nav sections). */}
         <div
           className={cn(
-            'flex items-center border-t border-border p-2',
-            expanded ? 'gap-3 px-3 py-3' : 'flex-col gap-2 py-3',
+            'flex items-center border-t border-border p-4',
+            expanded ? 'gap-3' : 'flex-col gap-2',
           )}
         >
           <Avatar className="size-8 text-sm font-medium">
