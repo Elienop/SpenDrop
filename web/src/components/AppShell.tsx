@@ -10,6 +10,7 @@ import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
 import { Trash } from '../pages/Trash';
 import { Toaster } from '@/components/ui/sonner';
+import { cn } from '@/lib/utils';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 export function AppShell() {
@@ -30,25 +31,34 @@ export function AppShell() {
   }, []);
 
   return (
-    <div className="flex min-h-screen bg-background text-foreground">
+    <div className="min-h-screen bg-background text-foreground">
       <Sidebar />
+      {/*
+        Outer <main> covers the viewport area to the right of the fixed
+        sidebar (pl-60 / pl-12 = sidebar width when expanded / collapsed).
+        Inner wrapper centers the page content with `mx-auto max-w-[1400px]`
+        so on wide screens the content sits in the middle of the available
+        space instead of hugging the sidebar. The padding-left transitions
+        so toggling the sidebar slides the content over smoothly.
+      */}
       <main
-        className={
-          sidebarExpanded
-            ? 'flex-1 max-w-[1640px] py-8 pr-10 pl-[calc(240px+2.5rem)]'
-            : 'flex-1 max-w-[1464px] py-8 pr-10 pl-[calc(48px+2.5rem)]'
-        }
+        className={cn(
+          'min-h-screen py-8 transition-[padding] duration-200 ease-linear',
+          sidebarExpanded ? 'pl-60' : 'pl-12',
+        )}
       >
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/reports" element={<Reports />} />
-          <Route path="/transactions" element={<Transactions />} />
-          <Route path="/budgets" element={<Budgets />} />
-          <Route path="/savings" element={<Savings />} />
-          <Route path="/categories" element={<Categories />} />
-          <Route path="/trash" element={<Trash />} />
-          <Route path="/settings" element={<Settings />} />
-        </Routes>
+        <div className="mx-auto max-w-[1400px] px-10">
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/reports" element={<Reports />} />
+            <Route path="/transactions" element={<Transactions />} />
+            <Route path="/budgets" element={<Budgets />} />
+            <Route path="/savings" element={<Savings />} />
+            <Route path="/categories" element={<Categories />} />
+            <Route path="/trash" element={<Trash />} />
+            <Route path="/settings" element={<Settings />} />
+          </Routes>
+        </div>
       </main>
       <Toaster />
     </div>
