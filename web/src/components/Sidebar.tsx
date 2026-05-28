@@ -328,12 +328,11 @@ function SidebarLink({
       {showPill && (
         // Inline styled span rather than shadcn `Badge variant="secondary"`:
         // on the active row (`bg-muted`) the secondary variant blends in.
-        // Using the primary accent at 15% gives a soft theme-tinted pill
-        // that stays distinct on both active and inactive rows AND tracks
-        // the user's ColorThemePicker choice (Violet/Blue/etc.) — the
-        // pill picks up the same hue as the active-route highlight in
-        // the rest of the app.
-        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-primary/15 px-1.5 text-xs font-medium tabular-nums text-primary">
+        // Using a solid `bg-primary` + `text-primary-foreground` follows
+        // the user's ColorThemePicker choice (Violet/Blue/etc.) AND keeps
+        // the number readable — a soft `bg-primary/15` tint was too pale
+        // to give the same-hue `text-primary` enough contrast.
+        <span className="ml-auto inline-flex h-5 min-w-[1.25rem] items-center justify-center rounded-md bg-primary px-1.5 text-xs font-medium tabular-nums text-primary-foreground">
           {displayBadge}
         </span>
       )}
