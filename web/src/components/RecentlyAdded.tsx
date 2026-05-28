@@ -12,6 +12,7 @@ import {
 } from '@/lib/offline-queue';
 import { useOnline } from '@/hooks/useOnline';
 import { useRecentTransactions } from '@/hooks/useRecentTransactions';
+import { TRASH_CHANGED_EVENT } from '@/hooks/useTrashCount';
 import type { Category } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
@@ -130,6 +131,11 @@ export function RecentlyAdded({
         .then(() => {
           refetch();
           toast.success('Moved to Trash');
+          // Saved row just became a server tombstone — notify the
+          // sidebar Trash badge. The PWA "delete from RecentlyAdded"
+          // flow often stays on the same tab, so the badge's
+          // window-focus refetch wouldn't fire on its own.
+          window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
         })
         .catch(() => toast.error('Could not delete'));
     }

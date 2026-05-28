@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from 'react';
-import { NavLink } from 'react-router-dom';
+import { useState, useEffect, useMemo, useRef } from 'react';
+import { NavLink, useLocation } from 'react-router-dom';
 import {
   Zap,
   LayoutGrid,
   ArrowLeftRight,
+  Wallet,
+  PiggyBank,
   ChartNoAxesColumnIncreasing,
   Tag,
   Settings as SettingsIcon,
@@ -12,9 +14,11 @@ import {
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { useTrashCount } from '../hooks/useTrashCount';
 import { isAdmin } from '@/lib/roles';
 import { Logo } from '@/components/Logo';
 import { LogoWordmark } from '@/components/LogoWordmark';
+import { Separator } from '@/components/ui/separator';
 import {
   Tooltip,
   TooltipContent,
@@ -35,8 +39,20 @@ interface MenuItem {
   end?: boolean;
   /** When true, the item is only rendered for admin users. */
   adminOnly?: boolean;
+  /**
+   * Optional numeric badge rendered next to the label (expanded
+   * sidebar only). When undefined or 0, no badge is drawn — the
+   * sidebar stays calm by default.
+   */
+  badge?: number;
 }
 
+// Flat top-section nav. Reports moves between Transactions and Budgets
+// (was after Savings) — Reports is a daily-review surface and the older
+// Menu/Admin/General triple-grouping (with hidden titles in collapsed
+// mode) gave inconsistent vertical rhythm across modes. A single
+// Separator below splits this section from the bottom-section
+// Settings + Log out without touching icon spacing.
 const menuItems: MenuItem[] = [
   // Fast-capture entry. Routes to the full-screen /quick screen, which lives
   // OUTSIDE AppShell (no sidebar) — the "Full app" link there returns here.
@@ -44,24 +60,49 @@ const menuItems: MenuItem[] = [
   { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
   { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
   { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
+  { path: '/budgets', label: 'Budgets', icon: Wallet },
+  { path: '/savings', label: 'Savings', icon: PiggyBank },
   { path: '/categories', label: 'Categories', icon: Tag },
 ];
 
-// Admin-only recovery surface. Kept in its own group below the main
-// menu so it sits visually adjacent to Settings — both are operator
-// tools — rather than mixing it into the day-to-day navigation and
-// cluttering the sidebar for members who never see it.
-const adminItems: MenuItem[] = [
-  { path: '/trash', label: 'Trash', icon: Trash2, adminOnly: true },
-];
-
-const generalItems: MenuItem[] = [
+// Settings lives in the bottom section, alongside the Log out button.
+// Kept as a separate constant so future bottom-section items (e.g. a
+// What's New link) slot in cleanly without restructuring the JSX.
+const bottomItems: MenuItem[] = [
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
 
 export function Sidebar() {
   const { user, logout } = useAuth();
   const admin = isAdmin(user);
+  // Tombstoned-transaction count for the Trash badge. Gated on
+  // `admin` so non-admin sessions don't issue a 403. The hook is
+  // safe to call unconditionally — it bails internally when
+  // `enabled` is false.
+  const { count: trashCount } = useTrashCount(admin);
+
+  // Admin-only recovery surface. Kept in its own group below the main
+  // menu so it sits visually adjacent to Settings — both are operator
+  // tools — rather than mixing it into the day-to-day navigation and
+  // cluttering the sidebar for members who never see it.
+  //
+  // Computed inside the component (vs module scope) because the Trash
+  // badge needs the live `trashCount` from the hook. `useMemo` keeps
+  // the array reference stable across renders that don't change the
+  // count — guards against a future `React.memo` on `SidebarLink`
+  // silently busting on a fresh-each-render `item` prop.
+  const adminItems: MenuItem[] = useMemo(
+    () => [
+      {
+        path: '/trash',
+        label: 'Trash',
+        icon: Trash2,
+        adminOnly: true,
+        badge: trashCount,
+      },
+    ],
+    [trashCount],
+  );
   // Hide the admin section entirely for non-admins so a member never
   // even has the link rendered in the DOM. The backend still enforces
   // 403 on the underlying routes — this is purely UX cleanup. Every
@@ -94,11 +135,17 @@ export function Sidebar() {
           expanded ? 'w-60' : 'w-12',
         )}
       >
-        {/* Header — matches SidebarHeader: gap-2 p-2 */}
+        {/*
+          Header — explicit p-4 so the logo (and the slightly taller
+          collapse toggle, size-8 = 32px) sit with 16px above and
+          below, matching the 16px rhythm we use for the top-section
+          first item, the section separator's neighbours, and the
+          footer below.
+        */}
         <div
           className={cn(
-            'flex h-14 shrink-0 items-center border-b border-border p-2',
-            expanded ? 'justify-between px-4' : 'justify-center',
+            'flex shrink-0 items-center border-b border-border p-4',
+            expanded ? 'justify-between' : 'justify-center',
           )}
         >
           {expanded ? (
@@ -138,32 +185,52 @@ export function Sidebar() {
           )}
           aria-label="Primary"
         >
-          {/* Menu group — matches SidebarGroup: p-2 */}
-          <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-            <SidebarSectionTitle expanded={expanded} title="Menu" />
+          {/*
+            Top section — flat list of all primary nav items plus the
+            admin-only Trash entry (rendered inline; no section title or
+            separate group). The previous Menu/Admin/General grouping
+            hid its section titles in collapsed mode but still consumed
+            vertical rhythm, making the icon column look uneven across
+            states.
+          */}
+          {/*
+            `pt-4` above the first nav item so the space below the header
+            border matches the 16px gap between the last item and the
+            section Separator (`p-2` bottom 8px + nav `gap-2` 8px).
+            Without this the header sat noticeably closer to Quick add
+            than the separator sat to Trash.
+          */}
+          <div
+            className={cn(
+              'flex flex-col gap-0.5 px-2 pb-2 pt-4',
+              !expanded && 'items-center',
+            )}
+          >
             {menuItems.map((item) => (
+              <SidebarLink key={item.path} item={item} expanded={expanded} />
+            ))}
+            {visibleAdminItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
           </div>
 
           {/*
-            Admin group — only rendered when there's at least one visible
-            admin item, so members (and any future role with no entries)
-            don't see a naked section title with nothing under it.
+            Wrapper carries the horizontal inset; the Separator itself is
+            full-width inside it. Putting `mx-2` directly on Separator gives
+            `w-full + 8px*2` of margin, which overflows the 240px sidebar
+            and pops a horizontal scrollbar in the nav.
           */}
-          {visibleAdminItems.length > 0 && (
-            <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-              <SidebarSectionTitle expanded={expanded} title="Admin" />
-              {visibleAdminItems.map((item) => (
-                <SidebarLink key={item.path} item={item} expanded={expanded} />
-              ))}
-            </div>
-          )}
+          <div className="px-2">
+            <Separator />
+          </div>
 
-          {/* General group */}
+          {/*
+            Bottom section — Settings + Log out. Pinned visually
+            beneath the divider, mirroring the canonical sidebar
+            "primary nav up top, app controls down bottom" pattern.
+          */}
           <div className={cn('flex flex-col gap-0.5 p-2', !expanded && 'items-center')}>
-            <SidebarSectionTitle expanded={expanded} title="General" />
-            {generalItems.map((item) => (
+            {bottomItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
             <Tooltip>
@@ -189,18 +256,25 @@ export function Sidebar() {
           </div>
         </nav>
 
-        {/* Color theme select — above footer */}
+        {/*
+          Color theme select — above footer. Slightly more vertical
+          padding (py-5 = 20px vs the standard 16px elsewhere) because
+          the Select trigger and the avatar row below have shorter
+          content than the nav rows; the extra 4px lets these two
+          bottom blocks read at the same visual weight as the header
+          and the nav sections.
+        */}
         {expanded && (
-          <div className="px-3 py-3">
+          <div className="px-4 py-5">
             <ColorThemePicker />
           </div>
         )}
 
-        {/* Footer — matches SidebarFooter: gap-2 p-2 */}
+        {/* Footer — same py-5 px-4 as the theme picker above. */}
         <div
           className={cn(
-            'flex items-center border-t border-border p-2',
-            expanded ? 'gap-3 px-3 py-3' : 'flex-col gap-2 py-3',
+            'flex items-center border-t border-border px-4 py-5',
+            expanded ? 'gap-3' : 'flex-col gap-2',
           )}
         >
           <Avatar className="size-8 text-sm font-medium">
@@ -223,25 +297,6 @@ export function Sidebar() {
   );
 }
 
-function SidebarSectionTitle({
-  title,
-  expanded,
-}: {
-  title: string;
-  expanded: boolean;
-}) {
-  return (
-    <p
-      className={cn(
-        'h-8 px-3 text-xs font-medium tracking-wide text-muted-foreground transition-[margin,opacity] duration-200 ease-linear',
-        expanded ? 'pb-1' : '-mt-8 opacity-0',
-      )}
-    >
-      {title}
-    </p>
-  );
-}
-
 function SidebarLink({
   item,
   expanded,
@@ -250,29 +305,83 @@ function SidebarLink({
   expanded: boolean;
 }) {
   const Icon = item.icon;
+  const hasBadge = item.badge !== undefined && item.badge > 0;
+  // Numeric pill only renders in the expanded sidebar; in collapsed
+  // mode a tiny dot lives on the icon instead (no room for a number).
+  const showPill = expanded && hasBadge;
+  const showDot = !expanded && hasBadge;
+  // Visible value is capped at "99+" so a 3+ digit count can't widen
+  // the pill and push the row out of alignment. aria-label below
+  // keeps the real number so screen readers stay accurate.
+  const displayBadge =
+    item.badge !== undefined && item.badge > 99 ? '99+' : item.badge;
+  // aria-label overrides the link's text-derived accessible name so
+  // SR users hear "Trash, 7 items" instead of "Trash 7" or "Trash
+  // 99+". Active in BOTH collapsed and expanded modes so SR users
+  // get the count regardless of sidebar state.
+  const ariaLabel = hasBadge
+    ? `${item.label}, ${item.badge} item${item.badge === 1 ? '' : 's'}`
+    : undefined;
+  // Compute isActive ourselves rather than via NavLink's className function
+  // form. The function-form pattern (`className={({ isActive }) => ...}`)
+  // does not survive Vite's prod minification on this stack — the function
+  // is stringified into the class attribute literally instead of being
+  // called, so `relative` (which anchors the collapsed-mode dot) and the
+  // active-route highlight both silently fail in production. Passing a
+  // plain string keeps it deterministic.
+  const { pathname } = useLocation();
+  const isActive = item.end
+    ? pathname === item.path
+    : pathname === item.path || pathname.startsWith(item.path + '/');
+  const linkClassName = cn(
+    // `relative` anchors the absolute-positioned collapsed-mode dot.
+    'relative flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+    isActive && 'bg-muted text-foreground',
+    expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
+  );
   const link = (
     <NavLink
       to={item.path}
       end={item.end}
-      className={({ isActive }) =>
-        cn(
-          'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
-          isActive && 'bg-muted text-foreground',
-          expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
-        )
-      }
+      aria-label={ariaLabel}
+      className={linkClassName}
     >
       <Icon aria-hidden="true" />
       <span className={expanded ? 'truncate' : 'sr-only'}>
         {item.label}
       </span>
+      {showPill && (
+        // Inline styled span rather than shadcn `Badge variant="secondary"`:
+        // on the active row (`bg-muted`) the secondary variant blends in.
+        // Using a solid `bg-primary` + `text-primary-foreground` follows
+        // the user's ColorThemePicker choice (Violet/Blue/etc.) AND keeps
+        // the number readable — a soft `bg-primary/15` tint was too pale
+        // to give the same-hue `text-primary` enough contrast.
+        <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 pt-px text-xs font-medium leading-none tabular-nums text-primary-foreground">
+          {displayBadge}
+        </span>
+      )}
+      {showDot && (
+        // Collapsed-mode "has content" indicator. Uses the primary accent
+        // so it tracks the user's chosen theme (Violet/Blue/etc.) instead
+        // of being a hardcoded red — matches the pill's hue above. The
+        // `ring-2 ring-card` halo keeps the dot legible against the
+        // sidebar background in any theme.
+        <span
+          data-testid="trash-dot"
+          aria-hidden="true"
+          className="pointer-events-none absolute right-1 top-1 h-2 w-2 rounded-full bg-primary ring-2 ring-card"
+        />
+      )}
     </NavLink>
   );
   if (expanded) return link;
   return (
     <Tooltip>
       <TooltipTrigger asChild>{link}</TooltipTrigger>
-      <TooltipContent side="right">{item.label}</TooltipContent>
+      <TooltipContent side="right">
+        {hasBadge ? `${item.label} · ${displayBadge}` : item.label}
+      </TooltipContent>
     </Tooltip>
   );
 }

@@ -3,6 +3,8 @@ import { Routes, Route } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { Dashboard } from '../pages/Dashboard';
 import { Transactions } from '../pages/Transactions';
+import { Budgets } from '../pages/Budgets';
+import { Savings } from '../pages/Savings';
 import { Categories } from '../pages/Categories';
 import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
@@ -41,6 +43,8 @@ export function AppShell() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/reports" element={<Reports />} />
           <Route path="/transactions" element={<Transactions />} />
+          <Route path="/budgets" element={<Budgets />} />
+          <Route path="/savings" element={<Savings />} />
           <Route path="/categories" element={<Categories />} />
           <Route path="/trash" element={<Trash />} />
           <Route path="/settings" element={<Settings />} />
