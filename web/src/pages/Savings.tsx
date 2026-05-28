@@ -1,8 +1,8 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { useForm } from 'react-hook-form';
+import { useForm, useWatch } from 'react-hook-form';
 import * as z from 'zod';
-import { PiggyBank } from 'lucide-react';
+import { AlertCircle, PiggyBank } from 'lucide-react';
 import { toast } from 'sonner';
 import { api } from '../api/client';
 import type { SavingsGoal } from '../api/types';
@@ -41,13 +41,38 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { MIN_YEAR, MAX_YEAR } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 
+// Destructive action button classes. Inlined here rather than reaching
+// into Settings.tsx (the only other current call site) per the "don't
+// touch unrelated code" scope of the extraction PR; hoist to a shared
+// lib/styles.ts if a third call site lands.
+const destructiveActionClass =
+  'bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive';
+
 const goalSchema = z.object({
   year: z.number().int().min(MIN_YEAR).max(MAX_YEAR),
-  target_amount: z.number().min(0),
+  // The backend treats `target_amount: 0` as a delete (there is no
+  // separate DELETE route). A user pressing Enter on the default form
+  // would silently destroy an existing goal — so reject empty/zero at
+  // the schema level. Real deletion goes through the row's Delete
+  // button + AlertDialog instead.
+  target_amount: z
+    .number({ error: 'Enter a target greater than 0' })
+    .positive('Target must be greater than 0'),
 });
 type GoalValues = z.infer<typeof goalSchema>;
 
@@ -60,9 +85,29 @@ function SavingsSection() {
     resolver: zodResolver(goalSchema),
     defaultValues: {
       year: new Date().getFullYear(),
-      target_amount: 0,
+      // `undefined` (not `0`) so the field renders blank and a no-op
+      // submit triggers the schema validator, not a silent
+      // PUT target_amount=0 (which would delete an existing goal).
+      target_amount: undefined as unknown as number,
     },
   });
+
+  const [confirmDelete, setConfirmDelete] = useState<SavingsGoal | null>(null);
+
+  // The form's `year` field. Watched so the dialog can surface a
+  // replace-existing warning when the picked year already has a goal.
+  // PUT /savings-goals/{year} is upsert — without this clue the user
+  // would silently overwrite a prior target. `useWatch` (vs
+  // `form.watch`) is React-Compiler-safe and doesn't trigger the
+  // `react-hooks/incompatible-library` advisory.
+  const watchedYear = useWatch({ control: form.control, name: 'year' });
+  const existingGoal = useMemo(
+    () =>
+      typeof watchedYear === 'number' && Number.isFinite(watchedYear)
+        ? goals.find((g) => g.year === watchedYear)
+        : undefined,
+    [goals, watchedYear],
+  );
 
   const fetchGoals = useCallback(async () => {
     const data = await api.get<SavingsGoal[]>('savings-goals');
@@ -84,13 +129,20 @@ function SavingsSection() {
   }
 
   async function onAdd(values: GoalValues) {
+    // Capture the clash flag at submit time — the warning was visible
+    // when the user committed, so the toast/UX should reflect the
+    // action they actually took (replace vs add), not whatever the
+    // post-refetch state turns out to be.
+    const isReplace = goals.some((g) => g.year === values.year);
     try {
       await api.put(`savings-goals/${values.year}`, {
         target_amount: values.target_amount,
       });
       form.reset();
       setAddOpen(false);
-      toast.success('Savings goal added');
+      toast.success(
+        isReplace ? 'Savings goal replaced' : 'Savings goal added',
+      );
       refreshGoals();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to add goal');
@@ -128,7 +180,9 @@ function SavingsSection() {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add Savings Goal</DialogTitle>
+              <DialogTitle>
+                {existingGoal ? 'Replace Savings Goal' : 'Add Savings Goal'}
+              </DialogTitle>
               <DialogDescription>
                 Set a yearly savings target.
               </DialogDescription>
@@ -166,6 +220,22 @@ function SavingsSection() {
                     </FormItem>
                   )}
                 />
+                {existingGoal && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" aria-hidden="true" />
+                    <AlertTitle>
+                      You already have a goal for {existingGoal.year}
+                    </AlertTitle>
+                    <AlertDescription>
+                      Saving will replace your current{' '}
+                      {formatCurrency(
+                        existingGoal.target_amount,
+                        baseCurrency,
+                      )}{' '}
+                      target for {existingGoal.year}.
+                    </AlertDescription>
+                  </Alert>
+                )}
                 <FormField
                   control={form.control}
                   name="target_amount"
@@ -184,7 +254,7 @@ function SavingsSection() {
                           onChange={(e) =>
                             field.onChange(
                               e.target.value === ''
-                                ? 0
+                                ? undefined
                                 : Number(e.target.value),
                             )
                           }
@@ -196,7 +266,9 @@ function SavingsSection() {
                   )}
                 />
                 <DialogFooter>
-                  <Button type="submit">Add Goal</Button>
+                  <Button type="submit">
+                    {existingGoal ? 'Replace Goal' : 'Add Goal'}
+                  </Button>
                 </DialogFooter>
               </form>
             </Form>
@@ -238,7 +310,7 @@ function SavingsSection() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => void handleDelete(g)}
+                      onClick={() => setConfirmDelete(g)}
                       aria-label={`Delete ${g.year} goal`}
                     >
                       Delete
@@ -250,6 +322,39 @@ function SavingsSection() {
           </Table>
         )}
       </CardContent>
+      <AlertDialog
+        open={confirmDelete !== null}
+        onOpenChange={(open) => {
+          if (!open) setConfirmDelete(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete savings goal?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Remove the{' '}
+              {confirmDelete
+                ? formatCurrency(confirmDelete.target_amount, baseCurrency)
+                : ''}{' '}
+              target for {confirmDelete?.year}. You can add a new goal for{' '}
+              {confirmDelete?.year} later.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className={destructiveActionClass}
+              onClick={() => {
+                const goal = confirmDelete;
+                setConfirmDelete(null);
+                if (goal) void handleDelete(goal);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Card>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   Zap,
@@ -14,7 +14,9 @@ import {
   LogOut,
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
+import { useTrashCount } from '../hooks/useTrashCount';
 import { isAdmin } from '@/lib/roles';
+import { Badge } from '@/components/ui/badge';
 import { Logo } from '@/components/Logo';
 import { LogoWordmark } from '@/components/LogoWordmark';
 import {
@@ -37,6 +39,12 @@ interface MenuItem {
   end?: boolean;
   /** When true, the item is only rendered for admin users. */
   adminOnly?: boolean;
+  /**
+   * Optional numeric badge rendered next to the label (expanded
+   * sidebar only). When undefined or 0, no badge is drawn — the
+   * sidebar stays calm by default.
+   */
+  badge?: number;
 }
 
 const menuItems: MenuItem[] = [
@@ -51,14 +59,6 @@ const menuItems: MenuItem[] = [
   { path: '/categories', label: 'Categories', icon: Tag },
 ];
 
-// Admin-only recovery surface. Kept in its own group below the main
-// menu so it sits visually adjacent to Settings — both are operator
-// tools — rather than mixing it into the day-to-day navigation and
-// cluttering the sidebar for members who never see it.
-const adminItems: MenuItem[] = [
-  { path: '/trash', label: 'Trash', icon: Trash2, adminOnly: true },
-];
-
 const generalItems: MenuItem[] = [
   { path: '/settings', label: 'Settings', icon: SettingsIcon },
 ];
@@ -66,6 +66,34 @@ const generalItems: MenuItem[] = [
 export function Sidebar() {
   const { user, logout } = useAuth();
   const admin = isAdmin(user);
+  // Tombstoned-transaction count for the Trash badge. Gated on
+  // `admin` so non-admin sessions don't issue a 403. The hook is
+  // safe to call unconditionally — it bails internally when
+  // `enabled` is false.
+  const { count: trashCount } = useTrashCount(admin);
+
+  // Admin-only recovery surface. Kept in its own group below the main
+  // menu so it sits visually adjacent to Settings — both are operator
+  // tools — rather than mixing it into the day-to-day navigation and
+  // cluttering the sidebar for members who never see it.
+  //
+  // Computed inside the component (vs module scope) because the Trash
+  // badge needs the live `trashCount` from the hook. `useMemo` keeps
+  // the array reference stable across renders that don't change the
+  // count — guards against a future `React.memo` on `SidebarLink`
+  // silently busting on a fresh-each-render `item` prop.
+  const adminItems: MenuItem[] = useMemo(
+    () => [
+      {
+        path: '/trash',
+        label: 'Trash',
+        icon: Trash2,
+        adminOnly: true,
+        badge: trashCount,
+      },
+    ],
+    [trashCount],
+  );
   // Hide the admin section entirely for non-admins so a member never
   // even has the link rendered in the DOM. The backend still enforces
   // 403 on the underlying routes — this is purely UX cleanup. Every
@@ -254,10 +282,27 @@ function SidebarLink({
   expanded: boolean;
 }) {
   const Icon = item.icon;
+  // Badge is shown only in the expanded sidebar — the collapsed
+  // sidebar is icon-only and has no room for a number next to the
+  // label (user picked "next to label" placement).
+  const showBadge =
+    expanded && item.badge !== undefined && item.badge > 0;
+  // Visible value is capped at "99+" so a 3+ digit count can't widen
+  // the badge and push the row out of alignment. aria-label below
+  // keeps the real number so screen readers stay accurate.
+  const displayBadge =
+    item.badge !== undefined && item.badge > 99 ? '99+' : item.badge;
+  // aria-label overrides the link's text-derived accessible name so
+  // SR users hear "Trash, 7 items" instead of the bare concatenation
+  // "Trash 7". Singular at exactly 1.
+  const ariaLabel = showBadge
+    ? `${item.label}, ${item.badge} item${item.badge === 1 ? '' : 's'}`
+    : undefined;
   const link = (
     <NavLink
       to={item.path}
       end={item.end}
+      aria-label={ariaLabel}
       className={({ isActive }) =>
         cn(
           'flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
@@ -270,6 +315,14 @@ function SidebarLink({
       <span className={expanded ? 'truncate' : 'sr-only'}>
         {item.label}
       </span>
+      {showBadge && (
+        <Badge
+          variant="secondary"
+          className="ml-auto h-5 min-w-[1.25rem] px-1.5 text-xs tabular-nums"
+        >
+          {displayBadge}
+        </Badge>
+      )}
     </NavLink>
   );
   if (expanded) return link;

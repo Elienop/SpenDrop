@@ -485,7 +485,7 @@ describe('Budgets page', () => {
 
       // shadcn Dialog replaces the old window.confirm — assert on the
       // dialog body and the "Keep editing" / "Discard changes" buttons.
-      const dialog = await screen.findByRole('dialog');
+      const dialog = await screen.findByRole('alertdialog');
       expect(dialog).toHaveTextContent(/1 unsaved change/i);
       expect(dialog).toHaveTextContent(/2025/);
 
@@ -503,7 +503,7 @@ describe('Budgets page', () => {
       ).toBeInTheDocument();
       // Dialog is dismissed.
       await waitFor(() =>
-        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument(),
       );
     });
 
@@ -744,7 +744,7 @@ describe('Budgets page', () => {
 
       // Discard dialog is shown; no refetch happened yet.
       expect(
-        await screen.findByText(/discard unsaved budget changes/i),
+        await screen.findByText(/discard unsaved changes/i),
       ).toBeInTheDocument();
       expect(mockedApi.get).not.toHaveBeenCalledWith(
         'category-budgets?year=2026&month=7',
@@ -776,7 +776,7 @@ describe('Budgets page', () => {
       await user.click(await screen.findByRole('option', { name: '2025' }));
 
       expect(
-        await screen.findByText(/discard unsaved budget changes/i),
+        await screen.findByText(/discard unsaved changes/i),
       ).toBeInTheDocument();
       expect(mockedApi.get).not.toHaveBeenCalledWith(
         'category-budgets?year=2025&month=4',
@@ -889,6 +889,29 @@ describe('Budgets page', () => {
   describe('in-app navigation guard', () => {
     beforeEach(asAdmin);
 
+    afterEach(() => {
+      // The popstate-guard effect pushes a sentinel into window.history
+      // when dirty. RTL's cleanup unmounts the component (which removes
+      // the popstate listener and triggers our own sentinel cleanup),
+      // but if a test errored before unmount completed, sentinel
+      // entries may linger. Drain them so a later test calling real
+      // history.back() doesn't fall through our debris.
+      //
+      // Bounded — happy-dom's history.back() doesn't reliably decrement
+      // when there's nothing to go back to, so an unbounded while can
+      // OOM the worker.
+      for (let i = 0; i < 8; i++) {
+        if (
+          typeof window === 'undefined' ||
+          !(window.history.state as { spendropBudgetsGuard?: boolean } | null)
+            ?.spendropBudgetsGuard
+        ) {
+          break;
+        }
+        window.history.back();
+      }
+    });
+
     test('sidebar navigation with dirty budgets is intercepted by discard dialog', async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       // Render a sidebar-style anchor alongside Budgets so the
@@ -918,7 +941,7 @@ describe('Budgets page', () => {
 
       await user.click(screen.getByTestId('sidebar-link'));
 
-      const dialog = await screen.findByRole('dialog');
+      const dialog = await screen.findByRole('alertdialog');
       expect(dialog).toHaveTextContent(/1 unsaved change/i);
       expect(dialog).toHaveTextContent(/Transactions/);
 
@@ -928,7 +951,7 @@ describe('Budgets page', () => {
       );
       expect(april().value).toBe('4000');
       await waitFor(() =>
-        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument(),
       );
     });
 
@@ -957,7 +980,7 @@ describe('Budgets page', () => {
       // No dirty edits → no dialog, nav proceeds normally (browser-
       // level; MemoryRouter doesn't actually follow <a>, but the
       // absence of the dialog is what we're asserting).
-      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
     });
 
     // NOTE: The page-level nav guard sums both editor sections' dirty
@@ -971,5 +994,41 @@ describe('Budgets page', () => {
     // ("changing the month with unsaved edits opens the discard
     // dialog instead of wiping") already proves the dirty count
     // reaches the inner-panel dialog, which uses the same memo.
+
+    test('browser back (popstate) with dirty edits opens the discard prompt', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const april = () =>
+        screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+      await waitFor(() => expect(april().value).toBe('3000'));
+
+      await user.clear(april());
+      await user.type(april(), '4000');
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
+        ).toBeInTheDocument();
+      });
+
+      // Fire a popstate (browser Back / Forward / mobile swipe). The
+      // page's sentinel effect has pushed a duplicate history entry
+      // while dirty; the synthetic event below simulates the browser
+      // popping it.
+      window.dispatchEvent(new PopStateEvent('popstate', { state: null }));
+
+      const dialog = await screen.findByRole('alertdialog');
+      expect(dialog).toHaveTextContent(/1 unsaved change/i);
+      expect(dialog).toHaveTextContent(/the previous page/i);
+
+      // Cancel → dialog closes, edits stay.
+      await user.click(
+        screen.getByRole('button', { name: /keep editing/i }),
+      );
+      await waitFor(() =>
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument(),
+      );
+      expect(april().value).toBe('4000');
+    });
   });
 });

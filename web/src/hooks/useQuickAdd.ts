@@ -3,6 +3,7 @@ import { api } from '@/api/client';
 import type { Transaction } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import { enqueue, removeQueued } from '@/lib/offline-queue';
+import { TRASH_CHANGED_EVENT } from '@/hooks/useTrashCount';
 
 /**
  * Result of a quick-add submit: either it reached the server (and is undoable
@@ -66,6 +67,9 @@ export function useQuickAdd(): UseQuickAddResult {
   const undo = useCallback(async (outcome: QuickAddOutcome): Promise<void> => {
     if (outcome.status === 'saved') {
       await api.del(`transactions/${outcome.transaction.id}`);
+      // The soft-delete just moved a row into trash — notify the
+      // sidebar badge.
+      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
     } else {
       await removeQueued(outcome.queuedId);
     }

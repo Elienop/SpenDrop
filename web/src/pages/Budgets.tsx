@@ -30,13 +30,15 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import {
   Table,
   TableBody,
@@ -85,12 +87,15 @@ interface DiscardEditsDialogProps {
 /**
  * Shadcn-styled replacement for the native `window.confirm` we used to
  * pop when a user tried to leave the Budgets page (year dropdown, month
- * dropdown, or sidebar navigation) with unsaved budget edits. One dialog
- * for all call sites: the body reads "Discard <N> unsaved change(s)?
- * You are about to leave for <destinationLabel>." and the destructive
- * button wins focus so Enter commits (matching the muscle memory of the
- * old OS dialog). Mirrors <ConfirmPurgeDialog> in Trash.tsx for visual
- * consistency.
+ * dropdown, sidebar navigation, or browser-back) with unsaved budget
+ * edits. One component for all call sites; the body reads "Discard
+ * <N> unsaved change(s)? Leaving for <destinationLabel> will lose
+ * them."
+ *
+ * Uses AlertDialog (not Dialog) so Radix defaults focus to the Cancel
+ * button — Enter dismisses safely. A destructive autoFocus would
+ * destroy edits on a stray keystroke, which is the canonical wrong
+ * default for blocking confirms.
  */
 function DiscardEditsDialog({
   open,
@@ -100,16 +105,16 @@ function DiscardEditsDialog({
   onConfirm,
 }: DiscardEditsDialogProps) {
   return (
-    <Dialog
+    <AlertDialog
       open={open}
       onOpenChange={(isOpen) => {
         if (!isOpen) onCancel();
       }}
     >
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Discard unsaved budget changes?</DialogTitle>
-          <DialogDescription>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+          <AlertDialogDescription>
             You have{' '}
             <span className="font-semibold text-foreground">
               {count} unsaved change{count === 1 ? '' : 's'}
@@ -120,23 +125,21 @@ function DiscardEditsDialog({
             </span>{' '}
             will lose them. Save your budgets first if you want to keep
             them.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button type="button" variant="outline" onClick={onCancel}>
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel onClick={onCancel}>
             Keep editing
-          </Button>
-          <Button
-            type="button"
-            variant="destructive"
+          </AlertDialogCancel>
+          <AlertDialogAction
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90 focus-visible:ring-destructive"
             onClick={onConfirm}
-            autoFocus
           >
             Discard changes
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }
 
@@ -150,15 +153,25 @@ function DiscardEditsDialog({
 const BUDGET_YEARS_AHEAD = 5;
 
 interface MonthlyBudgetsSectionProps {
-  // Parent-held mirror of `dirtyCount`. Lets the Budgets page's nav
-  // guard consult the current dirty state *before* committing a route
-  // change (and before the page unmounts and wipes the in-progress edits
-  // with it). Passed as a ref rather than a callback so keystrokes don't
-  // re-render the parent.
+  // Parent-held mirror of `dirtyCount`. Lets the Budgets page's
+  // click-listener consult the current dirty state *before* committing
+  // a route change (and before the page unmounts and wipes the
+  // in-progress edits with it). Passed as a ref rather than a callback
+  // so keystrokes don't re-render the parent.
   dirtyCountRef?: RefObject<number>;
+  // Reactive companion to `dirtyCountRef` — the page needs an
+  // `isDirty` *state* (not just a ref) to (a) gate the popstate
+  // sentinel effect and (b) pass the live count into the discard
+  // dialog without reading refs during render. The cost is one extra
+  // setState per dirtyCount transition, which only fires when count
+  // crosses an integer boundary, not per keystroke.
+  onDirtyChange?: (count: number) => void;
 }
 
-function MonthlyBudgetsSection({ dirtyCountRef }: MonthlyBudgetsSectionProps) {
+function MonthlyBudgetsSection({
+  dirtyCountRef,
+  onDirtyChange,
+}: MonthlyBudgetsSectionProps) {
   const baseCurrency = useBaseCurrency();
   const initialYear = new Date().getFullYear();
   const [year, setYear] = useState(initialYear);
@@ -380,17 +393,21 @@ function MonthlyBudgetsSection({ dirtyCountRef }: MonthlyBudgetsSectionProps) {
     return count;
   }, [editAmounts]);
 
-  // Mirror `dirtyCount` into the parent's ref so the Budgets-page nav
-  // guard can block leaving with unsaved budget edits. The cleanup
-  // resets to 0 on unmount so a stale count can't block a future nav
-  // after this component is already gone.
+  // Mirror `dirtyCount` into the parent's ref AND into a parent
+  // setState callback. The ref is read by the click-listener (cheap
+  // per-click read), the state by the popstate-sentinel effect (which
+  // needs reactivity to install/uninstall the history.pushState
+  // sentinel based on dirtiness). The cleanup resets both to 0 on
+  // unmount so a stale value can't block a future nav after this
+  // component is already gone.
   useEffect(() => {
-    if (!dirtyCountRef) return;
-    dirtyCountRef.current = dirtyCount;
+    if (dirtyCountRef) dirtyCountRef.current = dirtyCount;
+    onDirtyChange?.(dirtyCount);
     return () => {
-      dirtyCountRef.current = 0;
+      if (dirtyCountRef) dirtyCountRef.current = 0;
+      onDirtyChange?.(0);
     };
-  }, [dirtyCount, dirtyCountRef]);
+  }, [dirtyCount, dirtyCountRef, onDirtyChange]);
 
   // Block accidental browser close / reload while changes are unsaved.
   // The browser always shows its own generic prompt; the `returnValue`
@@ -639,10 +656,12 @@ interface CategoryLimitsSectionProps {
   // they can't trigger a request that would 403.
   admin: boolean;
   // Parent-held mirror of `dirtyCount` — see <MonthlyBudgetsSectionProps>
-  // for the ref-not-callback rationale. Lets the Budgets-page nav guard
+  // for the ref/callback rationale. Lets the Budgets-page click-listener
   // consult this section's dirty state before the page unmounts and
   // silently wipes in-progress edits.
   dirtyCountRef?: RefObject<number>;
+  // Reactive companion — see <MonthlyBudgetsSectionProps>.
+  onDirtyChange?: (count: number) => void;
 }
 
 /**
@@ -661,6 +680,7 @@ interface CategoryLimitsSectionProps {
 function CategoryLimitsSection({
   admin,
   dirtyCountRef,
+  onDirtyChange,
 }: CategoryLimitsSectionProps) {
   const baseCurrency = useBaseCurrency();
   const now = useMemo(() => new Date(), []);
@@ -857,17 +877,17 @@ function CategoryLimitsSection({
     return count;
   }, [editAmounts, expenseCategories]);
 
-  // Mirror `dirtyCount` into the parent's ref so the Budgets-page nav
-  // guard can block leaving with unsaved category-limit edits. The
-  // cleanup resets to 0 on unmount so a stale count can't block a future
-  // nav after this component is already gone.
+  // Mirror `dirtyCount` into the parent's ref AND state callback —
+  // see the parallel comment in MonthlyBudgetsSection for the
+  // ref-and-callback rationale.
   useEffect(() => {
-    if (!dirtyCountRef) return;
-    dirtyCountRef.current = dirtyCount;
+    if (dirtyCountRef) dirtyCountRef.current = dirtyCount;
+    onDirtyChange?.(dirtyCount);
     return () => {
-      dirtyCountRef.current = 0;
+      if (dirtyCountRef) dirtyCountRef.current = 0;
+      onDirtyChange?.(0);
     };
-  }, [dirtyCount, dirtyCountRef]);
+  }, [dirtyCount, dirtyCountRef, onDirtyChange]);
 
   // Block accidental browser close / reload while changes are unsaved.
   // Mirrors <MonthlyBudgetsSection>'s handler; both sections live on
@@ -1081,17 +1101,37 @@ export function Budgets() {
   const admin = isAdmin(user);
   const navigate = useNavigate();
 
-  // Live mirror of each section's dirtyCount so this component can
-  // block a route change without the sections having to re-render the
-  // page on every keystroke. Sections write into these refs via an
-  // effect and reset them on unmount.
+  // Per-section dirtyCount mirrored two ways:
+  //  * `…Ref` is read by the capture-phase anchor-click listener
+  //    (cheap, no re-render per keystroke).
+  //  * `…Dirty` state drives the popstate-sentinel effect (needs
+  //    reactivity to install/uninstall on dirty/clean transitions)
+  //    and the discard-dialog's count display (reading refs at
+  //    render trips react-hooks/refs lint).
+  // Sections call onDirtyChange(count) and write dirtyCountRef.current
+  // from the same effect.
   const monthlyDirtyCountRef = useRef(0);
   const categoryLimitsDirtyCountRef = useRef(0);
+  const [monthlyDirty, setMonthlyDirty] = useState(0);
+  const [catLimitsDirty, setCatLimitsDirty] = useState(0);
+  const dirtyCount = monthlyDirty + catLimitsDirty;
+  const isDirty = dirtyCount > 0;
 
   // Parked target while the discard-edits dialog is open. Storing the
   // target href (rather than a boolean) lets the same dialog name the
   // destination and commit the change on "Discard".
   const [pendingHref, setPendingHref] = useState<string | null>(null);
+  // Separate trigger for the browser-back / forward / swipe-back
+  // discard prompt. Distinct from `pendingHref` because we can't
+  // determine the *href* the user navigated to from a popstate event
+  // (history.state may be ours, the target URL is gone) — we just know
+  // they tried to leave. The two dialogs are siblings and never open
+  // simultaneously (different trigger paths).
+  const [pendingBack, setPendingBack] = useState(false);
+  // True while we're programmatically calling history.go(-2) on
+  // Discard. The popstate handler bails on the inbound event so we
+  // don't re-prompt ourselves into a loop.
+  const selfNavRef = useRef(false);
 
   // Guard in-app navigation (e.g. sidebar NavLinks) when the page has
   // unsaved budget edits. The app uses <BrowserRouter> — not the data
@@ -1148,25 +1188,61 @@ export function Budgets() {
     return ROUTE_LABELS[pathOnly] ?? pathOnly;
   }, [pendingHref]);
 
-  // Live sum of both editors' dirty counts. Reading refs at render
-  // is intentional here — this mirrors the inner section dialogs
-  // which display their live `dirtyCount` useMemo (see Save buttons
-  // above), and matches the pattern that shipped in the pre-extraction
-  // Settings.tsx for months. The lint rule is overzealous on this
-  // specific shape (refs that mirror an effect-flushed count); the
-  // dialog is modal so no concurrent state changes can stale-out the
-  // read before the user clicks Cancel or Discard.
-  const dirtyCount =
-    // eslint-disable-next-line react-hooks/refs
-    monthlyDirtyCountRef.current + categoryLimitsDirtyCountRef.current;
+  // Popstate sentinel: only active while editors are dirty so a fresh
+  // visit to /budgets doesn't pollute history for users who never
+  // edit. The duplicate history entry catches browser Back / Forward
+  // / mobile swipe-back; on Discard we go(-2) through both the
+  // sentinel and the original /budgets entry. The capture-phase click
+  // listener above handles in-app sidebar/NavLink navigation;
+  // together they cover sidebar + browser toolbar + mobile gestures.
+  // Edge cases (Forward through Discard, history.go to an arbitrary
+  // index) are not handled — Discard always sends back exactly two
+  // steps from the current position.
+  useEffect(() => {
+    if (!isDirty) return;
+    window.history.pushState({ spendropBudgetsGuard: true }, '');
+
+    function handler() {
+      if (selfNavRef.current) {
+        selfNavRef.current = false;
+        return;
+      }
+      // Re-push so a subsequent Back also prompts (otherwise the user
+      // could escape after the first Cancel).
+      window.history.pushState({ spendropBudgetsGuard: true }, '');
+      setPendingBack(true);
+    }
+
+    window.addEventListener('popstate', handler);
+    return () => {
+      window.removeEventListener('popstate', handler);
+      // Clean up the sentinel we pushed so the user's next Back leaves
+      // /budgets in one press, not two. The listener is already detached
+      // above so the popstate this fires has no handler — no recursion.
+      // Guarded on `spendropBudgetsGuard` so we only pop when WE own the
+      // current state entry (a programmatic navigate between effect runs
+      // shouldn't have its history touched).
+      if (
+        typeof window !== 'undefined' &&
+        (window.history.state as { spendropBudgetsGuard?: boolean } | null)
+          ?.spendropBudgetsGuard
+      ) {
+        window.history.back();
+      }
+    };
+  }, [isDirty]);
 
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Budgets</h1>
-      <MonthlyBudgetsSection dirtyCountRef={monthlyDirtyCountRef} />
+      <MonthlyBudgetsSection
+        dirtyCountRef={monthlyDirtyCountRef}
+        onDirtyChange={setMonthlyDirty}
+      />
       <CategoryLimitsSection
         admin={admin}
         dirtyCountRef={categoryLimitsDirtyCountRef}
+        onDirtyChange={setCatLimitsDirty}
       />
       <DiscardEditsDialog
         open={pendingHref !== null}
@@ -1180,6 +1256,22 @@ export function Budgets() {
           // re-render after this point to flush the "null" state.
           setPendingHref(null);
           if (href !== null) navigate(href);
+        }}
+      />
+      <DiscardEditsDialog
+        open={pendingBack}
+        count={dirtyCount}
+        destinationLabel="the previous page"
+        onCancel={() => setPendingBack(false)}
+        onConfirm={() => {
+          setPendingBack(false);
+          // Flag the next popstate as self-issued so the handler
+          // doesn't re-prompt before the navigation completes.
+          selfNavRef.current = true;
+          // -2: through the sentinel we pushed AND the original
+          // /budgets history entry, landing where the user actually
+          // wanted to go (one step back from where Budgets opened).
+          window.history.go(-2);
         }}
       />
     </div>

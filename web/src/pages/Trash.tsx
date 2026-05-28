@@ -19,6 +19,7 @@ import type {
 } from '../api/types';
 import { useAuth } from '../hooks/useAuth';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { TRASH_CHANGED_EVENT } from '../hooks/useTrashCount';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -502,6 +503,7 @@ export function Trash() {
         toast.success(
           `Restored "${row.description || '(no description)'}"`,
         );
+        window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
         await fetchTrash();
       } catch (err) {
         toast.error(
@@ -527,6 +529,7 @@ export function Trash() {
           `Purged "${row.description || '(no description)'}"`,
         );
         setPendingPurge(null);
+        window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
         await fetchTrash();
       } catch (err) {
         toast.error(
@@ -552,6 +555,7 @@ export function Trash() {
         `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
       );
       setSelectedIds(new Set());
+      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
       await fetchTrash();
     } catch (err) {
       toast.error(
@@ -577,6 +581,7 @@ export function Trash() {
       // Drop any row-level selection state; the rows it pointed at are
       // about to disappear from the list anyway.
       setSelectedIds(new Set());
+      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
       await fetchTrash();
     } catch (err) {
       toast.error(
@@ -600,6 +605,7 @@ export function Trash() {
       );
       setPendingPurgeAll(false);
       setSelectedIds(new Set());
+      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
       await fetchTrash();
     } catch (err) {
       toast.error(

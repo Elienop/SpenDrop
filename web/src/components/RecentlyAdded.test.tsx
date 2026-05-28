@@ -146,6 +146,42 @@ describe('RecentlyAdded', () => {
     expect(removeQueued).not.toHaveBeenCalled();
   });
 
+  test('deleting a saved row dispatches TRASH_CHANGED_EVENT for the sidebar badge', async () => {
+    apiDel.mockResolvedValueOnce(undefined);
+    const trashListener = vi.fn();
+    window.addEventListener('spendrop-trash-changed', trashListener);
+    try {
+      const user = userEvent.setup();
+      renderPanel([]);
+      await screen.findByText('sdsaved');
+
+      await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+
+      await waitFor(() => expect(trashListener).toHaveBeenCalled());
+    } finally {
+      window.removeEventListener('spendrop-trash-changed', trashListener);
+    }
+  });
+
+  test('deleting a pending (un-synced) row does NOT dispatch TRASH_CHANGED_EVENT', async () => {
+    // Pending rows live in local IndexedDB only — they never reached
+    // the server, so deleting one is not a server tombstone and must
+    // not signal the trash badge.
+    const trashListener = vi.fn();
+    window.addEventListener('spendrop-trash-changed', trashListener);
+    try {
+      const user = userEvent.setup();
+      renderPanel([queued()]);
+      await user.click(
+        screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
+      );
+      await waitFor(() => expect(removeQueued).toHaveBeenCalled());
+      expect(trashListener).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('spendrop-trash-changed', trashListener);
+    }
+  });
+
   test('offline: shows pending + an offline note and never fetches saved', async () => {
     setOnline(false);
     renderPanel([queued()]);
