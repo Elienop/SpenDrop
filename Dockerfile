@@ -31,10 +31,13 @@ EXPOSE 8080
 # Scrape the cheap GET /api/health (200 {"status":"ok"}) — NOT /healthz/data,
 # which runs PRAGMA quick_check + several SELECTs per call and must not be
 # polled sub-10s. busybox wget ships in alpine:3.20 (curl is not installed);
-# --spider does a HEAD-like fetch and -q silences output. start-period=20s
-# covers first-boot migrations/content-hash backfill so the legitimate sweep
-# does not flap unhealthy; ~90s (interval*retries) of failures before unhealthy.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+# --spider does a HEAD-like fetch and -q silences output. start-period=60s
+# covers a large legacy DB's first-boot: the synchronous migration backfill +
+# integrity scan can run well past 20s and would otherwise flap the container
+# unhealthy before the server starts answering. The healthcheck is purely
+# observational under `restart: unless-stopped` (no restart-on-unhealthy), so a
+# generous start-period only delays the first status report, it costs nothing.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
     CMD wget -q --spider http://127.0.0.1:8080/api/health || exit 1
 ENV DB_PATH=/app/data/spendrop.db
 ENV BACKUP_DIR=/app/data/backups

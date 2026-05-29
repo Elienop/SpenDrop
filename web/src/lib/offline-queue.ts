@@ -234,13 +234,14 @@ function isOffline(): boolean {
 
 // --- Replay -----------------------------------------------------------------
 
-let draining = false;
-// Set when a drain is requested while one is already in flight (e.g. a second
-// 'online' event during a flaky reconnect). The active drain re-runs once after
-// it settles if connectivity is still up, so rows skipped by a mid-drain
-// offline blip are not stranded until the next launch. Capped to a single
-// re-run — a fresh external trigger is needed to set it again.
-let rerunRequested = false;
+// Drain in-flight / rerun state is keyed PER USER, not module-global: on a
+// shared device user A's drain must not suppress or mis-target user B's. A
+// userId in `draining` has a drain currently running; a userId in
+// `rerunRequested` had a trigger arrive mid-drain and will be re-drained once —
+// for that SAME user — after its active drain settles. Both are capped to a
+// single re-run per user (a fresh external trigger re-sets it).
+const draining = new Set<number>();
+const rerunRequested = new Set<number>();
 
 export interface DrainResult {
   /** Rows successfully posted to the server and removed from the queue. */
@@ -267,13 +268,14 @@ export async function drainQueue(userId: number): Promise<DrainResult> {
   if (isOffline()) {
     return { synced: 0, remaining: await safeCount(userId) };
   }
-  if (draining) {
-    // A drain is already in flight; ask it to re-run once it settles so this
-    // trigger is not silently dropped.
-    rerunRequested = true;
+  if (draining.has(userId)) {
+    // A drain for THIS user is already in flight; ask it to re-run once it
+    // settles so this trigger is not silently dropped. A different user's drain
+    // is unaffected — its own entry gates it independently.
+    rerunRequested.add(userId);
     return { synced: 0, remaining: await safeCount(userId) };
   }
-  draining = true;
+  draining.add(userId);
   let synced = 0;
   try {
     for (const item of await getAllQueued(userId)) {
@@ -303,16 +305,15 @@ export async function drainQueue(userId: number): Promise<DrainResult> {
     // drainQueue can't slip in between releasing it and this final read.
     return { synced, remaining: await safeCount(userId) };
   } finally {
-    draining = false;
+    draining.delete(userId);
     notify();
-    // If a trigger arrived mid-drain and we are still online, run once more so
-    // rows skipped by a brief offline blip aren't stranded. Consume the flag
-    // before recursing so this stays a single-shot re-run.
-    if (rerunRequested && !isOffline()) {
-      rerunRequested = false;
+    // If a trigger arrived mid-drain for THIS user and we are still online, run
+    // once more so rows skipped by a brief offline blip aren't stranded.
+    // Consume this user's flag before recursing so it stays a single-shot
+    // re-run, and re-drain the SAME user it was requested for.
+    const rerun = rerunRequested.delete(userId);
+    if (rerun && !isOffline()) {
       void drainQueue(userId);
-    } else {
-      rerunRequested = false;
     }
   }
 }

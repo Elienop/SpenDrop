@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
 
+# Serialize release runs so two near-simultaneous pushes to main can't push
+# image vX while the other creates git tag vX+1 (the dry-run version step and
+# the real-tag step are separate, widening that window). cancel-in-progress is
+# false because cancelling a run mid-build/push could orphan a pushed image or a
+# half-created tag — serialize, never interrupt.
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
 jobs:
   # Run the full gate suite (Go build/vet/schema-drift/test, frontend
   # tsc/vitest/eslint, docker build) before anything ships. This is the exact

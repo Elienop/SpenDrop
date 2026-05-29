@@ -20,9 +20,13 @@ import (
 // succeed with no "database is locked" error and the final live count must
 // equal N.
 //
-// This is the behavioral counterpart to the cmd/spendrop openDB pin: it would
-// previously have been able to interleave two writers on two pool connections;
-// the cap removes that race entirely.
+// This is the behavioral counterpart to the cmd/spendrop openDB pin
+// (TestMainDBHandle_PinsMaxOpenConnsToOne in cmd/spendrop/db_test.go asserts
+// the production open path itself sets MaxOpenConnections == 1). Here we both
+// assert the pin is in effect (db.Stats) and exercise the behavior it buys: N
+// writers interleaving on a single connection without a lock error. Removing
+// the SetMaxOpenConns(1) line below makes the db.Stats assertion fail outright,
+// so this test no longer passes vacuously without the pin.
 func TestStore_ConcurrentWritersSerialize_NoLockError(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "serialize.db")
@@ -36,6 +40,12 @@ func TestStore_ConcurrentWritersSerialize_NoLockError(t *testing.T) {
 	// The change under test: pin the handle to a single connection so writers
 	// serialize rather than race two OS connections for the SQLite write lock.
 	db.SetMaxOpenConns(1)
+
+	// Prove the pin is actually in effect — this fails if the line above is
+	// removed, so the test cannot pass without the single-connection cap.
+	if got := db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("MaxOpenConnections = %d, want 1 (single-connection pin not in effect)", got)
+	}
 
 	if err := db.Ping(); err != nil {
 		t.Fatalf("ping test db: %v", err)

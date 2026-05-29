@@ -132,6 +132,71 @@ describe('offline-queue — per-user scoping', () => {
     expect(await countQueued(2)).toBe(1);
   });
 
+  test('an in-flight drain for user A does not suppress a drain for user B', async () => {
+    await enqueue(1, payload({ description: 'alice' }));
+    await enqueue(2, payload({ description: 'bob' }));
+
+    // Hold ONLY alice's POST open. With per-user drain state, bob's drain must
+    // run to completion meanwhile; a module-global flag would make bob's call a
+    // no-op (its row stranded until the next trigger).
+    let releaseAlice!: () => void;
+    const aliceGate = new Promise<void>((resolve) => {
+      releaseAlice = resolve;
+    });
+    post.mockImplementation(async (_path, body) => {
+      if ((body as CreateTransactionInput).description === 'alice') {
+        await aliceGate;
+      }
+      return {} as never;
+    });
+
+    const aliceDrain = drainQueue(1); // in flight, parked on aliceGate
+    const bobResult = await drainQueue(2); // must NOT be gated by alice
+
+    expect(bobResult.synced).toBe(1);
+    expect(await countQueued(2)).toBe(0); // bob synced independently
+
+    releaseAlice();
+    const aliceResult = await aliceDrain;
+    expect(aliceResult.synced).toBe(1);
+    expect(await countQueued(1)).toBe(0);
+  });
+
+  test('a mid-flight rerun re-drains the SAME user it was requested for', async () => {
+    await enqueue(1, payload({ description: 'alice-1' }));
+    await enqueue(2, payload({ description: 'bob-1' }));
+
+    // Park alice's first POST so a second drainQueue(1) lands mid-flight and
+    // flags a rerun for user 1. Enqueue a second alice row during the hold so
+    // the rerun has something to pick up — proving the rerun targets user 1,
+    // not whoever happened to trigger it.
+    let releaseAlice!: () => void;
+    const aliceGate = new Promise<void>((resolve) => {
+      releaseAlice = resolve;
+    });
+    let aliceCalls = 0;
+    post.mockImplementation(async (_path, body) => {
+      if ((body as CreateTransactionInput).description?.startsWith('alice')) {
+        aliceCalls++;
+        if (aliceCalls === 1) await aliceGate;
+      }
+      return {} as never;
+    });
+
+    const aliceDrain = drainQueue(1); // parked on the first alice POST
+    const reentrant = await drainQueue(1); // mid-flight: flags rerun for user 1
+    expect(reentrant.synced).toBe(0);
+    await enqueue(1, payload({ description: 'alice-2' })); // arrives mid-drain
+
+    releaseAlice();
+    await aliceDrain;
+    await new Promise((r) => setTimeout(r, 10)); // let the fire-and-forget rerun settle
+
+    // The rerun re-drained user 1 (picking up alice-2), not user 2.
+    expect(await countQueued(1)).toBe(0);
+    expect(await countQueued(2)).toBe(1); // bob never touched
+  });
+
   test('purgeQueue removes only the target user\'s database', async () => {
     await enqueue(1, payload({ description: 'alice' }));
     await enqueue(2, payload({ description: 'bob' }));
