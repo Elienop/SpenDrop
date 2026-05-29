@@ -174,6 +174,10 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	// We do not rely on this as an optimization for correctness — the
 	// main loop below terminates on its own when the page comes back
 	// empty — it only silences the logs.
+	// Counts ALL un-hashed rows including tombstoned ones: the partial unique
+	// index idx_transactions_content_hash covers tombstoned rows, so they must
+	// be backfilled too. Deliberately no deleted_at filter (see the exemption
+	// note in queries.sql).
 	var pending int64
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM transactions WHERE content_hash IS NULL`,

@@ -171,7 +171,11 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	}
 
 	converted := *req.OriginalAmount / currency.RateToBase
-	// Round to 2 decimal places
+	// Round to 2 decimal places. This is redundant with dollarsToCents (the
+	// single wire-edge rounding chokepoint, cents.go), which re-rounds *100 on
+	// the same scale and always agrees — so it is provably a no-op on the
+	// stored cents. Kept deliberately to avoid churning a money path for zero
+	// behavior change; see audit item h-resolvecurrency-double-round.
 	converted = math.Round(converted*100) / 100
 
 	origAmt = sql.NullFloat64{Float64: *req.OriginalAmount, Valid: true}

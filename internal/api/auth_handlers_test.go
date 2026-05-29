@@ -630,8 +630,9 @@ func TestHandleLogout_DeletesSessionFromDB(t *testing.T) {
 		t.Fatalf("logout failed: %d", logoutRec.Code)
 	}
 
-	// Verify session is gone from DB
-	_, err := q.GetSession(context.Background(), sessionToken)
+	// Verify session is gone from DB. Sessions are stored hashed, so look up
+	// by the hash of the plaintext cookie value.
+	_, err := q.GetSession(context.Background(), auth.HashSessionToken(sessionToken))
 	if err != sql.ErrNoRows {
 		t.Errorf("expected session to be deleted from DB, got err: %v", err)
 	}
@@ -648,6 +649,110 @@ func TestHandleLogout_NoCookie_Returns200(t *testing.T) {
 	// Should still return 200 gracefully even without a cookie
 	if rec.Code != http.StatusOK {
 		t.Errorf("expected 200, got %d", rec.Code)
+	}
+}
+
+// --- session-token hashing at rest ---
+
+// TestSetSessionCookie_StoresHashNotPlaintext verifies the cookie value handed
+// to the browser is never the value stored in sessions.token: the DB holds only
+// the SHA-256 hash, so a database/backup leak cannot yield replayable cookies.
+func TestSetSessionCookie_StoresHashNotPlaintext(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
+	regRec := httptest.NewRecorder()
+	h.handleRegister(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("register failed: %d body=%s", regRec.Code, regRec.Body.String())
+	}
+
+	var cookieValue string
+	for _, c := range regRec.Result().Cookies() {
+		if c.Name == "session" {
+			cookieValue = c.Value
+			break
+		}
+	}
+	if cookieValue == "" {
+		t.Fatal("no session cookie set on register")
+	}
+
+	// The raw cookie value must NOT be the stored token.
+	var rawCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM sessions WHERE token = ?`, cookieValue).Scan(&rawCount); err != nil {
+		t.Fatalf("count raw token: %v", err)
+	}
+	if rawCount != 0 {
+		t.Error("sessions.token stored the raw cookie value — a DB leak would be directly replayable")
+	}
+
+	// The stored token must be HashSessionToken(cookieValue).
+	var hashCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM sessions WHERE token = ?`, auth.HashSessionToken(cookieValue)).Scan(&hashCount); err != nil {
+		t.Fatalf("count hashed token: %v", err)
+	}
+	if hashCount != 1 {
+		t.Errorf("expected exactly one session row keyed by the token hash, got %d", hashCount)
+	}
+}
+
+// TestSessionLookup_AcceptsPlaintextCookie_RejectsRawDBValue proves that a
+// request bearing the plaintext cookie authenticates, while a request bearing
+// the raw DB-stored value (the hash) does not — i.e. a leaked DB row is not a
+// directly-replayable cookie.
+func TestSessionLookup_AcceptsPlaintextCookie_RejectsRawDBValue(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
+	regRec := httptest.NewRecorder()
+	h.handleRegister(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("register failed: %d body=%s", regRec.Code, regRec.Body.String())
+	}
+
+	var cookieValue string
+	for _, c := range regRec.Result().Cookies() {
+		if c.Name == "session" {
+			cookieValue = c.Value
+			break
+		}
+	}
+	if cookieValue == "" {
+		t.Fatal("no session cookie set on register")
+	}
+	storedHash := auth.HashSessionToken(cookieValue)
+
+	protected := auth.RequireAuth(q)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Plaintext cookie authenticates.
+	okReq := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	okReq.AddCookie(&http.Cookie{Name: "session", Value: cookieValue})
+	okRec := httptest.NewRecorder()
+	protected.ServeHTTP(okRec, okReq)
+	if okRec.Code != http.StatusOK {
+		t.Errorf("plaintext cookie should authenticate, got %d", okRec.Code)
+	}
+
+	// The raw DB-stored value (the hash) must NOT authenticate. It is 64 hex
+	// chars so it passes the length check, exercising the lookup path itself.
+	if len(storedHash) != 64 {
+		t.Fatalf("expected 64-char hash, got %d", len(storedHash))
+	}
+	badReq := httptest.NewRequest(http.MethodGet, "/api/test", nil)
+	badReq.AddCookie(&http.Cookie{Name: "session", Value: storedHash})
+	badRec := httptest.NewRecorder()
+	protected.ServeHTTP(badRec, badReq)
+	if badRec.Code != http.StatusUnauthorized {
+		t.Errorf("raw DB-stored hash must not be a replayable cookie, got %d", badRec.Code)
 	}
 }
 

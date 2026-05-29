@@ -277,6 +277,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		// style-src keeps 'unsafe-inline' as a conscious accepted risk: shadcn/
+		// Radix components rely on inline style="" attributes (popover/dialog
+		// positioning, CSS-variable animations) that no CSP hash or nonce can
+		// practically cover. The risk is style injection, not script execution
+		// — script-src is locked to 'self'. Do not re-flag without a Radix-wide
+		// inline-style audit.
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'")
 		if !insecureModeEnabled() {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
