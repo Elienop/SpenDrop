@@ -119,6 +119,14 @@ ON CONFLICT(code) DO UPDATE SET
 --   * CountAllTransactions: the live/deleted split used by operator tools.
 -- When adding a new transactions read, place it in queries.sql (not raw
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
+--
+-- Two INTENTIONAL raw reads live OUTSIDE this file and also see tombstones,
+-- by design: latestTransactionWriteAt (health_handlers.go) reports the true
+-- last-write watermark (a soft-delete is a write that bumps updated_at), and
+-- the content_hash backfill pre-count (content_hash.go) must count every
+-- un-hashed row including tombstoned ones because the partial unique index
+-- idx_transactions_content_hash covers them. Both are deliberate, not
+-- invariant violations.
 
 -- name: CreateTransaction :one
 -- Phase 3.1b: the legacy REAL columns (amount, original_amount) were dropped

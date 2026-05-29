@@ -54,7 +54,9 @@ type dumbRow struct {
 // Contract (must match reports_handlers.go:handleReportIncomeExpenses):
 //
 //  1. Window lower bound: first day of the month that is months-1
-//     calendar months before `now`, formatted "YYYY-MM-01".
+//     calendar months before the first day of `now`'s month, formatted
+//     "YYYY-MM-01". `now` is normalized to first-of-month before any
+//     AddDate so a day>=29 anchor cannot overflow a shorter target month.
 //  2. Window upper bound: last day of `now`'s month, computed as
 //     time.Date(year, month+1, 0, ...) and formatted "YYYY-MM-DD".
 //  3. A row is in-window iff its date-only representation (NOT its
@@ -69,8 +71,9 @@ type dumbRow struct {
 //     categories table has a CHECK constraint — so any other value in
 //     the test generator is a bug, not runtime data.
 //  6. The output has exactly `months` entries, ordered earliest month
-//     first, using the same `now.AddDate(0, -i, 0)` loop the handler
-//     does so the slot list is bit-for-bit identical.
+//     first, using the same `base.AddDate(0, -i, 0)` loop the handler
+//     does (where base is the first day of `now`'s month), so the slot
+//     list is bit-for-bit identical.
 //  7. Dollars are computed once at the wire edge via centsToDollars,
 //     exactly as the handler does, so a JSON round-trip produces
 //     identical float values on both sides.
@@ -78,18 +81,21 @@ type dumbRow struct {
 // DO NOT call from production handlers; this is the metamorphic
 // reference implementation.
 func dumbIncomeExpenses(rows []dumbRow, now time.Time, months int) []incomeExpenseEntry {
-	// Mirror the handler's window construction exactly. earliest is
-	// `months-1` calendar months before `now`, the first day of that
-	// month becomes the inclusive lower bound, and the last day of
-	// `now`'s month becomes the inclusive upper bound. Using %d-%02d-01
-	// instead of time.Format so the string is byte-for-byte identical
-	// to the handler's fmt.Sprintf call on the same inputs.
-	earliest := now.AddDate(0, -(months - 1), 0)
+	// Mirror the handler's window construction exactly. First normalize to
+	// the first day of `now`'s month so AddDate cannot overflow a short
+	// month (the handler does the same — see reports_handlers.go). earliest
+	// is `months-1` calendar months before that base, the first day of that
+	// month becomes the inclusive lower bound, and the last day of `now`'s
+	// month becomes the inclusive upper bound. Using %d-%02d-01 instead of
+	// time.Format so the string is byte-for-byte identical to the handler's
+	// fmt.Sprintf call on the same inputs.
+	base := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC)
+	earliest := base.AddDate(0, -(months - 1), 0)
 	dateFrom := fmt.Sprintf("%d-%02d-01", earliest.Year(), earliest.Month())
 	// time.Date(y, m+1, 0, ...) rolls the day-zero of the next month
 	// back to the last day of this month, independent of month length
 	// or leap years — standard Go idiom that the handler also uses.
-	dateTo := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
+	dateTo := time.Date(base.Year(), base.Month()+1, 0, 0, 0, 0, 0, time.UTC).Format("2006-01-02")
 
 	type key struct{ y, m int }
 	type bucket struct {
@@ -133,7 +139,7 @@ func dumbIncomeExpenses(rows []dumbRow, now time.Time, months int) []incomeExpen
 
 	entries := make([]incomeExpenseEntry, 0, months)
 	for i := months - 1; i >= 0; i-- {
-		t := now.AddDate(0, -i, 0)
+		t := base.AddDate(0, -i, 0)
 		y, m := t.Year(), int(t.Month())
 		entry := incomeExpenseEntry{Year: y, Month: m}
 		if b, ok := buckets[key{y, m}]; ok {

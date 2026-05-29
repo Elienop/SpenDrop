@@ -205,6 +205,16 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusNotFound, "transaction not found")
 			return
 		}
+		if database.IsContentHashUniqueViolation(err) {
+			// A newer live row was re-imported with identical content while
+			// this row sat in the trash; flipping deleted_at back to NULL
+			// re-enters the partial unique index and collides. Surface an
+			// actionable 409 instead of an opaque 500 — the user can purge
+			// this trashed copy or edit the live copy to distinguish them,
+			// then retry. Nothing changed, so skip checkpoint reverification.
+			writeError(w, http.StatusConflict, "cannot restore: a newer transaction with identical date, amount, description, and category already exists. Purge this trashed copy or edit the existing one, then retry.")
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "failed to restore transaction")
 		return
 	}
@@ -280,8 +290,16 @@ type batchRestoreRequest struct {
 // trash are silently skipped — this matches the delete-batch contract
 // where the caller cannot always know the exact state of every id it
 // submitted and should not have the whole batch fail because of stragglers.
+//
+// Conflicted counts ids that could not be restored because a newer live
+// row was re-imported with the same content_hash while the id sat in the
+// trash. Those ids are skipped (the rest of the batch still commits) so
+// the frontend can surface "restored N, M could not be restored (a newer
+// copy already exists)". The field is additive JSON — older clients that
+// don't read it are unaffected.
 type batchRestoreResponse struct {
-	Restored int `json:"restored"`
+	Restored   int `json:"restored"`
+	Conflicted int `json:"conflicted"`
 }
 
 // handleBatchRestoreTransactions serves POST /api/transactions/restore-batch.
@@ -335,6 +353,7 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	}()
 
 	restored := 0
+	conflicted := 0
 	for _, id := range req.IDs {
 		err := h.txnStore.RestoreTx(r.Context(), tx, user.ID, id)
 		if err == nil {
@@ -343,6 +362,21 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		}
 		if errors.Is(err, sql.ErrNoRows) {
 			// Already live / missing — skip and continue the batch.
+			continue
+		}
+		if database.IsContentHashUniqueViolation(err) {
+			// A live row was re-imported with the same content_hash while
+			// this id sat in the trash, so restoring it would re-enter the
+			// partial unique index and collide. SQLite aborts only the
+			// failing UPDATE (default ON CONFLICT ABORT), not the
+			// surrounding tx, so the *sql.Tx stays usable for the remaining
+			// ids and the final Commit. We skip this one straggler and keep
+			// restoring the rest — never roll back the whole undo batch for
+			// a single recoverable collision (the CLAUDE.md collision-
+			// tolerance invariant). RestoreTx writes its audit row only
+			// after a successful RestoreTransaction, so no partial audit
+			// row leaks for the skipped id.
+			conflicted++
 			continue
 		}
 		writeError(w, http.StatusInternalServerError, "failed to restore transactions")
@@ -364,14 +398,17 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
 
-	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored})
+	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored, Conflicted: conflicted})
 }
 
 // restoreAllResponse is the JSON output for POST /api/transactions/restore-all.
 // Mirrors batchRestoreResponse so the frontend can share a render path for
-// both the "selected" and "all pages" bulk-restore results.
+// both the "selected" and "all pages" bulk-restore results — including the
+// Conflicted count for ids whose content_hash now collides with a re-imported
+// live row (skipped rather than failing the whole call).
 type restoreAllResponse struct {
-	Restored int `json:"restored"`
+	Restored   int `json:"restored"`
+	Conflicted int `json:"conflicted"`
 }
 
 // handleRestoreAllTransactions serves POST /api/transactions/restore-all —
@@ -432,6 +469,7 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 	}()
 
 	restored := 0
+	conflicted := 0
 	for _, id := range ids {
 		err := h.txnStore.RestoreTx(ctx, tx, user.ID, id)
 		if err == nil {
@@ -441,6 +479,15 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		if errors.Is(err, sql.ErrNoRows) {
 			// Race: the row became live (or was purged) between the
 			// snapshot and this inner call. Skip and keep going.
+			continue
+		}
+		if database.IsContentHashUniqueViolation(err) {
+			// Same recoverable collision as batch-restore: a re-imported
+			// live row now owns this id's content_hash. SQLite aborts only
+			// the failing UPDATE, so the tx stays usable; skip this id and
+			// keep restoring the rest rather than rolling back the whole
+			// undo (CLAUDE.md collision-tolerance invariant).
+			conflicted++
 			continue
 		}
 		writeError(w, http.StatusInternalServerError, "failed to restore transactions")
@@ -458,7 +505,7 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		h.verifyAffectedCheckpoints(ctx, time.Time{})
 	}
 
-	writeJSON(w, http.StatusOK, restoreAllResponse{Restored: restored})
+	writeJSON(w, http.StatusOK, restoreAllResponse{Restored: restored, Conflicted: conflicted})
 }
 
 // purgeAllResponse is the JSON output for DELETE /api/transactions/trash.

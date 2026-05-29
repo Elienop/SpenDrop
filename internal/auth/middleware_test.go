@@ -56,10 +56,13 @@ func createTestUser(t *testing.T, q *database.Queries, role string) database.Use
 }
 
 // createTestSession creates a session for the given user with the given expiry.
+// `token` is the plaintext cookie value the test will send; sessions are stored
+// hashed (matching production), so we persist HashSessionToken(token) and the
+// middleware re-hashes the incoming cookie to find this row.
 func createTestSession(t *testing.T, q *database.Queries, userID int64, token string, expiresAt time.Time) {
 	t.Helper()
 	err := q.CreateSession(context.Background(), database.CreateSessionParams{
-		Token:     token,
+		Token:     HashSessionToken(token),
 		UserID:    userID,
 		ExpiresAt: expiresAt,
 	})
@@ -134,8 +137,9 @@ func TestRequireAuth_ExpiredSession_DeletesSession(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 
-	// Session should have been deleted
-	_, err := q.GetSession(context.Background(), expiredTokDel)
+	// Session should have been deleted. Sessions are stored hashed, so look up
+	// by the hash of the plaintext token the middleware would have deleted.
+	_, err := q.GetSession(context.Background(), HashSessionToken(expiredTokDel))
 	if err != sql.ErrNoRows {
 		t.Errorf("expected expired session to be deleted, got err: %v", err)
 	}
@@ -276,10 +280,11 @@ func combinedAuthHelper(t *testing.T) (q *database.Queries, bucket *ratelimit.Bu
 	t.Helper()
 	q, _, bucket, stop = setupMiddlewareTest(t)
 	uid, pt := seedUserAndLiveToken(t, q, "alice")
-	// 64 hex chars so RequireAuth's length check passes.
+	// 64 hex chars so RequireAuth's length check passes. Sessions are stored
+	// hashed, so persist the hash and send the plaintext as the cookie.
 	sessionTok := "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
 	if err := q.CreateSession(context.Background(), database.CreateSessionParams{
-		Token:     sessionTok,
+		Token:     HashSessionToken(sessionTok),
 		UserID:    uid,
 		ExpiresAt: time.Now().Add(time.Hour),
 	}); err != nil {

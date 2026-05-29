@@ -145,6 +145,50 @@ func TestHandleExpenseVelocity_Unauthorized(t *testing.T) {
 	}
 }
 
+// --- Phase 2.1 soft-delete invariant: expense-velocity must hide tombstoned rows ---
+
+func TestHandleExpenseVelocity_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	// Expense-type category is required: SumExpensesByDayInMonth joins
+	// categories and filters c.type='expense', so a non-expense sentinel would
+	// be excluded for the wrong reason and the test would pass vacuously.
+	cat := seedTestCategory(t, q, "VelFood", "expense")
+
+	// One live $40 row on Jan 5, one tombstoned sentinel $999 on Jan 6.
+	// If the deleted_at filter is ever dropped from SumExpensesByDayInMonth,
+	// a second daily entry (day=6, daily_total=999) appears and the assertions
+	// below fail loudly.
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-01-05", 40, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2026-01-06", 999, "tombstoned")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/reports/expense-velocity?year=2026&month=1", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleExpenseVelocity(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	current := resp["current"].([]any)
+	if len(current) != 1 {
+		t.Fatalf("expected 1 daily entry (tombstoned day excluded), got %d: %v", len(current), current)
+	}
+	day := current[0].(map[string]any)
+	if got := day["daily_total"].(float64); got != 40 {
+		t.Errorf("daily_total=%v, want 40 (tombstoned 999 must be excluded)", got)
+	}
+	for _, e := range current {
+		if e.(map[string]any)["daily_total"].(float64) == 999 {
+			t.Errorf("velocity aggregate leaked tombstoned sentinel 999: %v", e)
+		}
+	}
+}
+
 func TestHandleSpendingHeatmap_Default(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

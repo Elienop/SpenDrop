@@ -174,6 +174,10 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	// We do not rely on this as an optimization for correctness — the
 	// main loop below terminates on its own when the page comes back
 	// empty — it only silences the logs.
+	// Counts ALL un-hashed rows including tombstoned ones: the partial unique
+	// index idx_transactions_content_hash covers tombstoned rows, so they must
+	// be backfilled too. Deliberately no deleted_at filter (see the exemption
+	// note in queries.sql).
 	var pending int64
 	if err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM transactions WHERE content_hash IS NULL`,
@@ -228,7 +232,7 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 			switch {
 			case err == nil:
 				done++
-			case isContentHashUniqueViolation(err):
+			case IsContentHashUniqueViolation(err):
 				skipped = append(skipped, row.ID)
 			default:
 				return fmt.Errorf("backfill content_hash: update row id=%d: %w", row.ID, err)
@@ -268,7 +272,7 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
-// isContentHashUniqueViolation reports whether err is a UNIQUE constraint
+// IsContentHashUniqueViolation reports whether err is a UNIQUE constraint
 // violation on the partial index idx_transactions_content_hash. This is
 // the exact-and-only error shape the backfill tolerates: any other
 // UNIQUE violation (e.g. on users.username or categories.name) would
@@ -284,7 +288,15 @@ func BackfillContentHashes(ctx context.Context, db *sql.DB) error {
 // tightening the scope. The message format itself is stable: upstream
 // SQLite emits it from sqlite3.c as "UNIQUE constraint failed: %s.%s",
 // not driver-side, so a mattn version bump cannot silently change it.
-func isContentHashUniqueViolation(err error) bool {
+//
+// It is exported so the api layer can reuse this single detection
+// chokepoint on the trash-restore path: restoring a tombstoned row whose
+// content_hash now collides with a separately re-imported live row must
+// be skipped-and-reported, not surfaced as an opaque 500 / batch rollback.
+// The substring check survives the fmt.Errorf("restore transaction: %w", …)
+// wrap in TransactionStore.Restore/RestoreTx because err.Error() includes
+// the wrapped text.
+func IsContentHashUniqueViolation(err error) bool {
 	if err == nil {
 		return false
 	}

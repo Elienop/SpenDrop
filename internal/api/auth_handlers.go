@@ -55,8 +55,12 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userI
 
 	ttl := getSessionTTL()
 	expiresAt := time.Now().Add(ttl)
+	// Store only the SHA-256 hash of the token, never the raw cookie value, so
+	// a database/backup leak cannot yield directly-replayable session cookies
+	// (mirrors the API-token at-rest design). The plaintext token is handed to
+	// the browser below and re-hashed on every lookup in authenticateSession.
 	err = h.queries.CreateSession(r.Context(), database.CreateSessionParams{
-		Token:     token,
+		Token:     auth.HashSessionToken(token),
 		UserID:    userID,
 		ExpiresAt: expiresAt,
 	})
@@ -255,6 +259,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.queries.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
+		// Run a dummy bcrypt comparison so the user-miss path pays the same
+		// hash cost as a wrong-password attempt, closing the timing oracle
+		// that would otherwise distinguish known from unknown usernames.
+		auth.DummyCheckPassword()
 		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return
@@ -289,8 +297,9 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 	cookie, err := r.Cookie("session")
 	if err == nil {
-		// Best-effort delete; ignore errors (token may already be gone)
-		h.queries.DeleteSession(r.Context(), cookie.Value)
+		// Best-effort delete; ignore errors (token may already be gone).
+		// Sessions are stored hashed, so hash the cookie value before deleting.
+		h.queries.DeleteSession(r.Context(), auth.HashSessionToken(cookie.Value))
 	}
 
 	http.SetCookie(w, &http.Cookie{

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import type {
   DashboardSummary,
@@ -27,8 +27,15 @@ export function useDashboard(
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
+  // Monotonic generation token for out-of-order response handling: a fast
+  // period change re-runs this effect and issues a fresh trio; without this
+  // guard a slower earlier trio could resolve last and overwrite the current
+  // period. We bump per run and ignore any continuation whose gen is stale.
+  // (Same pattern as useTrashCount/useRecentTransactions.)
+  const genRef = useRef(0);
 
   useEffect(() => {
+    const gen = ++genRef.current;
     setFetching(true);
     setError('');
 
@@ -43,14 +50,17 @@ export function useDashboard(
       api.get<{ categories: CategoryBreakdownItem[] }>(`dashboard/categories${params}`),
     ])
       .then(([summaryData, trendData, categoriesData]) => {
+        if (gen !== genRef.current) return; // stale trio, newer period in flight
         setSummary(summaryData);
         setTrend(trendData.trend);
         setCategories(categoriesData.categories);
       })
       .catch((err) => {
+        if (gen !== genRef.current) return; // ignore stale errors too
         setError(err instanceof Error ? err.message : 'Failed to load dashboard');
       })
       .finally(() => {
+        if (gen !== genRef.current) return; // don't clear flags for a stale run
         setLoading(false);
         setFetching(false);
       });

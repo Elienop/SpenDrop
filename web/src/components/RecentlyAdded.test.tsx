@@ -84,9 +84,13 @@ function setOnline(value: boolean): void {
   Object.defineProperty(navigator, 'onLine', { configurable: true, value });
 }
 
+// The offline queue is namespaced per user; pending-row delete/undo target it.
+const RU = 7;
+
 function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
   return render(
     <RecentlyAdded
+      userId={RU}
       pending={pending}
       categories={categories}
       baseCode="USD"
@@ -130,7 +134,7 @@ describe('RecentlyAdded', () => {
       screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
     );
 
-    await waitFor(() => expect(removeQueued).toHaveBeenCalledWith(1));
+    await waitFor(() => expect(removeQueued).toHaveBeenCalledWith(RU, 1));
     expect(apiDel).not.toHaveBeenCalled();
     expect(toastSuccess).toHaveBeenCalled();
   });
@@ -224,7 +228,8 @@ describe('RecentlyAdded', () => {
 
     opts.action?.onClick();
     await waitFor(() => expect(enqueue).toHaveBeenCalled());
-    expect(enqueue.mock.calls[0][0]).toMatchObject({
+    expect(enqueue.mock.calls[0][0]).toBe(RU);
+    expect(enqueue.mock.calls[0][1]).toMatchObject({
       description: 'sdpending',
       amount: 22.22,
     });
@@ -261,6 +266,7 @@ describe('RecentlyAdded', () => {
 
     rerender(
       <RecentlyAdded
+        userId={RU}
         pending={[]}
         categories={categories}
         baseCode="USD"

@@ -65,6 +65,13 @@ describe('BulkEditDialog', () => {
     ).toBeDisabled();
   });
 
+  test('bulk-edit dialog exposes an accessible description', () => {
+    renderDialog();
+    expect(screen.getByRole('dialog')).toHaveAccessibleDescription(
+      /only the fields you change/i,
+    );
+  });
+
   test('Apply enables when category is changed', async () => {
     const user = userEvent.setup();
     renderDialog();

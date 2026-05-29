@@ -36,6 +36,11 @@ interface RecentRow {
 }
 
 interface RecentlyAddedProps {
+  /**
+   * The authenticated user's id — the offline queue is namespaced per user, so
+   * pending-row delete/undo must target this user's database.
+   */
+  userId: number;
   /** The offline write queue (from useOfflineQueue) — not yet on the server. */
   pending: QueuedTransaction[];
   /** Used to resolve a pending row's category id to a name. */
@@ -55,6 +60,7 @@ interface RecentlyAddedProps {
  * rows show (saved history lives on the server) plus an offline note.
  */
 export function RecentlyAdded({
+  userId,
   pending,
   categories,
   baseCode,
@@ -109,7 +115,7 @@ export function RecentlyAdded({
   const handleDelete = (row: RecentRow): void => {
     if (row.kind === 'pending') {
       const { payload } = row;
-      void removeQueued(row.refId)
+      void removeQueued(userId, row.refId)
         .then(() => {
           toast.success('Removed', {
             duration: PENDING_UNDO_MS,
@@ -117,7 +123,7 @@ export function RecentlyAdded({
               ? {
                   label: 'Undo',
                   onClick: () =>
-                    void enqueue(payload).catch(() =>
+                    void enqueue(userId, payload).catch(() =>
                       toast.error('Could not restore'),
                     ),
                 }

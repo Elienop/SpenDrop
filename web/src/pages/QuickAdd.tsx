@@ -27,6 +27,7 @@ import { useCurrencies } from '@/hooks/useCurrencies';
 import { useDescriptionHistory } from '@/hooks/useDescriptionHistory';
 import { useQuickAdd, type QuickAddOutcome } from '@/hooks/useQuickAdd';
 import { useOfflineQueue } from '@/hooks/useOfflineQueue';
+import { useAuth } from '@/hooks/useAuth';
 import { parseQuickEntry } from '@/lib/quick-parse';
 import { toCreatePayload } from '@/lib/currency';
 import { formatCurrency } from '@/lib/format';
@@ -87,8 +88,9 @@ export function QuickAdd() {
     rateFor,
     loading: currenciesLoading,
   } = useCurrencies();
+  const { user } = useAuth();
   const { create, undo, saving } = useQuickAdd();
-  const { pending, count: pendingCount } = useOfflineQueue();
+  const { pending, count: pendingCount } = useOfflineQueue(user?.id);
   const historyDescriptions = useDescriptionHistory();
 
   // Expense categories only (quick-add captures spending). Surface the
@@ -562,12 +564,15 @@ export function QuickAdd() {
           </p>
         )}
 
-        <RecentlyAdded
-          pending={pending}
-          categories={categories}
-          baseCode={baseCode}
-          refreshKey={recentRefreshKey}
-        />
+        {user && (
+          <RecentlyAdded
+            userId={user.id}
+            pending={pending}
+            categories={categories}
+            baseCode={baseCode}
+            refreshKey={recentRefreshKey}
+          />
+        )}
       </main>
 
       <footer className="sticky bottom-0 flex flex-col gap-2 border-t border-border bg-background px-4 py-4 pb-[env(safe-area-inset-bottom)]">

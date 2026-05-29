@@ -3,6 +3,7 @@ import { api } from '@/api/client';
 import type { Transaction } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import { enqueue, removeQueued } from '@/lib/offline-queue';
+import { useAuth } from '@/hooks/useAuth';
 import { TRASH_CHANGED_EVENT } from '@/hooks/useTrashCount';
 
 /**
@@ -45,14 +46,23 @@ export interface UseQuickAddResult {
  * than risk a duplicate — `POST /api/transactions` has no content-hash dedup.
  */
 export function useQuickAdd(): UseQuickAddResult {
+  const { user } = useAuth();
   const [saving, setSaving] = useState(false);
+
+  // /quick mounts behind ProtectedRoute, so `user` is non-null wherever create/
+  // undo run. The offline queue is namespaced per user (so a stale session can
+  // never replay another account's captures), so the id is required.
+  const userId = user?.id;
 
   const create = useCallback(
     async (input: CreateTransactionInput): Promise<QuickAddOutcome> => {
+      if (userId === undefined) {
+        throw new Error('Cannot save a transaction without an authenticated user');
+      }
       setSaving(true);
       try {
         if (typeof navigator !== 'undefined' && navigator.onLine === false) {
-          const queuedId = await enqueue(input);
+          const queuedId = await enqueue(userId, input);
           return { status: 'queued', queuedId };
         }
         const transaction = await api.post<Transaction>('transactions', input);
@@ -61,19 +71,22 @@ export function useQuickAdd(): UseQuickAddResult {
         setSaving(false);
       }
     },
-    [],
+    [userId],
   );
 
-  const undo = useCallback(async (outcome: QuickAddOutcome): Promise<void> => {
-    if (outcome.status === 'saved') {
-      await api.del(`transactions/${outcome.transaction.id}`);
-      // The soft-delete just moved a row into trash — notify the
-      // sidebar badge.
-      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
-    } else {
-      await removeQueued(outcome.queuedId);
-    }
-  }, []);
+  const undo = useCallback(
+    async (outcome: QuickAddOutcome): Promise<void> => {
+      if (outcome.status === 'saved') {
+        await api.del(`transactions/${outcome.transaction.id}`);
+        // The soft-delete just moved a row into trash — notify the
+        // sidebar badge.
+        window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
+      } else if (userId !== undefined) {
+        await removeQueued(userId, outcome.queuedId);
+      }
+    },
+    [userId],
+  );
 
   return { create, undo, saving };
 }

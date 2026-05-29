@@ -64,6 +64,12 @@ describe('AutocompleteInput — desktop (fine pointer)', () => {
     expect(input).toHaveAttribute('aria-autocomplete', 'inline');
   });
 
+  test('desktop combobox does not set aria-controls (inline ghost has no popup)', () => {
+    render(<ControlledAutocomplete suggestions={['groceries']} />);
+    const input = screen.getByRole('combobox');
+    expect(input).not.toHaveAttribute('aria-controls');
+  });
+
   test('shows ghost tail when typed prefix matches a suggestion', async () => {
     const user = userEvent.setup();
     render(<ControlledAutocomplete suggestions={['groceries', 'gas']} />);
@@ -214,6 +220,34 @@ describe('AutocompleteInput — touch (coarse pointer)', () => {
       expect(screen.getByRole('option', { name: 'gas' })).toBeInTheDocument();
       expect(screen.getByRole('option', { name: 'gym' })).toBeInTheDocument();
       expect(screen.queryByRole('option', { name: 'zinc' })).not.toBeInTheDocument();
+      // cmdk already provides the listbox role on CommandList — document it.
+      expect(screen.getByRole('listbox')).toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+
+  test('aria-controls is absent until the popover opens, then references the popup', async () => {
+    const restore = mockCoarsePointer(true);
+    try {
+      const user = userEvent.setup();
+      render(<ControlledAutocomplete suggestions={['groceries', 'gas']} />);
+      const input = screen.getByRole('combobox');
+
+      // Closed: no controlled popup yet.
+      expect(input).not.toHaveAttribute('aria-controls');
+
+      await user.type(input, 'g');
+      await waitFor(() => {
+        expect(screen.getByRole('option', { name: 'groceries' })).toBeInTheDocument();
+      });
+
+      // Open: aria-controls now points at the popover container that wraps the
+      // cmdk listbox, and aria-expanded is true.
+      expect(input).toHaveAttribute('aria-expanded', 'true');
+      const controls = input.getAttribute('aria-controls');
+      expect(controls).toBeTruthy();
+      expect(document.getElementById(controls as string)).not.toBeNull();
     } finally {
       restore();
     }

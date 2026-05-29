@@ -44,8 +44,9 @@ func seedTokenTestUser(t *testing.T, h *Handler, username string) (database.User
 	if err != nil {
 		t.Fatalf("generate session: %v", err)
 	}
+	// Sessions are stored hashed; persist the hash, send the plaintext cookie.
 	if err := h.queries.CreateSession(context.Background(), database.CreateSessionParams{
-		Token:     token,
+		Token:     auth.HashSessionToken(token),
 		UserID:    user.ID,
 		ExpiresAt: time.Now().Add(time.Hour),
 	}); err != nil {

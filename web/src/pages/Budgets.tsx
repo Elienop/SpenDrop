@@ -564,38 +564,38 @@ function MonthlyBudgetsSection({
             </span>
           </div>
         </div>
-        {(preBulkSnapshot !== null || dirtyCount > 0) && (
-          // `flex-wrap` so the row breaks on narrow viewports rather
-          // than crushing the badge into the dirty-count span;
-          // `sm:ml-auto` on the dirty-count pushes it to the right
-          // edge on >= sm so the bulk-change pill stays anchored left.
-          <div className="flex flex-wrap items-center gap-3">
-            {preBulkSnapshot !== null && (
-              <>
-                <Badge variant="secondary">Bulk change applied</Badge>
-                <Button
-                  type="button"
-                  variant="link"
-                  size="sm"
-                  onClick={handleUndoBulk}
-                  disabled={saving}
-                  className="h-auto p-0"
-                >
-                  Undo
-                </Button>
-              </>
-            )}
-            {dirtyCount > 0 && (
-              <span
-                className={`text-sm sm:ml-auto ${ATTENTION_TEXT_CLASS}`}
-                aria-live="polite"
-                data-testid="budget-dirty-indicator"
+        {/* `flex-wrap` so the row breaks on narrow viewports rather than
+            crushing the badge into the dirty-count span; `sm:ml-auto` on the
+            dirty-count pushes it to the right edge on >= sm so the bulk-change
+            pill stays anchored left. The wrapper is always mounted so the
+            aria-live region below is in the DOM before its content changes —
+            assistive tech needs that to announce the first 0->1 transition. */}
+        <div className="flex flex-wrap items-center gap-3">
+          {preBulkSnapshot !== null && (
+            <>
+              <Badge variant="secondary">Bulk change applied</Badge>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                onClick={handleUndoBulk}
+                disabled={saving}
+                className="h-auto p-0"
               >
-                {dirtyCount} unsaved change{dirtyCount === 1 ? '' : 's'}
-              </span>
-            )}
-          </div>
-        )}
+                Undo
+              </Button>
+            </>
+          )}
+          {/* Always-mounted live region; only the text is gated so AT observes
+              a content mutation rather than a node insertion on 0->1. */}
+          <span
+            className={`text-sm sm:ml-auto ${dirtyCount > 0 ? ATTENTION_TEXT_CLASS : ''}`}
+            aria-live="polite"
+            data-testid="budget-dirty-indicator"
+          >
+            {dirtyCount > 0 ? `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}` : ''}
+          </span>
+        </div>
       </CardHeader>
       <CardContent>
         <form
@@ -993,13 +993,16 @@ function CategoryLimitsSection({
               </SelectContent>
             </Select>
           </div>
-          {admin && dirtyCount > 0 && (
+          {admin && (
+            // Always-mounted live region (gated only by admin so the region
+            // exists before the first dirty edit); only the text is conditional
+            // so assistive tech announces the first 0->1 transition.
             <span
-              className={`self-end text-sm ${ATTENTION_TEXT_CLASS}`}
+              className={`self-end text-sm ${dirtyCount > 0 ? ATTENTION_TEXT_CLASS : ''}`}
               aria-live="polite"
               data-testid="category-limits-dirty-indicator"
             >
-              {dirtyCount} unsaved change{dirtyCount === 1 ? '' : 's'}
+              {dirtyCount > 0 ? `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}` : ''}
             </span>
           )}
         </div>

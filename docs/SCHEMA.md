@@ -438,6 +438,11 @@ CREATE INDEX idx_balance_checkpoints_date ON balance_checkpoints(date);
 -- soft-delete automatically removes the row from the index, and a
 -- restore re-inserts it — the query filter and the index filter
 -- therefore agree about which rows are "visible" at every point.
+-- One residual hole: if the same statement is RE-IMPORTED as a new
+-- live row while the original sits tombstoned, both carry the same
+-- hash and a later restore of the tombstoned row collides on this
+-- index. That collision is handled (skipped-and-reported, never a
+-- hard failure) on the restore path in trash_handlers.go.
 --
 -- The index is global, not per-user. SpenDrop is a household ledger
 -- where transactions imported by one member should deduplicate against

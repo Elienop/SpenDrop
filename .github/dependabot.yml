@@ -1,0 +1,11 @@
+# Keeps the SHA-pinned GitHub Actions (in .github/workflows/*.yml) fresh:
+# Dependabot opens weekly PRs that bump each pinned commit SHA to the latest
+# release of its tracked major version, with the `# vX` comment updated, so the
+# pins do not silently rot. Without this, SHA pinning trades a supply-chain
+# risk for a staleness risk.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly

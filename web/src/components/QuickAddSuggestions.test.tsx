@@ -13,7 +13,7 @@ describe('QuickAddSuggestions', () => {
       />,
     );
     expect(
-      screen.queryByRole('listbox', { name: /description suggestions/i }),
+      screen.queryByRole('group', { name: /description suggestions/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -22,7 +22,7 @@ describe('QuickAddSuggestions', () => {
       <QuickAddSuggestions suggestions={[]} query="lun" onPick={() => {}} />,
     );
     expect(
-      screen.queryByRole('listbox', { name: /description suggestions/i }),
+      screen.queryByRole('group', { name: /description suggestions/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -35,11 +35,11 @@ describe('QuickAddSuggestions', () => {
       />,
     );
     // Top 3 matches only.
-    expect(screen.getByRole('option', { name: 'lunch' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'lunchbox' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'Lunar' })).toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'lung' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('option', { name: 'coffee' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'lunch' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'lunchbox' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Lunar' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'lung' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'coffee' })).not.toBeInTheDocument();
   });
 
   test('skips an exact-match-only entry (no point suggesting what is already typed)', () => {
@@ -51,7 +51,7 @@ describe('QuickAddSuggestions', () => {
       />,
     );
     expect(
-      screen.queryByRole('listbox', { name: /description suggestions/i }),
+      screen.queryByRole('group', { name: /description suggestions/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -65,10 +65,10 @@ describe('QuickAddSuggestions', () => {
     );
     // 'lunch' (exact, no extension) is skipped, but 'lunchbox' (extends it) stays.
     expect(
-      screen.queryByRole('option', { name: 'lunch' }),
+      screen.queryByRole('button', { name: 'lunch' }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole('option', { name: 'lunchbox' }),
+      screen.getByRole('button', { name: 'lunchbox' }),
     ).toBeInTheDocument();
   });
 
@@ -82,9 +82,8 @@ describe('QuickAddSuggestions', () => {
         onPick={onPick}
       />,
     );
-    // The <li role="option"> wraps a <Button> — clicking the option dispatches
-    // on the <li>, which doesn't bubble to the button's onClick. Click the
-    // button explicitly (the chip the user actually taps).
+    // The chips are now plain <Button>s (no <li role="option"> wrapper), so the
+    // click target IS the interactive button.
     await user.click(screen.getByRole('button', { name: 'lunch' }));
     expect(onPick).toHaveBeenCalledWith('lunch');
   });
@@ -101,5 +100,44 @@ describe('QuickAddSuggestions', () => {
     const kbd = screen.getByText('Tab');
     expect(kbd.tagName).toBe('KBD');
     expect(kbd.className).toMatch(/md:inline-block/);
+  });
+
+  test('exposes no listbox/option roles (it is a button group, not a combobox)', () => {
+    render(
+      <QuickAddSuggestions
+        suggestions={['lunch', 'lunchbox']}
+        query="lu"
+        onPick={() => {}}
+      />,
+    );
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(screen.queryAllByRole('option')).toHaveLength(0);
+    expect(screen.getAllByRole('button').length).toBeGreaterThan(0);
+  });
+
+  test('the suggestion group has an accessible name', () => {
+    render(
+      <QuickAddSuggestions
+        suggestions={['lunch', 'lunchbox']}
+        query="lu"
+        onPick={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole('group', { name: /description suggestions/i }),
+    ).toBeInTheDocument();
+  });
+
+  test('chip meets the 44px touch target (min-h-11)', () => {
+    render(
+      <QuickAddSuggestions
+        suggestions={['lunch', 'coffee']}
+        query="lu"
+        onPick={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole('button', { name: 'lunch' }).className,
+    ).toMatch(/min-h-11/);
   });
 });

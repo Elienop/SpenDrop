@@ -88,14 +88,19 @@ func authenticateSession(w http.ResponseWriter, r *http.Request, queries *databa
 		return nil, false
 	}
 
-	session, err := queries.GetSession(r.Context(), cookie.Value)
+	// Sessions are stored as the SHA-256 hash of the cookie value, so hash the
+	// incoming plaintext cookie before every lookup/delete. A leaked DB row
+	// holds only the hash and is not a directly-replayable cookie.
+	tokenHash := HashSessionToken(cookie.Value)
+
+	session, err := queries.GetSession(r.Context(), tokenHash)
 	if err != nil {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return nil, false
 	}
 
 	if session.ExpiresAt.Before(time.Now()) {
-		queries.DeleteSession(r.Context(), cookie.Value)
+		queries.DeleteSession(r.Context(), tokenHash)
 		http.Error(w, `{"error":"session expired"}`, http.StatusUnauthorized)
 		return nil, false
 	}

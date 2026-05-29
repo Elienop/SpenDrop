@@ -426,13 +426,12 @@ describe('Budgets page', () => {
         screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
       await waitFor(() => expect(april().value).toBe('3000'));
 
-      // Baseline: Save button shows plain label, no dirty indicator.
+      // Baseline: Save button shows plain label; the dirty live region is
+      // always mounted (for reliable AT announcement) but empty when clean.
       expect(
         screen.getByRole('button', { name: /^Save Budgets$/ }),
       ).toBeInTheDocument();
-      expect(
-        screen.queryByTestId('budget-dirty-indicator'),
-      ).not.toBeInTheDocument();
+      expect(screen.getByTestId('budget-dirty-indicator').textContent).toBe('');
 
       // Edit April → dirty count = 1.
       await user.clear(april());
@@ -458,6 +457,32 @@ describe('Budgets page', () => {
       expect(
         screen.getByTestId('budget-dirty-indicator').textContent,
       ).toMatch(/2 unsaved changes$/);
+    });
+
+    test('announces first unsaved change via a persistently-mounted live region', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const april = () =>
+        screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+      await waitFor(() => expect(april().value).toBe('3000'));
+
+      // Region exists and is a polite live region while clean (empty text), so
+      // assistive tech observes a content mutation on the first 0->1 change.
+      const region = screen.getByTestId('budget-dirty-indicator');
+      expect(region.textContent).toBe('');
+      expect(region).toHaveAttribute('aria-live', 'polite');
+
+      // One edit → the SAME node (not a freshly-inserted one) gains the text.
+      await user.clear(april());
+      await user.type(april(), '3500');
+
+      await waitFor(() => {
+        expect(screen.getByTestId('budget-dirty-indicator').textContent).toMatch(
+          /1 unsaved change$/,
+        );
+      });
+      expect(screen.getByTestId('budget-dirty-indicator')).toBe(region);
     });
 
     test('year change with unsaved changes opens discard dialog and respects Keep editing', async () => {
@@ -586,9 +611,12 @@ describe('Budgets page', () => {
           screen.getByRole('button', { name: /^Save Budgets$/ }),
         ).toBeInTheDocument();
       });
-      expect(
-        screen.queryByTestId('budget-dirty-indicator'),
-      ).not.toBeInTheDocument();
+      // The live region stays mounted after save; its text clears to empty.
+      await waitFor(() => {
+        expect(screen.getByTestId('budget-dirty-indicator').textContent).toBe(
+          '',
+        );
+      });
     });
 
     test('annual total reflects per-row edits', async () => {
