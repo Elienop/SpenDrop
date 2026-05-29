@@ -5,48 +5,74 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  # Run the full gate suite (Go build/vet/schema-drift/test, frontend
+  # tsc/vitest/eslint, docker build) before anything ships. This is the exact
+  # same reusable workflow pr.yml invokes, so a push-to-main release is gated
+  # on identical checks to a PR — no more shipping :latest after only
+  # `go test -race`. `needs: gates` on the release job blocks the release
+  # unless every gate passed.
+  gates:
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: gates
     runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
+      # 1. COMPUTE the next version + changelog only — dry_run means NO git tag
+      #    is created yet. The outputs (new_tag/new_version/changelog) are still
+      #    populated, so we can build with the computed tag before committing
+      #    to it. This closes the orphaned-tag hole: previously the tag was
+      #    created BEFORE build/push, so a build/push failure left a published
+      #    semver tag (and release) pointing at an image that never reached
+      #    ghcr, and the next push bumped from that orphan, skipping a version.
+      - name: Compute next version (dry run)
+        id: version
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
         with:
-          go-version-file: go.mod
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          default_bump: patch
+          tag_prefix: v
+          dry_run: true
 
-      - name: Run tests
-        run: go test -race -count=1 ./...
+      # 2. Build with the computed tag.
+      - name: Build the Docker image
+        run: |
+          docker build . --file Dockerfile \
+            --tag ghcr.io/elienop/spendrop:${{ steps.version.outputs.new_tag }} \
+            --tag ghcr.io/elienop/spendrop:latest
 
-      - name: Bump version and create tag
+      # 3. Push. If THIS fails, no git tag and no release exist yet, so the next
+      #    push retries cleanly from the prior good tag (no skipped version).
+      - name: Push the Docker image to GitHub Container Registry
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker push ghcr.io/elienop/spendrop:${{ steps.version.outputs.new_tag }}
+          docker push ghcr.io/elienop/spendrop:latest
+
+      # 4. Image is live → NOW create + push the real git tag. No commits land
+      #    between the dry run and here within one job run, so the bump is
+      #    recomputed to the same value and the git tag stays in lockstep with
+      #    the pushed image tag.
+      - name: Create and push tag
         id: tag
-        uses: mathieudutour/github-tag-action@v6.2
+        uses: mathieudutour/github-tag-action@a22cf08638b34d5badda920f9daf6e72c477b07b # v6.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           default_bump: patch
           tag_prefix: v
 
-      - name: Build the Docker image
-        run: |
-          docker build . --file Dockerfile \
-            --tag ghcr.io/elienop/spendrop:${{ steps.tag.outputs.new_tag }} \
-            --tag ghcr.io/elienop/spendrop:latest
-
-      - name: Push the Docker image to GitHub Container Registry
-        run: |
-          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker push ghcr.io/elienop/spendrop:${{ steps.tag.outputs.new_tag }}
-          docker push ghcr.io/elienop/spendrop:latest
-
+      # 5. Release last, against the now-existing tag + live image.
       - name: Create a release
-        uses: ncipollo/release-action@v1.20.0
+        uses: ncipollo/release-action@b7eabc95ff50cbeeedec83973935c8f306dfcd0b # v1.20.0
         with:
           name: ${{ steps.tag.outputs.new_tag }}
           tag: ${{ steps.tag.outputs.new_tag }}
-          body: ${{ steps.tag.outputs.changelog }}
+          body: ${{ steps.version.outputs.changelog }}
           generateReleaseNotes: true
