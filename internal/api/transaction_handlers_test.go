@@ -199,6 +199,64 @@ func TestHandleCreateTransaction_ValidInput_Returns201(t *testing.T) {
 	if resp["amount"].(float64) != 50.0 {
 		t.Errorf("expected amount 50, got %v", resp["amount"])
 	}
+	// Money Wire-Edge DTO discipline: the response emits dollars, never *_cents.
+	// A typed-struct decode would zero-fill a renamed field and hide a future
+	// raw-row regression, so assert the cents keys are absent on the raw map.
+	if _, leaked := resp["amount_cents"]; leaked {
+		t.Error("amount_cents must NOT leak in transaction response — frontend reads amount (dollars)")
+	}
+	if _, leaked := resp["original_amount_cents"]; leaked {
+		t.Error("original_amount_cents must NOT leak in transaction response")
+	}
+}
+
+func TestHandleListTransactions_DoesNotLeakAmountCents(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// One base-currency row via the handler so the DTO path is exercised.
+	body := strings.NewReader(`{"date":"2026-04-06","amount":50.00,"description":"USD","category_id":1}`)
+	create := httptest.NewRequest(http.MethodPost, "/api/transactions", body)
+	create = withUser(create, user)
+	h.handleCreateTransaction(httptest.NewRecorder(), create)
+
+	// One foreign-currency row so original_amount(_cents) is populated.
+	// LBP rate 89000 from seed data → 89000/89000 = $1.00, original_amount=89000.
+	fx := strings.NewReader(`{"date":"2026-04-06","original_amount":89000,"original_currency":"LBP","description":"LBP","category_id":1}`)
+	createFx := httptest.NewRequest(http.MethodPost, "/api/transactions", fx)
+	createFx = withUser(createFx, user)
+	h.handleCreateTransaction(httptest.NewRecorder(), createFx)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions", nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleListTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Decode into []map[string]any: a typed-struct decode would zero-fill a
+	// renamed/missing field and hide a *_cents leak. This is the exact decode
+	// the Money Wire-Edge DTO discipline mandates for every money read.
+	var resp struct {
+		Transactions []map[string]any `json:"transactions"`
+	}
+	decodeResponse(t, rec, &resp)
+	if len(resp.Transactions) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(resp.Transactions))
+	}
+	for _, tx := range resp.Transactions {
+		if _, ok := tx["amount"].(float64); !ok {
+			t.Errorf("row missing dollar `amount` float: %v", tx)
+		}
+		if _, leaked := tx["amount_cents"]; leaked {
+			t.Errorf("amount_cents leaked in list response: %v", tx)
+		}
+		if _, leaked := tx["original_amount_cents"]; leaked {
+			t.Errorf("original_amount_cents leaked in list response: %v", tx)
+		}
+	}
 }
 
 func TestHandleCreateTransaction_MissingDate_Returns400(t *testing.T) {

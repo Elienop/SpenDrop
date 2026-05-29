@@ -293,6 +293,47 @@ func TestHandleCreateCheckpoint_HidesTombstoned(t *testing.T) {
 	}
 }
 
+// --- Money wire-edge: checkpoint response emits dollars, never *_cents ---
+
+func TestHandleCreateCheckpoint_DoesNotLeakCents(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_cents", "member")
+	cat := seedTestCategory(t, q, "CentsFood", "expense")
+
+	// $125 live total so the create's inline verify populates actual_amount.
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 50.00, "a")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 75.00, "b")
+
+	body := `{"scope_type":"total","date":"2026-04-30","expected_amount":125.00}`
+	req := httptest.NewRequest(http.MethodPost, "/api/checkpoints", strings.NewReader(body))
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleCreateCheckpoint(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Raw map decode: a typed checkpointResponse decode zero-fills and would
+	// hide a *_cents leak. Money Wire-Edge DTO discipline mandates this shape.
+	var raw map[string]any
+	if err := json.NewDecoder(bytes.NewReader(rec.Body.Bytes())).Decode(&raw); err != nil {
+		t.Fatalf("decode raw: %v", err)
+	}
+	if ea, ok := raw["expected_amount"].(float64); !ok || ea != 125.00 {
+		t.Errorf("expected_amount=%v (ok=%v), want 125.00", raw["expected_amount"], ok)
+	}
+	if aa, ok := raw["actual_amount"].(float64); !ok || aa != 125.00 {
+		t.Errorf("actual_amount=%v (ok=%v), want 125.00", raw["actual_amount"], ok)
+	}
+	if _, leaked := raw["expected_amount_cents"]; leaked {
+		t.Error("expected_amount_cents must NOT leak — frontend reads expected_amount (dollars)")
+	}
+	if _, leaked := raw["actual_amount_cents"]; leaked {
+		t.Error("actual_amount_cents must NOT leak — frontend reads actual_amount (dollars)")
+	}
+}
+
 // --- handleListCheckpoints ---
 
 func TestHandleListCheckpoints_ReturnsHouseholdWide(t *testing.T) {
