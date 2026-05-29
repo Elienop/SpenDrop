@@ -144,6 +144,14 @@ vi.mock('@/components/RecentlyAdded', () => ({
   RecentlyAdded: () => null,
 }));
 
+// QuickAdd (and useQuickAdd) read the authenticated user to namespace the
+// offline queue. Mock useAuth to a fixed member so the tests don't need to
+// mount AuthProvider (whose mount fires an `auth/me` fetch).
+const TEST_USER_ID = 7;
+vi.mock('@/hooks/useAuth', () => ({
+  useAuth: () => ({ user: { id: TEST_USER_ID } }),
+}));
+
 // useDescriptionHistory has its own test; stub it here so QuickAdd tests
 // can deterministically inject a list (or empty) and skip the hook's
 // `transactions?...` fetch path.
@@ -427,7 +435,9 @@ describe('QuickAdd — offline capture', () => {
     // Enqueued locally; the network POST is never attempted while offline.
     await waitFor(() => expect(enqueue).toHaveBeenCalled());
     expect(apiPost).not.toHaveBeenCalled();
-    const [queuedPayload] = enqueue.mock.calls[0];
+    // The queue is namespaced per user: enqueue(userId, payload).
+    const [queuedUserId, queuedPayload] = enqueue.mock.calls[0];
+    expect(queuedUserId).toBe(TEST_USER_ID);
     expect(queuedPayload).toMatchObject({
       amount: 43,
       category_id: 1,

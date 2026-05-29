@@ -17,9 +17,10 @@ export function useOfflineSync(): void {
 
   useEffect(() => {
     if (!user) return;
+    const userId = user.id;
 
     const run = (): void => {
-      void drainQueue()
+      void drainQueue(userId)
         .then(({ synced }) => {
           if (synced > 0) {
             toast.success(

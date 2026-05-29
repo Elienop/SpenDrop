@@ -8,6 +8,7 @@ import {
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
+import { purgeQueue } from '@/lib/offline-queue';
 import type { User } from '../api/types';
 
 interface AuthContextType {
@@ -78,15 +79,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // already killed this session, so the POST rejects. Swallowing it and
     // clearing state in `finally` keeps the client and server in sync
     // instead of leaving a stale user object behind.
+    const uid = user?.id;
     try {
       await api.post('auth/logout');
     } catch {
       // Ignore — the session is gone one way or another.
     } finally {
+      // Purge this user's offline write-queue and the device-global api-lists
+      // Cache so a different account logging in on the same device can never
+      // replay or read the leaving user's data. Best-effort — a failure here
+      // must not block clearing auth state.
+      if (uid !== undefined) {
+        try {
+          await purgeQueue(uid);
+        } catch {
+          // Best-effort hygiene; per-user namespacing already isolates replay.
+        }
+      }
+      try {
+        await caches.delete('spendrop-api-lists');
+      } catch {
+        // The Cache Storage API / service worker may be absent (e.g. tests).
+      }
       setUser(null);
     }
     navigate('/login');
-  }, [navigate]);
+  }, [navigate, user]);
 
   return (
     <AuthContext.Provider value={{ user, loading, login, register, logout }}>

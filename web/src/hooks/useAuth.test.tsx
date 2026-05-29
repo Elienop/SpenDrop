@@ -13,6 +13,13 @@ vi.mock('../api/client', () => {
   };
 });
 
+// Logout purges the leaving user's per-user offline queue. Mock the lib so the
+// test asserts the call without touching IndexedDB.
+const purgeQueue = vi.fn();
+vi.mock('@/lib/offline-queue', () => ({
+  purgeQueue: (...args: unknown[]) => purgeQueue(...args),
+}));
+
 // We'll import after mock setup
 import { api } from '../api/client';
 import { AuthProvider, useAuth } from './useAuth';
@@ -43,13 +50,21 @@ function renderWithProviders(ui: React.ReactElement) {
   );
 }
 
+// The Cache Storage API is absent in happy-dom; stub a deletable spy so the
+// logout purge path has something to call.
+const cachesDelete = vi.fn().mockResolvedValue(true);
+
 describe('useAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    purgeQueue.mockResolvedValue(undefined);
+    cachesDelete.mockResolvedValue(true);
+    vi.stubGlobal('caches', { delete: cachesDelete });
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   test('starts in loading state and checks session on mount', async () => {
@@ -198,5 +213,58 @@ describe('useAuth', () => {
       expect(screen.getByTestId('user')).toHaveTextContent('null');
     });
     expect(mockedApi.post).toHaveBeenCalledWith('auth/logout');
+  });
+
+  test('logout purges the offline queue and api-lists cache for the leaving user', async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      id: 42,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.post.mockResolvedValueOnce(undefined);
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+
+    await user.click(screen.getByText('Logout'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    // The leaving user's offline DB and the device-global api-lists Cache are
+    // purged so a different account on this device can't replay/read them.
+    expect(purgeQueue).toHaveBeenCalledWith(42);
+    expect(cachesDelete).toHaveBeenCalledWith('spendrop-api-lists');
+  });
+
+  test('logout still purges the queue when the logout POST rejects', async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      id: 42,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.post.mockRejectedValueOnce(new Error('Unauthorized'));
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+
+    await user.click(screen.getByText('Logout'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    expect(purgeQueue).toHaveBeenCalledWith(42);
   });
 });
