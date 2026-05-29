@@ -196,11 +196,17 @@ export const AutocompleteInput = forwardRef<
     [isCoarse, ghostActive, match, text, touchOpen, onKeyDown, acceptMatch],
   );
 
-  // Shared aria props on the input
+  // Shared aria props on the input.
+  //
+  // aria-controls is deliberately NOT here: on desktop the only element bearing
+  // listboxId is the sr-only aria-live announcement <span>, not a popup/listbox,
+  // so advertising aria-controls there is misleading (it claims a controlled
+  // popup that does not exist for the inline-ghost pattern). On touch the
+  // popover IS a real controlled region, so the touch branch re-adds
+  // aria-controls inline, gated on `open`.
   const commonAria = {
     role: 'combobox' as const,
     'aria-autocomplete': (isCoarse ? 'list' : 'inline') as 'list' | 'inline',
-    'aria-controls': listboxId,
     autoComplete: 'off' as const,
   };
 
@@ -224,6 +230,10 @@ export const AutocompleteInput = forwardRef<
             onKeyDown={handleKeyDown}
             className={cn(className)}
             aria-expanded={open}
+            // Only advertise the controlled popup while it is actually rendered,
+            // pointed at the PopoverContent container (which wraps cmdk's
+            // role="listbox"). Referencing the popup container is valid ARIA.
+            aria-controls={open ? listboxId : undefined}
             {...commonAria}
             {...props}
           />

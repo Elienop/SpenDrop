@@ -519,7 +519,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     await user.type(input, 'lun');
 
     expect(
-      await screen.findByRole('listbox', { name: /description suggestions/i }),
+      await screen.findByRole('group', { name: /description suggestions/i }),
     ).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'lunch' })).toBeInTheDocument();
     expect(
@@ -546,7 +546,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     await user.type(input, 'test');
 
     expect(
-      await screen.findByRole('listbox', { name: /description suggestions/i }),
+      await screen.findByRole('group', { name: /description suggestions/i }),
     ).toBeInTheDocument();
     // Clean suggestion survives the filter and renders.
     expect(screen.getByRole('button', { name: 'tests' })).toBeInTheDocument();
@@ -586,7 +586,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     const input = screen.getByPlaceholderText(/lunch/i);
     await user.type(input, 'lun');
     expect(
-      await screen.findByRole('listbox', { name: /description suggestions/i }),
+      await screen.findByRole('group', { name: /description suggestions/i }),
     ).toBeInTheDocument();
 
     // Once an amount is parsed out, the suggestion strip vanishes — we don't
@@ -594,7 +594,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     await user.type(input, 'ch 12');
     await waitFor(() => {
       expect(
-        screen.queryByRole('listbox', { name: /description suggestions/i }),
+        screen.queryByRole('group', { name: /description suggestions/i }),
       ).not.toBeInTheDocument();
     });
   });
@@ -608,7 +608,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
 
     const input = screen.getByPlaceholderText(/lunch/i) as HTMLInputElement;
     await user.type(input, 'lun');
-    await screen.findByRole('listbox', { name: /description suggestions/i });
+    await screen.findByRole('group', { name: /description suggestions/i });
 
     // First chip = 'lunch' (prefix match of 'lun', exact-match-no-extension
     // skip does not apply since the typed text is 'lun', not 'lunch').
@@ -626,13 +626,13 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     const input = screen.getByPlaceholderText(/lunch/i);
     await user.type(input, 'lun');
     expect(
-      await screen.findByRole('listbox', { name: /description suggestions/i }),
+      await screen.findByRole('group', { name: /description suggestions/i }),
     ).toBeInTheDocument();
 
     await user.click(screen.getByRole('tab', { name: /tap/i }));
 
     expect(
-      screen.queryByRole('listbox', { name: /description suggestions/i }),
+      screen.queryByRole('group', { name: /description suggestions/i }),
     ).not.toBeInTheDocument();
   });
 });

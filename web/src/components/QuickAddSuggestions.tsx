@@ -49,34 +49,38 @@ export function QuickAddSuggestions({
 
   if (filtered.length === 0) return null;
 
+  // role="group" (not listbox): these are optional tap-accelerators for a
+  // free-text input, not a selection widget. A listbox/combobox would claim a
+  // keyboard model (arrow nav, aria-activedescendant) this strip does not
+  // implement, and would compete with AutocompleteInput's combobox elsewhere.
+  // A labelled group of buttons is the honest, minimal semantics.
   return (
-    <ul
-      role="listbox"
+    <div
+      role="group"
       aria-label="Description suggestions"
       className="flex gap-2 overflow-x-auto"
     >
       {filtered.map((suggestion, idx) => (
-        <li key={suggestion} role="option" aria-selected="false">
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            // h-10 matches the >=44px-ish touch target of nearby CategoryChips.
-            className="h-10 rounded-full px-3 text-sm"
-            onClick={() => onPick(suggestion)}
-          >
-            {suggestion}
-            {idx === 0 && (
-              <kbd
-                aria-hidden="true"
-                className="ml-2 hidden rounded border border-border bg-muted px-1 py-0.5 text-xs font-medium md:inline-block"
-              >
-                Tab
-              </kbd>
-            )}
-          </Button>
-        </li>
+        <Button
+          key={suggestion}
+          type="button"
+          variant="secondary"
+          size="sm"
+          // min-h-11 == 44px, matching CategoryChips' Apple-HIG touch target.
+          className="min-h-11 rounded-full px-3 text-sm"
+          onClick={() => onPick(suggestion)}
+        >
+          {suggestion}
+          {idx === 0 && (
+            <kbd
+              aria-hidden="true"
+              className="ml-2 hidden rounded border border-border bg-muted px-1 py-0.5 text-xs font-medium md:inline-block"
+            >
+              Tab
+            </kbd>
+          )}
+        </Button>
       ))}
-    </ul>
+    </div>
   );
 }

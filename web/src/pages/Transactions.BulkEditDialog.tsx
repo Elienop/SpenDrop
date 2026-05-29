@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -111,6 +112,10 @@ export function BulkEditDialog({
       <DialogContent className="md:max-w-3xl">
         <DialogHeader>
           <DialogTitle>Edit {count} transactions</DialogTitle>
+          <DialogDescription>
+            Only the fields you change are applied. Leave a field untouched to
+            keep its current value on every selected transaction.
+          </DialogDescription>
         </DialogHeader>
         <form
           onSubmit={submit}
