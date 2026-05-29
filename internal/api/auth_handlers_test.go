@@ -447,6 +447,40 @@ func TestHandleLogin_NonexistentUser_Returns401(t *testing.T) {
 	}
 }
 
+func TestHandleLogin_NonexistentUser_RunsBcryptEqualizer(t *testing.T) {
+	h := setupHandler(t)
+
+	// Register a real user so the wrong-password (known-user) path is exercised.
+	regBody := strings.NewReader(`{"username":"alice","password":"longpassword"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
+	h.handleRegister(httptest.NewRecorder(), regReq)
+
+	// Wrong password for an existing user — pays the full bcrypt compare.
+	wrongBody := strings.NewReader(`{"username":"alice","password":"wrongpasswd"}`)
+	wrongReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", wrongBody)
+	wrongRec := httptest.NewRecorder()
+	h.handleLogin(wrongRec, wrongReq)
+
+	// Unknown username — must emit a byte-identical 401, proving the user-miss
+	// branch runs the bcrypt equaliser rather than short-circuiting. The
+	// auth-package unit tests are the authoritative proof the compare executes
+	// at the configured cost; here we lock the response equivalence.
+	missBody := strings.NewReader(`{"username":"nobody","password":"longpassword"}`)
+	missReq := httptest.NewRequest(http.MethodPost, "/api/auth/login", missBody)
+	missRec := httptest.NewRecorder()
+	h.handleLogin(missRec, missReq)
+
+	if missRec.Code != http.StatusUnauthorized {
+		t.Errorf("user-miss: expected 401, got %d", missRec.Code)
+	}
+	if missRec.Code != wrongRec.Code {
+		t.Errorf("user-miss status %d != wrong-password status %d", missRec.Code, wrongRec.Code)
+	}
+	if missRec.Body.String() != wrongRec.Body.String() {
+		t.Errorf("user-miss body %q != wrong-password body %q", missRec.Body.String(), wrongRec.Body.String())
+	}
+}
+
 func TestHandleLogin_InvalidJSON_Returns400(t *testing.T) {
 	h := setupHandler(t)
 

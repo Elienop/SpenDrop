@@ -52,6 +52,35 @@ func CheckPassword(hash, password string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)) == nil
 }
 
+// dummyHash is a bcrypt hash of a throwaway value, used by DummyCheckPassword
+// to equalise login timing on the user-miss path. Generated lazily at the
+// configured bcryptCost so its compare time matches a real wrong-password
+// compare. Never matches any real password.
+var (
+	dummyHashOnce sync.Once
+	dummyHash     []byte
+)
+
+// DummyCheckPassword performs a bcrypt comparison against a fixed dummy hash,
+// paying the same work as CheckPassword without revealing whether a user
+// exists. Always returns false. Callers invoke it on the username-not-found
+// branch of login so both 401 paths cost the same.
+func DummyCheckPassword() bool {
+	dummyHashOnce.Do(func() {
+		authMu.RLock()
+		cost := bcryptCost
+		authMu.RUnlock()
+		// Error is impossible for a fixed short input at a valid cost; if it
+		// ever occurs, dummyHash stays nil and the compare below still runs
+		// (returning an error → false) so the branch never panics.
+		hash, err := bcrypt.GenerateFromPassword([]byte("spendrop-login-timing-equalizer"), cost)
+		if err == nil {
+			dummyHash = hash
+		}
+	})
+	return bcrypt.CompareHashAndPassword(dummyHash, []byte("x")) == nil
+}
+
 func GenerateSessionToken() (string, error) {
 	authMu.RLock()
 	n := tokenBytes

@@ -255,6 +255,10 @@ func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.queries.GetUserByUsername(r.Context(), req.Username)
 	if err != nil {
+		// Run a dummy bcrypt comparison so the user-miss path pays the same
+		// hash cost as a wrong-password attempt, closing the timing oracle
+		// that would otherwise distinguish known from unknown usernames.
+		auth.DummyCheckPassword()
 		h.loginFailureLimiter.Consume(clientIP)
 		writeError(w, http.StatusUnauthorized, "invalid credentials")
 		return

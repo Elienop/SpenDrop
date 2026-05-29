@@ -69,6 +69,34 @@ func TestCheckPassword_WrongPassword(t *testing.T) {
 	}
 }
 
+func TestDummyCheckPassword_UsesConfiguredCost(t *testing.T) {
+	// The dummy hash must be generated at the same bcrypt cost the package is
+	// configured with, otherwise its compare time diverges from real users and
+	// the timing oracle persists at a smaller magnitude.
+	if !DummyCheckPassword() {
+		// Always false in practice — calling it here forces lazy init.
+	}
+	authMu.RLock()
+	want := bcryptCost
+	authMu.RUnlock()
+	got, err := bcrypt.Cost(dummyHash)
+	if err != nil {
+		t.Fatalf("bcrypt.Cost(dummyHash): %v", err)
+	}
+	if got != want {
+		t.Errorf("dummy hash cost = %d, want configured cost %d", got, want)
+	}
+}
+
+func TestDummyCheckPassword_AlwaysFalseAndNoPanic(t *testing.T) {
+	if DummyCheckPassword() {
+		t.Error("expected DummyCheckPassword to return false on first call")
+	}
+	if DummyCheckPassword() {
+		t.Error("expected DummyCheckPassword to return false on repeat call")
+	}
+}
+
 func TestGenerateSessionToken_Returns64CharHex(t *testing.T) {
 	token, err := GenerateSessionToken()
 	if err != nil {
