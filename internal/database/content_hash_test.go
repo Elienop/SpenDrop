@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -330,6 +331,87 @@ func TestGetTransactionByContentHash_HidesTombstoned(t *testing.T) {
 	_, err = q.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true})
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Errorf("expected sql.ErrNoRows after soft-delete, got %v", err)
+	}
+}
+
+// TestIsContentHashUniqueViolation_MatchesWrappedRestoreError pins that the
+// exported detector still fires when the real SQLite UNIQUE error is wrapped
+// with the same fmt.Errorf("restore transaction: %w", …) prefix that
+// TransactionStore.Restore / RestoreTx apply — the api trash-restore path
+// relies on this to map the collision to a 409 / skip-and-count instead of an
+// opaque 500. It also guards the narrow scope: a users.username UNIQUE error
+// must NOT match, so an unrelated constraint violation still surfaces as a
+// real bug.
+func TestIsContentHashUniqueViolation_MatchesWrappedRestoreError(t *testing.T) {
+	q, _ := setupTestDB(t)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, CreateUserParams{
+		Username:     "hashowner",
+		PasswordHash: "$2a$10$fake",
+		DisplayName:  "Hash Owner",
+		Role:         "member",
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	foodID := cats[0].ID
+	foodName := cats[0].Name
+
+	date := time.Date(2026, 2, 1, 0, 0, 0, 0, time.UTC)
+	hash := ComputeContentHash(date, 1500, "Same content", foodName)
+	if _, err := q.CreateTransaction(ctx, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		AmountCents: 1500,
+		Description: "Same content",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{String: hash, Valid: true},
+	}); err != nil {
+		t.Fatalf("seed first row: %v", err)
+	}
+
+	// A second LIVE row with the same content_hash violates the partial
+	// unique index — the exact shape the restore path hits.
+	_, hashErr := q.CreateTransaction(ctx, CreateTransactionParams{
+		UserID:      user.ID,
+		Date:        date,
+		AmountCents: 1500,
+		Description: "Same content",
+		CategoryID:  foodID,
+		ContentHash: sql.NullString{String: hash, Valid: true},
+	})
+	if hashErr == nil {
+		t.Fatal("expected a content_hash UNIQUE violation on the duplicate insert, got nil")
+	}
+	if !IsContentHashUniqueViolation(hashErr) {
+		t.Errorf("unwrapped content_hash error not detected: %v", hashErr)
+	}
+	wrapped := fmt.Errorf("restore transaction: %w", hashErr)
+	if !IsContentHashUniqueViolation(wrapped) {
+		t.Errorf("wrapped content_hash error not detected (the %%w wrap defeated the substring match): %v", wrapped)
+	}
+
+	// A users.username UNIQUE violation must NOT be mistaken for a
+	// content_hash collision — scope stays narrow.
+	_, userErr := q.CreateUser(ctx, CreateUserParams{
+		Username:     "hashowner",
+		PasswordHash: "$2a$10$fake",
+		DisplayName:  "Dup",
+		Role:         "member",
+	})
+	if userErr == nil {
+		t.Fatal("expected a users.username UNIQUE violation on the duplicate user, got nil")
+	}
+	if IsContentHashUniqueViolation(userErr) {
+		t.Errorf("users.username UNIQUE error wrongly matched as content_hash: %v", userErr)
+	}
+	if IsContentHashUniqueViolation(fmt.Errorf("restore transaction: %w", userErr)) {
+		t.Errorf("wrapped users.username UNIQUE error wrongly matched as content_hash: %v", userErr)
 	}
 }
 

@@ -2,15 +2,48 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 )
+
+// seedContentHashRow creates a transaction carrying a content_hash derived
+// from its own fields, mirroring how the import path populates the column.
+// tombstoned controls whether the row is immediately soft-deleted. It is
+// used by the trash-restore collision tests: a tombstoned row keeps its
+// content_hash (SoftDeleteTransaction never clears it) and is invisible to
+// the deleted_at-filtered dedup lookup, so a separately-seeded LIVE row can
+// legitimately own the same hash. Restoring the tombstoned row then re-enters
+// the partial unique index and collides.
+func seedContentHashRow(t *testing.T, q *database.Queries, userID, categoryID int64, date string, amountCents int64, desc, categoryName string, tombstoned bool) database.Transaction {
+	t.Helper()
+	d, _ := time.Parse("2006-01-02", date)
+	hash := database.ComputeContentHash(d, amountCents, desc, categoryName)
+	txn, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:      userID,
+		Date:        d,
+		AmountCents: amountCents,
+		Description: desc,
+		CategoryID:  categoryID,
+		ContentHash: sql.NullString{String: hash, Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("seed content-hash row: %v", err)
+	}
+	if tombstoned {
+		if err := q.SoftDeleteTransaction(context.Background(), txn.ID); err != nil {
+			t.Fatalf("soft-delete content-hash row: %v", err)
+		}
+	}
+	return txn
+}
 
 // The tests in this file cover the Phase 2.2 admin trash endpoints:
 // handleListDeletedTransactions, handleRestoreTransaction,
@@ -324,6 +357,201 @@ func TestHandleRestoreTransaction_InvalidID_Returns400(t *testing.T) {
 	h.handleRestoreTransaction(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("status=%d, want 400", rec.Code)
+	}
+}
+
+// --- content_hash collision on restore (TRASH-RESTORE-HASH-001) ---
+//
+// A tombstoned row keeps its content_hash, but the partial unique index
+// idx_transactions_content_hash excludes tombstoned rows and the dedup
+// lookup filters deleted_at IS NULL — so the same statement can be
+// re-imported as a NEW live row carrying the identical hash. Restoring the
+// tombstoned row then flips deleted_at back to NULL, re-enters the partial
+// index, and hits "UNIQUE constraint failed: transactions.content_hash".
+// The handlers must surface this as an actionable 409 (single) and a
+// skip-and-count "conflicted" (batch / all), never an opaque 500 or a
+// whole-batch rollback.
+
+func TestHandleRestoreTransaction_ContentHashCollision_Returns409(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Tombstoned row (keeps its content_hash) + a separately-seeded LIVE
+	// row with the SAME content (mirrors a re-import while the row was in
+	// the trash). Both use category id=1 ("Food") so the hashes match.
+	tomb := seedContentHashRow(t, q, admin.ID, 1, "2026-04-01", 5000, "lunch", "Food", true)
+	_ = seedContentHashRow(t, q, admin.ID, 1, "2026-04-01", 5000, "lunch", "Food", false)
+
+	if got := countAuditRows(t, db); got != 0 {
+		t.Fatalf("pre-restore audit count=%d, want 0", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/"+fmt.Sprint(tomb.ID)+"/restore", nil)
+	req = withUserAndURLParam(req, admin, "id", fmt.Sprint(tomb.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status=%d, want 409; body=%s", rec.Code, rec.Body.String())
+	}
+	// Body must point the user at the existing/duplicate row.
+	if body := rec.Body.String(); !strings.Contains(strings.ToLower(body), "already exists") {
+		t.Errorf("409 body=%q, want a message mentioning an existing/duplicate transaction", body)
+	}
+
+	// The trashed row stayed in the trash — restore did not partially apply.
+	if got := countTombstonedTransactions(t, db); got != 1 {
+		t.Errorf("tombstone count after 409=%d, want 1 (row stays in trash)", got)
+	}
+	// No restore audit row was written for the failed restore.
+	if got := countAuditRows(t, db); got != 0 {
+		t.Errorf("audit rows after 409=%d, want 0", got)
+	}
+}
+
+func TestHandleBatchRestoreTransactions_SkipsContentHashCollisionRestoresRest(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Three clean tombstoned rows + one tombstoned row whose hash collides
+	// with a separately-seeded live row.
+	c1 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "clean a")
+	c2 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "clean b")
+	c3 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "clean c")
+	colliding := seedContentHashRow(t, q, admin.ID, 1, "2026-04-04", 4000, "dup", "Food", true)
+	_ = seedContentHashRow(t, q, admin.ID, 1, "2026-04-04", 4000, "dup", "Food", false)
+
+	body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d,%d,%d]}`, c1.ID, c2.ID, c3.ID, colliding.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch restore: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp batchRestoreResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 3 {
+		t.Errorf("Restored=%d, want 3", resp.Restored)
+	}
+	if resp.Conflicted != 1 {
+		t.Errorf("Conflicted=%d, want 1", resp.Conflicted)
+	}
+
+	// Only the colliding row remains in the trash.
+	if got := countTombstonedTransactions(t, db); got != 1 {
+		t.Errorf("tombstone count after batch=%d, want 1 (only the colliding row)", got)
+	}
+	// Exactly three restore audit rows — the colliding id wrote none.
+	rows := listAuditRows(t, db)
+	if len(rows) != 3 {
+		t.Fatalf("audit row count=%d, want 3 (colliding id writes none)", len(rows))
+	}
+	for _, r := range rows {
+		if r.Action != database.AuditRestore {
+			t.Errorf("row %d action=%q, want %q", r.TransactionID, r.Action, database.AuditRestore)
+		}
+		if r.TransactionID == colliding.ID {
+			t.Errorf("colliding id %d wrote a restore audit row — it should have been skipped", colliding.ID)
+		}
+	}
+}
+
+func TestHandleBatchRestoreTransactions_CollisionDoesNotPoisonTxForLaterIDs(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	// Order the ids so the colliding id is NOT last. If a UNIQUE violation
+	// poisoned the surrounding *sql.Tx (instead of aborting only the failing
+	// UPDATE), clean2 and clean3 — restored AFTER the collision — would fail
+	// to commit. This pins the SQLite statement-abort assumption.
+	clean1 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "clean 1")
+	colliding := seedContentHashRow(t, q, admin.ID, 1, "2026-04-02", 5000, "dup", "Food", true)
+	_ = seedContentHashRow(t, q, admin.ID, 1, "2026-04-02", 5000, "dup", "Food", false)
+	clean2 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "clean 2")
+	clean3 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-04", 40.0, "clean 3")
+
+	body := strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d,%d,%d]}`, clean1.ID, colliding.ID, clean2.ID, clean3.ID))
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch restore: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp batchRestoreResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 3 {
+		t.Errorf("Restored=%d, want 3 (clean1, clean2, clean3 — clean2/clean3 follow the collision)", resp.Restored)
+	}
+	if resp.Conflicted != 1 {
+		t.Errorf("Conflicted=%d, want 1", resp.Conflicted)
+	}
+
+	// The two clean rows AFTER the collision must be live, proving the tx
+	// stayed usable past the constraint error.
+	for _, id := range []int64{clean2.ID, clean3.ID} {
+		row, err := q.GetTransactionByID(context.Background(), id)
+		if err != nil {
+			t.Fatalf("get row %d: %v", id, err)
+		}
+		if row.DeletedAt.Valid {
+			t.Errorf("row %d (restored after the collision) is still tombstoned — tx was poisoned", id)
+		}
+	}
+	// Only the colliding row remains trashed.
+	if got := countTombstonedTransactions(t, db); got != 1 {
+		t.Errorf("tombstone count=%d, want 1 (only the colliding row)", got)
+	}
+}
+
+func TestHandleRestoreAllTransactions_SkipsContentHashCollision(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "clean a")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "clean b")
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-03", 30.0, "clean c")
+	colliding := seedContentHashRow(t, q, admin.ID, 1, "2026-04-04", 4000, "dup", "Food", true)
+	_ = seedContentHashRow(t, q, admin.ID, 1, "2026-04-04", 4000, "dup", "Food", false)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-all", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleRestoreAllTransactions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restore-all: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp restoreAllResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 3 {
+		t.Errorf("Restored=%d, want 3", resp.Restored)
+	}
+	if resp.Conflicted != 1 {
+		t.Errorf("Conflicted=%d, want 1", resp.Conflicted)
+	}
+
+	if got := countTombstonedTransactions(t, db); got != 1 {
+		t.Errorf("tombstone count after restore-all=%d, want 1 (only the colliding row)", got)
+	}
+	rows := listAuditRows(t, db)
+	if len(rows) != 3 {
+		t.Fatalf("audit row count=%d, want 3 (colliding id writes none)", len(rows))
+	}
+	for _, r := range rows {
+		if r.TransactionID == colliding.ID {
+			t.Errorf("colliding id %d wrote a restore audit row — it should have been skipped", colliding.ID)
+		}
 	}
 }
 
