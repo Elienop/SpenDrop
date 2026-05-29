@@ -119,8 +119,9 @@ func (f *propertyFixture) runProcess(t *rapid.T, rows []importRow) importResult 
 	}
 	defer tx.Rollback()
 	qtx := f.q.WithTx(tx)
+	store := database.NewTransactionStore(f.db, f.q)
 
-	result, _ := processImportRows(context.Background(), qtx, importProcessInput{
+	result, _ := processImportRows(context.Background(), qtx, tx, store, importProcessInput{
 		UserID:            f.userID,
 		Rows:              rows,
 		CategoryMap:       nil,
@@ -465,7 +466,8 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 		defer tx.Rollback()
 		in.UserID = fix.userID
-		result, _ := processImportRows(ctx, fix.q.WithTx(tx), in)
+		store := database.NewTransactionStore(fix.db, fix.q)
+		result, _ := processImportRows(ctx, fix.q.WithTx(tx), tx, store, in)
 		return result
 	}
 

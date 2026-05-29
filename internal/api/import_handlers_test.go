@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -2851,5 +2852,160 @@ func TestHandleImportGetSession_WrongUser_Returns403(t *testing.T) {
 
 	if getRec.Code != http.StatusForbidden {
 		t.Fatalf("expected 403, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+}
+
+// TestHandleImportConfirm_WritesPerRowInsertAudit pins the invariant that
+// imported rows route through TransactionStore so each insert emits a paired
+// transaction_audit row (audit finding: import was the only un-audited
+// transactions writer). Mirrors the count-assertion style used for the
+// single/batch create paths.
+func TestHandleImportConfirm_WritesPerRowInsertAudit(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "auditconfirmer", "member")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Groceries", "42.50", "Food"},
+		{"2026-01-16", "Electric bill", "120.00", "Utilities"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, err := q.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("list categories: %v", err)
+	}
+	catMap := make(map[string]float64)
+	for _, c := range cats {
+		catMap[c.Name] = float64(c.ID)
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+		"category_map":        catMap,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	// Exactly one per-row insert audit row per imported transaction, none
+	// using the bulk-summary sentinel id.
+	var inserts int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transaction_audit WHERE action = ? AND transaction_id != ?`,
+		database.AuditInsert, database.BulkAuditTransactionID,
+	).Scan(&inserts); err != nil {
+		t.Fatal(err)
+	}
+	if inserts != 2 {
+		t.Fatalf("expected 2 per-row insert audit rows, got %d", inserts)
+	}
+
+	// Each audit row must reference a live transactions.id and carry a
+	// non-NULL after_json snapshot.
+	rows, err := db.Query(
+		`SELECT transaction_id, after_json FROM transaction_audit WHERE action = ? AND transaction_id != ?`,
+		database.AuditInsert, database.BulkAuditTransactionID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var txID int64
+		var afterJSON sql.NullString
+		if err := rows.Scan(&txID, &afterJSON); err != nil {
+			t.Fatal(err)
+		}
+		if !afterJSON.Valid {
+			t.Errorf("insert audit row for transaction_id=%d has NULL after_json", txID)
+		}
+		var exists int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM transactions WHERE id = ?`, txID,
+		).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 1 {
+			t.Errorf("audit transaction_id=%d does not match a live transactions row", txID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestProcessImportRows_AuditRollsBackWithData proves the imported data row
+// and its paired audit row commit or roll back together: when the caller's tx
+// is rolled back, neither the transactions row nor the transaction_audit row
+// survives.
+func TestProcessImportRows_AuditRollsBackWithData(t *testing.T) {
+	q, db := setupTestDB(t)
+	user := seedTestUser(t, q, "auditrollback", "member")
+	cat := seedTestCategory(t, q, "RollbackCat", "expense")
+	store := database.NewTransactionStore(db, q)
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+
+	qtx := q.WithTx(tx)
+	result, _ := processImportRows(context.Background(), qtx, tx, store, importProcessInput{
+		UserID: user.ID,
+		Rows: []importRow{
+			{Date: "2026-03-01", Description: "Lunch", Amount: 12.50, Category: cat.Name},
+		},
+		CatNameToID: map[string]int64{
+			strings.ToLower(cat.Name): cat.ID,
+		},
+		CatIDToName: map[int64]string{
+			cat.ID: cat.Name,
+		},
+	})
+	if len(result.Inserted) != 1 {
+		t.Fatalf("expected 1 inserted row, got %d (errored=%v skipped=%v)",
+			len(result.Inserted), result.Errored, result.Skipped)
+	}
+
+	// Roll back without committing: the data row and audit row must both
+	// disappear because the audited insert ran on the same tx.
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	var txCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&txCount); err != nil {
+		t.Fatal(err)
+	}
+	if txCount != 0 {
+		t.Errorf("expected 0 transactions after rollback, got %d", txCount)
+	}
+
+	var auditCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM transaction_audit`).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 0 {
+		t.Errorf("expected 0 audit rows after rollback, got %d", auditCount)
 	}
 }

@@ -966,7 +966,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// owns auth, JSON, store lookup, category loading, and the SQL
 	// transaction lifecycle — processImportRows only runs the policy
 	// loop.
-	result, minImportDate := processImportRows(r.Context(), qtx, importProcessInput{
+	result, minImportDate := processImportRows(r.Context(), qtx, tx, h.txnStore, importProcessInput{
 		UserID:            entry.UserID,
 		Rows:              filteredRows,
 		CategoryMap:       req.CategoryMap,
@@ -1360,6 +1360,8 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 func processImportRows(
 	ctx context.Context,
 	qtx *database.Queries,
+	tx *sql.Tx,
+	store *database.TransactionStore,
 	in importProcessInput,
 ) (importResult, time.Time) {
 	var result importResult
@@ -1504,7 +1506,15 @@ func processImportRows(
 			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
 		}
 
-		if _, err := qtx.CreateTransaction(ctx, params); err != nil {
+		// Route the insert through the TransactionStore on the caller's
+		// tx so each imported row emits a paired transaction_audit row.
+		// CreateTx internally does s.q.WithTx(tx), so the audited insert
+		// shares the exact transaction as the dup-check qtx above — N data
+		// rows + N audit rows commit (or roll back) together at the
+		// handler's tx.Commit. in.UserID is the actor, the same value
+		// already written as params.UserID.
+		created, err := store.CreateTx(ctx, tx, in.UserID, params)
+		if err != nil {
 			log.Printf("import: failed to insert row (date=%s, desc=%s): %v", sanitizeLogValue(row.Date), sanitizeLogValue(description), err)
 			result.Errored = append(result.Errored, importErrored{
 				RowIndex: i,
@@ -1513,11 +1523,11 @@ func processImportRows(
 			continue
 		}
 
-		minDate = earliestDate(minDate, date)
+		minDate = earliestDate(minDate, created.Date)
 		result.Inserted = append(result.Inserted, importInserted{
 			RowIndex:    i,
-			Date:        date,
-			AmountCents: amountCents,
+			Date:        created.Date,
+			AmountCents: created.AmountCents,
 		})
 	}
 
