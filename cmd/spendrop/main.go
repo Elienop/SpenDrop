@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"log"
 	"net/http"
@@ -56,10 +55,15 @@ func main() {
 			"For plain-HTTP LAN deployments, set COOKIE_SECURE=false.")
 	}
 
-	// Open SQLite with WAL mode via the DSN derived from config.
-	sqlDB, err := sql.Open("sqlite3", cfg.SQLiteDSN())
+	// Open SQLite with WAL mode via the DSN derived from config. openDB pins
+	// the handle to a single connection (SetMaxOpenConns(1)) so every writer
+	// — including the boot-time content_hash backfill, the migration runner,
+	// and the session-cleanup / daily-integrity goroutines that share this
+	// handle — serializes through one OS connection, matching the
+	// "No concurrent writers" invariant.
+	sqlDB, err := openDB(cfg)
 	if err != nil {
-		log.Fatalf("open database: %v", err)
+		log.Fatalf("%v", err)
 	}
 	defer sqlDB.Close()
 

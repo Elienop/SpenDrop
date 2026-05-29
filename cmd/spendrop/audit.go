@@ -18,7 +18,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -77,9 +76,11 @@ func auditCmd(ctx context.Context, cfg *config.Config, args []string) int {
 		return 2
 	}
 
-	sqlDB, err := sql.Open("sqlite3", cfg.SQLiteDSN())
+	// openDB pins the handle to a single connection, matching the server
+	// handle and the backup helpers (serialize on one conn).
+	sqlDB, err := openDB(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "open database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
 	defer sqlDB.Close()
