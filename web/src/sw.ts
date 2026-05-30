@@ -79,7 +79,10 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(title, {
       body: data.body ?? '',
       icon: '/pwa-192x192.png',
-      badge: '/pwa-192x192.png',
+      // No `badge`: Android's status-bar badge must be a white-on-transparent
+      // silhouette, and a full-color PNG (like pwa-192x192.png) gets masked to
+      // a solid white square. Omitting it lets the browser use a sane default.
+      // (A dedicated monochrome badge asset could be added later.)
       data: { url },
     }),
   );

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"testing"
 
@@ -214,5 +215,17 @@ func TestEvaluateBudgetAlerts_PayloadIsDollarsNotCents(t *testing.T) {
 	}
 	if p.SpentDollars != 150 {
 		t.Errorf("spent: want 150 dollars, got %v (cents leaked?)", p.SpentDollars)
+	}
+	// Title/Body must be populated, or the SW renders a blank "SpenDrop"
+	// notification with no description (regression guard). The seed helper makes
+	// the category name unique per test, so match on shape, not an exact name.
+	if !strings.HasPrefix(p.Title, "Over budget: ") || len(p.Title) <= len("Over budget: ") {
+		t.Errorf("title: want %q + a category name, got %q", "Over budget: ", p.Title)
+	}
+	if !strings.Contains(p.Body, "$150.00") || !strings.Contains(p.Body, "$100.00") {
+		t.Errorf("body must state spent ($150.00) and limit ($100.00), got %q", p.Body)
+	}
+	if p.URL != "/budgets" {
+		t.Errorf("url: want /budgets for the click deep-link, got %q", p.URL)
 	}
 }

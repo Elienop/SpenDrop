@@ -32,10 +32,16 @@ type budgetCell struct {
 }
 
 // pushAlertPayload is the JSON body delivered to the service worker's 'push'
-// handler. Every money figure is DOLLARS via centsToDollars — never a raw
-// *_cents value (Money Wire-Edge DTO discipline). The SW reads these field
-// names directly to build the Notification title/body.
+// handler. Title/Body are the human-readable strings the SW renders directly
+// (it reads data.title / data.body); without them an over-budget push shows a
+// blank "SpenDrop" notification. URL is the deep-link the notificationclick
+// handler opens. The structured fields (category, dollars) are kept for any
+// future client-side use. Every money figure is DOLLARS via centsToDollars —
+// never a raw *_cents value (Money Wire-Edge DTO discipline).
 type pushAlertPayload struct {
+	Title        string  `json:"title"`
+	Body         string  `json:"body"`
+	URL          string  `json:"url"`
 	Type         string  `json:"type"` // "budget_over"
 	CategoryID   int64   `json:"category_id"`
 	CategoryName string  `json:"category_name"`
@@ -115,14 +121,20 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 		// Fresh cross. Build the dollars payload and fan out. The latch is set
 		// regardless of whether any subscriber exists, so a later subscribe +
 		// re-eval does not retroactively double-fire.
+		limitDollars := centsToDollars(limitCents)
+		spentDollars := centsToDollars(spentCents)
 		payload := pushAlertPayload{
+			Title: fmt.Sprintf("Over budget: %s", catName),
+			Body: fmt.Sprintf("%s is over budget — $%.2f spent of your $%.2f limit this month.",
+				catName, spentDollars, limitDollars),
+			URL:          "/budgets",
 			Type:         "budget_over",
 			CategoryID:   cell.CategoryID,
 			CategoryName: catName,
 			Year:         cell.Year,
 			Month:        cell.Month,
-			LimitDollars: centsToDollars(limitCents),
-			SpentDollars: centsToDollars(spentCents),
+			LimitDollars: limitDollars,
+			SpentDollars: spentDollars,
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
