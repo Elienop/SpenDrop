@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { purgeQueue } from '@/lib/offline-queue';
+import { getReadyRegistration } from '@/lib/push-sw';
 import type { User } from '../api/types';
 
 interface AuthContextType {
@@ -90,8 +91,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // can't inherit the leaving user's push registration. Best-effort —
       // never block logout on push teardown.
       try {
-        if ('serviceWorker' in navigator) {
-          const reg = await navigator.serviceWorker.ready;
+        // getReadyRegistration() resolves to null (never pending) when the SW
+        // registration silently failed, so a stuck `ready` can never trap this
+        // security-critical teardown — setUser(null)/navigate always run below.
+        const reg = await getReadyRegistration();
+        if (reg) {
           const sub = await reg.pushManager.getSubscription();
           if (sub) {
             const endpoint = sub.endpoint;

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '@/api/client';
 import { urlBase64ToUint8Array } from '@/lib/vapid';
+import { getReadyRegistration } from '@/lib/push-sw';
 
 interface VapidKeyResponse {
   publicKey: string;
@@ -86,7 +87,10 @@ export function useWebPush(): UseWebPush {
         setPermission(perm);
         return;
       }
-      const reg = await navigator.serviceWorker.ready;
+      // Bounded — a silently-failed SW registration resolves null here instead
+      // of hanging, which would otherwise trap the toggle in `busy` forever.
+      const reg = await getReadyRegistration();
+      if (!reg) return;
       const { publicKey } = await api.get<VapidKeyResponse>(
         'push/vapid-public-key',
       );
@@ -112,8 +116,9 @@ export function useWebPush(): UseWebPush {
     if (!supported || busy) return;
     setBusy(true);
     try {
-      const reg = await navigator.serviceWorker.ready;
-      const sub = await reg.pushManager.getSubscription();
+      // Bounded — see enable(); a stuck `ready` must not pin the toggle busy.
+      const reg = await getReadyRegistration();
+      const sub = reg ? await reg.pushManager.getSubscription() : null;
       if (sub) {
         const endpoint = sub.endpoint;
         await sub.unsubscribe();

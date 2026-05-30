@@ -35,6 +35,10 @@ const pushManager = {
 const registration = {
   pushManager,
   showNotification: vi.fn(async () => undefined),
+  // getReadyRegistration() prefers getRegistration() (which resolves to a value
+  // or undefined, never pending) over awaiting `ready`. Expose an active
+  // registration so the helper's primary path is exercised in hook tests.
+  active: {} as ServiceWorker,
 };
 
 Object.defineProperty(navigator, 'serviceWorker', {
@@ -42,6 +46,9 @@ Object.defineProperty(navigator, 'serviceWorker', {
   value: {
     ready: Promise.resolve(registration as unknown as ServiceWorkerRegistration),
     register: vi.fn(async () => registration),
+    getRegistration: vi.fn(
+      async () => registration as unknown as ServiceWorkerRegistration,
+    ),
     controller: {} as ServiceWorker,
     addEventListener: vi.fn(),
   },

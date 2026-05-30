@@ -9,6 +9,7 @@ vi.mock('../api/client', () => {
     api: {
       get: vi.fn(),
       post: vi.fn(),
+      del: vi.fn(),
     },
   };
 });
@@ -23,6 +24,7 @@ vi.mock('@/lib/offline-queue', () => ({
 // We'll import after mock setup
 import { api } from '../api/client';
 import { AuthProvider, useAuth } from './useAuth';
+import { pushTestState, makeSubscription } from '@/test/setup';
 
 const mockedApi = vi.mocked(api);
 
@@ -60,11 +62,14 @@ describe('useAuth', () => {
     purgeQueue.mockResolvedValue(undefined);
     cachesDelete.mockResolvedValue(true);
     vi.stubGlobal('caches', { delete: cachesDelete });
+    pushTestState.permission = 'default';
+    pushTestState.subscription = null;
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
+    pushTestState.subscription = null;
   });
 
   test('starts in loading state and checks session on mount', async () => {
@@ -241,6 +246,45 @@ describe('useAuth', () => {
     // purged so a different account on this device can't replay/read them.
     expect(purgeQueue).toHaveBeenCalledWith(42);
     expect(cachesDelete).toHaveBeenCalledWith('spendrop-api-lists');
+  });
+
+  test('logout unsubscribes the device push subscription, DELETEs the server row, and still completes', async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      id: 7,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.post.mockResolvedValueOnce(undefined);
+    mockedApi.del.mockResolvedValueOnce(undefined);
+    // A push subscription exists on this device, exercising the unsubscribe
+    // teardown branch that defaults off (pushTestState.subscription = null).
+    const sub = makeSubscription();
+    pushTestState.subscription = sub;
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+
+    await user.click(screen.getByText('Logout'));
+
+    // Teardown ran: the device subscription was unsubscribed and its server row
+    // deleted by endpoint, so a different account on this device can't inherit
+    // the leaving user's push registration.
+    await waitFor(() => {
+      expect(sub.unsubscribe).toHaveBeenCalled();
+    });
+    expect(mockedApi.del).toHaveBeenCalledWith('push/subscriptions', {
+      endpoint: sub.endpoint,
+    });
+    // Logout still completes — the security-critical state clear is not trapped.
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
   });
 
   test('logout still purges the queue when the logout POST rejects', async () => {
