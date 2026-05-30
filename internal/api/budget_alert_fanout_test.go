@@ -37,7 +37,7 @@ func TestFanOutPush_MultipleSubsPrunesGoneRow(t *testing.T) {
 	seedPushSub(t, q, bob.ID, gone)
 	seedPushSub(t, q, bob.ID, "https://push.example/bob-ok")
 
-	h.fanOutPush(context.Background(), []byte(`{"type":"budget_over"}`))
+	h.fanOutPush(context.Background(), "over_budget", []byte(`{"type":"budget_over"}`))
 
 	// All three subs were attempted (household-wide, not per-user).
 	if len(ps.seen) != 3 {
@@ -65,7 +65,7 @@ func TestFanOutPush_NilDispatcherIsNoOp(t *testing.T) {
 	seedPushSub(t, q, alice.ID, "https://push.example/ep-1")
 
 	// Must not panic and must not prune anything when the feature is off.
-	h.fanOutPush(context.Background(), []byte(`{}`))
+	h.fanOutPush(context.Background(), "over_budget", []byte(`{}`))
 	all, err := q.ListAllPushSubscriptions(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)
