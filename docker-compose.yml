@@ -25,8 +25,10 @@ services:
       # - BACKUP_KEEP_MONTHLY=12
       # --- Web Push (optional, default OFF) ---------------------------------
       # Leave PUSH_ENABLED unset/false to keep push fully inert. To enable,
-      # generate a VAPID keypair once (e.g. `npx web-push generate-vapid-keys`,
-      # or any P-256 base64url keypair) and set all three keys + a subject.
+      # generate a VAPID keypair once — on any Docker host, no Go/Node install:
+      #   docker run --rm node:22-alpine npx -y web-push generate-vapid-keys
+      # (or `npx web-push generate-vapid-keys`, or `go run ./cmd/vapidgen`) —
+      # then set all three keys + a subject.
       # ROTATING THESE KEYS INVALIDATES EVERY EXISTING SUBSCRIPTION — every
       # device must re-enable notifications afterward. See README → Notifications.
       # - PUSH_ENABLED=true
