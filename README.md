@@ -624,8 +624,18 @@ Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS exampl
 SpenDrop can send a push notification when a budget category goes over its
 monthly limit. Push is **off by default** and requires a VAPID keypair.
 
-1. Generate a VAPID keypair (one-time):
-   `npx web-push generate-vapid-keys` (prints a base64url public + private key).
+1. Generate a VAPID keypair (one-time). The keys are just base64url strings,
+   so generate them on any machine and paste them below — pick whichever you have:
+   - **Docker only** (no Go or Node install needed — works on the server):
+     `docker run --rm node:22-alpine npx -y web-push generate-vapid-keys`
+   - **Node:** `npx web-push generate-vapid-keys`
+   - **This repo (Go):** `go run ./cmd/vapidgen`
+
+   The Docker option runs a throwaway, self-deleting container (`--rm`) — it
+   installs no app and leaves nothing running; only the small `node:22-alpine`
+   image stays cached afterward (drop it with `docker rmi node:22-alpine` if you
+   want). You do this **once, on any machine** — the keys are just text you paste
+   below, so your server itself never needs Go or Node.
 2. Set `PUSH_ENABLED=true`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
    `VAPID_SUBJECT` (a `mailto:` or `https:` contact URL) in your compose env.
 3. Redeploy. Each user opens **Settings → Notifications** and enables push
@@ -640,9 +650,17 @@ monthly limit. Push is **off by default** and requires a VAPID keypair.
 
 ### TrueNAS redeploy
 
-Set the three env vars in the app's TrueNAS configuration (or the bind-mounted
-`.env`), then redeploy the stack. Existing data is untouched; subscriptions are
-stored in the DB at `/mnt/zfs/data/services/apps/spendrop/spendrop.db`.
+Add the four env vars (`PUSH_ENABLED` plus the three `VAPID_*`) to the app's
+`environment:` in your compose/stack config, then pull the current image and
+recreate the container:
+
+```bash
+docker compose pull && docker compose up -d
+```
+
+Existing data is untouched — the additive migrations apply automatically on
+boot, and subscriptions are stored in the DB at
+`/mnt/zfs/data/services/apps/spendrop/spendrop.db`.
 
 ## Using API tokens
 
