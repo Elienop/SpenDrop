@@ -28,6 +28,12 @@ type Handler struct {
 	// cfg.Push.Enabled. Read-only after startup, like the other handler deps.
 	pushSender *push.Sender
 
+	// pushTesterForBudgetAlerts is a TEST-ONLY override for the push
+	// dispatcher consulted by evaluateBudgetAlerts before pushSender, so unit
+	// tests can capture fan-out without a real VAPID keypair. Production code
+	// never sets this; a non-nil value outside a _test.go file is a bug.
+	pushTesterForBudgetAlerts pushDispatcher
+
 	// clock is the time source every reports/dashboard handler reads for
 	// "current date" decisions (year-over-year default year, rolling
 	// trend windows, YTD end-of-month). Phase 3.2 introduces it so the
