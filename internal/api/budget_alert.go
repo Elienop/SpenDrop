@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 	"github.com/elienop/spendrop/internal/push"
@@ -185,6 +186,36 @@ func (h *Handler) cellOverBudget(ctx context.Context, cell budgetCell) (over boo
 // the cents/strftime boundary lives next to its only caller.
 func fmtYear(y int) string  { return fmt.Sprintf("%04d", y) }
 func fmtMonth(m int) string { return fmt.Sprintf("%02d", m) }
+
+// cellForDate derives the (category, calendar-month) cell from a transaction's
+// OWN date — read in UTC so a back-dated row maps to the month it actually
+// lands in, NOT h.clock.Now(). Used by every commit site to feed
+// evaluateBudgetAlerts.
+func cellForDate(categoryID int64, date time.Time) budgetCell {
+	d := date.UTC()
+	return budgetCell{CategoryID: categoryID, Year: d.Year(), Month: int(d.Month())}
+}
+
+// cellsForCreate / cellsForDelete: a single affected cell.
+func cellsForCreate(categoryID int64, date time.Time) []budgetCell {
+	return []budgetCell{cellForDate(categoryID, date)}
+}
+
+func cellsForDelete(categoryID int64, date time.Time) []budgetCell {
+	return []budgetCell{cellForDate(categoryID, date)}
+}
+
+// cellsForUpdate returns the OLD and NEW cells deduped. An edit that moves a
+// row between categories or months can both clear the old cell's latch (spend
+// dropped there) and trip the new cell — both must be evaluated.
+func cellsForUpdate(oldCat int64, oldDate time.Time, newCat int64, newDate time.Time) []budgetCell {
+	oldCell := cellForDate(oldCat, oldDate)
+	newCell := cellForDate(newCat, newDate)
+	if oldCell == newCell {
+		return []budgetCell{newCell}
+	}
+	return []budgetCell{oldCell, newCell}
+}
 
 // fanOutPush delivers one already-marshalled payload to EVERY push
 // subscription in the household (shared visibility, same model as transactions
