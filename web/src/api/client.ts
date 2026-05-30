@@ -52,6 +52,13 @@ class ApiClient {
       );
     }
 
+    // 204 No Content carries no body — `response.json()` would reject with a
+    // SyntaxError on the empty stream, surfacing a successful request as an
+    // error (e.g. DELETE /push/subscriptions). Short-circuit before parsing.
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
     return response.json() as Promise<T>;
   }
 
@@ -85,8 +92,11 @@ class ApiClient {
   // `{purged: N}`) can be called as `api.del<Shape>(path)` and still
   // typecheck. Callers that don't care pass `api.del(path)` — the
   // default `T = void` keeps the original ergonomics.
-  del<T = void>(path: string): Promise<T> {
-    return this.request<T>(path, { method: 'DELETE' });
+  del<T = void>(path: string, body?: unknown): Promise<T> {
+    return this.request<T>(path, {
+      method: 'DELETE',
+      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
   }
 
   async upload<T>(path: string, file: File, fieldName = 'file'): Promise<T> {
@@ -113,6 +123,11 @@ class ApiClient {
         (error as { error?: string } | null)?.error || fallback,
         response.status,
       );
+    }
+
+    // 204 No Content carries no body (see `request` above) — short-circuit.
+    if (response.status === 204) {
+      return undefined as T;
     }
 
     return response.json() as Promise<T>;
