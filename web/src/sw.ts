@@ -79,10 +79,11 @@ self.addEventListener('push', (event) => {
     self.registration.showNotification(title, {
       body: data.body ?? '',
       icon: '/pwa-192x192.png',
-      // No `badge`: Android's status-bar badge must be a white-on-transparent
-      // silhouette, and a full-color PNG (like pwa-192x192.png) gets masked to
-      // a solid white square. Omitting it lets the browser use a sane default.
-      // (A dedicated monochrome badge asset could be added later.)
+      // Monochrome white-on-transparent SpenDrop "S" so Android renders the
+      // brand mark as a status-bar silhouette (not a generic bell, and not the
+      // solid white square a full-color PNG would mask to). Regenerate from the
+      // favicon glyph via: rsvg-convert -w 96 -h 96 <S-glyph>.svg -o badge-96x96.png
+      badge: '/badge-96x96.png',
       data: { url },
     }),
   );
