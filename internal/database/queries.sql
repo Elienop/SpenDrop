@@ -839,3 +839,30 @@ SELECT * FROM api_token_audit
 WHERE user_id = sqlc.arg(user_id)
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(limit);
+
+-- Push Subscriptions (Web Push)
+-- HAND-WRITTEN in queries.sql.go: sqlc cannot generate this repo. Column order
+-- for SELECT *: id, user_id, endpoint, p256dh, auth, user_agent, created_at,
+-- last_seen (the on-disk order from migration 013).
+
+-- name: UpsertPushSubscription :exec
+INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(endpoint) DO UPDATE SET
+    p256dh = excluded.p256dh,
+    auth = excluded.auth,
+    user_agent = excluded.user_agent,
+    user_id = excluded.user_id,
+    last_seen = datetime('now');
+
+-- name: ListPushSubscriptionsByUser :many
+SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id;
+
+-- name: ListAllPushSubscriptions :many
+SELECT * FROM push_subscriptions ORDER BY id;
+
+-- name: DeletePushSubscriptionByEndpoint :exec
+DELETE FROM push_subscriptions WHERE endpoint = ?;
+
+-- name: CountPushSubscriptionsByUser :one
+SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?;

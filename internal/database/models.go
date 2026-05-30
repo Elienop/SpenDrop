@@ -89,6 +89,17 @@ type Currency struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type PushSubscription struct {
+	ID        int64          `json:"id"`
+	UserID    int64          `json:"user_id"`
+	Endpoint  string         `json:"endpoint"`
+	P256dh    string         `json:"p256dh"`
+	Auth      string         `json:"auth"`
+	UserAgent sql.NullString `json:"user_agent"`
+	CreatedAt time.Time      `json:"created_at"`
+	LastSeen  time.Time      `json:"last_seen"`
+}
+
 type SavedFilter struct {
 	ID         int64     `json:"id"`
 	UserID     int64     `json:"user_id"`

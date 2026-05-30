@@ -2726,3 +2726,129 @@ func (q *Queries) ListAPITokenAuditByUser(ctx context.Context, arg ListAPITokenA
 	}
 	return items, nil
 }
+
+// Push Subscriptions (Web Push). HAND-WRITTEN: sqlc cannot generate this repo.
+// SELECT * column order: id, user_id, endpoint, p256dh, auth, user_agent,
+// created_at, last_seen (the on-disk order from migration 013).
+
+const upsertPushSubscription = `-- name: UpsertPushSubscription :exec
+INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(endpoint) DO UPDATE SET
+    p256dh = excluded.p256dh,
+    auth = excluded.auth,
+    user_agent = excluded.user_agent,
+    user_id = excluded.user_id,
+    last_seen = datetime('now')
+`
+
+type UpsertPushSubscriptionParams struct {
+	UserID    int64          `json:"user_id"`
+	Endpoint  string         `json:"endpoint"`
+	P256dh    string         `json:"p256dh"`
+	Auth      string         `json:"auth"`
+	UserAgent sql.NullString `json:"user_agent"`
+}
+
+func (q *Queries) UpsertPushSubscription(ctx context.Context, arg UpsertPushSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, upsertPushSubscription,
+		arg.UserID,
+		arg.Endpoint,
+		arg.P256dh,
+		arg.Auth,
+		arg.UserAgent,
+	)
+	return err
+}
+
+const listPushSubscriptionsByUser = `-- name: ListPushSubscriptionsByUser :many
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions WHERE user_id = ? ORDER BY id
+`
+
+func (q *Queries) ListPushSubscriptionsByUser(ctx context.Context, userID int64) ([]PushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, listPushSubscriptionsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PushSubscription{}
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.P256dh,
+			&i.Auth,
+			&i.UserAgent,
+			&i.CreatedAt,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAllPushSubscriptions = `-- name: ListAllPushSubscriptions :many
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions ORDER BY id
+`
+
+func (q *Queries) ListAllPushSubscriptions(ctx context.Context) ([]PushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, listAllPushSubscriptions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PushSubscription{}
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.P256dh,
+			&i.Auth,
+			&i.UserAgent,
+			&i.CreatedAt,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const deletePushSubscriptionByEndpoint = `-- name: DeletePushSubscriptionByEndpoint :exec
+DELETE FROM push_subscriptions WHERE endpoint = ?
+`
+
+func (q *Queries) DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint string) error {
+	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByEndpoint, endpoint)
+	return err
+}
+
+const countPushSubscriptionsByUser = `-- name: CountPushSubscriptionsByUser :one
+SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?
+`
+
+func (q *Queries) CountPushSubscriptionsByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPushSubscriptionsByUser, userID)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
