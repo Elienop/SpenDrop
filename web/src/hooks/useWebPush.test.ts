@@ -87,4 +87,30 @@ describe('useWebPush', () => {
     });
     await waitFor(() => expect(result.current.subscribed).toBe(false));
   });
+
+  test('reconciles a pre-existing subscription to the server on mount', async () => {
+    pushTestState.permission = 'granted';
+    pushTestState.subscription = makeSubscription('https://push.example/rotated');
+    const { result } = renderHook(() => useWebPush());
+    await waitFor(() => expect(result.current.subscribed).toBe(true));
+    // Mount-time reconcile re-POSTs the current (possibly rotated) endpoint.
+    await waitFor(() =>
+      expect(mockApi.post).toHaveBeenCalledWith(
+        'push/subscriptions',
+        expect.objectContaining({ endpoint: 'https://push.example/rotated' }),
+      ),
+    );
+  });
+
+  test('does NOT reconcile when there is no local subscription', async () => {
+    pushTestState.permission = 'granted';
+    pushTestState.subscription = null;
+    const { result } = renderHook(() => useWebPush());
+    await waitFor(() => expect(result.current.supported).toBe(true));
+    // Give the mount effect a tick to settle.
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockApi.post).not.toHaveBeenCalled();
+  });
 });

@@ -51,6 +51,21 @@ export function useWebPush(): UseWebPush {
     void navigator.serviceWorker.ready.then(async (reg) => {
       const existing = await reg.pushManager.getSubscription();
       if (mountedRef.current) setSubscribed(existing !== null);
+      // Reconcile: a browser can rotate the endpoint while the app was closed,
+      // and pushsubscriptionchange may not have fired (or its re-POST failed).
+      // Re-POST the current subscription so the server row matches the browser.
+      // Idempotent server-side (UpsertPushSubscription ON CONFLICT(endpoint)).
+      if (existing && Notification.permission === 'granted') {
+        const json = existing.toJSON() as PushSubscriptionJSONShape;
+        try {
+          await api.post('push/subscriptions', {
+            endpoint: json.endpoint,
+            keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+          });
+        } catch {
+          // Best-effort; the explicit enable() path re-registers on next toggle.
+        }
+      }
     });
     return () => {
       mountedRef.current = false;
