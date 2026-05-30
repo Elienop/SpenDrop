@@ -2852,3 +2852,39 @@ func (q *Queries) CountPushSubscriptionsByUser(ctx context.Context, userID int64
 	err := row.Scan(&n)
 	return n, err
 }
+
+// Budget Alert State (Web Push over-budget latch). HAND-WRITTEN: sqlc cannot
+// generate this repo. Both funcs are :execrows returning sql.Result so the
+// caller can read RowsAffected - SetBudgetAlertState reports whether the latch
+// was newly set (1) or already present (0); ClearBudgetAlertState reports how
+// many latch rows were removed.
+
+const setBudgetAlertState = `-- name: SetBudgetAlertState :execrows
+INSERT INTO budget_alert_state (category_id, year, month)
+VALUES (?, ?, ?)
+ON CONFLICT(category_id, year, month) DO NOTHING
+`
+
+type SetBudgetAlertStateParams struct {
+	CategoryID int64 `json:"category_id"`
+	Year       int64 `json:"year"`
+	Month      int64 `json:"month"`
+}
+
+func (q *Queries) SetBudgetAlertState(ctx context.Context, arg SetBudgetAlertStateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, setBudgetAlertState, arg.CategoryID, arg.Year, arg.Month)
+}
+
+const clearBudgetAlertState = `-- name: ClearBudgetAlertState :execrows
+DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?
+`
+
+type ClearBudgetAlertStateParams struct {
+	CategoryID int64 `json:"category_id"`
+	Year       int64 `json:"year"`
+	Month      int64 `json:"month"`
+}
+
+func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAlertStateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, clearBudgetAlertState, arg.CategoryID, arg.Year, arg.Month)
+}

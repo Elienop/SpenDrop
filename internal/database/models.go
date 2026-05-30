@@ -70,6 +70,14 @@ type CategoryBudget struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type BudgetAlertState struct {
+	ID         int64     `json:"id"`
+	CategoryID int64     `json:"category_id"`
+	Year       int64     `json:"year"`
+	Month      int64     `json:"month"`
+	NotifiedAt time.Time `json:"notified_at"`
+}
+
 type Category struct {
 	ID        int64          `json:"id"`
 	Name      string         `json:"name"`

@@ -866,3 +866,14 @@ DELETE FROM push_subscriptions WHERE endpoint = ?;
 
 -- name: CountPushSubscriptionsByUser :one
 SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?;
+
+-- Budget Alert State (Web Push over-budget latch)
+-- HAND-WRITTEN in queries.sql.go: sqlc cannot generate this repo. Both SetBudgetAlertState and ClearBudgetAlertState are :execrows so the caller learns the rows-affected count: SetBudgetAlertState returns 1 when the row was NEWLY inserted (a fresh over-budget cross) and 0 when the latch was already set (dedup) - that count gates the push fan-out. ClearBudgetAlertState returns the number of latch rows removed.
+
+-- name: SetBudgetAlertState :execrows
+INSERT INTO budget_alert_state (category_id, year, month)
+VALUES (?, ?, ?)
+ON CONFLICT(category_id, year, month) DO NOTHING;
+
+-- name: ClearBudgetAlertState :execrows
+DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?;
