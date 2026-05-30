@@ -621,8 +621,9 @@ Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS exampl
 
 ## Notifications (Web Push)
 
-SpenDrop can send a push notification when a budget category goes over its
-monthly limit. Push is **off by default** and requires a VAPID keypair.
+SpenDrop can send push notifications for budget overruns and transaction
+activity (see [Notification types](#notification-types) below). Push is **off by
+default** and requires a VAPID keypair.
 
 1. Generate a VAPID keypair (one-time). The keys are just base64url strings,
    so generate them on any machine and paste them below — pick whichever you have:
@@ -647,6 +648,32 @@ monthly limit. Push is **off by default** and requires a VAPID keypair.
 > **Key rotation is breaking.** Changing `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`
 > invalidates every stored subscription — all devices must re-enable
 > notifications. Treat the keypair as long-lived; back it up with your secrets.
+
+### Notification types
+
+Two layers of control:
+
+- **Per device (any user):** the **"Push notifications on this device"** toggle in
+  **Settings → Notifications** subscribes/unsubscribes *that* browser. A user who
+  wants no notifications simply leaves it off.
+- **Per type (admin only, household-wide):** below the master toggle, an admin
+  chooses which events send a push to every subscribed device. Non-admins see
+  these read-only ("Managed by your admin"), since the ledger is shared.
+
+| Type | Fires when | Default |
+|---|---|---|
+| **Over budget** | a category's month-to-date spend crosses its budget limit (once per crossing) | **on** |
+| **Transaction added** | a transaction is created | off |
+| **Transaction deleted** | a transaction is removed | off |
+| **Transaction edited** | a transaction's amount/category/date changes | off |
+| **Large transaction** | a single transaction is ≥ the admin-set **threshold** (default $500) | off |
+
+Notes: activity pushes go to **all** subscribed household devices (including the
+person who made the change). A **bulk import or batch delete sends one aggregated
+push** ("N transactions added"), never one-per-row. A transaction that is both an
+activity event and over the large threshold sends **only** the large-transaction
+alert. New types default **off**, so enabling push changes nothing until an admin
+turns a type on.
 
 ### TrueNAS redeploy
 
