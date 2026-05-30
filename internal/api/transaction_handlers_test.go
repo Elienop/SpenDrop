@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,10 @@ import (
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
 )
+
+// errSendBoom is a shared sentinel for tests that force every push Send to
+// fail, asserting the (already-committed) mutation never errors as a result.
+var errSendBoom = errors.New("send boom")
 
 // withUser injects an authenticated user into the request context.
 func withUser(r *http.Request, user database.User) *http.Request {
@@ -3387,3 +3392,119 @@ func TestBatchUpdate_TagsWithEmbeddedQuote_VerbatimStorage(t *testing.T) {
 //
 // If concurrent writer behavior ever needs to be re-asserted, do it at the
 // SQLite-driver level, not via parallel HTTP handlers.
+
+// --- Activity notification triggers (Task 6) ---
+
+func TestCreateTransaction_FiresTxnAdded(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCat(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/create")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	body := strings.NewReader(`{"date":"2026-05-10","amount":12.34,"description":"milk","category_id":` + itoa(cat.ID) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions", body)
+	req = withUser(req, user)
+	rec2 := httptest.NewRecorder()
+	h.handleCreateTransaction(rec2, req)
+
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
+	}
+	if rec.count() != 1 {
+		t.Fatalf("want 1 push, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	_ = json.Unmarshal(rec.payloads[0], &p)
+	if p.Type != "txn_added" {
+		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+}
+
+// A push send failure must NEVER fail the (already-committed) mutation.
+func TestCreateTransaction_SendFailureNeverErrors(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{err: errSendBoom} // every Send returns an error
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCat(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/boom")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	body := strings.NewReader(`{"date":"2026-05-10","amount":12.34,"description":"milk","category_id":` + itoa(cat.ID) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions", body)
+	req = withUser(req, user)
+	rec2 := httptest.NewRecorder()
+	h.handleCreateTransaction(rec2, req)
+
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("send failure must not break the mutation: got %d", rec2.Code)
+	}
+}
+
+func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCat(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/del")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnDeleted = true })
+	txn := seedExpenseRow(t, q, user.ID, cat.ID, "2026-05-10", 1234)
+
+	req := httptest.NewRequest(http.MethodDelete, "/x", nil)
+	req = withUserAndURLParam(req, user, "id", itoa(txn.ID))
+	rec2 := httptest.NewRecorder()
+	h.handleDeleteTransaction(rec2, req)
+
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("delete: expected 200, got %d", rec2.Code)
+	}
+	var p pushAlertPayload
+	if rec.count() != 1 {
+		t.Fatalf("want 1 push, got %d", rec.count())
+	}
+	_ = json.Unmarshal(rec.payloads[0], &p)
+	if p.Type != "txn_deleted" {
+		t.Errorf("type: got %q want txn_deleted", p.Type)
+	}
+}
+
+// A batch create fires exactly ONE aggregate push, never one-per-row.
+func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCat(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/batch")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	body := strings.NewReader(`[
+		{"date":"2026-05-10","amount":1,"description":"a","category_id":` + itoa(cat.ID) + `},
+		{"date":"2026-05-11","amount":2,"description":"b","category_id":` + itoa(cat.ID) + `},
+		{"date":"2026-05-12","amount":3,"description":"c","category_id":` + itoa(cat.ID) + `}
+	]`)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch", body)
+	req = withUser(req, user)
+	rec2 := httptest.NewRecorder()
+	h.handleBatchCreateTransactions(rec2, req)
+
+	if rec2.Code != http.StatusCreated {
+		t.Fatalf("batch create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
+	}
+	if rec.count() != 1 {
+		t.Fatalf("batch must fire ONE aggregate push, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	_ = json.Unmarshal(rec.payloads[0], &p)
+	if p.Type != "txn_added" {
+		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+}
