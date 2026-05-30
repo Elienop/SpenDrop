@@ -2833,12 +2833,57 @@ func (q *Queries) ListAllPushSubscriptions(ctx context.Context) ([]PushSubscript
 	return items, nil
 }
 
+const getPushSubscriptionByEndpoint = `-- name: GetPushSubscriptionByEndpoint :one
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions WHERE endpoint = ?
+`
+
+// GetPushSubscriptionByEndpoint detects a cross-user re-home: if the endpoint
+// already exists under a different user_id the upsert caller rejects it (409)
+// instead of silently re-assigning the device. Returns sql.ErrNoRows when the
+// endpoint is unknown.
+func (q *Queries) GetPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error) {
+	row := q.db.QueryRowContext(ctx, getPushSubscriptionByEndpoint, endpoint)
+	var i PushSubscription
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Endpoint,
+		&i.P256dh,
+		&i.Auth,
+		&i.UserAgent,
+		&i.CreatedAt,
+		&i.LastSeen,
+	)
+	return i, err
+}
+
 const deletePushSubscriptionByEndpoint = `-- name: DeletePushSubscriptionByEndpoint :exec
 DELETE FROM push_subscriptions WHERE endpoint = ?
 `
 
+// DeletePushSubscriptionByEndpoint is the UNSCOPED delete used only for the
+// internal prune path (dead-endpoint cleanup on 410/404) where the endpoint
+// already came from a user-scoped or all-subscriptions list. The user-facing
+// unsubscribe handler MUST use DeletePushSubscriptionByEndpointAndUser.
 func (q *Queries) DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint string) error {
 	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByEndpoint, endpoint)
+	return err
+}
+
+const deletePushSubscriptionByEndpointAndUser = `-- name: DeletePushSubscriptionByEndpointAndUser :exec
+DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?
+`
+
+type DeletePushSubscriptionByEndpointAndUserParams struct {
+	Endpoint string `json:"endpoint"`
+	UserID   int64  `json:"user_id"`
+}
+
+// DeletePushSubscriptionByEndpointAndUser is the user-scoped delete for the
+// unsubscribe handler: it deletes only a row the caller owns, so a user who
+// learns another user's endpoint out-of-band cannot delete it. Idempotent.
+func (q *Queries) DeletePushSubscriptionByEndpointAndUser(ctx context.Context, arg DeletePushSubscriptionByEndpointAndUserParams) error {
+	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByEndpointAndUser, arg.Endpoint, arg.UserID)
 	return err
 }
 

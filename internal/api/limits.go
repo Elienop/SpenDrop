@@ -89,6 +89,12 @@ const (
 // in-memory sheet buffer before the download could finish streaming.
 const MaxExportRows = 50_000
 
+// MaxSubscriptionsPerUser caps how many browser push subscriptions one user
+// may register. A user with phone + laptop + tablet needs a handful; 20 is
+// generous headroom while still bounding a misbehaving client that re-POSTs a
+// fresh endpoint on every page load.
+const MaxSubscriptionsPerUser = 20
+
 // Month-window caps for trend endpoints. 10 years is the upper bound for
 // simple income/expense trend walks; category trends are capped lower
 // because the query fans out per category.

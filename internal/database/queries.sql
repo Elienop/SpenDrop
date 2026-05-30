@@ -861,8 +861,24 @@ SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id;
 -- name: ListAllPushSubscriptions :many
 SELECT * FROM push_subscriptions ORDER BY id;
 
+-- name: GetPushSubscriptionByEndpoint :one
+-- Used by handleCreatePushSubscription to detect a cross-user re-home: if the
+-- endpoint already exists under a DIFFERENT user_id the upsert is rejected
+-- (409) instead of silently re-assigning the device to the caller.
+SELECT * FROM push_subscriptions WHERE endpoint = ?;
+
 -- name: DeletePushSubscriptionByEndpoint :exec
+-- Unscoped delete: used ONLY for the internal prune path (dead-endpoint cleanup
+-- on 410/404) where the endpoint already came from a user-scoped or
+-- all-subscriptions list. The user-facing unsubscribe handler MUST use
+-- DeletePushSubscriptionByEndpointAndUser to avoid cross-user deletion (IDOR).
 DELETE FROM push_subscriptions WHERE endpoint = ?;
+
+-- name: DeletePushSubscriptionByEndpointAndUser :exec
+-- User-scoped delete for the unsubscribe handler. Deletes only a row the
+-- caller owns, so an authenticated user who learns another user's endpoint
+-- out-of-band cannot delete that user's subscription. Idempotent.
+DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?;
 
 -- name: CountPushSubscriptionsByUser :one
 SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?;

@@ -90,6 +90,11 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	// no real-world payoff. Revisit if we ever ship a multi-tenant build.
 	r.Get("/healthz/data", h.handleHealthzData)
 
+	// Web Push VAPID public key (public — the key is not a secret and the
+	// browser fetches it before any session exists). 404s when push is
+	// disabled. Mirrors /api/health's top-level public registration.
+	r.Get("/api/push/vapid-public-key", h.handleGetVAPIDPublicKey)
+
 	// Auth routes (public, except /me)
 	r.Route("/api/auth", func(r chi.Router) {
 		r.Post("/register", h.handleRegister)
@@ -243,6 +248,13 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Get("/", h.handleListAPITokens)
 			r.Delete("/", h.handleRevokeAllAPITokens)
 			r.Delete("/{id}", h.handleRevokeAPIToken)
+		})
+
+		// Web Push subscription management (user-scoped).
+		r.Route("/push", func(r chi.Router) {
+			r.Post("/subscriptions", h.handleCreatePushSubscription)
+			r.Delete("/subscriptions", h.handleDeletePushSubscription)
+			r.Post("/test", h.handlePushTest)
 		})
 	})
 
