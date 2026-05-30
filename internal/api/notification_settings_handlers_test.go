@@ -105,3 +105,30 @@ func TestHandleUpdateNotificationSettings_RejectsNegativeThreshold(t *testing.T)
 		t.Fatalf("negative threshold: expected 400, got %d", rec.Code)
 	}
 }
+
+// A huge-but-finite threshold (e.g. 1e308) passes a naive ">= 0" check yet
+// overflows int64 in dollarsToCents and would store a NEGATIVE threshold. The
+// MaxTransactionAmount bound must reject it before the DB write.
+func TestHandleUpdateNotificationSettings_RejectsOverflowThreshold(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":true,"large_txn_threshold_dollars":1e308}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("overflow threshold: expected 400, got %d", rec.Code)
+	}
+	// Nothing overflowed into storage — the bound rejected before the write.
+	saved, err := q.GetNotificationSettings(req.Context())
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if saved.LargeTxnThresholdCents < 0 {
+		t.Fatalf("overflow leaked a negative threshold into storage: %d", saved.LargeTxnThresholdCents)
+	}
+}

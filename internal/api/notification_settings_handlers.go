@@ -1,6 +1,7 @@
 package api
 
 import (
+	"math"
 	"net/http"
 	"time"
 
@@ -84,8 +85,14 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.LargeTxnThresholdDollars < 0 {
-		writeError(w, http.StatusBadRequest, "large_txn_threshold_dollars must be >= 0")
+	// Validate the dollar threshold the same way every other money input is
+	// validated (see transaction_handlers.go / checkpoint_handlers.go): reject
+	// NaN/Inf and bound it by MaxTransactionAmount. A lone `>= 0` check is
+	// insufficient — a huge but finite value (e.g. 1e308) passes it yet
+	// overflows int64 in dollarsToCents and stores a negative threshold.
+	if math.IsNaN(req.LargeTxnThresholdDollars) || math.IsInf(req.LargeTxnThresholdDollars, 0) ||
+		req.LargeTxnThresholdDollars < 0 || req.LargeTxnThresholdDollars > MaxTransactionAmount {
+		writeError(w, http.StatusBadRequest, "large_txn_threshold_dollars must be between 0 and the maximum transaction amount")
 		return
 	}
 
