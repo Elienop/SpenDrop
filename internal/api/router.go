@@ -255,6 +255,13 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Post("/subscriptions", h.handleCreatePushSubscription)
 			r.Delete("/subscriptions", h.handleDeletePushSubscription)
 			r.Post("/test", h.handlePushTest)
+
+			// Household-wide notification preferences. GET is readable by any
+			// authed user; PUT is admin-only (enforced in-handler) because the
+			// settings are household-wide, so the two share one path and cannot
+			// use a RequireAdmin middleware on the route.
+			r.Get("/preferences", h.handleGetNotificationSettings)
+			r.Put("/preferences", h.handleUpdateNotificationSettings)
 		})
 	})
 

@@ -53,6 +53,38 @@ func seedPushSub(t *testing.T, q *database.Queries, userID int64, endpoint strin
 	}
 }
 
+func TestFanOutPush_NoOpWhenTypeDisabled(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/ep-disabled")
+
+	// txn_added defaults OFF (migration 015) — fan-out must not send.
+	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`))
+	if rec.count() != 0 {
+		t.Fatalf("disabled type: want 0 sends, got %d", rec.count())
+	}
+}
+
+func TestFanOutPush_SendsWhenTypeEnabled(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/ep-enabled")
+
+	// over_budget defaults ON — fan-out must send to the one subscription.
+	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`))
+	if rec.count() != 1 {
+		t.Fatalf("enabled type: want 1 send, got %d", rec.count())
+	}
+}
+
 func TestEvaluateBudgetAlerts_LatchSendsOnceThenDedups(t *testing.T) {
 	q, db := setupTestDB(t)
 	rec := &recordingSender{}

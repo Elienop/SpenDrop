@@ -372,6 +372,10 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// already-committed mutation. Cell is derived from the row's own date.
 	h.evaluateBudgetAlerts(r.Context(), cellsForCreate(txn.CategoryID, txn.Date))
 
+	// Activity notification (post-commit, best-effort). notifyTxnAdded applies
+	// large-txn precedence internally; both no-op when the type is disabled.
+	h.notifyTxnAdded(r.Context(), txn)
+
 	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
 }
 
@@ -483,6 +487,19 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	h.evaluateBudgetAlerts(r.Context(),
 		cellsForUpdate(existing.CategoryID, existing.Date, req.CategoryID, date))
 
+	// Activity notification. Re-read the committed row so AmountCents reflects
+	// the edit for large-txn precedence; a read miss simply drops the notify
+	// (best-effort) and never fails the already-committed update.
+	// GetTransactionByID returns GetTransactionByIDRow; the notify helpers take
+	// database.Transaction, so lift the three fields they use.
+	if updated, err := h.queries.GetTransactionByID(r.Context(), id); err == nil {
+		h.notifyTxnEdited(r.Context(), database.Transaction{
+			AmountCents: updated.AmountCents,
+			CategoryID:  updated.CategoryID,
+			Description: updated.Description,
+		})
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -541,6 +558,15 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 	// back under the limit — evaluating clears the latch (and re-arms a future
 	// re-cross). Post-commit, best-effort.
 	h.evaluateBudgetAlerts(r.Context(), cellsForDelete(existing.CategoryID, existing.Date))
+
+	// Activity notification. Use the pre-delete copy we already loaded so the
+	// body still has the amount/category/description of the removed row.
+	// existing is a GetTransactionByIDRow; lift the fields the helper uses.
+	h.notifyTxnDeleted(r.Context(), database.Transaction{
+		AmountCents: existing.AmountCents,
+		CategoryID:  existing.CategoryID,
+		Description: existing.Description,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -650,6 +676,12 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			cells = append(cells, c)
 		}
 		h.evaluateBudgetAlerts(r.Context(), cells)
+	}
+
+	// Activity notification: ONE aggregate push for the whole batch, never
+	// one-per-row. len(results) is the count of successful inserts.
+	if n := len(results); n > 0 {
+		h.notifyTxnBatch(r.Context(), "added", n)
 	}
 
 	writeJSON(w, http.StatusCreated, results)
@@ -1110,6 +1142,11 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			cells = append(cells, c)
 		}
 		h.evaluateBudgetAlerts(r.Context(), cells)
+	}
+
+	// Activity notification: ONE aggregate push for the whole batch delete.
+	if deleted > 0 {
+		h.notifyTxnBatch(r.Context(), "deleted", deleted)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})

@@ -1,0 +1,156 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/elienop/spendrop/internal/database"
+)
+
+// enableNotif flips one household type on (defaults are off for activity types).
+func enableNotif(t *testing.T, q *database.Queries, mut func(*database.UpdateNotificationSettingsParams)) {
+	t.Helper()
+	cur, err := q.GetNotificationSettings(context.Background())
+	if err != nil {
+		t.Fatalf("get settings: %v", err)
+	}
+	p := database.UpdateNotificationSettingsParams{
+		OverBudget:             cur.OverBudget,
+		TxnAdded:               cur.TxnAdded,
+		TxnDeleted:             cur.TxnDeleted,
+		TxnEdited:              cur.TxnEdited,
+		LargeTxn:               cur.LargeTxn,
+		LargeTxnThresholdCents: cur.LargeTxnThresholdCents,
+	}
+	mut(&p)
+	if err := q.UpdateNotificationSettings(context.Background(), p); err != nil {
+		t.Fatalf("update settings: %v", err)
+	}
+}
+
+func decodeOnly(t *testing.T, rec *recordingSender) pushAlertPayload {
+	t.Helper()
+	if rec.count() != 1 {
+		t.Fatalf("want exactly 1 send, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	if err := json.Unmarshal(rec.payloads[0], &p); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if p.Title == "" || p.Body == "" || p.URL == "" {
+		t.Errorf("payload missing title/body/url: %+v", p)
+	}
+	return p
+}
+
+func TestNotifyTxnAdded_FiresWhenEnabled(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/added")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234) // $12.34, below default $500 threshold
+	h.notifyTxnAdded(context.Background(), txn)
+
+	p := decodeOnly(t, rec)
+	if p.Type != "txn_added" {
+		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+}
+
+func TestNotifyTxnDeleted_And_Edited_FireWithType(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		enable  func(*database.UpdateNotificationSettingsParams)
+		call    func(h *Handler, txn database.Transaction)
+		wantTyp string
+	}{
+		{"deleted", func(p *database.UpdateNotificationSettingsParams) { p.TxnDeleted = true },
+			func(h *Handler, txn database.Transaction) { h.notifyTxnDeleted(context.Background(), txn) }, "txn_deleted"},
+		{"edited", func(p *database.UpdateNotificationSettingsParams) { p.TxnEdited = true },
+			func(h *Handler, txn database.Transaction) { h.notifyTxnEdited(context.Background(), txn) }, "txn_edited"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, db := setupTestDB(t)
+			rec := &recordingSender{}
+			h := NewHandler(q, db)
+			h.pushTesterForBudgetAlerts = rec
+			user := seedTestUser(t, q, "alice", RoleMember)
+			cat := seedExpenseCategory(t, q, "Groceries")
+			seedPushSub(t, q, user.ID, "https://push.example/"+tc.name)
+			enableNotif(t, q, tc.enable)
+
+			txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234)
+			tc.call(h, txn)
+			p := decodeOnly(t, rec)
+			if p.Type != tc.wantTyp {
+				t.Errorf("type: got %q want %q", p.Type, tc.wantTyp)
+			}
+		})
+	}
+}
+
+// Large-txn precedence: when amount >= threshold and large_txn is on, a single
+// create sends ONE "large_txn" push instead of "txn_added".
+func TestNotifyTxnAdded_LargePrecedence(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCategory(t, q, "Rent")
+	seedPushSub(t, q, user.ID, "https://push.example/large")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) {
+		p.TxnAdded = true
+		p.LargeTxn = true
+		p.LargeTxnThresholdCents = 50000 // $500
+	})
+
+	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 120000) // $1200 >= $500
+	h.notifyTxnAdded(context.Background(), txn)
+
+	p := decodeOnly(t, rec) // exactly one push, not two
+	if p.Type != "large_txn" {
+		t.Errorf("type: got %q want large_txn (precedence)", p.Type)
+	}
+}
+
+// When the type is off the helper is a pure no-op (no send), even with a subscription.
+func TestNotifyTxnAdded_NoOpWhenDisabled(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/off")
+	// txn_added stays at its default (off); do not enable.
+
+	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234)
+	h.notifyTxnAdded(context.Background(), txn)
+	if rec.count() != 0 {
+		t.Fatalf("disabled: want 0 sends, got %d", rec.count())
+	}
+}
+
+func TestNotifyTxnBatch_AggregatesOneSend(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/batch")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	h.notifyTxnBatch(context.Background(), "added", 7)
+	p := decodeOnly(t, rec) // ONE aggregate push, not 7
+	if p.Type != "txn_added" {
+		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+}

@@ -141,7 +141,7 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			log.Printf("budget alert: marshal payload cat=%d: %v", cell.CategoryID, err)
 			continue
 		}
-		h.fanOutPush(ctx, body)
+		h.fanOutPush(ctx, "over_budget", body)
 	}
 }
 
@@ -229,24 +229,64 @@ func cellsForUpdate(oldCat int64, oldDate time.Time, newCat int64, newDate time.
 	return []budgetCell{oldCell, newCell}
 }
 
+// notifTypeEnabled reads the household notification_settings row and reports
+// whether the given notification type is currently switched on. Unknown types
+// are treated as DISABLED (fail-closed) so a typo'd type id can never spam
+// every device. The over-budget LATCH is set regardless of this toggle (see
+// evaluateBudgetAlerts) — only the SEND is gated here, so toggling a type back
+// on does not retroactively re-fire a cross that already latched while off.
+func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
+	switch notifType {
+	case "over_budget":
+		return s.OverBudget
+	case "txn_added":
+		return s.TxnAdded
+	case "txn_deleted":
+		return s.TxnDeleted
+	case "txn_edited":
+		return s.TxnEdited
+	case "large_txn":
+		return s.LargeTxn
+	default:
+		return false
+	}
+}
+
 // fanOutPush delivers one already-marshalled payload to EVERY push
 // subscription in the household (shared visibility, same model as transactions
 // and categories — over-budget is a household signal, not a per-user one). It
 // is best-effort: any per-send error is counted and the loop continues.
+//
+// Household gate: the SEND is gated on the household notification_settings
+// toggle for notifType — when that type is switched off the entire fan-out is
+// a no-op. The over-budget latch (evaluateBudgetAlerts) is unaffected by the
+// toggle, so flipping a type back on never retroactively re-fires a cross that
+// already latched while it was off.
 //
 // Send-time pruning: when Send reports prune==true (the transport saw HTTP 404
 // or 410 — the endpoint is permanently gone) the stale row is deleted by
 // endpoint so it is not retried on the next alert. Transient failures (401/
 // 403/429/5xx) never prune — they are counted as failed and the row is kept.
 //
-// Logging: a SINGLE bounded summary line per fan-out, "push fan-out: sent=N
-// pruned=M failed=K". Endpoint URLs are a bearer-grade secret (anyone holding
-// one can push to that device) and are NEVER logged. No per-row logging, so a
-// household with hundreds of devices cannot flood the log.
-func (h *Handler) fanOutPush(ctx context.Context, payload []byte) {
+// Logging: a SINGLE bounded summary line per fan-out, "push fan-out: type=T
+// sent=N pruned=M failed=K". Endpoint URLs are a bearer-grade secret (anyone
+// holding one can push to that device) and are NEVER logged. No per-row
+// logging, so a household with hundreds of devices cannot flood the log.
+func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte) {
 	d := h.dispatcher()
 	if d == nil {
 		return // push disabled — no-op
+	}
+	// Household gate: skip the entire fan-out when this type is switched off.
+	// The settings row is seeded at id=1 by migration 015, so a read error here
+	// is a real fault, not a missing row — log it and fail closed (no send).
+	settings, err := h.queries.GetNotificationSettings(ctx)
+	if err != nil {
+		log.Printf("push fan-out: read notification settings: %v", err)
+		return
+	}
+	if !notifTypeEnabled(settings, notifType) {
+		return // type disabled household-wide — no-op
 	}
 	subs, err := h.queries.ListAllPushSubscriptions(ctx)
 	if err != nil {
@@ -275,5 +315,5 @@ func (h *Handler) fanOutPush(ctx context.Context, payload []byte) {
 		}
 	}
 	// One bounded summary line. NEVER log endpoint URLs.
-	log.Printf("push fan-out: sent=%d pruned=%d failed=%d", sent, pruned, failed)
+	log.Printf("push fan-out: type=%s sent=%d pruned=%d failed=%d", notifType, sent, pruned, failed)
 }

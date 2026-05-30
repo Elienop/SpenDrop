@@ -25,6 +25,7 @@ import type {
   Currency,
   ImportPreview,
   ListTokensResponse,
+  NotificationSettings,
   PatchRowRequest,
   ResetPasswordResponse,
   RevokeAllResponse,
@@ -34,6 +35,7 @@ import type {
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
 import { useWebPush } from '@/hooks/useWebPush';
+import { useNotificationPrefs } from '@/hooks/useNotificationPrefs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -1948,6 +1950,52 @@ function DataSection() {
 export function NotificationsSection() {
   const { supported, permission, subscribed, busy, enable, disable, sendTest } =
     useWebPush();
+  const {
+    settings,
+    loading: prefsLoading,
+    error: prefsError,
+    canEdit,
+    update,
+  } = useNotificationPrefs();
+
+  // Per-type rows render in this fixed order. The `key` is the wire field
+  // name shared with the backend fan-out type ids (see notifications.go).
+  const TYPE_ROWS: { key: keyof NotificationSettings; label: string }[] = [
+    { key: 'over_budget', label: 'Over budget' },
+    { key: 'txn_added', label: 'Transaction added' },
+    { key: 'txn_deleted', label: 'Transaction deleted' },
+    { key: 'txn_edited', label: 'Transaction edited' },
+    { key: 'large_txn', label: 'Large transaction' },
+  ];
+
+  async function handleTypeToggle(
+    key: keyof NotificationSettings,
+    next: boolean,
+  ) {
+    try {
+      await update({ [key]: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleThresholdChange(raw: string) {
+    // A cleared field reads as '' → Number('') === 0, which would silently
+    // set the household large-transaction threshold to $0 (every txn "large").
+    // Treat blank as a no-op and revert the visible value to the server echo.
+    if (raw.trim() === '') return;
+    const dollars = Number(raw);
+    if (!Number.isFinite(dollars) || dollars < 0) return;
+    try {
+      await update({ large_txn_threshold_dollars: dollars });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
 
   async function handleToggle(next: boolean) {
     try {
@@ -1974,6 +2022,10 @@ export function NotificationsSection() {
     }
   }
 
+  // Intentional scoping (Task 8): the household notification-type policy is
+  // co-located inside this per-device push card, so a browser without push
+  // support shows only the unsupported notice and not the household block.
+  // Household policy is device-agnostic, but per task scope it lives here.
   if (!supported) {
     return (
       <Card>
@@ -2032,6 +2084,76 @@ export function NotificationsSection() {
         >
           Send test
         </Button>
+
+        <Separator />
+        <div className="flex flex-col gap-1">
+          <h3 className="text-sm font-medium">Household notification types</h3>
+          <p className="text-xs text-muted-foreground">
+            {canEdit
+              ? 'Choose which events send a push to every subscribed device in the household.'
+              : 'Managed by your admin. These settings apply to the whole household.'}
+          </p>
+        </div>
+
+        {prefsError ? (
+          <p className="text-sm text-destructive">{prefsError}</p>
+        ) : prefsLoading || !settings ? (
+          <p className="text-sm text-muted-foreground">Loading…</p>
+        ) : (
+          <div className="flex flex-col gap-4">
+            {TYPE_ROWS.map(({ key, label }) => {
+              const id = `notif-type-${key}`;
+              return (
+                <div
+                  key={key}
+                  className="flex max-w-md items-center justify-between gap-4"
+                >
+                  <Label htmlFor={id}>{label}</Label>
+                  <Switch
+                    id={id}
+                    checked={Boolean(settings[key])}
+                    disabled={!canEdit}
+                    onCheckedChange={(v) => void handleTypeToggle(key, v)}
+                    aria-label={label}
+                  />
+                </div>
+              );
+            })}
+
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label
+                htmlFor="large-txn-threshold"
+                className="flex flex-col gap-1"
+              >
+                <span>Large transaction threshold</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Amount in dollars that counts as a large transaction.
+                </span>
+              </Label>
+              <div className="flex items-center gap-1">
+                <span className="text-sm text-muted-foreground">$</span>
+                <Input
+                  // `key` remounts the uncontrolled input on each server echo
+                  // so a >2-decimal entry (e.g. 500.999 → stored → echoed
+                  // 501.00) re-syncs the visible value to the rounded truth.
+                  key={settings.large_txn_threshold_dollars}
+                  id="large-txn-threshold"
+                  type="number"
+                  min={0}
+                  step="0.01"
+                  inputMode="decimal"
+                  className="w-28"
+                  disabled={!canEdit}
+                  aria-label="Large transaction threshold"
+                  defaultValue={settings.large_txn_threshold_dollars}
+                  onBlur={(e) =>
+                    void handleThresholdChange(e.currentTarget.value)
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
   );
