@@ -9,6 +9,7 @@ import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { api } from '../api/client';
 import { purgeQueue } from '@/lib/offline-queue';
+import { getReadyRegistration } from '@/lib/push-sw';
 import type { User } from '../api/types';
 
 interface AuthContextType {
@@ -85,6 +86,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } catch {
       // Ignore — the session is gone one way or another.
     } finally {
+      // Unsubscribe this device's push subscription and drop the server row
+      // BEFORE the offline-queue purge, so a different account logging in here
+      // can't inherit the leaving user's push registration. Best-effort —
+      // never block logout on push teardown.
+      try {
+        // getReadyRegistration() resolves to null (never pending) when the SW
+        // registration silently failed, so a stuck `ready` can never trap this
+        // security-critical teardown — setUser(null)/navigate always run below.
+        const reg = await getReadyRegistration();
+        if (reg) {
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            const endpoint = sub.endpoint;
+            await sub.unsubscribe();
+            await api.del('push/subscriptions', { endpoint });
+          }
+        }
+      } catch {
+        // Push may be unsupported / already gone; the server row, if any, is
+        // pruned on its next failed send (404/410).
+      }
       // Purge this user's offline write-queue and the device-global api-lists
       // Cache so a different account logging in on the same device can never
       // replay or read the leaving user's data. Best-effort — a failure here

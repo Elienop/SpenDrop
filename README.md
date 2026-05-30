@@ -293,6 +293,17 @@ Most deployments only need the first handful of variables. Everything below is a
 | `BACKUP_KEEP_WEEKLY` | `4` | Distinct ISO weeks retained |
 | `BACKUP_KEEP_MONTHLY` | `12` | Distinct calendar months retained. The sum of the three `BACKUP_KEEP_*` counts must be ≥ 1 — setting all three to `0` is rejected at startup because the current tick's own backup would be pruned on the same tick |
 
+#### Notifications (Web Push)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PUSH_ENABLED` | `false` | Enable Web Push budget-over notifications. When `false` the feature is a hard no-op and the `VAPID_*` variables are ignored |
+| `VAPID_PUBLIC_KEY` | _(unset)_ | base64url P-256 public key. Required when `PUSH_ENABLED=true` |
+| `VAPID_PRIVATE_KEY` | _(unset)_ | base64url P-256 private key. Required when `PUSH_ENABLED=true`. Never logged or returned by any handler |
+| `VAPID_SUBJECT` | _(unset)_ | `mailto:` or `https:` contact URL for the VAPID JWT `sub` claim. Required when `PUSH_ENABLED=true` |
+
+See [Notifications (Web Push)](#notifications-web-push) for setup, key rotation, and TrueNAS redeploy notes.
+
 ## Docker Configuration
 
 The Docker setup uses a multi-stage build (Go builder, Node builder, Alpine runtime) for a minimal final image.
@@ -607,6 +618,31 @@ sudo zfs mount tank/spendrop
 Then bind-mount `/srv/spendrop` into the container exactly as in the LUKS example. The advantage of ZFS encryption is that `zfs send -w` (raw send) ships the dataset *still encrypted* to a backup target — perfect for offsite backups to a host you do not fully trust. Plain `zfs send` without `-w` decrypts before streaming, which defeats the point.
 
 **A reminder.** None of the above protects you against the running SpenDrop process being compromised. Encryption at rest is the lock on the front door of the building. TLS is the lock on the apartment door. Application-level auth is the lock on the diary inside. You need all three, and they are sold separately.
+
+## Notifications (Web Push)
+
+SpenDrop can send a push notification when a budget category goes over its
+monthly limit. Push is **off by default** and requires a VAPID keypair.
+
+1. Generate a VAPID keypair (one-time):
+   `npx web-push generate-vapid-keys` (prints a base64url public + private key).
+2. Set `PUSH_ENABLED=true`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
+   `VAPID_SUBJECT` (a `mailto:` or `https:` contact URL) in your compose env.
+3. Redeploy. Each user opens **Settings → Notifications** and enables push
+   *per device* (a phone and a laptop are two separate subscriptions).
+
+> Push delivery requires the app be served over **HTTPS** (browsers only allow
+> service-worker push on secure origins; `localhost` is exempt for dev).
+
+> **Key rotation is breaking.** Changing `VAPID_PUBLIC_KEY`/`VAPID_PRIVATE_KEY`
+> invalidates every stored subscription — all devices must re-enable
+> notifications. Treat the keypair as long-lived; back it up with your secrets.
+
+### TrueNAS redeploy
+
+Set the three env vars in the app's TrueNAS configuration (or the bind-mounted
+`.env`), then redeploy the stack. Existing data is untouched; subscriptions are
+stored in the DB at `/mnt/zfs/data/services/apps/spendrop/spendrop.db`.
 
 ## Using API tokens
 

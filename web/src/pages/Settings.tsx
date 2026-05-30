@@ -33,9 +33,11 @@ import type {
 } from '../api/types';
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
+import { useWebPush } from '@/hooks/useWebPush';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Switch } from '@/components/ui/switch';
 import { cn, selectAllOnFocus } from '@/lib/utils';
 import {
   Card,
@@ -108,6 +110,7 @@ const VALID_TABS = [
   'currencies',
   'users',
   'api-tokens',
+  'notifications',
   'data',
 ] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
@@ -1940,6 +1943,100 @@ function DataSection() {
   );
 }
 
+/* ---------- Notifications Tab ---------- */
+
+export function NotificationsSection() {
+  const { supported, permission, subscribed, busy, enable, disable, sendTest } =
+    useWebPush();
+
+  async function handleToggle(next: boolean) {
+    try {
+      if (next) {
+        await enable();
+      } else {
+        await disable();
+      }
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update notifications',
+      );
+    }
+  }
+
+  async function handleSendTest() {
+    try {
+      await sendTest();
+      toast.success('Test notification sent');
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to send test notification',
+      );
+    }
+  }
+
+  if (!supported) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Notifications</CardTitle>
+          <CardDescription>
+            This browser does not support web push notifications.
+          </CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Notifications</CardTitle>
+        <CardDescription>
+          Get a push notification on this device when a budget category goes
+          over its limit.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {permission === 'denied' && (
+          <Alert variant="warning">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Notifications are blocked</AlertTitle>
+            <AlertDescription>
+              You've blocked notifications for this site in your browser.
+              Re-enable them in your browser's site settings, then toggle this
+              on.
+            </AlertDescription>
+          </Alert>
+        )}
+        <div className="flex max-w-md items-center justify-between gap-4">
+          <Label htmlFor="push-toggle" className="flex flex-col gap-1">
+            <span>Push notifications on this device</span>
+            <span className="text-xs font-normal text-muted-foreground">
+              Each device subscribes separately.
+            </span>
+          </Label>
+          <Switch
+            id="push-toggle"
+            checked={subscribed}
+            disabled={busy || permission === 'denied'}
+            onCheckedChange={(v) => void handleToggle(v)}
+            aria-label="Push notifications on this device"
+          />
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          className="w-fit"
+          disabled={busy || permission !== 'granted' || !subscribed}
+          onClick={() => void handleSendTest()}
+        >
+          Send test
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 /* ---------- Main Settings Page ---------- */
 
 // Old `?tab=…` values that no longer correspond to a Settings tab —
@@ -2014,6 +2111,7 @@ export function Settings() {
           <TabsTrigger value="currencies">Currencies</TabsTrigger>
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}
           <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
+          <TabsTrigger value="notifications">Notifications</TabsTrigger>
           <TabsTrigger value="data">Import / Export</TabsTrigger>
         </TabsList>
         <TabsContent value="account" className="mt-6">
@@ -2029,6 +2127,9 @@ export function Settings() {
         )}
         <TabsContent value="api-tokens" className="mt-6">
           <ApiTokensSection />
+        </TabsContent>
+        <TabsContent value="notifications" className="mt-6">
+          <NotificationsSection />
         </TabsContent>
         <TabsContent value="data" className="mt-6">
           <DataSection />

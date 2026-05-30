@@ -226,6 +226,14 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 	// mutate the date column so that value is still authoritative.
 	h.verifyAffectedCheckpoints(r.Context(), existing.Date)
 
+	// Phase C (Task 17): a restore re-adds the row's spend to the live SUM,
+	// so its cell may now cross over budget — evaluate it (and re-arm a
+	// future re-cross). cellsForCreate is the correct shape: a restore, like
+	// a create, adds spend to a single cell. existing.Date/CategoryID are the
+	// pre-restore copy from the TOCTOU read; Restore doesn't mutate either.
+	// Post-commit, best-effort.
+	h.evaluateBudgetAlerts(r.Context(), cellsForCreate(existing.CategoryID, existing.Date))
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }
 
@@ -352,12 +360,23 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		}
 	}()
 
+	// Distinct (category, month) cells touched by this batch, for the
+	// post-commit over-budget hook (Phase C, Task 17). RestoreTx returns
+	// only error, so we read each row's (category, date) off the same tx
+	// before restoring it — only rows that actually restore are recorded.
+	qtx := h.queries.WithTx(tx)
+	cellSet := map[budgetCell]struct{}{}
+
 	restored := 0
 	conflicted := 0
 	for _, id := range req.IDs {
+		existing, loadErr := qtx.GetTransactionByID(r.Context(), id)
 		err := h.txnStore.RestoreTx(r.Context(), tx, user.ID, id)
 		if err == nil {
 			restored++
+			if loadErr == nil {
+				cellSet[cellForDate(existing.CategoryID, existing.Date)] = struct{}{}
+			}
 			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
@@ -396,6 +415,17 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	// so every red/green state is potentially affected.
 	if restored > 0 {
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
+	}
+
+	// Phase C (Task 17): evaluate the over-budget alert for every distinct
+	// (category, month) cell the batch restored spend into. Post-commit,
+	// best-effort.
+	if len(cellSet) > 0 {
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
 	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored, Conflicted: conflicted})
@@ -468,12 +498,22 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		}
 	}()
 
+	// Distinct (category, month) cells restored, for the post-commit
+	// over-budget hook (Phase C, Task 17). Same approach as batch-restore:
+	// read each row's (category, date) off the tx before restoring it.
+	qtx := h.queries.WithTx(tx)
+	cellSet := map[budgetCell]struct{}{}
+
 	restored := 0
 	conflicted := 0
 	for _, id := range ids {
+		existing, loadErr := qtx.GetTransactionByID(ctx, id)
 		err := h.txnStore.RestoreTx(ctx, tx, user.ID, id)
 		if err == nil {
 			restored++
+			if loadErr == nil {
+				cellSet[cellForDate(existing.CategoryID, existing.Date)] = struct{}{}
+			}
 			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
@@ -503,6 +543,17 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 	// doesn't pre-load dates, so re-verify every checkpoint.
 	if restored > 0 {
 		h.verifyAffectedCheckpoints(ctx, time.Time{})
+	}
+
+	// Phase C (Task 17): evaluate the over-budget alert for every distinct
+	// (category, month) cell restore-all re-added spend into. Post-commit,
+	// best-effort.
+	if len(cellSet) > 0 {
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(ctx, cells)
 	}
 
 	writeJSON(w, http.StatusOK, restoreAllResponse{Restored: restored, Conflicted: conflicted})

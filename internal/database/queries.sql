@@ -839,3 +839,57 @@ SELECT * FROM api_token_audit
 WHERE user_id = sqlc.arg(user_id)
 ORDER BY created_at DESC, id DESC
 LIMIT sqlc.arg(limit);
+
+-- Push Subscriptions (Web Push)
+-- HAND-WRITTEN in queries.sql.go: sqlc cannot generate this repo. Column order
+-- for SELECT *: id, user_id, endpoint, p256dh, auth, user_agent, created_at,
+-- last_seen (the on-disk order from migration 013).
+
+-- name: UpsertPushSubscription :exec
+INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(endpoint) DO UPDATE SET
+    p256dh = excluded.p256dh,
+    auth = excluded.auth,
+    user_agent = excluded.user_agent,
+    user_id = excluded.user_id,
+    last_seen = datetime('now');
+
+-- name: ListPushSubscriptionsByUser :many
+SELECT * FROM push_subscriptions WHERE user_id = ? ORDER BY id;
+
+-- name: ListAllPushSubscriptions :many
+SELECT * FROM push_subscriptions ORDER BY id;
+
+-- name: GetPushSubscriptionByEndpoint :one
+-- Used by handleCreatePushSubscription to detect a cross-user re-home: if the
+-- endpoint already exists under a DIFFERENT user_id the upsert is rejected
+-- (409) instead of silently re-assigning the device to the caller.
+SELECT * FROM push_subscriptions WHERE endpoint = ?;
+
+-- name: DeletePushSubscriptionByEndpoint :exec
+-- Unscoped delete: used ONLY for the internal prune path (dead-endpoint cleanup
+-- on 410/404) where the endpoint already came from a user-scoped or
+-- all-subscriptions list. The user-facing unsubscribe handler MUST use
+-- DeletePushSubscriptionByEndpointAndUser to avoid cross-user deletion (IDOR).
+DELETE FROM push_subscriptions WHERE endpoint = ?;
+
+-- name: DeletePushSubscriptionByEndpointAndUser :exec
+-- User-scoped delete for the unsubscribe handler. Deletes only a row the
+-- caller owns, so an authenticated user who learns another user's endpoint
+-- out-of-band cannot delete that user's subscription. Idempotent.
+DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?;
+
+-- name: CountPushSubscriptionsByUser :one
+SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?;
+
+-- Budget Alert State (Web Push over-budget latch)
+-- HAND-WRITTEN in queries.sql.go: sqlc cannot generate this repo. Both SetBudgetAlertState and ClearBudgetAlertState are :execrows so the caller learns the rows-affected count: SetBudgetAlertState returns 1 when the row was NEWLY inserted (a fresh over-budget cross) and 0 when the latch was already set (dedup) - that count gates the push fan-out. ClearBudgetAlertState returns the number of latch rows removed.
+
+-- name: SetBudgetAlertState :execrows
+INSERT INTO budget_alert_state (category_id, year, month)
+VALUES (?, ?, ?)
+ON CONFLICT(category_id, year, month) DO NOTHING;
+
+-- name: ClearBudgetAlertState :execrows
+DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?;

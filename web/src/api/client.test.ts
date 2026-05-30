@@ -102,6 +102,20 @@ describe('ApiClient.request', () => {
     expect((err as ApiError).message).toBe('Unauthorized');
   });
 
+  it('resolves (without parsing the body) on a 204 No Content response', async () => {
+    // The DELETE /push/subscriptions handler returns 204 with NO body.
+    // A real Response.json() on an empty body rejects with a SyntaxError;
+    // request() must short-circuit on 204 so callers like useWebPush.disable()
+    // don't see a spurious rejection on a successful unsubscribe.
+    mockFetch({
+      ok: true,
+      status: 204,
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+    });
+
+    await expect(api.del('push/subscriptions', { endpoint: 'x' })).resolves.toBeUndefined();
+  });
+
   it('throws an ApiError carrying the HTTP status and server message on other non-ok responses', async () => {
     mockFetch({
       ok: false,
@@ -224,6 +238,18 @@ describe('ApiClient.upload', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(401);
     expect((err as ApiError).message).toBe('Unauthorized');
+  });
+
+  it('resolves (without parsing the body) on a 204 No Content response', async () => {
+    mockFetch({
+      ok: true,
+      status: 204,
+      json: () => Promise.reject(new SyntaxError('Unexpected end of JSON input')),
+    });
+
+    const file = new File(['data'], 'test.csv', { type: 'text/csv' });
+
+    await expect(api.upload('imports', file)).resolves.toBeUndefined();
   });
 
   it('returns parsed JSON response on success', async () => {

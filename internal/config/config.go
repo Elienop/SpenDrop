@@ -13,6 +13,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -48,6 +49,10 @@ type Config struct {
 
 	// Backup controls the scheduled in-process database backup loop.
 	Backup BackupConfig
+
+	// Push controls Web Push notifications. When Enabled is false the
+	// feature is a hard no-op and the VAPID fields are ignored by Validate.
+	Push PushConfig
 
 	// ShutdownGrace is the maximum time the server waits for in-flight
 	// requests to finish during graceful shutdown.
@@ -137,6 +142,24 @@ type BackupConfig struct {
 	KeepMonthly int
 }
 
+// PushConfig holds the Web Push VAPID identity. When Enabled is false the
+// feature is a hard no-op (handlers 404, the sender is never constructed) and
+// the other fields are ignored by Validate — mirroring BackupConfig, an
+// operator can leave the keys unset without having to satisfy this surface.
+type PushConfig struct {
+	// Enabled toggles the entire Web Push feature. Env: PUSH_ENABLED. Default: false.
+	Enabled bool
+	// VAPIDPublicKey is the base64url-encoded application server public key,
+	// served to the browser at /api/push/vapid-public-key. Env: VAPID_PUBLIC_KEY.
+	VAPIDPublicKey string
+	// VAPIDPrivateKey is the base64url-encoded application server private key,
+	// used to sign the VAPID JWT. Never leaves the backend. Env: VAPID_PRIVATE_KEY.
+	VAPIDPrivateKey string
+	// VAPIDSubject is the JWT `sub` claim — a mailto: or https: URL identifying
+	// the operator to the push service. Env: VAPID_SUBJECT.
+	VAPIDSubject string
+}
+
 // Defaults returns the in-source default configuration. All fields are set.
 // The returned value is a fresh copy — callers can mutate it without
 // affecting other callers.
@@ -181,6 +204,9 @@ func Defaults() Config {
 			KeepDaily:   7,
 			KeepWeekly:  4,
 			KeepMonthly: 12,
+		},
+		Push: PushConfig{
+			Enabled: false,
 		},
 	}
 }
@@ -276,6 +302,20 @@ func Load() (*Config, error) {
 	}
 	if err := parseInt("BACKUP_KEEP_MONTHLY", &cfg.Backup.KeepMonthly); err != nil {
 		return nil, err
+	}
+
+	// Push
+	if err := parseBool("PUSH_ENABLED", &cfg.Push.Enabled); err != nil {
+		return nil, err
+	}
+	if v := os.Getenv("VAPID_PUBLIC_KEY"); v != "" {
+		cfg.Push.VAPIDPublicKey = v
+	}
+	if v := os.Getenv("VAPID_PRIVATE_KEY"); v != "" {
+		cfg.Push.VAPIDPrivateKey = v
+	}
+	if v := os.Getenv("VAPID_SUBJECT"); v != "" {
+		cfg.Push.VAPIDSubject = v
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -386,6 +426,23 @@ func (c *Config) Validate() error {
 		if c.Backup.KeepDaily+c.Backup.KeepWeekly+c.Backup.KeepMonthly < 1 {
 			return fmt.Errorf("BACKUP_KEEP_* sum must be >= 1 when BACKUP_ENABLED=true (daily=%d weekly=%d monthly=%d); otherwise every fresh backup is pruned on the same tick",
 				c.Backup.KeepDaily, c.Backup.KeepWeekly, c.Backup.KeepMonthly)
+		}
+	}
+
+	// Push settings are only validated when enabled (mirrors Backup). A
+	// disabled feature must not force the operator to supply VAPID keys.
+	if c.Push.Enabled {
+		if c.Push.VAPIDPublicKey == "" || c.Push.VAPIDPrivateKey == "" || c.Push.VAPIDSubject == "" {
+			return fmt.Errorf("VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, and VAPID_SUBJECT are all required when PUSH_ENABLED=true")
+		}
+		if !strings.HasPrefix(c.Push.VAPIDSubject, "mailto:") && !strings.HasPrefix(c.Push.VAPIDSubject, "https:") {
+			return fmt.Errorf("VAPID_SUBJECT must start with mailto: or https: (got %q)", c.Push.VAPIDSubject)
+		}
+		if _, err := base64.RawURLEncoding.DecodeString(c.Push.VAPIDPublicKey); err != nil {
+			return fmt.Errorf("VAPID_PUBLIC_KEY is not valid base64url: %w", err)
+		}
+		if _, err := base64.RawURLEncoding.DecodeString(c.Push.VAPIDPrivateKey); err != nil {
+			return fmt.Errorf("VAPID_PRIVATE_KEY is not valid base64url: %w", err)
 		}
 	}
 

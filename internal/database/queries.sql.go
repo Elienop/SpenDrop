@@ -2726,3 +2726,210 @@ func (q *Queries) ListAPITokenAuditByUser(ctx context.Context, arg ListAPITokenA
 	}
 	return items, nil
 }
+
+// Push Subscriptions (Web Push). HAND-WRITTEN: sqlc cannot generate this repo.
+// SELECT * column order: id, user_id, endpoint, p256dh, auth, user_agent,
+// created_at, last_seen (the on-disk order from migration 013).
+
+const upsertPushSubscription = `-- name: UpsertPushSubscription :exec
+INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(endpoint) DO UPDATE SET
+    p256dh = excluded.p256dh,
+    auth = excluded.auth,
+    user_agent = excluded.user_agent,
+    user_id = excluded.user_id,
+    last_seen = datetime('now')
+`
+
+type UpsertPushSubscriptionParams struct {
+	UserID    int64          `json:"user_id"`
+	Endpoint  string         `json:"endpoint"`
+	P256dh    string         `json:"p256dh"`
+	Auth      string         `json:"auth"`
+	UserAgent sql.NullString `json:"user_agent"`
+}
+
+func (q *Queries) UpsertPushSubscription(ctx context.Context, arg UpsertPushSubscriptionParams) error {
+	_, err := q.db.ExecContext(ctx, upsertPushSubscription,
+		arg.UserID,
+		arg.Endpoint,
+		arg.P256dh,
+		arg.Auth,
+		arg.UserAgent,
+	)
+	return err
+}
+
+const listPushSubscriptionsByUser = `-- name: ListPushSubscriptionsByUser :many
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions WHERE user_id = ? ORDER BY id
+`
+
+func (q *Queries) ListPushSubscriptionsByUser(ctx context.Context, userID int64) ([]PushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, listPushSubscriptionsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PushSubscription{}
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.P256dh,
+			&i.Auth,
+			&i.UserAgent,
+			&i.CreatedAt,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAllPushSubscriptions = `-- name: ListAllPushSubscriptions :many
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions ORDER BY id
+`
+
+func (q *Queries) ListAllPushSubscriptions(ctx context.Context) ([]PushSubscription, error) {
+	rows, err := q.db.QueryContext(ctx, listAllPushSubscriptions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PushSubscription{}
+	for rows.Next() {
+		var i PushSubscription
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Endpoint,
+			&i.P256dh,
+			&i.Auth,
+			&i.UserAgent,
+			&i.CreatedAt,
+			&i.LastSeen,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getPushSubscriptionByEndpoint = `-- name: GetPushSubscriptionByEndpoint :one
+SELECT id, user_id, endpoint, p256dh, auth, user_agent, created_at, last_seen FROM push_subscriptions WHERE endpoint = ?
+`
+
+// GetPushSubscriptionByEndpoint detects a cross-user re-home: if the endpoint
+// already exists under a different user_id the upsert caller rejects it (409)
+// instead of silently re-assigning the device. Returns sql.ErrNoRows when the
+// endpoint is unknown.
+func (q *Queries) GetPushSubscriptionByEndpoint(ctx context.Context, endpoint string) (PushSubscription, error) {
+	row := q.db.QueryRowContext(ctx, getPushSubscriptionByEndpoint, endpoint)
+	var i PushSubscription
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Endpoint,
+		&i.P256dh,
+		&i.Auth,
+		&i.UserAgent,
+		&i.CreatedAt,
+		&i.LastSeen,
+	)
+	return i, err
+}
+
+const deletePushSubscriptionByEndpoint = `-- name: DeletePushSubscriptionByEndpoint :exec
+DELETE FROM push_subscriptions WHERE endpoint = ?
+`
+
+// DeletePushSubscriptionByEndpoint is the UNSCOPED delete used only for the
+// internal prune path (dead-endpoint cleanup on 410/404) where the endpoint
+// already came from a user-scoped or all-subscriptions list. The user-facing
+// unsubscribe handler MUST use DeletePushSubscriptionByEndpointAndUser.
+func (q *Queries) DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint string) error {
+	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByEndpoint, endpoint)
+	return err
+}
+
+const deletePushSubscriptionByEndpointAndUser = `-- name: DeletePushSubscriptionByEndpointAndUser :exec
+DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?
+`
+
+type DeletePushSubscriptionByEndpointAndUserParams struct {
+	Endpoint string `json:"endpoint"`
+	UserID   int64  `json:"user_id"`
+}
+
+// DeletePushSubscriptionByEndpointAndUser is the user-scoped delete for the
+// unsubscribe handler: it deletes only a row the caller owns, so a user who
+// learns another user's endpoint out-of-band cannot delete it. Idempotent.
+func (q *Queries) DeletePushSubscriptionByEndpointAndUser(ctx context.Context, arg DeletePushSubscriptionByEndpointAndUserParams) error {
+	_, err := q.db.ExecContext(ctx, deletePushSubscriptionByEndpointAndUser, arg.Endpoint, arg.UserID)
+	return err
+}
+
+const countPushSubscriptionsByUser = `-- name: CountPushSubscriptionsByUser :one
+SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?
+`
+
+func (q *Queries) CountPushSubscriptionsByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countPushSubscriptionsByUser, userID)
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}
+
+// Budget Alert State (Web Push over-budget latch). HAND-WRITTEN: sqlc cannot
+// generate this repo. Both funcs are :execrows returning sql.Result so the
+// caller can read RowsAffected - SetBudgetAlertState reports whether the latch
+// was newly set (1) or already present (0); ClearBudgetAlertState reports how
+// many latch rows were removed.
+
+const setBudgetAlertState = `-- name: SetBudgetAlertState :execrows
+INSERT INTO budget_alert_state (category_id, year, month)
+VALUES (?, ?, ?)
+ON CONFLICT(category_id, year, month) DO NOTHING
+`
+
+type SetBudgetAlertStateParams struct {
+	CategoryID int64 `json:"category_id"`
+	Year       int64 `json:"year"`
+	Month      int64 `json:"month"`
+}
+
+func (q *Queries) SetBudgetAlertState(ctx context.Context, arg SetBudgetAlertStateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, setBudgetAlertState, arg.CategoryID, arg.Year, arg.Month)
+}
+
+const clearBudgetAlertState = `-- name: ClearBudgetAlertState :execrows
+DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?
+`
+
+type ClearBudgetAlertStateParams struct {
+	CategoryID int64 `json:"category_id"`
+	Year       int64 `json:"year"`
+	Month      int64 `json:"month"`
+}
+
+func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAlertStateParams) (sql.Result, error) {
+	return q.db.ExecContext(ctx, clearBudgetAlertState, arg.CategoryID, arg.Year, arg.Month)
+}

@@ -70,6 +70,14 @@ type CategoryBudget struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+type BudgetAlertState struct {
+	ID         int64     `json:"id"`
+	CategoryID int64     `json:"category_id"`
+	Year       int64     `json:"year"`
+	Month      int64     `json:"month"`
+	NotifiedAt time.Time `json:"notified_at"`
+}
+
 type Category struct {
 	ID        int64          `json:"id"`
 	Name      string         `json:"name"`
@@ -87,6 +95,17 @@ type Currency struct {
 	RateToBase float64   `json:"rate_to_base"`
 	IsBase     bool      `json:"is_base"`
 	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+type PushSubscription struct {
+	ID        int64          `json:"id"`
+	UserID    int64          `json:"user_id"`
+	Endpoint  string         `json:"endpoint"`
+	P256dh    string         `json:"p256dh"`
+	Auth      string         `json:"auth"`
+	UserAgent sql.NullString `json:"user_agent"`
+	CreatedAt time.Time      `json:"created_at"`
+	LastSeen  time.Time      `json:"last_seen"`
 }
 
 type SavedFilter struct {

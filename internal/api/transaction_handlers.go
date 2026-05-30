@@ -367,6 +367,11 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// verifyAffectedCheckpoints for the error contract.
 	h.verifyAffectedCheckpoints(r.Context(), txn.Date)
 
+	// Phase C (Task 17): fire the over-budget alert hook for the cell the new
+	// row lands in. Post-commit, best-effort — never blocks or errors the
+	// already-committed mutation. Cell is derived from the row's own date.
+	h.evaluateBudgetAlerts(r.Context(), cellsForCreate(txn.CategoryID, txn.Date))
+
 	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
 }
 
@@ -471,6 +476,13 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	// checkpoint on or after that minimum.
 	h.verifyAffectedCheckpoints(r.Context(), earliestDate(existing.Date, date))
 
+	// Phase C (Task 17): an edit can move the row between categories and/or
+	// months — evaluate both the OLD cell (its spend may have dropped under,
+	// clearing the latch) and the NEW cell (it may have crossed over).
+	// Post-commit, best-effort.
+	h.evaluateBudgetAlerts(r.Context(),
+		cellsForUpdate(existing.CategoryID, existing.Date, req.CategoryID, date))
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -525,6 +537,11 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 	// existing.Date is the pre-delete copy we loaded for the TOCTOU check.
 	h.verifyAffectedCheckpoints(r.Context(), existing.Date)
 
+	// Phase C (Task 17): a delete drops the row's spend, so its cell may now be
+	// back under the limit — evaluating clears the latch (and re-arms a future
+	// re-cross). Post-commit, best-effort.
+	h.evaluateBudgetAlerts(r.Context(), cellsForDelete(existing.CategoryID, existing.Date))
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
@@ -577,6 +594,9 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	// checkpoint hook; a zero value means "no rows committed yet" and
 	// suppresses the hook call entirely.
 	var minBatchDate time.Time
+	// Distinct (category, month) cells touched by this batch, for the
+	// post-commit over-budget hook (Phase C, Task 17).
+	cellSet := map[budgetCell]struct{}{}
 
 	for i, req := range reqs {
 		date, _ := time.Parse("2006-01-02", req.Date)
@@ -604,6 +624,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		}
 
 		minBatchDate = earliestDate(minBatchDate, txn.Date)
+		cellSet[cellForDate(txn.CategoryID, txn.Date)] = struct{}{}
 		results = append(results, toTransactionResponse(txn))
 	}
 
@@ -619,6 +640,16 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	// which case the loop short-circuits with no query.
 	if !minBatchDate.IsZero() {
 		h.verifyAffectedCheckpoints(r.Context(), minBatchDate)
+	}
+
+	// Phase C (Task 17): evaluate the over-budget alert for every distinct
+	// (category, month) cell the batch touched. Post-commit, best-effort.
+	if len(cellSet) > 0 {
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
 	writeJSON(w, http.StatusCreated, results)
@@ -1004,6 +1035,9 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	// the post-commit checkpoint hook (nothing changed, nothing to
 	// re-verify).
 	var minDeletedDate time.Time
+	// Distinct (category, month) cells touched by this batch, for the
+	// post-commit over-budget hook (Phase C, Task 17).
+	cellSet := map[budgetCell]struct{}{}
 
 	for _, id := range req.IDs {
 		existing, err := qtx.GetTransactionByID(r.Context(), id)
@@ -1028,6 +1062,7 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			return
 		}
 		minDeletedDate = earliestDate(minDeletedDate, existing.Date)
+		cellSet[cellForDate(existing.CategoryID, existing.Date)] = struct{}{}
 		deleted++
 	}
 
@@ -1065,6 +1100,16 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	// actually changed and the hook is a no-op.
 	if !minDeletedDate.IsZero() {
 		h.verifyAffectedCheckpoints(r.Context(), minDeletedDate)
+	}
+
+	// Phase C (Task 17): evaluate the over-budget alert for every distinct
+	// (category, month) cell the batch tombstoned. Post-commit, best-effort.
+	if len(cellSet) > 0 {
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
@@ -1226,6 +1271,12 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 
 	var updated, skipped int64
 	var minDate time.Time
+	// Distinct (category, month) cells touched by this batch, for the
+	// post-commit over-budget hook (Phase C, Task 17). UpdateTx returns
+	// before/after rows carrying CategoryID and Date, so both the OLD cell
+	// (whose spend dropped) and the NEW cell (which may have crossed) are
+	// enumerable per row — unlike the single-SQL filter-update path.
+	cellSet := map[budgetCell]struct{}{}
 
 	for _, id := range req.IDs {
 		// Compute per-row patch. For non-replace tag modes we need the
@@ -1272,6 +1323,12 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 				// values into one floor.
 				minDate = earliestDate(minDate, earliestDate(before.Date, after.Date))
 			}
+			// Record both the old and new cells: a category/date patch
+			// relocates the row's spend, dropping the old cell (latch may
+			// clear) and possibly crossing the new cell over budget. When
+			// neither changed, both map to the same cell and dedupe.
+			cellSet[cellForDate(before.CategoryID, before.Date)] = struct{}{}
+			cellSet[cellForDate(after.CategoryID, after.Date)] = struct{}{}
 		}
 	}
 
@@ -1299,6 +1356,17 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 	// least one row was actually updated (minDate stays zero otherwise).
 	if patch.Date != nil && !minDate.IsZero() {
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
+	}
+
+	// Phase C (Task 17): evaluate the over-budget alert for every distinct
+	// (category, month) cell this batch's old/new row positions touched.
+	// Post-commit, best-effort.
+	if len(cellSet) > 0 {
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
 	writeJSON(w, http.StatusOK, bulkUpdateResponse{Updated: updated, Skipped: skipped})
@@ -1420,6 +1488,11 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	if deleted > 0 {
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
+
+	// Budget-alert hook intentionally skipped here: the bulk UPDATE does not
+	// expose per-row (category, month), so there is no precise cell to
+	// evaluate. Re-import / wipe workflows re-trip alerts on the next
+	// single-row or batch-create. (Phase C, Task 17.)
 
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
 }
@@ -1557,6 +1630,13 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 	if patch.Date != nil {
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
 	}
+
+	// Budget-alert hook intentionally skipped here: the no-tags fast path is a
+	// single SQL UPDATE that does not enumerate per-row (category, month), so
+	// there is no precise old/new cell to evaluate (unlike the ID-list
+	// handleBatchUpdateTransactions, which does enumerate). Wipe-and-reimport
+	// workflows re-trip alerts on the next single-row, batch-create, or
+	// import. (Phase C, Task 17.)
 
 	writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})
 }

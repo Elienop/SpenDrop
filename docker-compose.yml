@@ -23,6 +23,16 @@ services:
       # - BACKUP_KEEP_DAILY=7
       # - BACKUP_KEEP_WEEKLY=4
       # - BACKUP_KEEP_MONTHLY=12
+      # --- Web Push (optional, default OFF) ---------------------------------
+      # Leave PUSH_ENABLED unset/false to keep push fully inert. To enable,
+      # generate a VAPID keypair once (e.g. `npx web-push generate-vapid-keys`,
+      # or any P-256 base64url keypair) and set all three keys + a subject.
+      # ROTATING THESE KEYS INVALIDATES EVERY EXISTING SUBSCRIPTION — every
+      # device must re-enable notifications afterward. See README → Notifications.
+      # - PUSH_ENABLED=true
+      # - VAPID_PUBLIC_KEY=<base64url P-256 public key>
+      # - VAPID_PRIVATE_KEY=<base64url P-256 private key>
+      # - VAPID_SUBJECT=mailto:you@example.com
     restart: unless-stopped
 
 volumes:

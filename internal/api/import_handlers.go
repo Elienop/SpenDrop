@@ -772,6 +772,11 @@ type importInserted struct {
 	RowIndex    int
 	Date        time.Time
 	AmountCents int64
+	// CategoryID carries the resolved category of the inserted row so the
+	// confirm handler can derive the (category, month) cell for the
+	// post-commit over-budget alert hook (Phase C, Task 17) without
+	// re-querying.
+	CategoryID int64
 }
 
 // importSkipped records a user-data-level rejection (bad date, empty
@@ -992,6 +997,23 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// minImportDate zero and no-op the hook.
 	if !minImportDate.IsZero() {
 		h.verifyAffectedCheckpoints(r.Context(), minImportDate)
+	}
+
+	// Phase C (Task 17): import is the single largest expense-creating path, so
+	// it must fire the over-budget alert just like batch-create. Collect every
+	// distinct (category, month) cell the inserted rows landed in and evaluate
+	// the deduped set once. Post-commit, best-effort — a push failure never
+	// affects the already-committed import.
+	if len(result.Inserted) > 0 {
+		cellSet := map[budgetCell]struct{}{}
+		for _, ins := range result.Inserted {
+			cellSet[cellForDate(ins.CategoryID, ins.Date)] = struct{}{}
+		}
+		cells := make([]budgetCell, 0, len(cellSet))
+		for c := range cellSet {
+			cells = append(cells, c)
+		}
+		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
 	// Phase 3.4b: the user-visible `skipped` field rolls up three
@@ -1528,6 +1550,7 @@ func processImportRows(
 			RowIndex:    i,
 			Date:        created.Date,
 			AmountCents: created.AmountCents,
+			CategoryID:  created.CategoryID,
 		})
 	}
 

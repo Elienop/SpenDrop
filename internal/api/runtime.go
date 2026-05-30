@@ -49,6 +49,14 @@ var (
 	// for user-supplied passwords. Max must stay ≤ 72 (bcrypt input limit).
 	passwordMinLength = runtimeDefaults.Password.MinLength
 	passwordMaxLength = runtimeDefaults.Password.MaxLength
+
+	// pushEnabled toggles the Web Push feature surface. When false, the public
+	// vapid route 404s and the subscribe/test handlers report disabled.
+	pushEnabled = runtimeDefaults.Push.Enabled
+
+	// vapidPublicKey is the base64url application-server public key echoed to
+	// the browser by /api/push/vapid-public-key. Never a secret.
+	vapidPublicKey = runtimeDefaults.Push.VAPIDPublicKey
 )
 
 // ApplyConfig mutates the package-level runtime knobs from cfg. Called
@@ -66,6 +74,8 @@ func ApplyConfig(cfg *config.Config) {
 	sessionTTL = cfg.Session.TTL
 	passwordMinLength = cfg.Password.MinLength
 	passwordMaxLength = cfg.Password.MaxLength
+	pushEnabled = cfg.Push.Enabled
+	vapidPublicKey = cfg.Push.VAPIDPublicKey
 }
 
 // getMaxJSONBytes returns the current JSON body cap under the read lock so
@@ -104,4 +114,18 @@ func getPasswordBounds() (minLen, maxLen int) {
 	runtimeMu.RLock()
 	defer runtimeMu.RUnlock()
 	return passwordMinLength, passwordMaxLength
+}
+
+// getPushEnabled reports whether the Web Push config flag is on.
+func getPushEnabled() bool {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return pushEnabled
+}
+
+// getVAPIDPublicKey returns the configured base64url VAPID public key.
+func getVAPIDPublicKey() string {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return vapidPublicKey
 }

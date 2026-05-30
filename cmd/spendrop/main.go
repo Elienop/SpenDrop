@@ -18,6 +18,7 @@ import (
 	"github.com/elienop/spendrop/internal/backup"
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/push"
 )
 
 func main() {
@@ -209,6 +210,23 @@ func main() {
 	// state. The timestamp was captured right after the synchronous
 	// pragma returned above.
 	h.SetIntegrityResult(startupIntegrityAt, startupIntegrityResult)
+
+	// Wire Web Push. Constructed ONLY when cfg.Push.Enabled — when push is
+	// off the Handler's pushSender stays nil and every push handler treats
+	// that as "feature disabled" (public vapid route 404s, subscribe/test
+	// report disabled). cfg.Validate has already guaranteed the VAPID keys
+	// are present and well-formed whenever Enabled is true, so NewSender
+	// cannot be handed half a keypair here. http.DefaultClient is shared
+	// across the whole fan-out so the connection pool is reused.
+	if cfg.Push.Enabled {
+		h.SetPushSender(push.NewSender(
+			cfg.Push.VAPIDPublicKey,
+			cfg.Push.VAPIDPrivateKey,
+			cfg.Push.VAPIDSubject,
+			http.DefaultClient,
+		))
+		log.Println("Web Push enabled")
+	}
 
 	// Daily full PRAGMA integrity_check runs in the background alongside
 	// session cleanup. This is the long-running scan that cross-checks
