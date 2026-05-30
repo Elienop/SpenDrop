@@ -1,0 +1,110 @@
+package api
+
+import (
+	"net/http"
+	"time"
+
+	"github.com/elienop/spendrop/internal/auth"
+	"github.com/elienop/spendrop/internal/database"
+)
+
+// notificationSettingsDTO is the wire shape for /api/push/preferences. The
+// large-transaction threshold crosses the edge in DOLLARS
+// (large_txn_threshold_dollars), converted via centsToDollars on read /
+// dollarsToCents on write — the raw large_txn_threshold_cents column is NEVER
+// exposed (Money Wire-Edge DTO discipline; see savingsGoalDTO). The five
+// toggles are plain bools the frontend reads directly.
+type notificationSettingsDTO struct {
+	OverBudget               bool      `json:"over_budget"`
+	TxnAdded                 bool      `json:"txn_added"`
+	TxnDeleted               bool      `json:"txn_deleted"`
+	TxnEdited                bool      `json:"txn_edited"`
+	LargeTxn                 bool      `json:"large_txn"`
+	LargeTxnThresholdDollars float64   `json:"large_txn_threshold_dollars"`
+	UpdatedAt                time.Time `json:"updated_at"`
+}
+
+func notificationSettingsToDTO(s database.NotificationSettings) notificationSettingsDTO {
+	return notificationSettingsDTO{
+		OverBudget:               s.OverBudget,
+		TxnAdded:                 s.TxnAdded,
+		TxnDeleted:               s.TxnDeleted,
+		TxnEdited:                s.TxnEdited,
+		LargeTxn:                 s.LargeTxn,
+		LargeTxnThresholdDollars: centsToDollars(s.LargeTxnThresholdCents),
+		UpdatedAt:                s.UpdatedAt,
+	}
+}
+
+// updateNotificationSettingsRequest is the PUT body. The threshold is a dollar
+// float; an absent toggle decodes as false, so the frontend always sends the
+// full set (the hook in useNotificationPrefs merges partials before PUT).
+type updateNotificationSettingsRequest struct {
+	OverBudget               bool    `json:"over_budget"`
+	TxnAdded                 bool    `json:"txn_added"`
+	TxnDeleted               bool    `json:"txn_deleted"`
+	TxnEdited                bool    `json:"txn_edited"`
+	LargeTxn                 bool    `json:"large_txn"`
+	LargeTxnThresholdDollars float64 `json:"large_txn_threshold_dollars"`
+}
+
+// handleGetNotificationSettings returns the household notification preferences.
+// ANY authenticated user may READ (so non-admins can see what is enabled and
+// why their device buzzes); only admins may write (see PUT).
+func (h *Handler) handleGetNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	if _, ok := auth.GetUser(r); !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	s, err := h.queries.GetNotificationSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read notification settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, notificationSettingsToDTO(s))
+}
+
+// handleUpdateNotificationSettings rewrites the household preferences. ADMIN
+// ONLY (403 otherwise) — these are household-wide, so a member must not be able
+// to mute everyone's alerts. The dollar threshold is validated >= 0 and
+// converted to cents before storage; the response echoes the saved DTO.
+func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if user.Role != RoleAdmin {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	var req updateNotificationSettingsRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.LargeTxnThresholdDollars < 0 {
+		writeError(w, http.StatusBadRequest, "large_txn_threshold_dollars must be >= 0")
+		return
+	}
+
+	if err := h.queries.UpdateNotificationSettings(r.Context(), database.UpdateNotificationSettingsParams{
+		OverBudget:             req.OverBudget,
+		TxnAdded:               req.TxnAdded,
+		TxnDeleted:             req.TxnDeleted,
+		TxnEdited:              req.TxnEdited,
+		LargeTxn:               req.LargeTxn,
+		LargeTxnThresholdCents: dollarsToCents(req.LargeTxnThresholdDollars),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update notification settings")
+		return
+	}
+
+	s, err := h.queries.GetNotificationSettings(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to read notification settings")
+		return
+	}
+	writeJSON(w, http.StatusOK, notificationSettingsToDTO(s))
+}
