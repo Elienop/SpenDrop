@@ -508,3 +508,31 @@ export interface BulkUpdateResponse {
   updated: number;
   skipped?: number;
 }
+
+// ---------- Notification preferences (household-wide) ----------
+
+/**
+ * Household-wide push notification preferences, as returned by
+ * `GET /api/push/preferences` and accepted by `PUT /api/push/preferences`.
+ *
+ * Each boolean is a per-type send gate keyed by the notification type id
+ * shared with the backend fan-out (`over_budget`, `txn_added`, … — see
+ * `internal/api/notifications.go`). There is exactly one household row, so
+ * this is a flat object, not a list.
+ *
+ * `large_txn_threshold_dollars` crosses the wire in whole/fractional
+ * DOLLARS (the backend stores integer cents and converts at the handler
+ * via `centsToDollars`/`dollarsToCents`). NEVER expect a `*_cents` field
+ * here — bind this value directly to a `<Input type="number">`.
+ *
+ * PUT is admin-only server-side (403 for members); the hook also gates the
+ * call client-side via `canEdit` so members never fire a doomed request.
+ */
+export interface NotificationSettings {
+  over_budget: boolean;
+  txn_added: boolean;
+  txn_deleted: boolean;
+  txn_edited: boolean;
+  large_txn: boolean;
+  large_txn_threshold_dollars: number;
+}
