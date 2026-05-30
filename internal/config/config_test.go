@@ -22,6 +22,7 @@ func clearConfigEnv(t *testing.T) {
 		"SQLITE_BUSY_TIMEOUT",
 		"BACKUP_ENABLED", "BACKUP_DIR", "BACKUP_INTERVAL",
 		"BACKUP_KEEP_DAILY", "BACKUP_KEEP_WEEKLY", "BACKUP_KEEP_MONTHLY",
+		"PUSH_ENABLED", "VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT",
 	} {
 		t.Setenv(key, "")
 	}
@@ -400,6 +401,84 @@ func TestValidate_DisabledSkipsBackupChecks(t *testing.T) {
 	d.Backup.KeepDaily = -5             // would fail if Enabled
 	if err := d.Validate(); err != nil {
 		t.Errorf("Validate: unexpected error when disabled: %v", err)
+	}
+}
+
+func TestPushDefaults_DisabledNoOp(t *testing.T) {
+	d := Defaults()
+	if d.Push.Enabled {
+		t.Errorf("Push.Enabled default = true, want false")
+	}
+	// Disabled config with all VAPID fields empty must still validate.
+	if err := d.Validate(); err != nil {
+		t.Fatalf("disabled Push must be a no-op for Validate, got: %v", err)
+	}
+}
+
+func TestPushValidate_RejectsHalfConfigWhenEnabled(t *testing.T) {
+	// A real base64url keypair shape (not validated for curve correctness,
+	// only for decodability + presence). These decode as base64url.
+	const pub = "BNcRdreALRFXTkOOUHK1EtK2wtazFZWxRP9rsB5XF8XlS6KbBJg"
+	const priv = "on6X5KGB6Xms6Abz0Tdq8h2gXZ5l9Y6Xqg0Z1aB2cd"
+	cases := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing public", func(c *Config) {
+			c.Push = PushConfig{Enabled: true, VAPIDPrivateKey: priv, VAPIDSubject: "mailto:a@b.c"}
+		}},
+		{"missing private", func(c *Config) {
+			c.Push = PushConfig{Enabled: true, VAPIDPublicKey: pub, VAPIDSubject: "mailto:a@b.c"}
+		}},
+		{"missing subject", func(c *Config) {
+			c.Push = PushConfig{Enabled: true, VAPIDPublicKey: pub, VAPIDPrivateKey: priv}
+		}},
+		{"bad subject scheme", func(c *Config) {
+			c.Push = PushConfig{Enabled: true, VAPIDPublicKey: pub, VAPIDPrivateKey: priv, VAPIDSubject: "tel:+100"}
+		}},
+		{"public not base64url", func(c *Config) {
+			c.Push = PushConfig{Enabled: true, VAPIDPublicKey: "not base64!!", VAPIDPrivateKey: priv, VAPIDSubject: "mailto:a@b.c"}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			d := Defaults()
+			tc.mutate(&d)
+			if err := d.Validate(); err == nil {
+				t.Errorf("Validate: want error, got nil")
+			}
+		})
+	}
+}
+
+func TestPushValidate_AcceptsFullConfig(t *testing.T) {
+	d := Defaults()
+	d.Push = PushConfig{
+		Enabled:         true,
+		VAPIDPublicKey:  "BNcRdreALRFXTkOOUHK1EtK2wtazFZWxRP9rsB5XF8XlS6KbBJg",
+		VAPIDPrivateKey: "on6X5KGB6Xms6Abz0Tdq8h2gXZ5l9Y6Xqg0Z1aB2cd",
+		VAPIDSubject:    "mailto:ops@example.com",
+	}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("full Push config should validate, got: %v", err)
+	}
+}
+
+func TestLoad_ParsesPushEnv(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("PUSH_ENABLED", "true")
+	t.Setenv("VAPID_PUBLIC_KEY", "BNcRdreALRFXTkOOUHK1EtK2wtazFZWxRP9rsB5XF8XlS6KbBJg")
+	t.Setenv("VAPID_PRIVATE_KEY", "on6X5KGB6Xms6Abz0Tdq8h2gXZ5l9Y6Xqg0Z1aB2cd")
+	t.Setenv("VAPID_SUBJECT", "https://example.com")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Push.Enabled {
+		t.Errorf("Push.Enabled = false, want true")
+	}
+	if cfg.Push.VAPIDSubject != "https://example.com" {
+		t.Errorf("VAPIDSubject = %q", cfg.Push.VAPIDSubject)
 	}
 }
 
