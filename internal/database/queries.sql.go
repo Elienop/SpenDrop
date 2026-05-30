@@ -2933,3 +2933,59 @@ type ClearBudgetAlertStateParams struct {
 func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAlertStateParams) (sql.Result, error) {
 	return q.db.ExecContext(ctx, clearBudgetAlertState, arg.CategoryID, arg.Year, arg.Month)
 }
+
+// Notification Settings (household-wide Web Push preferences). HAND-WRITTEN:
+// sqlc cannot generate this repo. The single household row is seeded at id=1 by
+// migration 015, so GetNotificationSettings is an unconditional WHERE id = 1
+// (never ErrNoRows on a migrated DB) and UpdateNotificationSettings is a plain
+// UPDATE, not an upsert. Bools scan straight into Go bool (see GetCategoryByID
+// / IsActive). updated_at is server-set via datetime('now').
+
+const getNotificationSettings = `-- name: GetNotificationSettings :one
+SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at
+FROM notification_settings WHERE id = 1
+`
+
+func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSettings, error) {
+	row := q.db.QueryRowContext(ctx, getNotificationSettings)
+	var i NotificationSettings
+	err := row.Scan(
+		&i.ID,
+		&i.OverBudget,
+		&i.TxnAdded,
+		&i.TxnDeleted,
+		&i.TxnEdited,
+		&i.LargeTxn,
+		&i.LargeTxnThresholdCents,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateNotificationSettings = `-- name: UpdateNotificationSettings :exec
+UPDATE notification_settings
+SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
+    large_txn_threshold_cents = ?, updated_at = datetime('now')
+WHERE id = 1
+`
+
+type UpdateNotificationSettingsParams struct {
+	OverBudget             bool  `json:"over_budget"`
+	TxnAdded               bool  `json:"txn_added"`
+	TxnDeleted             bool  `json:"txn_deleted"`
+	TxnEdited              bool  `json:"txn_edited"`
+	LargeTxn               bool  `json:"large_txn"`
+	LargeTxnThresholdCents int64 `json:"large_txn_threshold_cents"`
+}
+
+func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNotificationSettingsParams) error {
+	_, err := q.db.ExecContext(ctx, updateNotificationSettings,
+		arg.OverBudget,
+		arg.TxnAdded,
+		arg.TxnDeleted,
+		arg.TxnEdited,
+		arg.LargeTxn,
+		arg.LargeTxnThresholdCents,
+	)
+	return err
+}

@@ -78,6 +78,17 @@ type BudgetAlertState struct {
 	NotifiedAt time.Time `json:"notified_at"`
 }
 
+type NotificationSettings struct {
+	ID                     int64     `json:"id"`
+	OverBudget             bool      `json:"over_budget"`
+	TxnAdded               bool      `json:"txn_added"`
+	TxnDeleted             bool      `json:"txn_deleted"`
+	TxnEdited              bool      `json:"txn_edited"`
+	LargeTxn               bool      `json:"large_txn"`
+	LargeTxnThresholdCents int64     `json:"large_txn_threshold_cents"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
 type Category struct {
 	ID        int64          `json:"id"`
 	Name      string         `json:"name"`
