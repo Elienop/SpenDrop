@@ -260,3 +260,33 @@ func TestNewRouter_AdminRoutes_AsMember_Returns403(t *testing.T) {
 		t.Errorf("expected 403, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestNewRouter_Events_WithoutAuth_Returns401(t *testing.T) {
+	q, db := setupTestDB(t)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("GET /api/events without auth: expected 401, got %d; body %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestNewRouter_CSP_PermitsSameOriginConnect(t *testing.T) {
+	q, db := setupTestDB(t)
+	router := NewRouter(q, db, nil) // nil cfg → config.Defaults()
+
+	// Any response carries securityHeaders. The SSE EventSource is a
+	// same-origin fetch governed by connect-src; assert the policy already
+	// allows 'self' so /api/events needs no CSP change.
+	req := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "connect-src 'self'") {
+		t.Fatalf("CSP %q missing connect-src 'self' (SSE EventSource would be blocked)", csp)
+	}
+}
