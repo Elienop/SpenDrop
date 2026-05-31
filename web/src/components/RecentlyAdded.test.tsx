@@ -1,6 +1,9 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 import type { Category, Transaction } from '@/api/types';
 
 const apiGet = vi.fn();
@@ -87,7 +90,20 @@ function setOnline(value: boolean): void {
 // The offline queue is namespaced per user; pending-row delete/undo target it.
 const RU = 7;
 
+// A fresh per-test QueryClient (retry off) keeps each render isolated and
+// preserves the "two distinct query keys → two apiGet calls" assertions.
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
+
 function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
+  // Pass the provider via RTL's `wrapper` option (not by wrapping the JSX) so
+  // that `rerender` reuses the same provider — the refreshKey test rerenders
+  // the bare component, which would otherwise lose the QueryClientProvider.
   return render(
     <RecentlyAdded
       userId={RU}
@@ -96,6 +112,7 @@ function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
       baseCode="USD"
       refreshKey={refreshKey}
     />,
+    { wrapper: makeWrapper() },
   );
 }
 
