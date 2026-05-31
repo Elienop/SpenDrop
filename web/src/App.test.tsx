@@ -1,6 +1,7 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // Mock the auth module
 vi.mock('./hooks/useAuth', () => ({
@@ -75,12 +76,21 @@ const authenticatedUser = {
 };
 
 function renderApp(initialPath = '/') {
+  // Real pages mount useTransactions(), which calls useQueryClient() and now
+  // hard-requires a QueryClientProvider ancestor (the production provider lives
+  // in main.tsx, not App.tsx). Fresh client per render with retries off and gc
+  // disabled so cached data never leaks across tests.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
   return render(
-    <ThemeProvider>
-      <MemoryRouter initialEntries={[initialPath]}>
-        <App />
-      </MemoryRouter>
-    </ThemeProvider>,
+    <QueryClientProvider client={queryClient}>
+      <ThemeProvider>
+        <MemoryRouter initialEntries={[initialPath]}>
+          <App />
+        </MemoryRouter>
+      </ThemeProvider>
+    </QueryClientProvider>,
   );
 }
 
