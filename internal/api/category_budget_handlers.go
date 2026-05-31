@@ -131,6 +131,10 @@ func (h *Handler) handleSetCategoryBudget(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Live-updates: a per-category limit re-colors that category's budget cell
+	// and the reports budget surface. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("budgets", "reports")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -164,6 +168,13 @@ func (h *Handler) handleDeleteCategoryBudget(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusInternalServerError, "failed to delete category budget")
 		return
 	}
+
+	// Live-updates: clearing a per-category limit changes that category's
+	// budget cell and the reports budget surface. The op is idempotent, so we
+	// always signal (a no-op-on-the-server delete still re-syncs viewers
+	// cheaply under the client-side debounce). Post-commit, best-effort,
+	// nil-safe.
+	h.publishInvalidate("budgets", "reports")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

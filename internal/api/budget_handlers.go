@@ -144,6 +144,10 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: a changed monthly budget re-colors budget cells and the
+	// reports budget surface. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("budgets", "reports")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -200,6 +204,10 @@ func (h *Handler) handleDefaultBudget(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "failed to update default budget")
 			return
 		}
+		// Live-updates: the default budget feeds every month without an
+		// explicit budget, so it re-colors budget cells and the reports
+		// budget surface. Post-commit, best-effort, nil-safe.
+		h.publishInvalidate("budgets", "reports")
 		writeJSON(w, http.StatusOK, map[string]any{"amount": req.Amount})
 
 	default:

@@ -139,6 +139,11 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: a new category changes the category list and the
+	// dashboard/reports category breakdowns on every open device.
+	// Post-commit, best-effort, nil-safe — never affects the response.
+	h.publishInvalidate("categories", "dashboard", "reports")
+
 	writeJSON(w, http.StatusCreated, toCategoryResponse(cat))
 }
 
@@ -196,6 +201,10 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: a renamed/re-iconed category changes the category list
+	// and dashboard/reports labels. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("categories", "dashboard", "reports")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -244,6 +253,11 @@ func (h *Handler) handlePatchCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: toggling is_active adds/removes the category from the
+	// active list and the dashboard/reports breakdowns. Post-commit,
+	// best-effort, nil-safe.
+	h.publishInvalidate("categories", "dashboard", "reports")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -281,6 +295,10 @@ func (h *Handler) handleDeleteCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "category not found")
 		return
 	}
+
+	// Live-updates: a hard-deleted category drops out of the list and the
+	// dashboard/reports breakdowns. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("categories", "dashboard", "reports")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -336,6 +354,11 @@ func (h *Handler) handleReorderCategories(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "failed to commit reorder")
 		return
 	}
+
+	// Live-updates: reordering changes the category sort order shown in the
+	// list and dashboard/reports. One signal for the whole batch.
+	// Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("categories", "dashboard", "reports")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
 }

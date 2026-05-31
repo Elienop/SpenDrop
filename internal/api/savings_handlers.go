@@ -108,5 +108,9 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: a changed savings target updates the savings panel and the
+	// reports savings tab. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("savings", "reports")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
