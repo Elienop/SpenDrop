@@ -109,6 +109,10 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates: a new currency appears in every open device's currency
+	// picker. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("currencies")
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"code":         req.Code,
 		"name":         req.Name,
@@ -172,6 +176,10 @@ func (h *Handler) handleUpdateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to update currency")
 		return
 	}
+
+	// Live-updates: a changed exchange rate updates the currency picker on
+	// every open device. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("currencies")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }

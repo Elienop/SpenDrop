@@ -278,6 +278,25 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Get("/summary", h.handleHomepageSummary)
 	})
 
+	// Live-updates SSE stream. Mounted as its own authed sub-route — NOT
+	// inside the main /api group — so it does not inherit that group's
+	// requireJSONContentType middleware (a GET would pass it anyway, since
+	// that gate early-returns for GET/OPTIONS/HEAD; keeping the route out of
+	// the group is the cleaner expression of that, and puts this long-lived
+	// streaming GET on its own dedicated middleware chain).
+	// Accepts either a session cookie (the browser EventSource path, which
+	// cannot set headers) or a Bearer token, via RequireAuthOrAPIToken, and
+	// shares the same authFailLimiter bucket so SSE connection attempts count
+	// toward the household's 30-per-10-min Bearer quota. The stream is held
+	// open by h.handleEvents; the global 60s WriteTimeout is cleared per
+	// connection inside the handler. No CSP change is needed — the existing
+	// `connect-src 'self'` in securityHeaders already permits a same-origin
+	// EventSource to /api/events.
+	r.Route("/api/events", func(r chi.Router) {
+		r.Use(auth.RequireAuthOrAPIToken(queries, authFailLimiter))
+		r.Get("/", h.handleEvents)
+	})
+
 	// SPA fallback: serve React build if web/dist exists
 	distPath := "web/dist"
 	if _, err := os.Stat(distPath); err == nil {

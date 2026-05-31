@@ -1,11 +1,12 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
+import { createElement, type ReactNode } from 'react';
 import { TransactionRow } from './TransactionRow';
 import type { TransactionRowProps } from './TransactionRow';
 import type { Transaction, Category } from '../api/types';
-import { __resetCurrenciesCacheForTests } from '../hooks/useCurrencies';
 
 vi.mock('@/api/client', () => ({
   api: {
@@ -20,10 +21,6 @@ vi.mock('@/api/client', () => ({
     }),
   },
 }));
-
-beforeEach(() => {
-  __resetCurrenciesCacheForTests();
-});
 
 const mockCategories: Category[] = [
   {
@@ -65,6 +62,14 @@ function renderRow(
 ) {
   const update = onUpdate ?? vi.fn().mockResolvedValue(undefined);
   const del = onDelete ?? vi.fn().mockResolvedValue(undefined);
+  // Fresh QueryClient per render so the `useCurrencies` cache is isolated per
+  // test (replacing the old module-cache reset shim). `retry: false` keeps
+  // rejected currency fetches from re-firing.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
   return render(
     <table>
       <tbody>
@@ -78,6 +83,7 @@ function renderRow(
         />
       </tbody>
     </table>,
+    { wrapper },
   );
 }
 
@@ -260,7 +266,6 @@ describe('TransactionRow edit — currency', () => {
       }
       return [];
     });
-    __resetCurrenciesCacheForTests();
 
     const onUpdate = vi.fn().mockResolvedValue(undefined);
     renderRow(makeTx({ amount: 25.5, original_amount: null, original_currency: null }), onUpdate);

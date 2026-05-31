@@ -1,6 +1,9 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement } from 'react';
+import type { ReactNode } from 'react';
 import type { Category, Transaction } from '@/api/types';
 
 const apiGet = vi.fn();
@@ -87,7 +90,20 @@ function setOnline(value: boolean): void {
 // The offline queue is namespaced per user; pending-row delete/undo target it.
 const RU = 7;
 
+// A fresh per-test QueryClient (retry off) keeps each render isolated and
+// preserves the "two distinct query keys → two apiGet calls" assertions.
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
+
 function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
+  // Pass the provider via RTL's `wrapper` option (not by wrapping the JSX) so
+  // that `rerender` reuses the same provider — the refreshKey test rerenders
+  // the bare component, which would otherwise lose the QueryClientProvider.
   return render(
     <RecentlyAdded
       userId={RU}
@@ -96,6 +112,7 @@ function renderPanel(pending: QueuedTransaction[], refreshKey = 0) {
       baseCode="USD"
       refreshKey={refreshKey}
     />,
+    { wrapper: makeWrapper() },
   );
 }
 
@@ -150,40 +167,51 @@ describe('RecentlyAdded', () => {
     expect(removeQueued).not.toHaveBeenCalled();
   });
 
-  test('deleting a saved row dispatches TRASH_CHANGED_EVENT for the sidebar badge', async () => {
+  test('deleting a saved row removes it via refetch (no window event)', async () => {
+    // The old bespoke TRASH_CHANGED_EVENT window-event bus is retired —
+    // the saved row is now refetched away locally and the sidebar badge
+    // refreshes via TanStack focus-refetch + the SSE `trash` invalidation.
     apiDel.mockResolvedValueOnce(undefined);
-    const trashListener = vi.fn();
-    window.addEventListener('spendrop-trash-changed', trashListener);
-    try {
-      const user = userEvent.setup();
-      renderPanel([]);
-      await screen.findByText('sdsaved');
+    // First load returns the saved row; the post-delete refetch returns empty.
+    apiGet
+      .mockResolvedValueOnce({
+        transactions: [savedTxn()],
+        total: 1,
+        page: 1,
+        per_page: 5,
+      })
+      .mockResolvedValueOnce({
+        transactions: [],
+        total: 0,
+        page: 1,
+        per_page: 5,
+      });
 
-      await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+    const user = userEvent.setup();
+    renderPanel([]);
+    await screen.findByText('sdsaved');
 
-      await waitFor(() => expect(trashListener).toHaveBeenCalled());
-    } finally {
-      window.removeEventListener('spendrop-trash-changed', trashListener);
-    }
+    await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+
+    await waitFor(() => expect(apiDel).toHaveBeenCalledWith('transactions/5'));
+    expect(toastSuccess).toHaveBeenCalledWith('Moved to Trash');
+    // The row is refetched away — no leftover saved row in the panel.
+    await waitFor(() =>
+      expect(screen.queryByText('sdsaved')).not.toBeInTheDocument(),
+    );
   });
 
-  test('deleting a pending (un-synced) row does NOT dispatch TRASH_CHANGED_EVENT', async () => {
+  test('deleting a pending (un-synced) row drops it locally without a network delete', async () => {
     // Pending rows live in local IndexedDB only — they never reached
-    // the server, so deleting one is not a server tombstone and must
-    // not signal the trash badge.
-    const trashListener = vi.fn();
-    window.addEventListener('spendrop-trash-changed', trashListener);
-    try {
-      const user = userEvent.setup();
-      renderPanel([queued()]);
-      await user.click(
-        screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
-      );
-      await waitFor(() => expect(removeQueued).toHaveBeenCalled());
-      expect(trashListener).not.toHaveBeenCalled();
-    } finally {
-      window.removeEventListener('spendrop-trash-changed', trashListener);
-    }
+    // the server, so deleting one is not a server tombstone: it drops
+    // the queued row via removeQueued and issues no DELETE.
+    const user = userEvent.setup();
+    renderPanel([queued()]);
+    await user.click(
+      screen.getByRole('button', { name: /delete unsynced entry sdpending/i }),
+    );
+    await waitFor(() => expect(removeQueued).toHaveBeenCalled());
+    expect(apiDel).not.toHaveBeenCalled();
   });
 
   test('offline: shows pending + an offline note and never fetches saved', async () => {

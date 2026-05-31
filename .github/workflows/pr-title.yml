@@ -1,18 +1,27 @@
 name: PR Title
 
-# Lints the PR title against the Conventional Commits format. This matters
-# beyond style: SpenDrop squash-merges with the PR title as the commit subject
-# (the repo's squash_merge_commit_title = COMMIT_OR_PR_TITLE → PR title for any
-# multi-commit PR), and the release job in main.yml
+# Keeps the PR title Conventional Commits — but SELF-HEALS instead of just
+# failing. GitHub pre-fills a new PR's title with the branch name (e.g.
+# "Feat/live updates"), which is not "type: description", so a strict check
+# fails on every creation. Here, when the title is not conventional, it is
+# rewritten to the PR's first conventional commit subject (every commit is
+# conventional by repo discipline) and the check passes. A title that is
+# already conventional is left untouched; it only fails if no conventional
+# commit exists to derive a title from.
+#
+# Why this matters beyond style: SpenDrop squash-merges with the PR title as
+# the commit subject (squash_merge_commit_title = COMMIT_OR_PR_TITLE → the PR
+# title for any multi-commit PR), and the release job in main.yml
 # (mathieudutour/github-tag-action, default_bump: patch) reads that subject to
 # pick the semver bump:
 #   feat: → minor   fix: → patch   a breaking change → major   anything else → patch
-# So a non-conventional title (e.g. the branch-name default "Feat/foo bar")
-# silently ships a feature as a patch bump. Enforcing the title here keeps the
-# release version honest.
+# A non-conventional title (the branch-name default) silently ships a feature
+# as a patch bump. Self-healing the title keeps the release version honest
+# without a human having to remember to retype it.
 #
 # Kept in its own workflow (not pr.yml) so the `edited` trigger re-validates
 # when a title is fixed, without re-running the heavy build/test/docker jobs.
+# The regex types below mirror the Conventional Commit types SpenDrop uses.
 
 on:
   pull_request:
@@ -20,31 +29,51 @@ on:
     types: [opened, edited, synchronize, reopened]
 
 permissions:
-  pull-requests: read
+  contents: read        # checkout, to read the PR's commit subjects
+  pull-requests: write  # to rewrite a non-conventional title
 
 jobs:
   conventional-title:
     name: Conventional title
     runs-on: ubuntu-latest
     steps:
-      - name: Lint PR title
-        uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Checkout (full history to read PR commits)
+        uses: actions/checkout@v4
         with:
-          # Conventional Commit types SpenDrop uses. `feat`/`fix` drive the
-          # release bump; the rest are valid but bump patch (the default).
-          types: |
-            feat
-            fix
-            chore
-            docs
-            refactor
-            perf
-            test
-            build
-            ci
-            style
-            revert
-          # Scope (e.g. `feat(web):`) is allowed but not required.
-          requireScope: false
+          fetch-depth: 0
+
+      - name: Ensure a Conventional Commits PR title (auto-fix from first commit)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          TYPES='feat|fix|chore|docs|refactor|perf|test|build|ci|style|revert'
+          CONV="^(${TYPES})(\([^)]+\))?!?: .+"
+
+          title="$(gh pr view "$PR" --json title --jq .title)"
+          if printf '%s' "$title" | grep -Eq "$CONV"; then
+            echo "PR title is conventional: $title"
+            exit 0
+          fi
+
+          echo "PR title is not Conventional Commits: \"$title\""
+          echo "Deriving one from the PR's first conventional commit…"
+
+          derived=""
+          while IFS= read -r subject; do
+            if printf '%s' "$subject" | grep -Eq "$CONV"; then
+              derived="$subject"
+              break
+            fi
+          done < <(git log --reverse --format=%s "${BASE_SHA}..${HEAD_SHA}")
+
+          if [ -z "$derived" ]; then
+            echo "::error::No conventional commit found to derive a PR title from. Set a Conventional Commits title, e.g. 'feat: …'. Allowed types: ${TYPES//|/ }"
+            exit 1
+          fi
+
+          gh pr edit "$PR" --title "$derived"
+          echo "PR title was not conventional; set it to the first commit: \"$derived\""

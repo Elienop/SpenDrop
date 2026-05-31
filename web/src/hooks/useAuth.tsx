@@ -123,6 +123,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       } catch {
         // The Cache Storage API / service worker may be absent (e.g. tests).
       }
+      // setUser(null) also tears down the live-updates SSE connection: the
+      // EventSource lives inside useLiveUpdates' auth-gated effect, so dropping
+      // the user re-runs that effect's cleanup (es.close()). Keep this state
+      // clear unconditional — it is the single teardown point for the socket.
       setUser(null);
     }
     navigate('/login');

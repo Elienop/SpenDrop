@@ -422,6 +422,50 @@ spendrop.example.com {
 
 Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start. That HTTPS origin is also what enables the installable PWA — home-screen install and offline capture both require a secure context (see [Mobile capture](#mobile-capture-installable-pwa)).
 
+### Live updates
+
+SpenDrop keeps every **open** device current automatically. When anyone in the household adds, edits, or deletes a transaction (or changes a budget, category, savings goal, or currency), every other open SpenDrop tab refreshes the affected views — transaction list, dashboard, reports, trash counter — within about a second, **with no manual refresh**. It works over a single long-lived [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events) stream on `GET /api/events`, authenticated by your existing session cookie.
+
+This is **always on** — there is no environment variable to enable it, no secret to generate, and nothing to turn on per device. If the stream is ever unavailable (proxy misconfigured, flaky network), the app silently falls back to refreshing whenever a tab regains focus or reconnects, so your data is never stale for long. No transaction data crosses the event stream — only a tiny hint telling the browser which views to re-fetch through the normal authenticated API.
+
+#### Reverse-proxy requirement
+
+Server-Sent Events are a streaming response: the proxy must forward each event the instant the server writes it, and must **not** compress the stream. Caddy buffers and compresses by default, which would make events arrive in a clump (or never) — so the `/api/events` route needs two adjustments:
+
+1. `flush_interval -1` on its `reverse_proxy` — forward every write immediately instead of buffering.
+2. Exclude `/api/events` from `encode` (compression) — a compressed SSE stream never flushes per event.
+
+A SpenDrop site block that handles both, adapted from the basic example above:
+
+```caddy
+# Caddyfile
+spendrop.example.com {
+    @sse path /api/events
+    @notsse not path /api/events
+
+    # Live-update stream: forward each event immediately, never buffer.
+    handle @sse {
+        reverse_proxy spendrop:8080 {
+            flush_interval -1
+        }
+    }
+
+    # Everything else: normal proxying.
+    handle {
+        reverse_proxy spendrop:8080
+    }
+
+    # Compress responses, but never the SSE stream (compression defeats per-event flush).
+    encode @notsse gzip zstd
+}
+```
+
+Replace `spendrop:8080` and `spendrop.example.com` with the upstream and domain from your own setup. The load-bearing pieces are `flush_interval -1` on the SSE route and the `not path /api/events` exclusion from `encode` — the surrounding structure can follow whatever your existing Caddyfile already does.
+
+Caddy serves the public side over **HTTP/2** by default (any HTTPS site), which matters here: the old HTTP/1.1 6-connections-per-origin limit would let a couple of open SpenDrop tabs starve the rest of the app of connections while the SSE stream holds one open. Over HTTP/2 the stream is one multiplexed substream, so it costs nothing against that cap. You get this for free as long as the site is served over HTTPS through Caddy — no extra directive needed.
+
+After editing the Caddyfile, reload Caddy (`docker exec caddy caddy reload --config /etc/caddy/Caddyfile`, or `caddy reload` on a host install) and the live-update stream is active. No SpenDrop redeploy is required for the proxy change.
+
 ### Backup and Restore
 
 SpenDrop takes a consistent, WAL-aware backup of your database every 24 hours by default. Backups land in `/app/data/backups/` inside the `spendrop-data` volume as timestamped files like `spendrop-2026-04-13T0300Z.db` (ISO-8601, UTC, minute precision, no colons so they work on every filesystem). Each backup is accompanied by a `.sha256` sidecar that is **only** written after the file passes three checks:
@@ -778,6 +822,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 |--------|----------|-------------|
 | GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
 | GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, and the cached result of the daily full `PRAGMA integrity_check`. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, or version string that is safe to expose on a self-hosted LAN. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 
 ### Users (admin only)
 All require an admin session.

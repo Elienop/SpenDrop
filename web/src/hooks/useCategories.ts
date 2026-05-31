@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type { Category } from '@/api/types';
 
@@ -11,31 +11,24 @@ export interface UseCategoriesResult {
 
 /**
  * Fetches the household's categories (active only — the API omits inactive
- * by default). Used by the mobile quick-add screen to render category chips
- * and to feed the freeform parser's name matching. Kept as its own hook so
- * the quick-add surface doesn't depend on the heavier `useTransactions`
- * list state.
+ * by default). Backed by TanStack Query under the `['categories']` key so the
+ * live-update subscriber refetches it after any category CRUD anywhere in the
+ * household via `invalidateQueries({ queryKey: ['categories'] })`. Used by the
+ * mobile quick-add screen to render category chips and to feed the freeform
+ * parser's name matching.
  */
 export function useCategories(): UseCategoriesResult {
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const query = useQuery({
+    queryKey: ['categories'],
+    queryFn: () => api.get<Category[]>('categories'),
+  });
 
-  const fetchCategories = useCallback(() => {
-    setLoading(true);
-    setError('');
-    api
-      .get<Category[]>('categories')
-      .then((list) => setCategories(list))
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : 'Failed to load categories'),
-      )
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    fetchCategories();
-  }, [fetchCategories]);
-
-  return { categories, loading, error, refetch: fetchCategories };
+  return {
+    categories: query.data ?? [],
+    loading: query.isLoading,
+    error: query.error instanceof Error ? query.error.message : '',
+    refetch: () => {
+      void query.refetch();
+    },
+  };
 }

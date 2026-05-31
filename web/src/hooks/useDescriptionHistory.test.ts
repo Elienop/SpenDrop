@@ -1,5 +1,8 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { createElement } from 'react';
 import type { Transaction } from '@/api/types';
 
 const apiGet = vi.fn();
@@ -28,6 +31,14 @@ vi.mock('../api/client', async (importOriginal) => ({
 
 import { useDescriptionHistory } from './useDescriptionHistory';
 
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
+
 function tx(over: Partial<Transaction>): Transaction {
   return {
     id: 0,
@@ -55,7 +66,7 @@ beforeEach(() => {
 describe('useDescriptionHistory', () => {
   test('returns empty list before the fetch resolves', () => {
     apiGet.mockImplementation(() => new Promise(() => {})); // never resolves
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     expect(result.current).toEqual([]);
   });
 
@@ -67,7 +78,7 @@ describe('useDescriptionHistory', () => {
         tx({ id: 3, description: 'coffee' }),
       ],
     });
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.length).toBe(2));
     expect(result.current).toEqual(['lunch', 'coffee']);
   });
@@ -80,7 +91,7 @@ describe('useDescriptionHistory', () => {
         tx({ id: 11, description: 'older' }), // less recent
       ],
     });
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.length).toBe(2));
     expect(result.current).toEqual(['newer', 'older']);
   });
@@ -93,14 +104,14 @@ describe('useDescriptionHistory', () => {
         tx({ id: 3, description: 'COFFEE' }),
       ],
     });
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.length).toBe(1));
     expect(result.current).toEqual(['Coffee']);
   });
 
   test('silent on fetch error — returns [] and never throws', async () => {
     apiGet.mockRejectedValue(new Error('boom'));
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     // Give the rejected promise a tick to settle.
     await new Promise((r) => setTimeout(r, 10));
     expect(result.current).toEqual([]);
@@ -114,14 +125,14 @@ describe('useDescriptionHistory', () => {
         tx({ id: 3, description: '' }),
       ],
     });
-    const { result } = renderHook(() => useDescriptionHistory());
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     await waitFor(() => expect(result.current.length).toBe(1));
     expect(result.current).toEqual(['lunch']);
   });
 
   test('fetches with per_page=200 sorted by date desc', async () => {
     apiGet.mockResolvedValue({ transactions: [] });
-    renderHook(() => useDescriptionHistory());
+    renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
     await waitFor(() => expect(apiGet).toHaveBeenCalled());
     const path = apiGet.mock.calls[0][0] as string;
     expect(path).toContain('transactions?');

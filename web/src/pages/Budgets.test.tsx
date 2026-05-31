@@ -2,6 +2,8 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactNode } from 'react';
 
 vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
@@ -133,11 +135,24 @@ function asMember() {
   });
 }
 
+// Wraps a subtree in a fresh QueryClientProvider so the `useBaseCurrency` →
+// `useCurrencies` useQuery (migrated to TanStack Query) has a provider and an
+// isolated cache. Used by `renderBudgets` and the inline navigation-guard
+// renders that mount a sidebar anchor alongside <Budgets />.
+function QueryWrapper({ children }: { children: ReactNode }) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return createElement(QueryClientProvider, { client }, children);
+}
+
 function renderBudgets() {
   return render(
-    <MemoryRouter>
-      <Budgets />
-    </MemoryRouter>,
+    <QueryWrapper>
+      <MemoryRouter>
+        <Budgets />
+      </MemoryRouter>
+    </QueryWrapper>,
   );
 }
 
@@ -947,12 +962,14 @@ describe('Budgets page', () => {
       // Using a raw anchor (not react-router's <Link>) exercises the
       // same DOM path the real Sidebar's NavLink produces.
       render(
-        <MemoryRouter>
-          <a href="/transactions" data-testid="sidebar-link">
-            Transactions
-          </a>
-          <Budgets />
-        </MemoryRouter>,
+        <QueryWrapper>
+          <MemoryRouter>
+            <a href="/transactions" data-testid="sidebar-link">
+              Transactions
+            </a>
+            <Budgets />
+          </MemoryRouter>
+        </QueryWrapper>,
       );
 
       const april = () =>
@@ -986,12 +1003,14 @@ describe('Budgets page', () => {
     test('sidebar navigation without dirty budgets passes through unguarded', async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       render(
-        <MemoryRouter>
-          <a href="/transactions" data-testid="sidebar-link">
-            Transactions
-          </a>
-          <Budgets />
-        </MemoryRouter>,
+        <QueryWrapper>
+          <MemoryRouter>
+            <a href="/transactions" data-testid="sidebar-link">
+              Transactions
+            </a>
+            <Budgets />
+          </MemoryRouter>
+        </QueryWrapper>,
       );
 
       // Wait for initial budget fetch so baseline is populated — a

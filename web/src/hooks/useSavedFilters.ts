@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type { SavedFilter } from '../api/types';
 
@@ -10,40 +10,47 @@ interface UseSavedFiltersResult {
   refetch: () => void;
 }
 
+/**
+ * Per-user saved transaction filters. Backed by TanStack Query under the
+ * `['filters']` key. Saved filters are per-user UI state (not household ledger
+ * data), so there is no SSE resource for them — the only refresh path is the
+ * local `invalidateQueries(['filters'])` fired by the save/delete mutations,
+ * exactly mirroring the previous post/del-then-refetch behavior. Non-critical:
+ * a failed read leaves the list empty without surfacing an error.
+ */
 export function useSavedFilters(): UseSavedFiltersResult {
-  const [savedFilters, setSavedFilters] = useState<SavedFilter[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
 
-  const fetchFilters = useCallback(() => {
-    setLoading(true);
-    api
-      .get<SavedFilter[]>('filters')
-      .then(setSavedFilters)
-      .catch(() => {
-        /* non-critical — filters remain empty */
-      })
-      .finally(() => setLoading(false));
-  }, []);
+  const query = useQuery({
+    queryKey: ['filters'],
+    queryFn: () => api.get<SavedFilter[]>('filters'),
+  });
 
-  useEffect(() => {
-    fetchFilters();
-  }, [fetchFilters]);
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ['filters'] });
 
-  const saveFilter = useCallback(
-    async (name: string, filterJSON: string) => {
-      await api.post('filters', { name, filter_json: filterJSON });
-      fetchFilters();
+  const saveMutation = useMutation({
+    mutationFn: ({ name, filterJSON }: { name: string; filterJSON: string }) =>
+      api.post('filters', { name, filter_json: filterJSON }),
+    onSuccess: invalidate,
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => api.del(`filters/${id}`),
+    onSuccess: invalidate,
+  });
+
+  return {
+    savedFilters: query.data ?? [],
+    loading: query.isLoading,
+    saveFilter: async (name: string, filterJSON: string) => {
+      await saveMutation.mutateAsync({ name, filterJSON });
     },
-    [fetchFilters],
-  );
-
-  const deleteFilter = useCallback(
-    async (id: number) => {
-      await api.del(`filters/${id}`);
-      fetchFilters();
+    deleteFilter: async (id: number) => {
+      await deleteMutation.mutateAsync(id);
     },
-    [fetchFilters],
-  );
-
-  return { savedFilters, loading, saveFilter, deleteFilter, refetch: fetchFilters };
+    refetch: () => {
+      void query.refetch();
+    },
+  };
 }

@@ -1,8 +1,26 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  render as rtlRender,
+  screen,
+  waitFor,
+  type RenderOptions,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
+
+// Each render gets a fresh QueryClient so the `useBaseCurrency` →
+// `useCurrencies` useQuery (migrated to TanStack Query) has a provider and an
+// isolated cache. `retry: false` keeps rejected currency fetches from re-firing.
+function render(ui: React.ReactElement, options?: RenderOptions) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: React.ReactNode }) =>
+    React.createElement(QueryClientProvider, { client }, children);
+  return rtlRender(ui, { wrapper, ...options });
+}
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { UseDashboardResult } from '../hooks/useDashboard';
 import type { CategoryBreakdownItem } from '../api/types';
@@ -80,29 +98,48 @@ vi.mock('../hooks/useDashboard', () => ({
 
 vi.mock('../api/client', () => ({
   api: {
-    get: vi.fn().mockResolvedValue({
-      transactions: [
-        {
-          id: 1,
-          user_id: 1,
-          date: '2026-04-01',
-          amount: 42.50,
-          original_amount: null,
-          original_currency: null,
-          description: 'Groceries',
-          category_id: 1,
-          category_name: 'Food',
-          category_type: 'expense',
-          tags: null,
-          notes: null,
-          created_at: '2026-04-01T00:00:00Z',
-          updated_at: '2026-04-01T00:00:00Z',
-        },
-      ],
-      total: 1,
-      page: 1,
-      per_page: 6,
-      total_pages: 1,
+    // Path-aware: `useBaseCurrency` (→ `useCurrencies`, now TanStack Query)
+    // fetches `currencies` and expects a Currency[] — returning the recent-tx
+    // paginated object for every path would make `list.find(...)` throw and
+    // unmount the Dashboard subtree. The recent-transactions table reads the
+    // paginated `transactions?...` response.
+    get: vi.fn((path: string) => {
+      if (path === 'currencies') {
+        return Promise.resolve([
+          {
+            code: 'USD',
+            name: 'US Dollar',
+            symbol: '$',
+            rate_to_base: 1,
+            is_base: true,
+            updated_at: '2026-04-01T00:00:00Z',
+          },
+        ]);
+      }
+      return Promise.resolve({
+        transactions: [
+          {
+            id: 1,
+            user_id: 1,
+            date: '2026-04-01',
+            amount: 42.50,
+            original_amount: null,
+            original_currency: null,
+            description: 'Groceries',
+            category_id: 1,
+            category_name: 'Food',
+            category_type: 'expense',
+            tags: null,
+            notes: null,
+            created_at: '2026-04-01T00:00:00Z',
+            updated_at: '2026-04-01T00:00:00Z',
+          },
+        ],
+        total: 1,
+        page: 1,
+        per_page: 6,
+        total_pages: 1,
+      });
     }),
   },
 }));

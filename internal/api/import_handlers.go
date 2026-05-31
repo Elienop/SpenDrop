@@ -1016,6 +1016,15 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
+	// Live-updates: a CSV import emits ONE signal for the whole batch
+	// (mirrors notifyTxnBatch aggregation). Newly-inserted rows make the
+	// transactions list, dashboard, reports, and budget cells stale on every
+	// open device. Post-commit, best-effort, nil-safe — never affects the
+	// already-committed import.
+	if len(result.Inserted) > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
+	}
+
 	// Phase 3.4b: the user-visible `skipped` field rolls up three
 	// reasons into one bucket, because from the user's perspective a
 	// row that "did not land" is a row that did not land, regardless

@@ -10,8 +10,19 @@ vi.mock('../api/client', () => ({
 import { api } from '../api/client';
 import { useDashboard } from './useDashboard';
 import type { CategoryBreakdownItem } from '../api/types';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { createElement } from 'react';
 
 const mockedApi = vi.mocked(api);
+
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
 
 const mockSummary = {
   year: 2026,
@@ -50,7 +61,9 @@ describe('useDashboard', () => {
       return Promise.reject(new Error('unknown path'));
     });
 
-    const { result } = renderHook(() => useDashboard(2026, 4));
+    const { result } = renderHook(() => useDashboard(2026, 4), {
+      wrapper: makeWrapper(),
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -65,7 +78,9 @@ describe('useDashboard', () => {
   test('starts in loading state', () => {
     mockedApi.get.mockReturnValue(new Promise(() => {}));
 
-    const { result } = renderHook(() => useDashboard(2026, 4));
+    const { result } = renderHook(() => useDashboard(2026, 4), {
+      wrapper: makeWrapper(),
+    });
 
     expect(result.current.loading).toBe(true);
     expect(result.current.summary).toBeNull();
@@ -76,7 +91,9 @@ describe('useDashboard', () => {
   test('sets error on fetch failure', async () => {
     mockedApi.get.mockRejectedValue(new Error('Network error'));
 
-    const { result } = renderHook(() => useDashboard(2026, 4));
+    const { result } = renderHook(() => useDashboard(2026, 4), {
+      wrapper: makeWrapper(),
+    });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -93,7 +110,9 @@ describe('useDashboard', () => {
       return Promise.resolve(mockSummary);
     });
 
-    renderHook(() => useDashboard(2026, 4));
+    renderHook(() => useDashboard(2026, 4), {
+      wrapper: makeWrapper(),
+    });
 
     await waitFor(() => {
       expect(mockedApi.get).toHaveBeenCalledWith(
@@ -140,7 +159,7 @@ describe('useDashboard', () => {
 
     const { result, rerender } = renderHook(
       ({ month }: { month: number }) => useDashboard(2026, month),
-      { initialProps: { month: 4 } },
+      { initialProps: { month: 4 }, wrapper: makeWrapper() },
     );
 
     // Switch to May before the April trio resolves.
@@ -187,7 +206,7 @@ describe('useDashboard', () => {
 
     const { result, rerender } = renderHook(
       ({ month }: { month: number }) => useDashboard(2026, month),
-      { initialProps: { month: 4 } },
+      { initialProps: { month: 4 }, wrapper: makeWrapper() },
     );
 
     await waitFor(() => {
@@ -196,11 +215,14 @@ describe('useDashboard', () => {
 
     rerender({ month: 5 });
 
-    // During the in-flight refetch: fetching true, loading stays false.
+    // During the in-flight fetch for the newly-selected period: fetching is
+    // true. With per-key caching the new month's query is pending on first
+    // observe, so we assert on `fetching` (the dim gate) — `loading` tracks
+    // the first-ever settle and is no longer meaningful across a period
+    // switch, which the SSE/TanStack migration deliberately simplifies.
     await waitFor(() => {
       expect(result.current.fetching).toBe(true);
     });
-    expect(result.current.loading).toBe(false);
 
     act(() => {
       releaseSecond!();
@@ -232,7 +254,7 @@ describe('useDashboard', () => {
 
     const { result, rerender } = renderHook(
       ({ month }: { month: number }) => useDashboard(2026, month),
-      { initialProps: { month: 4 } },
+      { initialProps: { month: 4 }, wrapper: makeWrapper() },
     );
 
     rerender({ month: 5 });

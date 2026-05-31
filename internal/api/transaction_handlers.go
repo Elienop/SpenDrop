@@ -376,6 +376,11 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// large-txn precedence internally; both no-op when the type is disabled.
 	h.notifyTxnAdded(r.Context(), txn)
 
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): tell every
+	// open household device to refetch. A new row changes the list, the
+	// dashboard totals, the reports aggregates, and the budget cells.
+	h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
+
 	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
 }
 
@@ -500,6 +505,11 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		})
 	}
 
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): an edit can
+	// move amount/category/date, so list, dashboard totals, reports, and budget
+	// cells may all change.
+	h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
 }
 
@@ -567,6 +577,11 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		CategoryID:  existing.CategoryID,
 		Description: existing.Description,
 	})
+
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): a delete
+	// tombstones the row — it leaves the list/dashboard/reports/budgets and
+	// appears in trash, so invalidate trash too.
+	h.publishInvalidate("transactions", "dashboard", "reports", "budgets", "trash")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
@@ -682,6 +697,13 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	// one-per-row. len(results) is the count of successful inserts.
 	if n := len(results); n > 0 {
 		h.notifyTxnBatch(r.Context(), "added", n)
+	}
+
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): ONE signal
+	// for the whole batch, mirroring the aggregate notify. New rows change the
+	// list, dashboard totals, reports, and budget cells.
+	if len(results) > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 	}
 
 	writeJSON(w, http.StatusCreated, results)
@@ -1016,6 +1038,14 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): a rename only
+	// changes descriptions (no amount/date/category move), so the list and the
+	// description-keyed report aggregates change; dashboard totals and budget
+	// cells are untouched.
+	if rowsAffected > 0 {
+		h.publishInvalidate("transactions", "reports")
+	}
+
 	writeJSON(w, http.StatusOK, map[string]int64{"updated": rowsAffected})
 }
 
@@ -1147,6 +1177,13 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 	// Activity notification: ONE aggregate push for the whole batch delete.
 	if deleted > 0 {
 		h.notifyTxnBatch(r.Context(), "deleted", deleted)
+	}
+
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): ONE signal
+	// for the whole batch. Tombstoned rows leave the list/dashboard/reports/
+	// budgets and appear in trash.
+	if deleted > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets", "trash")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int{"deleted": deleted})
@@ -1406,6 +1443,13 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): a patch can
+	// move amount/category/date across rows, so list, dashboard totals, reports,
+	// and budget cells may all change. Fire only when at least one row updated.
+	if updated > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
+	}
+
 	writeJSON(w, http.StatusOK, bulkUpdateResponse{Updated: updated, Skipped: skipped})
 }
 
@@ -1530,6 +1574,13 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	// expose per-row (category, month), so there is no precise cell to
 	// evaluate. Re-import / wipe workflows re-trip alerts on the next
 	// single-row or batch-create. (Phase C, Task 17.)
+
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): tombstoned
+	// rows leave the list/dashboard/reports and appear in trash. Budgets are
+	// omitted to match the budget-alert skip above (no precise cell enumerated).
+	if deleted > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports", "trash")
+	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
 }
@@ -1674,6 +1725,14 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 	// handleBatchUpdateTransactions, which does enumerate). Wipe-and-reimport
 	// workflows re-trip alerts on the next single-row, batch-create, or
 	// import. (Phase C, Task 17.)
+
+	// Live-updates broadcast (post-commit, best-effort, nil-safe): a filter
+	// update can move amount/category/date, so list, dashboard totals, and
+	// reports may change. Budgets are omitted to match the budget-alert skip
+	// above (no precise cell enumerated). Fire only when rows actually updated.
+	if updated > 0 {
+		h.publishInvalidate("transactions", "dashboard", "reports")
+	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})
 }

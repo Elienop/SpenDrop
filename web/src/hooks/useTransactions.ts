@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useState } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import { TRASH_CHANGED_EVENT } from './useTrashCount';
 import type {
   Transaction,
   PaginatedResponse,
@@ -150,15 +150,12 @@ function getInitialPerPage(): number {
 }
 
 export function useTransactions(): UseTransactionsResult {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [total, setTotal] = useState(0);
+  const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
   const [perPage, setPerPageState] = useState(getInitialPerPage);
   const [sortBy, setSortBy] = useState<SortColumn>('date');
   const [sortDir, setSortDir] = useState<SortDirection>('desc');
   const [filters, setFilters] = useState<TransactionFilters>(defaultFilters);
-  const [initialLoad, setInitialLoad] = useState(true);
-  const [error, setError] = useState('');
 
   // Filter-only query string (no pagination/sort). Shared by buildQuery
   // (list endpoint) and deleteByFilter (destructive endpoint) so both
@@ -190,48 +187,52 @@ export function useTransactions(): UseTransactionsResult {
     return params.toString();
   }, [buildFilterQuery, page, perPage, sortBy, sortDir]);
 
-  // fetchTransactionsAsync is the awaitable sibling of fetchTransactions.
-  // The state-update side effects (setTransactions/setTotal/setError/
-  // setInitialLoad) are identical — the only difference is that callers
-  // can await the response to read the freshly-loaded ids (see
-  // bulkUpdate, which uses the post-PATCH refetch result for selection
-  // pruning per spec §3.5). On error the rejection re-throws so callers
-  // who awaited can distinguish refetch failure from PATCH failure.
-  const fetchTransactionsAsync = useCallback(async (): Promise<
+  // Stable key with `'transactions'` as the first segment so an SSE-driven
+  // invalidateQueries({ queryKey: ['transactions'] }) prefix-matches and
+  // refetches the visible page (see useLiveUpdates). TanStack dedups and
+  // coalesces concurrent fetches and ignores out-of-order responses, which
+  // retires the hand-rolled genRef guard the old hook carried.
+  const query = useQuery<PaginatedResponse<Transaction>>({
+    queryKey: [
+      'transactions',
+      filters,
+      page,
+      perPage,
+      sortBy,
+      sortDir,
+    ],
+    queryFn: () =>
+      api.get<PaginatedResponse<Transaction>>(`transactions?${buildQuery()}`),
+  });
+
+  const transactions = query.data?.transactions ?? [];
+  const total = query.data?.total ?? 0;
+  // `initialLoad` keeps the legacy contract: true until the first settle.
+  const initialLoad = query.isLoading;
+  const error = query.isError
+    ? query.error instanceof Error
+      ? query.error.message
+      : 'Failed to load transactions'
+    : '';
+
+  // refetch returns void (the legacy fire-and-forget shape). The awaitable
+  // form lives inline in the mutations below via query.refetch.
+  const refetch = useCallback(() => {
+    void query.refetch();
+  }, [query]);
+
+  // Awaitable refetch of the current visible page, used by bulkUpdate to
+  // read the freshly-loaded ids for selection pruning (spec §3.5). Throws
+  // on failure so the mutation can wrap it in RefetchAfterMutationError.
+  const refetchAsync = useCallback(async (): Promise<
     PaginatedResponse<Transaction>
   > => {
-    setError('');
-    try {
-      const data = await api.get<PaginatedResponse<Transaction>>(
-        `transactions?${buildQuery()}`,
-      );
-      setTransactions(data.transactions);
-      setTotal(data.total);
-      return data;
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : 'Failed to load transactions',
-      );
-      throw err;
-    } finally {
-      setInitialLoad(false);
+    const result = await query.refetch({ throwOnError: true });
+    if (!result.data) {
+      throw new Error('Failed to load transactions');
     }
-  }, [buildQuery]);
-
-  // Void-returning wrapper kept for the mount effect and the external
-  // `refetch` callers that fire-and-forget. Errors are already handled
-  // (setError) inside fetchTransactionsAsync; we swallow the rejection
-  // here so the void-returning shape doesn't leak unhandled promise
-  // rejections to callers who never opted into awaiting.
-  const fetchTransactions = useCallback(() => {
-    fetchTransactionsAsync().catch(() => {
-      // Intentionally empty — see comment above.
-    });
-  }, [fetchTransactionsAsync]);
-
-  useEffect(() => {
-    fetchTransactions();
-  }, [fetchTransactions]);
+    return result.data;
+  }, [query]);
 
   const setFilter = useCallback(
     (key: keyof TransactionFilters, value: string) => {
@@ -282,32 +283,32 @@ export function useTransactions(): UseTransactionsResult {
     setPage(1);
   }, []);
 
+  // Mutations invalidate the whole `['transactions']` family locally so the
+  // acting device updates immediately without waiting for its own SSE echo.
   const createTransaction = useCallback(
     async (input: CreateTransactionInput): Promise<Transaction> => {
       const created = await api.post<Transaction>('transactions', input);
-      fetchTransactions();
+      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
       return created;
     },
-    [fetchTransactions],
+    [queryClient],
   );
 
   const updateTransaction = useCallback(
     async (input: UpdateTransactionInput) => {
       const { id, ...body } = input;
       await api.put(`transactions/${id}`, body);
-      fetchTransactions();
+      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
     },
-    [fetchTransactions],
+    [queryClient],
   );
 
   const deleteTransaction = useCallback(
     async (id: number) => {
       await api.del(`transactions/${id}`);
-      // Soft-delete just tombstoned a row — notify the sidebar badge.
-      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
-      fetchTransactions();
+      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
     },
-    [fetchTransactions],
+    [queryClient],
   );
 
   const deleteByFilter = useCallback(async (): Promise<number> => {
@@ -320,12 +321,9 @@ export function useTransactions(): UseTransactionsResult {
     // application/json automatically, which is required by the
     // requireJSONContentType middleware on all mutating API routes.
     const result = await api.post<{ deleted: number }>(path, {});
-    // Bulk soft-delete moved N rows into trash — fire one event,
-    // the listener refetches the count once.
-    window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
-    fetchTransactions();
+    void queryClient.invalidateQueries({ queryKey: ['transactions'] });
     return result.deleted;
-  }, [buildFilterQuery, fetchTransactions]);
+  }, [buildFilterQuery, queryClient]);
 
   const bulkUpdate = useCallback(
     async (
@@ -335,13 +333,13 @@ export function useTransactions(): UseTransactionsResult {
         'transactions/batch-update',
         args,
       );
-      // Refetch via the awaitable sibling so we can read the freshly-
-      // loaded ids and echo them as visibleIds. A refetch failure here
-      // means the data change landed but the view is stale — the
-      // wrapped error tells the page to show the differentiated toast.
+      // Refetch the visible page so we can read the freshly-loaded ids and
+      // echo them as visibleIds. A refetch failure here means the data
+      // change landed but the view is stale — the wrapped error tells the
+      // page to show the differentiated toast.
       let refreshed: PaginatedResponse<Transaction>;
       try {
-        refreshed = await fetchTransactionsAsync();
+        refreshed = await refetchAsync();
       } catch (err) {
         throw new RefetchAfterMutationError(
           err instanceof Error ? err.message : String(err),
@@ -349,7 +347,7 @@ export function useTransactions(): UseTransactionsResult {
       }
       return { ...result, visibleIds: refreshed.transactions.map((t) => t.id) };
     },
-    [fetchTransactionsAsync],
+    [refetchAsync],
   );
 
   const bulkUpdateByFilter = useCallback(
@@ -366,7 +364,7 @@ export function useTransactions(): UseTransactionsResult {
         body,
       );
       try {
-        await fetchTransactionsAsync();
+        await refetchAsync();
       } catch (err) {
         throw new RefetchAfterMutationError(
           err instanceof Error ? err.message : String(err),
@@ -374,7 +372,7 @@ export function useTransactions(): UseTransactionsResult {
       }
       return result;
     },
-    [fetchTransactionsAsync],
+    [refetchAsync],
   );
 
   return {
@@ -393,7 +391,7 @@ export function useTransactions(): UseTransactionsResult {
     setSort,
     initialLoad,
     error,
-    refetch: fetchTransactions,
+    refetch,
     createTransaction,
     updateTransaction,
     deleteTransaction,

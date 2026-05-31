@@ -1,5 +1,8 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { createElement } from 'react';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -13,6 +16,14 @@ import { api } from '../api/client';
 import { useSavedFilters } from './useSavedFilters';
 
 const mockedApi = vi.mocked(api);
+
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
 
 const mockFilters = [
   {
@@ -41,7 +52,7 @@ describe('useSavedFilters', () => {
   test('fetches saved filters on mount', async () => {
     mockedApi.get.mockResolvedValue(mockFilters);
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -54,7 +65,7 @@ describe('useSavedFilters', () => {
   test('starts in loading state with empty filters', () => {
     mockedApi.get.mockReturnValue(new Promise(() => {}));
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     expect(result.current.loading).toBe(true);
     expect(result.current.savedFilters).toEqual([]);
@@ -63,7 +74,7 @@ describe('useSavedFilters', () => {
   test('handles fetch failure gracefully', async () => {
     mockedApi.get.mockRejectedValue(new Error('Network error'));
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -77,7 +88,7 @@ describe('useSavedFilters', () => {
     mockedApi.get.mockResolvedValue(mockFilters);
     mockedApi.post.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -92,15 +103,15 @@ describe('useSavedFilters', () => {
       filter_json: '{"search":"test"}',
     });
 
-    // Should have fetched twice: once on mount, once after save
-    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+    // Should have fetched twice: once on mount, once after save (via invalidation)
+    await waitFor(() => expect(mockedApi.get).toHaveBeenCalledTimes(2));
   });
 
   test('deleteFilter calls del and refetches', async () => {
     mockedApi.get.mockResolvedValue(mockFilters);
     mockedApi.del.mockResolvedValue(undefined);
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);
@@ -112,14 +123,14 @@ describe('useSavedFilters', () => {
 
     expect(mockedApi.del).toHaveBeenCalledWith('filters/1');
 
-    // Should have fetched twice: once on mount, once after delete
-    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+    // Should have fetched twice: once on mount, once after delete (via invalidation)
+    await waitFor(() => expect(mockedApi.get).toHaveBeenCalledTimes(2));
   });
 
   test('refetch re-fetches filters', async () => {
     mockedApi.get.mockResolvedValue(mockFilters);
 
-    const { result } = renderHook(() => useSavedFilters());
+    const { result } = renderHook(() => useSavedFilters(), { wrapper: makeWrapper() });
 
     await waitFor(() => {
       expect(result.current.loading).toBe(false);

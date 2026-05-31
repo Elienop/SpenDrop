@@ -1,5 +1,8 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { createElement } from 'react';
 
 // Mock api/client at module-load. Co-locating these bulk-update tests
 // in their own *.tsx file (rather than alongside the existing fetch-spy
@@ -19,6 +22,16 @@ import { api } from '../api/client';
 import { useTransactions, RefetchAfterMutationError } from './useTransactions';
 
 const mockedApi = vi.mocked(api);
+
+// Each test gets a fresh QueryClient with retries off and gc disabled so a
+// failed query surfaces immediately and cached data never leaks across tests.
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
 
 const emptyListResponse = {
   transactions: [],
@@ -47,7 +60,9 @@ describe('useTransactions bulkUpdate', () => {
       });
     mockedApi.post.mockResolvedValueOnce({ updated: 2, skipped: 0 });
 
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await waitFor(() => expect(result.current.initialLoad).toBe(false));
 
     let response: Awaited<ReturnType<typeof result.current.bulkUpdate>>;
@@ -75,7 +90,9 @@ describe('useTransactions bulkUpdate', () => {
       .mockRejectedValueOnce(new Error('network blip'));
     mockedApi.post.mockResolvedValueOnce({ updated: 2, skipped: 0 });
 
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await waitFor(() => expect(result.current.initialLoad).toBe(false));
 
     let err: unknown;
@@ -101,7 +118,9 @@ describe('useTransactions bulkUpdateByFilter', () => {
       .mockResolvedValueOnce(emptyListResponse);
     mockedApi.post.mockResolvedValueOnce({ updated: 12 });
 
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await waitFor(() => expect(result.current.initialLoad).toBe(false));
 
     let response: Awaited<ReturnType<typeof result.current.bulkUpdateByFilter>>;

@@ -19,6 +19,7 @@ import (
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
 	"github.com/elienop/spendrop/internal/push"
+	"github.com/elienop/spendrop/internal/sse"
 )
 
 func main() {
@@ -275,6 +276,19 @@ func main() {
 			}
 		}
 	}()
+
+	// Live-updates SSE broker. The hub holds no application state — it fans
+	// out coarse "invalidate" hints to every connected household device after
+	// a committed mutation. It shares cleanupCtx with the session-cleanup,
+	// backup, and daily-integrity goroutines so the graceful-shutdown path
+	// below (cleanupCancel() before srv.Shutdown) tears down all SSE
+	// connections by closing every client channel before the HTTP server
+	// stops accepting. No DB handle is involved, so the hub never blocks the
+	// sqlDB.Close defer. Wired into the Handler via SetEventBroker right after
+	// it is constructed below.
+	hub := sse.NewHub()
+	go hub.Run(cleanupCtx)
+	h.SetEventBroker(hub)
 
 	addr := fmt.Sprintf(":%s", cfg.Port)
 	srv := &http.Server{

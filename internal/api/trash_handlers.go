@@ -234,6 +234,12 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 	// Post-commit, best-effort.
 	h.evaluateBudgetAlerts(r.Context(), cellsForCreate(existing.CategoryID, existing.Date))
 
+	// Live-updates: a restore re-adds a row to the live ledger, so every open
+	// device's transactions list, dashboard, reports, and budget cells may now
+	// be stale, and the trash view lost a row. Post-commit, best-effort,
+	// nil-safe — never affects the response.
+	h.publishInvalidate("trash", "transactions", "dashboard", "reports", "budgets")
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "restored"})
 }
 
@@ -284,6 +290,11 @@ func (h *Handler) handlePurgeTransaction(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusInternalServerError, "failed to purge transaction")
 		return
 	}
+
+	// Live-updates: a purge only changes the trash view (the row was already
+	// tombstoned and out of every live aggregate). Post-commit, best-effort,
+	// nil-safe — never affects the response.
+	h.publishInvalidate("trash")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "purged"})
 }
@@ -428,6 +439,13 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		h.evaluateBudgetAlerts(r.Context(), cells)
 	}
 
+	// Live-updates: one signal per batch (mirrors notifyTxnBatch aggregation).
+	// A batch restore re-adds rows to the live ledger and empties part of the
+	// trash. Post-commit, best-effort, nil-safe — never affects the response.
+	if restored > 0 {
+		h.publishInvalidate("trash", "transactions", "dashboard", "reports", "budgets")
+	}
+
 	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored, Conflicted: conflicted})
 }
 
@@ -556,6 +574,13 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		h.evaluateBudgetAlerts(ctx, cells)
 	}
 
+	// Live-updates: one signal for the whole restore-all op. Re-adds rows to
+	// the live ledger and empties the trash. Post-commit, best-effort,
+	// nil-safe — never affects the response.
+	if restored > 0 {
+		h.publishInvalidate("trash", "transactions", "dashboard", "reports", "budgets")
+	}
+
 	writeJSON(w, http.StatusOK, restoreAllResponse{Restored: restored, Conflicted: conflicted})
 }
 
@@ -593,6 +618,12 @@ func (h *Handler) handlePurgeAllTransactions(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to read purge result")
 		return
+	}
+
+	// Live-updates: emptying the trash only changes the trash view. Post-commit,
+	// best-effort, nil-safe — never affects the response.
+	if purged > 0 {
+		h.publishInvalidate("trash")
 	}
 
 	writeJSON(w, http.StatusOK, purgeAllResponse{Purged: purged})

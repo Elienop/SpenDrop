@@ -9,7 +9,6 @@ vi.mock('../hooks/useAuth', () => ({
 
 vi.mock('../hooks/useTrashCount', () => ({
   useTrashCount: vi.fn(),
-  TRASH_CHANGED_EVENT: 'spendrop-trash-changed',
 }));
 
 import { useAuth } from '../hooks/useAuth';

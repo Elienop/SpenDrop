@@ -8,6 +8,7 @@ import (
 	"github.com/elienop/spendrop/internal/database"
 	"github.com/elienop/spendrop/internal/push"
 	"github.com/elienop/spendrop/internal/ratelimit"
+	"github.com/elienop/spendrop/internal/sse"
 )
 
 // Handler holds dependencies for all API handlers.
@@ -33,6 +34,14 @@ type Handler struct {
 	// tests can capture fan-out without a real VAPID keypair. Production code
 	// never sets this; a non-nil value outside a _test.go file is a bug.
 	pushTesterForBudgetAlerts pushDispatcher
+
+	// broker fans out coarse SSE "invalidate" hints to every connected
+	// household device after a committed mutation. nil => the feature is a
+	// no-op (publishInvalidate returns immediately). Set once at startup via
+	// SetEventBroker after NewRouterWithHandler; read-only thereafter, like
+	// pushSender. No mutex: set once during single-threaded startup before the
+	// HTTP server binds, and the hub itself is internally goroutine-safe.
+	broker *sse.Hub
 
 	// clock is the time source every reports/dashboard handler reads for
 	// "current date" decisions (year-over-year default year, rolling
@@ -167,4 +176,28 @@ func (h *Handler) getIntegrityResult() (time.Time, string) {
 // during single-threaded startup before the HTTP server binds.
 func (h *Handler) SetPushSender(s *push.Sender) {
 	h.pushSender = s
+}
+
+// SetEventBroker installs the SSE fan-out hub. Called once from
+// cmd/spendrop/main.go at startup, after NewRouterWithHandler. Mirrors
+// SetPushSender: a single post-construction seam so NewHandler's signature
+// stays unchanged and the 50+ test call sites compile untouched. Not guarded
+// by a mutex because it is set exactly once during single-threaded startup
+// before the HTTP server binds.
+func (h *Handler) SetEventBroker(b *sse.Hub) {
+	h.broker = b
+}
+
+// publishInvalidate fans out a coarse SSE invalidation hint for the given
+// resource names to every connected household device. POST-COMMIT and
+// BEST-EFFORT, mirroring the notifyTxn* / evaluateBudgetAlerts contract: it
+// returns nothing, never errors, never rolls back, and never affects the HTTP
+// response. A nil broker (push/SSE-disabled handlers, every unit test built
+// via NewHandler) makes it a no-op. The underlying Hub.Publish is itself
+// non-blocking, so this cannot stall a request handler even under a backlog.
+func (h *Handler) publishInvalidate(resources ...string) {
+	if h.broker == nil {
+		return
+	}
+	h.broker.Publish(resources...)
 }

@@ -1,5 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import {
+  render as rtlRender,
+  screen,
+  waitFor,
+  type RenderOptions,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   describe,
   it,
@@ -9,8 +15,21 @@ import {
   afterEach,
   type Mock,
 } from 'vitest';
+import { createElement, type ReactElement, type ReactNode } from 'react';
 import { TransactionEntryRow } from './TransactionEntryRow';
 import type { Category, Transaction } from '../api/types';
+
+// Each render gets a fresh QueryClient so the `useCurrencies` cache is isolated
+// per test (replacing the old module-cache reset shim). `retry: false` keeps
+// rejected currency fetches from re-firing.
+function render(ui: ReactElement, options?: RenderOptions) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  return rtlRender(ui, { wrapper, ...options });
+}
 
 // Mock sonner so toast.success / toast.error become inspectable and no portal renders
 vi.mock('sonner', () => ({
@@ -41,7 +60,6 @@ vi.mock('@/api/client', () => ({
 
 // Import after the mock so we get the mocked version
 import { toast } from 'sonner';
-import { __resetCurrenciesCacheForTests } from '../hooks/useCurrencies';
 
 const mockCategories: Category[] = [
   {
@@ -95,7 +113,6 @@ describe('TransactionEntryRow', () => {
   let onDelete: Mock;
 
   beforeEach(() => {
-    __resetCurrenciesCacheForTests();
     onSubmit = vi.fn().mockResolvedValue(savedTransaction);
     onDelete = vi.fn().mockResolvedValue(undefined);
     (toast.success as Mock).mockClear();
