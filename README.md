@@ -701,7 +701,7 @@ Two layers of control:
   **Settings → Notifications** subscribes/unsubscribes *that* browser. A user who
   wants no notifications simply leaves it off.
 - **Per type (admin only, household-wide):** below the master toggle, an admin
-  chooses which events send a push to every subscribed device. Non-admins see
+  chooses which events send a push to household devices. Non-admins see
   these read-only ("Managed by your admin"), since the ledger is shared.
 
 | Type | Fires when | Default |
@@ -712,12 +712,15 @@ Two layers of control:
 | **Transaction edited** | a transaction's amount/category/date changes | off |
 | **Large transaction** | a single transaction is ≥ the admin-set **threshold** (default $500) | off |
 
-Notes: activity pushes go to **all** subscribed household devices (including the
-person who made the change). A **bulk import or batch delete sends one aggregated
-push** ("N transactions added"), never one-per-row. A transaction that is both an
-activity event and over the large threshold sends **only** the large-transaction
-alert. New types default **off**, so enabling push changes nothing until an admin
-turns a type on.
+Notes: **activity pushes skip the person who performed the action** — all of
+*their own* devices stay quiet (you are never notified of your own change, like a
+messaging app), while every *other* household member's subscribed devices get the
+push. **Over budget is the exception**: it notifies everyone, including whoever
+caused the overrun, because it is a state alert rather than a "you did this" echo.
+A **bulk import or batch delete sends one aggregated push** ("N transactions
+added"), never one-per-row. A transaction that is both an activity event and over
+the large threshold sends **only** the large-transaction alert. New types default
+**off**, so enabling push changes nothing until an admin turns a type on.
 
 ### TrueNAS redeploy
 
