@@ -2,6 +2,8 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactNode } from 'react';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -46,10 +48,18 @@ function defaultGet(path: string): Promise<unknown> {
 }
 
 function renderSavings() {
+  // Fresh QueryClient per render so the `useBaseCurrency` → `useCurrencies`
+  // useQuery (migrated to TanStack Query) has a provider and an isolated cache.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
   return render(
     <MemoryRouter>
       <Savings />
     </MemoryRouter>,
+    { wrapper },
   );
 }
 

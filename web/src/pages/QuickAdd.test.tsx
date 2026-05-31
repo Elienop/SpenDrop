@@ -2,6 +2,8 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactNode } from 'react';
 import { ApiError } from '@/api/client';
 import type { Category, Currency, Transaction } from '../api/types';
 
@@ -163,10 +165,21 @@ vi.mock('@/hooks/useDescriptionHistory', () => ({
 import { QuickAdd } from './QuickAdd';
 
 function renderQuickAdd() {
+  // Fresh QueryClient per render so the migrated useQuery hooks QuickAdd uses
+  // (`useCategories`, `useCurrencies`) have a provider and an isolated cache —
+  // letting the per-test `apiGet` mock drive the category/currency states
+  // (loading / empty / error / Retry). `retry: false` keeps a rejected
+  // categories fetch from re-firing so the error state surfaces deterministically.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
   return render(
     <MemoryRouter initialEntries={['/quick']}>
       <QuickAdd />
     </MemoryRouter>,
+    { wrapper },
   );
 }
 

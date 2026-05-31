@@ -1,6 +1,27 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import {
+  render as rtlRender,
+  screen,
+  waitFor,
+  within,
+  type RenderOptions,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactElement, type ReactNode } from 'react';
+
+// Each render gets a fresh QueryClient so the migrated useQuery hooks this page
+// renders through (`useBaseCurrency` → `useCurrencies`, and `useSuggestions`)
+// have a provider and an isolated cache. `retry: false` keeps rejected fetches
+// from re-firing.
+function render(ui: ReactElement, options?: RenderOptions) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  return rtlRender(ui, { wrapper, ...options });
+}
 
 const mockSaveFilter = vi.fn();
 const mockDeleteFilter = vi.fn();

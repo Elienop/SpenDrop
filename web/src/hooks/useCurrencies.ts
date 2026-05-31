@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type { Currency } from '@/api/types';
 import { DEFAULT_CURRENCY } from '@/lib/format';
@@ -18,75 +18,40 @@ export interface UseCurrenciesResult {
   error: string | null;
 }
 
-interface CacheEntry {
-  list: Currency[];
-  baseCode: string;
-  error: string | null;
-}
-
-// Module-level promise cache — one fetch per session, shared across hook
-// consumers. Mirrors `useBaseCurrency.ts`. A separate cache variable
-// intentionally; `useBaseCurrency` stays independent so removing this
-// hook later is straightforward.
-let cachePromise: Promise<CacheEntry> | null = null;
-
-function fetchCurrencies(): Promise<CacheEntry> {
-  if (!cachePromise) {
-    cachePromise = api
-      .get<Currency[]>('currencies')
-      .then((list) => {
-        const base = list.find((c) => c.is_base)?.code ?? DEFAULT_CURRENCY;
-        return { list, baseCode: base, error: null };
-      })
-      .catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : 'failed to load currencies';
-        return { list: [], baseCode: DEFAULT_CURRENCY, error: msg };
-      });
-  }
-  return cachePromise;
-}
-
-/** Test-only. Resets the module-level cache between unit tests. */
-export function __resetCurrenciesCacheForTests(): void {
-  cachePromise = null;
-}
-
+/**
+ * Household currency list + base code + rate lookup. Backed by TanStack Query
+ * under the `['currencies']` key — one shared cache entry across every
+ * consumer (incl. `useBaseCurrency`, which derives from this same query), and
+ * the live-update subscriber refreshes it after currency CRUD via
+ * `invalidateQueries({ queryKey: ['currencies'] })`. (Replaces the previous
+ * module-level promise cache and its test-only reset shim.)
+ */
 export function useCurrencies(): UseCurrenciesResult {
-  const [state, setState] = useState<{
-    list: Currency[];
-    baseCode: string;
-    error: string | null;
-    loading: boolean;
-  }>({ list: [], baseCode: DEFAULT_CURRENCY, error: null, loading: true });
+  const query = useQuery({
+    queryKey: ['currencies'],
+    queryFn: () => api.get<Currency[]>('currencies'),
+    // A failed currencies fetch must not re-fire when a second consumer mounts
+    // against the same cache (the previous module-promise cache memoized the
+    // failure for the session). The focus/reconnect backstop and the SSE
+    // `['currencies']` invalidation remain the recovery paths.
+    retryOnMount: false,
+  });
 
-  useEffect(() => {
-    let cancelled = false;
-    fetchCurrencies().then((entry) => {
-      if (cancelled) return;
-      setState({
-        list: entry.list,
-        baseCode: entry.baseCode,
-        error: entry.error,
-        loading: false,
-      });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const list = query.data ?? [];
+  const baseCode = list.find((c) => c.is_base)?.code ?? DEFAULT_CURRENCY;
 
   const rateFor = (code: string): number | null => {
-    const c = state.list.find((x) => x.code === code);
+    const c = list.find((x) => x.code === code);
     if (!c) return null;
     if (c.rate_to_base == null || c.rate_to_base <= 0) return null;
     return c.rate_to_base;
   };
 
   return {
-    list: state.list,
-    baseCode: state.baseCode,
+    list,
+    baseCode,
     rateFor,
-    loading: state.loading,
-    error: state.error,
+    loading: query.isLoading,
+    error: query.error instanceof Error ? query.error.message : null,
   };
 }
