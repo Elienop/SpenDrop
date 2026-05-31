@@ -63,7 +63,7 @@ func TestFanOutPush_NoOpWhenTypeDisabled(t *testing.T) {
 	seedPushSub(t, q, user.ID, "https://push.example/ep-disabled")
 
 	// txn_added defaults OFF (migration 015) — fan-out must not send.
-	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`))
+	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`), 0)
 	if rec.count() != 0 {
 		t.Fatalf("disabled type: want 0 sends, got %d", rec.count())
 	}
@@ -79,7 +79,7 @@ func TestFanOutPush_SendsWhenTypeEnabled(t *testing.T) {
 	seedPushSub(t, q, user.ID, "https://push.example/ep-enabled")
 
 	// over_budget defaults ON — fan-out must send to the one subscription.
-	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`))
+	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0)
 	if rec.count() != 1 {
 		t.Fatalf("enabled type: want 1 send, got %d", rec.count())
 	}

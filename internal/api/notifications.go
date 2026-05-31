@@ -31,8 +31,10 @@ func (h *Handler) categoryLabel(ctx context.Context, categoryID int64) string {
 }
 
 // emit marshals a typed payload and hands it to the household fan-out. Marshal
-// failures are logged and swallowed (best-effort).
-func (h *Handler) emit(ctx context.Context, notifType, title, body, url string) {
+// failures are logged and swallowed (best-effort). excludeUserID is the acting
+// user's id so the action's author is not notified of their own activity (0 =
+// exclude nobody); it is threaded straight through to fanOutPush.
+func (h *Handler) emit(ctx context.Context, notifType, title, body, url string, excludeUserID int64) {
 	payload := pushAlertPayload{
 		Title: title,
 		Body:  body,
@@ -44,7 +46,7 @@ func (h *Handler) emit(ctx context.Context, notifType, title, body, url string) 
 		log.Printf("notify: marshal %s payload: %v", notifType, err)
 		return
 	}
-	h.fanOutPush(ctx, notifType, b)
+	h.fanOutPush(ctx, notifType, b, excludeUserID)
 }
 
 // largeTxnEnabledAndThreshold reads the household large-transaction threshold
@@ -61,9 +63,9 @@ func (h *Handler) largeTxnEnabledAndThreshold(ctx context.Context) (enabled bool
 // notifyTxnAdded fires after a single transaction create. LARGE-TXN PRECEDENCE:
 // when large_txn is enabled and the amount is at/over the household threshold,
 // we send ONE "large_txn" push INSTEAD OF "txn_added" — never both.
-func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction) {
+func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction, excludeUserID int64) {
 	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
-		h.emitLarge(ctx, txn, "added")
+		h.emitLarge(ctx, txn, "added", excludeUserID)
 		return
 	}
 	dollars := centsToDollars(txn.AmountCents)
@@ -71,14 +73,14 @@ func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction) 
 	h.emit(ctx, "txn_added",
 		"Transaction added",
 		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
-		"/transactions")
+		"/transactions", excludeUserID)
 }
 
 // notifyTxnEdited fires after a single transaction update. Same large-txn
 // precedence as create.
-func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction) {
+func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction, excludeUserID int64) {
 	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
-		h.emitLarge(ctx, txn, "edited")
+		h.emitLarge(ctx, txn, "edited", excludeUserID)
 		return
 	}
 	dollars := centsToDollars(txn.AmountCents)
@@ -86,29 +88,29 @@ func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction)
 	h.emit(ctx, "txn_edited",
 		"Transaction edited",
 		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
-		"/transactions")
+		"/transactions", excludeUserID)
 }
 
 // notifyTxnDeleted fires after a single transaction delete. No large-txn
 // precedence on delete — a removal is activity, not a large spend signal.
-func (h *Handler) notifyTxnDeleted(ctx context.Context, txn database.Transaction) {
+func (h *Handler) notifyTxnDeleted(ctx context.Context, txn database.Transaction, excludeUserID int64) {
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_deleted",
 		"Transaction deleted",
 		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
-		"/transactions")
+		"/transactions", excludeUserID)
 }
 
 // emitLarge sends the "large_txn" payload. verb is the originating op
 // ("added"/"edited") purely for the body wording.
-func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb string) {
+func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb string, excludeUserID int64) {
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "large_txn",
 		"Large transaction",
 		fmt.Sprintf("$%.2f %s in %s — %s", dollars, verb, cat, txn.Description),
-		"/transactions")
+		"/transactions", excludeUserID)
 }
 
 // notifyTxnBatch fires once per batch operation (create/delete), aggregating
@@ -116,7 +118,7 @@ func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb 
 // "deleted" and selects the txn_added / txn_deleted type. Batches send only the
 // activity aggregate; large_txn is intentionally NOT evaluated for batches in
 // v1 (a bulk import should not fan out N large alerts).
-func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int) {
+func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int, excludeUserID int64) {
 	if count <= 0 {
 		return
 	}
@@ -135,5 +137,5 @@ func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int) {
 	}
 	h.emit(ctx, notifType, title,
 		fmt.Sprintf("%d %s %s", count, noun, kind),
-		"/transactions")
+		"/transactions", excludeUserID)
 }
