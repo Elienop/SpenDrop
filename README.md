@@ -440,21 +440,23 @@ A SpenDrop site block that handles both, adapted from the basic example above:
 ```caddy
 # Caddyfile
 spendrop.example.com {
-    # Live-update stream: forward each event immediately, never buffer.
     @sse path /api/events
-    reverse_proxy @sse spendrop:8080 {
-        flush_interval -1
+    @notsse not path /api/events
+
+    # Live-update stream: forward each event immediately, never buffer.
+    handle @sse {
+        reverse_proxy spendrop:8080 {
+            flush_interval -1
+        }
     }
 
     # Everything else: normal proxying.
-    reverse_proxy spendrop:8080
+    handle {
+        reverse_proxy spendrop:8080
+    }
 
     # Compress responses, but never the SSE stream (compression defeats per-event flush).
-    encode {
-        match {
-            not path /api/events
-        }
-    }
+    encode @notsse gzip zstd
 }
 ```
 
