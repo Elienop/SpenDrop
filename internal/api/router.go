@@ -279,8 +279,11 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	})
 
 	// Live-updates SSE stream. Mounted as its own authed sub-route — NOT
-	// inside the main /api group — so it skips requireJSONContentType: an
-	// EventSource GET carries no application/json body and must not be 415'd.
+	// inside the main /api group — so it does not inherit that group's
+	// requireJSONContentType middleware (a GET would pass it anyway, since
+	// that gate early-returns for GET/OPTIONS/HEAD; keeping the route out of
+	// the group is the cleaner expression of that, and puts this long-lived
+	// streaming GET on its own dedicated middleware chain).
 	// Accepts either a session cookie (the browser EventSource path, which
 	// cannot set headers) or a Bearer token, via RequireAuthOrAPIToken, and
 	// shares the same authFailLimiter bucket so SSE connection attempts count
