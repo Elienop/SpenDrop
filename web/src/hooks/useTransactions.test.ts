@@ -1,6 +1,17 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useTransactions } from './useTransactions';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
+import { createElement } from 'react';
+
+function makeWrapper() {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  return ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+}
 
 describe('useTransactions filters', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
@@ -29,7 +40,9 @@ describe('useTransactions filters', () => {
   }
 
   it('includes categoryIds as category_ids param when set', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -47,7 +60,9 @@ describe('useTransactions filters', () => {
   });
 
   it('skips category_id when categoryIds is present', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -71,7 +86,9 @@ describe('useTransactions filters', () => {
   });
 
   it('includes amountMin as amount_min param when set', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -87,7 +104,9 @@ describe('useTransactions filters', () => {
   });
 
   it('includes amountMax as amount_max param when set', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -103,7 +122,9 @@ describe('useTransactions filters', () => {
   });
 
   it('includes tags param when set', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -119,7 +140,9 @@ describe('useTransactions filters', () => {
   });
 
   it('omits new filter params when empty', async () => {
-    renderHook(() => useTransactions());
+    renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -132,7 +155,9 @@ describe('useTransactions filters', () => {
   });
 
   it('clears new filter fields on clearFilters', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -183,7 +208,9 @@ describe('useTransactions perPage', () => {
   }
 
   it('exposes setPerPage and defaults to 20', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -193,7 +220,9 @@ describe('useTransactions perPage', () => {
   });
 
   it('changes per_page param in query when setPerPage is called', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -209,7 +238,9 @@ describe('useTransactions perPage', () => {
   });
 
   it('resets to page 1 when perPage changes', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -235,7 +266,9 @@ describe('useTransactions perPage', () => {
   });
 
   it('persists perPage to localStorage', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -249,7 +282,9 @@ describe('useTransactions perPage', () => {
 
   it('reads perPage from localStorage on mount', async () => {
     localStorage.setItem('spendrop-tx-per-page', '100');
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -291,7 +326,9 @@ describe('useTransactions sorting', () => {
   }
 
   it('exposes sortBy and sortDir with defaults date/desc', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -301,7 +338,9 @@ describe('useTransactions sorting', () => {
   });
 
   it('includes sort_by and sort_dir in query string', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -316,7 +355,9 @@ describe('useTransactions sorting', () => {
   });
 
   it('setSort changes column and defaults to desc', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -335,7 +376,9 @@ describe('useTransactions sorting', () => {
   });
 
   it('setSort toggles direction when same column is clicked', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -364,7 +407,9 @@ describe('useTransactions sorting', () => {
   });
 
   it('exposes setSort function', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -419,7 +464,9 @@ describe('useTransactions deleteByFilter', () => {
   }
 
   it('POSTs to delete-by-filter with no query string when filters are empty', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -438,7 +485,9 @@ describe('useTransactions deleteByFilter', () => {
   });
 
   it('serializes active filters into the query string (no pagination/sort)', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -469,7 +518,9 @@ describe('useTransactions deleteByFilter', () => {
   });
 
   it('prefers category_ids over category_id, matching the list endpoint', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
@@ -490,7 +541,9 @@ describe('useTransactions deleteByFilter', () => {
   });
 
   it('triggers a refetch after a successful delete', async () => {
-    const { result } = renderHook(() => useTransactions());
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
     await vi.waitFor(() => {
       expect(fetchSpy).toHaveBeenCalled();
     });
