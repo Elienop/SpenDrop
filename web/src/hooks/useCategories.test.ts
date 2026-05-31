@@ -15,8 +15,8 @@ import { useCategories } from './useCategories';
 const mockedGet = api.get as unknown as ReturnType<typeof vi.fn>;
 
 const sample: Category[] = [
-  { id: 1, name: 'Food', type: 'expense', is_active: true, created_at: '', updated_at: '' },
-  { id: 2, name: 'Salary', type: 'income', is_active: true, created_at: '', updated_at: '' },
+  { id: 1, name: 'Food', type: 'expense', icon: null, sort_order: 0, is_active: true, created_at: '' },
+  { id: 2, name: 'Salary', type: 'income', icon: null, sort_order: 1, is_active: true, created_at: '' },
 ];
 
 function makeWrapper() {
