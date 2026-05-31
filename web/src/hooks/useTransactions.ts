@@ -1,7 +1,6 @@
 import { useCallback, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api/client';
-import { TRASH_CHANGED_EVENT } from './useTrashCount';
 import type {
   Transaction,
   PaginatedResponse,
@@ -307,8 +306,6 @@ export function useTransactions(): UseTransactionsResult {
   const deleteTransaction = useCallback(
     async (id: number) => {
       await api.del(`transactions/${id}`);
-      // Soft-delete just tombstoned a row — notify the sidebar badge.
-      window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
       void queryClient.invalidateQueries({ queryKey: ['transactions'] });
     },
     [queryClient],
@@ -324,9 +321,6 @@ export function useTransactions(): UseTransactionsResult {
     // application/json automatically, which is required by the
     // requireJSONContentType middleware on all mutating API routes.
     const result = await api.post<{ deleted: number }>(path, {});
-    // Bulk soft-delete moved N rows into trash — fire one event,
-    // the listener refetches the count once.
-    window.dispatchEvent(new Event(TRASH_CHANGED_EVENT));
     void queryClient.invalidateQueries({ queryKey: ['transactions'] });
     return result.deleted;
   }, [buildFilterQuery, queryClient]);
