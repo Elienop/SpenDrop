@@ -72,6 +72,10 @@ type Hub struct {
 	register   chan registerReq
 	unregister chan *Client
 	broadcast  chan []byte
+	// done is closed by Run when it exits (via ctx.Done()). After that, Run no
+	// longer drains register/unregister/broadcast, so producer-side blocking
+	// sends would deadlock. Every such send selects on done as an escape hatch.
+	done chan struct{}
 }
 
 // NewHub allocates a Hub. The hub does nothing until Run is started on a
@@ -83,6 +87,7 @@ func NewHub() *Hub {
 		register:   make(chan registerReq),
 		unregister: make(chan *Client),
 		broadcast:  make(chan []byte, 64),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -92,6 +97,10 @@ func NewHub() *Hub {
 // endpoint goroutines unblock and return (graceful shutdown tears down all
 // SSE connections before the HTTP server's Shutdown completes).
 func (h *Hub) Run(ctx context.Context) {
+	// Signal producers (Register/Unregister) that the loop has stopped draining
+	// its channels, whether Run returns via ctx.Done() or any future path.
+	defer close(h.done)
+
 	clients := make(map[*Client]struct{})
 	perUser := make(map[int64]int)
 
@@ -148,15 +157,28 @@ func (h *Hub) Run(ctx context.Context) {
 // maps that error to HTTP 503). Safe to call from any goroutine.
 func (h *Hub) Register(c *Client) error {
 	req := registerReq{client: c, err: make(chan error, 1)}
-	h.register <- req
-	return <-req.err
+	select {
+	case h.register <- req:
+		return <-req.err
+	case <-h.done:
+		// Run has exited and closed every client channel; there is no loop to
+		// accept the registration. The endpoint maps this to HTTP 503.
+		return fmt.Errorf("sse: hub is shut down")
+	}
 }
 
 // Unregister removes a client from the broadcast set and closes its channel.
 // Idempotent: unregistering a client the hub has already dropped is a no-op.
 // Safe to call from any goroutine (e.g. the endpoint's deferred cleanup).
 func (h *Hub) Unregister(c *Client) {
-	h.unregister <- c
+	select {
+	case h.unregister <- c:
+	case <-h.done:
+		// Run already exited and closed every client channel; nothing to do.
+		// Without this escape hatch the deferred cleanup in the SSE endpoint
+		// would block forever during graceful shutdown, leaking the goroutine
+		// and stalling srv.Shutdown until the grace deadline crashes main.
+	}
 }
 
 // Publish serializes one SSE "invalidate" frame for the given resource names

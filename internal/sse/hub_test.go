@@ -139,3 +139,121 @@ func TestHub_PerUserCapReturnsErrorOnSixth(t *testing.T) {
 		t.Fatalf("register for a different user should succeed, got %v", err)
 	}
 }
+
+// TestHub_UnregisterAfterShutdownDoesNotBlock pins the graceful-shutdown
+// invariant: once Run exits (ctx cancelled, every client channel closed, the
+// loop no longer draining its channels), a deferred Unregister from a wakened
+// endpoint goroutine must return immediately instead of blocking forever on a
+// send nobody reads. A blocking Unregister here would leak the endpoint
+// goroutine, stall srv.Shutdown, and crash main on every shutdown that has an
+// open SSE connection.
+func TestHub_UnregisterAfterShutdownDoesNotBlock(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h := NewHub()
+	go h.Run(ctx)
+
+	a := NewClient(1)
+	if err := h.Register(a); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+
+	cancel()
+
+	// Wait for Run to exit by observing the client channel close (its drain
+	// signal), so we know the loop is no longer reading h.unregister.
+	select {
+	case _, ok := <-a.ch:
+		if ok {
+			t.Fatal("expected client channel to be closed after Run exits")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("client channel not closed after ctx cancel")
+	}
+
+	done := make(chan struct{})
+	go func() {
+		h.Unregister(a)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Unregister blocked after hub shutdown")
+	}
+
+	// Register after shutdown must also return promptly, with an error, rather
+	// than block — the endpoint maps any non-nil Register error to HTTP 503.
+	regDone := make(chan error, 1)
+	go func() { regDone <- h.Register(NewClient(2)) }()
+	select {
+	case err := <-regDone:
+		if err == nil {
+			t.Fatal("expected an error registering against a shut-down hub")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Register blocked after hub shutdown")
+	}
+}
+
+// TestHub_UnregisterFreesCapSlot proves cap accounting is decremented on
+// Unregister: saturate one user's cap, drop one connection, and a fresh
+// Register for that same user must now succeed.
+func TestHub_UnregisterFreesCapSlot(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := NewHub()
+	go h.Run(ctx)
+
+	const userID int64 = 42
+	clients := make([]*Client, 0, maxConnsPerUser)
+	for i := 0; i < maxConnsPerUser; i++ {
+		c := NewClient(userID)
+		if err := h.Register(c); err != nil {
+			t.Fatalf("register %d: unexpected error %v", i, err)
+		}
+		clients = append(clients, c)
+	}
+
+	// At the cap: a new connection must be rejected.
+	if err := h.Register(NewClient(userID)); err == nil {
+		t.Fatalf("expected error at the per-user cap of %d", maxConnsPerUser)
+	}
+
+	// Free one slot.
+	h.Unregister(clients[0])
+
+	// A new connection for the same user must now succeed. Register is
+	// synchronous (round-trips through the loop), so the Unregister above is
+	// fully applied before this Register is processed.
+	if err := h.Register(NewClient(userID)); err != nil {
+		t.Fatalf("expected a freed cap slot to allow a new registration, got %v", err)
+	}
+}
+
+// TestHub_UnregisterIsIdempotent pins that unregistering the same client twice
+// is a no-op: the hub must not double-close c.ch (which would panic the loop
+// goroutine). Register is synchronous, so each Unregister is fully applied
+// before the next call's send is processed.
+func TestHub_UnregisterIsIdempotent(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	h := NewHub()
+	go h.Run(ctx)
+
+	a := NewClient(1)
+	if err := h.Register(a); err != nil {
+		t.Fatalf("register a: %v", err)
+	}
+
+	h.Unregister(a)
+	h.Unregister(a) // second time must be a no-op, not a double-close panic.
+
+	// The channel must be closed exactly once and the loop must still be alive:
+	// a subsequent Register round-trips, proving the loop did not panic.
+	if _, ok := <-a.ch; ok {
+		t.Fatal("expected client channel to be closed after Unregister")
+	}
+	if err := h.Register(NewClient(2)); err != nil {
+		t.Fatalf("hub loop should still be alive after idempotent Unregister, got %v", err)
+	}
+}
