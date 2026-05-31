@@ -3401,8 +3401,11 @@ func TestCreateTransaction_FiresTxnAdded(t *testing.T) {
 	h := NewHandler(q, db)
 	h.pushTesterForBudgetAlerts = rec
 	user := seedTestUser(t, q, "alice", RoleMember)
+	other := seedTestUser(t, q, "bob", RoleMember)
 	cat := seedExpenseCat(t, q, "Groceries")
-	seedPushSub(t, q, user.ID, "https://push.example/create")
+	// Actor's own device must be excluded; a second member's device must receive.
+	seedPushSub(t, q, user.ID, "https://push.example/create-actor")
+	seedPushSub(t, q, other.ID, "https://push.example/create-other")
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
 	body := strings.NewReader(`{"date":"2026-05-10","amount":12.34,"description":"milk","category_id":` + itoa(cat.ID) + `}`)
@@ -3414,8 +3417,9 @@ func TestCreateTransaction_FiresTxnAdded(t *testing.T) {
 	if rec2.Code != http.StatusCreated {
 		t.Fatalf("create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
 	}
+	// Exactly one push — to the other member, never an echo to the actor.
 	if rec.count() != 1 {
-		t.Fatalf("want 1 push, got %d", rec.count())
+		t.Fatalf("want 1 push (only the other member), got %d", rec.count())
 	}
 	var p pushAlertPayload
 	_ = json.Unmarshal(rec.payloads[0], &p)
@@ -3452,8 +3456,11 @@ func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
 	h := NewHandler(q, db)
 	h.pushTesterForBudgetAlerts = rec
 	user := seedTestUser(t, q, "alice", RoleMember)
+	other := seedTestUser(t, q, "bob", RoleMember)
 	cat := seedExpenseCat(t, q, "Groceries")
-	seedPushSub(t, q, user.ID, "https://push.example/del")
+	// Actor's own device must be excluded; a second member's device must receive.
+	seedPushSub(t, q, user.ID, "https://push.example/del-actor")
+	seedPushSub(t, q, other.ID, "https://push.example/del-other")
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnDeleted = true })
 	txn := seedExpenseRow(t, q, user.ID, cat.ID, "2026-05-10", 1234)
 
@@ -3467,7 +3474,7 @@ func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
 	}
 	var p pushAlertPayload
 	if rec.count() != 1 {
-		t.Fatalf("want 1 push, got %d", rec.count())
+		t.Fatalf("want 1 push (only the other member), got %d", rec.count())
 	}
 	_ = json.Unmarshal(rec.payloads[0], &p)
 	if p.Type != "txn_deleted" {
@@ -3482,8 +3489,11 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 	h := NewHandler(q, db)
 	h.pushTesterForBudgetAlerts = rec
 	user := seedTestUser(t, q, "alice", RoleMember)
+	other := seedTestUser(t, q, "bob", RoleMember)
 	cat := seedExpenseCat(t, q, "Groceries")
-	seedPushSub(t, q, user.ID, "https://push.example/batch")
+	// Actor's own device must be excluded; a second member's device must receive.
+	seedPushSub(t, q, user.ID, "https://push.example/batch-actor")
+	seedPushSub(t, q, other.ID, "https://push.example/batch-other")
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
 	body := strings.NewReader(`[
@@ -3499,8 +3509,9 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 	if rec2.Code != http.StatusCreated {
 		t.Fatalf("batch create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
 	}
+	// ONE aggregate push, to the other member only — never an echo to the actor.
 	if rec.count() != 1 {
-		t.Fatalf("batch must fire ONE aggregate push, got %d", rec.count())
+		t.Fatalf("batch must fire ONE aggregate push (only the other member), got %d", rec.count())
 	}
 	var p pushAlertPayload
 	_ = json.Unmarshal(rec.payloads[0], &p)

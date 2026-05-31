@@ -141,7 +141,7 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			log.Printf("budget alert: marshal payload cat=%d: %v", cell.CategoryID, err)
 			continue
 		}
-		h.fanOutPush(ctx, "over_budget", body)
+		h.fanOutPush(ctx, "over_budget", body, 0) // state alert: notify everyone, incl. actor
 	}
 }
 
@@ -272,7 +272,15 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 // sent=N pruned=M failed=K". Endpoint URLs are a bearer-grade secret (anyone
 // holding one can push to that device) and are NEVER logged. No per-row
 // logging, so a household with hundreds of devices cannot flood the log.
-func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte) {
+//
+// Actor exclusion (WhatsApp "don't echo the sender"): excludeUserID is the
+// acting user's id for ACTIVITY notifications — every subscription belonging to
+// that account is skipped (all the actor's devices, not just one) so the author
+// is not notified of their own action. excludeUserID==0 means exclude nobody
+// (real user ids are positive); over_budget passes 0 because a state alert must
+// reach everyone including the actor. Skipped subscriptions are not counted as
+// sent/pruned/failed.
+func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64) {
 	d := h.dispatcher()
 	if d == nil {
 		return // push disabled — no-op
@@ -295,6 +303,11 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	}
 	var sent, pruned, failed int
 	for _, s := range subs {
+		// Skip the actor's own subscriptions for activity notifications — do not
+		// count them as sent/pruned/failed (excludeUserID==0 disables this).
+		if excludeUserID != 0 && s.UserID == excludeUserID {
+			continue
+		}
 		prune, err := d.Send(ctx, push.Subscription{
 			Endpoint: s.Endpoint,
 			P256dh:   s.P256dh,
