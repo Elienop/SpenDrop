@@ -11,15 +11,20 @@ vi.mock('@/lib/queryClient', () => ({
 let currentUser: { id: number } | null = { id: 1 };
 vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: currentUser }) }));
 
-// --- EventSource test double (happy-dom ships none) -------------------------
+// --- EventSource test double (happy-dom ships none). Models NAMED events:
+// the server sends `event: invalidate`, which a real EventSource routes to
+// addEventListener('invalidate', …) — NOT to onmessage. The mock dispatches the
+// same way, so an onmessage-based regression fails this suite. ---------------
+type SseListener = (ev: MessageEvent) => void;
+
 class MockEventSource {
   static instances: MockEventSource[] = [];
   url: string;
   withCredentials: boolean;
   readyState = 0;
   onopen: ((this: EventSource, ev: Event) => void) | null = null;
-  onmessage: ((this: EventSource, ev: MessageEvent) => void) | null = null;
   onerror: ((this: EventSource, ev: Event) => void) | null = null;
+  private listeners = new Map<string, Set<SseListener>>();
   close = vi.fn(() => {
     this.readyState = 2;
   });
@@ -28,15 +33,25 @@ class MockEventSource {
     this.withCredentials = init?.withCredentials ?? false;
     MockEventSource.instances.push(this);
   }
+  addEventListener(type: string, cb: SseListener): void {
+    const set = this.listeners.get(type) ?? new Set<SseListener>();
+    set.add(cb);
+    this.listeners.set(type, set);
+  }
+  removeEventListener(type: string, cb: SseListener): void {
+    this.listeners.get(type)?.delete(cb);
+  }
   emitOpen(): void {
     this.readyState = 1;
     this.onopen?.call(this as unknown as EventSource, new Event('open'));
   }
+  // Dispatch a NAMED `invalidate` event, exactly as the server emits it.
   emitMessage(data: unknown): void {
-    this.onmessage?.call(
-      this as unknown as EventSource,
-      new MessageEvent('message', { data: JSON.stringify(data) }),
-    );
+    this.emitRaw(JSON.stringify(data));
+  }
+  emitRaw(raw: string): void {
+    const ev = new MessageEvent('invalidate', { data: raw });
+    this.listeners.get('invalidate')?.forEach((cb) => cb(ev));
   }
   emitError(): void {
     this.onerror?.call(this as unknown as EventSource, new Event('error'));
@@ -178,10 +193,7 @@ describe('useLiveUpdates', () => {
     renderHook(() => useLiveUpdates());
     const es = MockEventSource.instances[0];
     act(() => {
-      es.onmessage?.call(
-        es as unknown as EventSource,
-        new MessageEvent('message', { data: 'not-json{' }),
-      );
+      es.emitRaw('not-json{');
       vi.advanceTimersByTime(200);
     });
     expect(invalidateQueries).not.toHaveBeenCalled();

@@ -65,6 +65,10 @@ class LogoutMockEventSource {
   onmessage: ((ev: MessageEvent) => void) | null = null;
   onerror: ((ev: Event) => void) | null = null;
   close = esClose;
+  // useLiveUpdates subscribes via addEventListener('invalidate', …) (named SSE
+  // event), so the stub must provide these or the hook throws on mount.
+  addEventListener = vi.fn();
+  removeEventListener = vi.fn();
   constructor() {
     LogoutMockEventSource.instances.push(this);
   }

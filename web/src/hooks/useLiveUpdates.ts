@@ -73,7 +73,13 @@ export function useLiveUpdates(): void {
     // but a reconnect (onopen after an error) does.
     let hadError = false;
 
-    es.onmessage = (ev: MessageEvent): void => {
+    // The server sends NAMED `invalidate` events (`event: invalidate\ndata: …`).
+    // A real EventSource routes a named event to addEventListener(name) — NOT to
+    // `onmessage`, which only fires for the default/unnamed (`message`) event.
+    // Listening on onmessage here would silently receive nothing in production
+    // (a test mock that ignores the event name can hide this). So subscribe to
+    // the named event explicitly.
+    const onInvalidate = (ev: MessageEvent): void => {
       let payload: InvalidatePayload;
       try {
         payload = JSON.parse(ev.data as string) as InvalidatePayload;
@@ -88,6 +94,7 @@ export function useLiveUpdates(): void {
         }
       }
     };
+    es.addEventListener('invalidate', onInvalidate);
 
     es.onerror = (): void => {
       // EventSource auto-reconnects; just remember that a drop happened so the
@@ -115,7 +122,7 @@ export function useLiveUpdates(): void {
       for (const t of timers.values()) clearTimeout(t);
       timers.clear();
       es.onopen = null;
-      es.onmessage = null;
+      es.removeEventListener('invalidate', onInvalidate);
       es.onerror = null;
       es.close();
     };
