@@ -56,6 +56,25 @@ function renderWithProviders(ui: React.ReactElement) {
 // logout purge path has something to call.
 const cachesDelete = vi.fn().mockResolvedValue(true);
 
+// EventSource test double (happy-dom ships none). useLiveUpdates opens one when
+// authenticated; logout sets user→null, whose effect cleanup must close it.
+const esClose = vi.fn();
+class LogoutMockEventSource {
+  static instances: LogoutMockEventSource[] = [];
+  onopen: ((ev: Event) => void) | null = null;
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  onerror: ((ev: Event) => void) | null = null;
+  close = esClose;
+  constructor() {
+    LogoutMockEventSource.instances.push(this);
+  }
+}
+
+// Real shared QueryClient stub so useLiveUpdates' invalidate calls no-op.
+vi.mock('@/lib/queryClient', () => ({
+  queryClient: { invalidateQueries: vi.fn().mockResolvedValue(undefined) },
+}));
+
 describe('useAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -310,5 +329,52 @@ describe('useAuth', () => {
       expect(screen.getByTestId('user')).toHaveTextContent('null');
     });
     expect(purgeQueue).toHaveBeenCalledWith(42);
+  });
+
+  test('logout tears down the live-updates EventSource via the auth-gated effect', async () => {
+    vi.stubGlobal('EventSource', LogoutMockEventSource as unknown as typeof EventSource);
+    LogoutMockEventSource.instances = [];
+    esClose.mockClear();
+
+    // A small consumer that mounts the live subscriber inside the auth context,
+    // so logout (user→null) re-renders it and runs its cleanup.
+    const { useLiveUpdates } = await import('./useLiveUpdates');
+    function LiveConsumer() {
+      useLiveUpdates();
+      return null;
+    }
+
+    mockedApi.get.mockResolvedValueOnce({
+      id: 9,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.post.mockResolvedValueOnce(undefined);
+
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter>
+        <AuthProvider>
+          <AuthDisplay />
+          <LiveConsumer />
+        </AuthProvider>
+      </MemoryRouter>,
+    );
+
+    // Authenticated → exactly one EventSource opened.
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+    expect(LogoutMockEventSource.instances).toHaveLength(1);
+
+    await user.click(screen.getByText('Logout'));
+
+    // user→null re-renders LiveConsumer; the effect cleanup closes the socket.
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    expect(esClose).toHaveBeenCalledTimes(1);
   });
 });
