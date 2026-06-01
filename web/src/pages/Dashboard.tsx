@@ -155,6 +155,11 @@ export function Dashboard() {
       const lastDay = new Date(selectedYear, selectedMonth, 0).getDate();
       const dd = String(lastDay).padStart(2, '0');
       url += `&date_from=${selectedYear}-${mm}-01&date_to=${selectedYear}-${mm}-${dd}`;
+    } else {
+      // The "Latest" tab is "what I just typed" — order by entry time
+      // (created_at) so a just-added but earlier-dated row surfaces at the
+      // top. The month tab stays date-scoped and date-sorted above.
+      url += `&sort_by=created_at&sort_dir=desc`;
     }
     api
       .get<PaginatedResponse<Transaction>>(url)

@@ -1562,6 +1562,117 @@ func TestSortByTagsAsc(t *testing.T) {
 	}
 }
 
+// stampCreatedAt overwrites a transaction's created_at to a deterministic
+// value. CreateTransaction has no created_at parameter (it defaults to
+// CURRENT_TIMESTAMP), so seeding two rows back-to-back can collide on the
+// timestamp. Setting it explicitly makes the created_at sort order
+// deterministic and immune to wall-clock collisions. The stored layout
+// matches what the driver writes elsewhere (mattn/go-sqlite3 stores a
+// time.Time as RFC3339), so the column compares correctly as a date/time.
+func stampCreatedAt(t *testing.T, db *sql.DB, id int64, createdAt time.Time) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE transactions SET created_at = ? WHERE id = ?", createdAt, id); err != nil {
+		t.Fatalf("stamp created_at on id=%d: %v", id, err)
+	}
+}
+
+// TestSortByCreatedAt proves sorting by entry time (created_at) works
+// end-to-end through handleListTransactions, independent of the transaction
+// date. Both rows share the SAME date, so a date-sort cannot distinguish
+// them — only a created_at-sort can. The row with the LATER created_at is
+// deliberately given the LOWER id: under the secondary "t.id" tie-break a
+// broken whitelist (created_at silently falling back to t.date) would order
+// these rows by id and surface the EARLIER-entered row first on a desc sort,
+// failing the assertion.
+func TestSortByCreatedAt(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+
+	// Same date for both rows; differ only by created_at.
+	const sameDate = "2026-04-10"
+	// "EnteredLater" is seeded first → lower id, but stamped with the LATER
+	// created_at. "EnteredEarlier" is seeded second → higher id, stamped
+	// EARLIER. This inversion of id vs. created_at is what makes the test
+	// fail when created_at falls back to the t.date + t.id tie-break.
+	enteredLaterID := seedTestTransaction(t, q, user.ID, 1, sameDate, 10.0, "EnteredLater").ID
+	enteredEarlierID := seedTestTransaction(t, q, user.ID, 1, sameDate, 20.0, "EnteredEarlier").ID
+
+	base := time.Date(2026, 4, 10, 12, 0, 0, 0, time.UTC)
+	stampCreatedAt(t, db, enteredEarlierID, base)              // lower created_at, higher id
+	stampCreatedAt(t, db, enteredLaterID, base.Add(time.Hour)) // higher created_at, lower id
+
+	// DESC: the later-entered row (EnteredLater) must come first.
+	reqDesc := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=created_at&sort_dir=desc", nil)
+	reqDesc = withUser(reqDesc, user)
+	recDesc := httptest.NewRecorder()
+	h.handleListTransactions(recDesc, reqDesc)
+
+	if recDesc.Code != http.StatusOK {
+		t.Fatalf("desc: expected 200, got %d; body: %s", recDesc.Code, recDesc.Body.String())
+	}
+	var respDesc struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, recDesc, &respDesc)
+	if len(respDesc.Transactions) != 2 {
+		t.Fatalf("desc: expected 2 transactions, got %d", len(respDesc.Transactions))
+	}
+	if respDesc.Transactions[0].Description != "EnteredLater" {
+		t.Errorf("desc: expected first result 'EnteredLater' (created_at DESC), got %q", respDesc.Transactions[0].Description)
+	}
+	if respDesc.Transactions[1].Description != "EnteredEarlier" {
+		t.Errorf("desc: expected second result 'EnteredEarlier', got %q", respDesc.Transactions[1].Description)
+	}
+
+	// ASC: the earlier-entered row must come first (reverse of desc).
+	reqAsc := httptest.NewRequest(http.MethodGet, "/api/transactions?sort_by=created_at&sort_dir=asc", nil)
+	reqAsc = withUser(reqAsc, user)
+	recAsc := httptest.NewRecorder()
+	h.handleListTransactions(recAsc, reqAsc)
+
+	if recAsc.Code != http.StatusOK {
+		t.Fatalf("asc: expected 200, got %d; body: %s", recAsc.Code, recAsc.Body.String())
+	}
+	var respAsc struct {
+		Transactions []transactionResponse `json:"transactions"`
+	}
+	decodeResponse(t, recAsc, &respAsc)
+	if len(respAsc.Transactions) != 2 {
+		t.Fatalf("asc: expected 2 transactions, got %d", len(respAsc.Transactions))
+	}
+	if respAsc.Transactions[0].Description != "EnteredEarlier" {
+		t.Errorf("asc: expected first result 'EnteredEarlier' (created_at ASC), got %q", respAsc.Transactions[0].Description)
+	}
+	if respAsc.Transactions[1].Description != "EnteredLater" {
+		t.Errorf("asc: expected second result 'EnteredLater', got %q", respAsc.Transactions[1].Description)
+	}
+}
+
+// TestParseSortParams_CreatedAt asserts the whitelist resolves the frontend
+// "created_at" key to the safe fixed SQL column "t.created_at", and that an
+// unknown key still falls back to "t.date" (the injection-safe whitelist
+// property).
+func TestParseSortParams_CreatedAt(t *testing.T) {
+	col, dir := parseSortParams(map[string][]string{
+		"sort_by":  {"created_at"},
+		"sort_dir": {"asc"},
+	})
+	if col != "t.created_at" {
+		t.Errorf("expected column 't.created_at', got %q", col)
+	}
+	if dir != "ASC" {
+		t.Errorf("expected dir 'ASC', got %q", dir)
+	}
+
+	// Unknown key must still fall back to the default safe column.
+	col, _ = parseSortParams(map[string][]string{"sort_by": {"created_at; DROP TABLE"}})
+	if col != "t.date" {
+		t.Errorf("expected unknown key to fall back to 't.date', got %q", col)
+	}
+}
+
 // --- handleBulkRename ---
 
 func TestHandleBulkRename_RenamesMatchingTransactions(t *testing.T) {
