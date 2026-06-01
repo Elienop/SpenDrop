@@ -30,14 +30,16 @@ import { useOfflineQueue } from '@/hooks/useOfflineQueue';
 import { useAuth } from '@/hooks/useAuth';
 import { parseQuickEntry } from '@/lib/quick-parse';
 import { toCreatePayload } from '@/lib/currency';
+import { cn } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 import { formatYYYYMMDD } from '@/lib/dates';
-import { isExpense } from '@/lib/transaction-types';
+import { isExpense, isIncome, TYPE_INCOME } from '@/lib/transaction-types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category } from '@/api/types';
 
 type QuickMode = 'freeform' | 'tap';
+type EntryKind = 'income' | 'expense';
 
 function todayIso(): string {
   return formatYYYYMMDD(new Date());
@@ -47,6 +49,13 @@ function getStickyMode(): QuickMode {
   return localStorage.getItem(STORAGE_KEYS.quickAddMode) === 'tap'
     ? 'tap'
     : 'freeform';
+}
+
+function getStickyKind(): EntryKind {
+  // Default to 'expense' — the fast common path stays unchanged.
+  return localStorage.getItem(STORAGE_KEYS.quickAddKind) === TYPE_INCOME
+    ? 'income'
+    : 'expense';
 }
 
 function getLastCategoryId(): number {
@@ -73,6 +82,10 @@ function getLastCurrency(fallback: string): string {
  */
 export function QuickAdd() {
   const [mode, setMode] = useState<QuickMode>(getStickyMode);
+  // Income vs expense is derived purely from the selected category's type, so
+  // this axis only narrows which categories the parser/chips see — the submit
+  // pipeline is identical. Sticky so the screen reopens on the last-used kind.
+  const [kind, setKind] = useState<EntryKind>(getStickyKind);
   // Bumped after each successful add so the "Recently added" panel re-pulls.
   const [recentRefreshKey, setRecentRefreshKey] = useState(0);
 
@@ -93,18 +106,20 @@ export function QuickAdd() {
   const { pending, count: pendingCount } = useOfflineQueue(user?.id);
   const historyDescriptions = useDescriptionHistory();
 
-  // Expense categories only (quick-add captures spending). Surface the
-  // sticky last-used category first so the common case is one tap away.
-  const expenseCategories = useMemo<Category[]>(() => {
+  // Categories for the active kind (income or expense). Surface the sticky
+  // last-used category first so the common case is one tap away.
+  const activeCategories = useMemo<Category[]>(() => {
     const lastId = getLastCategoryId();
-    const expenses = categories.filter((c) => isExpense(c.type));
-    if (!lastId) return expenses;
-    const idx = expenses.findIndex((c) => c.id === lastId);
-    if (idx <= 0) return expenses;
-    const copy = [...expenses];
+    const pool = categories.filter((c) =>
+      kind === 'income' ? isIncome(c.type) : isExpense(c.type),
+    );
+    if (!lastId) return pool;
+    const idx = pool.findIndex((c) => c.id === lastId);
+    if (idx <= 0) return pool;
+    const copy = [...pool];
     const [last] = copy.splice(idx, 1);
     return [last, ...copy];
-  }, [categories]);
+  }, [categories, kind]);
 
   // Filter the history list to suggestions that round-trip through the
   // freeform parser as a *pure description* — no amount, no tags. If a past
@@ -115,7 +130,7 @@ export function QuickAdd() {
   const safeDescriptions = useMemo(() => {
     return historyDescriptions.filter((s) => {
       const p = parseQuickEntry(s, {
-        categories: expenseCategories,
+        categories: activeCategories,
         currencies,
         baseCurrency: baseCode,
       });
@@ -125,18 +140,18 @@ export function QuickAdd() {
         p.description.trim().toLowerCase() === s.trim().toLowerCase()
       );
     });
-  }, [historyDescriptions, expenseCategories, currencies, baseCode]);
+  }, [historyDescriptions, activeCategories, currencies, baseCode]);
 
   // --- Freeform state ------------------------------------------------------
   const [raw, setRaw] = useState('');
   const parsed = useMemo(
     () =>
       parseQuickEntry(raw, {
-        categories: expenseCategories,
+        categories: activeCategories,
         currencies,
         baseCurrency: baseCode,
       }),
-    [raw, expenseCategories, currencies, baseCode],
+    [raw, activeCategories, currencies, baseCode],
   );
 
   // --- Tap state -----------------------------------------------------------
@@ -174,6 +189,17 @@ export function QuickAdd() {
       if (m === 'tap') tapAmountRef.current?.focus();
       else inputRef.current?.focus();
     }, 0);
+  }, []);
+
+  // Switch income/expense kind + persist the toggle. Reset the picked category
+  // so a category chosen under one kind can't leak into the other and wrongly
+  // satisfy canSubmit — only the category selection is cleared; the amount,
+  // description, and tags are intentionally preserved.
+  const onKindChange = useCallback((next: string) => {
+    const k: EntryKind = next === TYPE_INCOME ? 'income' : 'expense';
+    setKind(k);
+    localStorage.setItem(STORAGE_KEYS.quickAddKind, k);
+    setPickedCategoryId(null);
   }, []);
 
   // Effective values per mode.
@@ -385,8 +411,8 @@ export function QuickAdd() {
   }, [submit]);
 
   const descriptionSuggestions = useMemo(
-    () => expenseCategories.map((c) => c.name),
-    [expenseCategories],
+    () => activeCategories.map((c) => c.name),
+    [activeCategories],
   );
 
   return (
@@ -418,12 +444,35 @@ export function QuickAdd() {
           </Alert>
         )}
 
-        <Tabs value={mode} onValueChange={onModeChange}>
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="freeform">Freeform</TabsTrigger>
-            <TabsTrigger value="tap">Tap</TabsTrigger>
-          </TabsList>
-        </Tabs>
+        {/* Two stacked segmented controls: first WHAT (income vs expense),
+            then HOW (freeform vs tap). Each carries a visible Label + an
+            aria-labelledby so the otherwise-identical tablists are
+            distinguishable to both sighted and screen-reader users. */}
+        <div className="flex flex-col gap-2">
+          <Label id="quick-kind-label">Type</Label>
+          <Tabs value={kind} onValueChange={onKindChange}>
+            <TabsList
+              aria-labelledby="quick-kind-label"
+              className="grid w-full grid-cols-2"
+            >
+              <TabsTrigger value="expense">Expense</TabsTrigger>
+              <TabsTrigger value="income">Income</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <Label id="quick-mode-label">Entry mode</Label>
+          <Tabs value={mode} onValueChange={onModeChange}>
+            <TabsList
+              aria-labelledby="quick-mode-label"
+              className="grid w-full grid-cols-2"
+            >
+              <TabsTrigger value="freeform">Freeform</TabsTrigger>
+              <TabsTrigger value="tap">Tap</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
 
         {mode === 'freeform' ? (
           <div className="flex flex-col gap-4">
@@ -450,10 +499,15 @@ export function QuickAdd() {
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
                 <div
                   data-testid="quick-preview-amount"
-                  className="font-mono text-3xl font-semibold tabular-nums"
+                  className={cn(
+                    'font-mono text-3xl font-semibold tabular-nums',
+                    kind === 'income' &&
+                      parsed.amount != null &&
+                      'text-emerald-500',
+                  )}
                 >
                   {parsed.amount != null ? (
-                    formatCurrency(parsed.amount, effective.currency)
+                    `${kind === 'income' ? '+' : ''}${formatCurrency(parsed.amount, effective.currency)}`
                   ) : (
                     <span className="text-base font-normal text-muted-foreground">
                       Add an amount
@@ -526,7 +580,7 @@ export function QuickAdd() {
 
         <div className="flex flex-col gap-2">
           <Label>Category</Label>
-          {categoriesLoading && expenseCategories.length === 0 ? (
+          {categoriesLoading && activeCategories.length === 0 ? (
             <p className="text-sm text-muted-foreground">Loading categories…</p>
           ) : categoriesError ? (
             <div className="flex flex-col items-start gap-2">
@@ -542,16 +596,16 @@ export function QuickAdd() {
                 Retry
               </Button>
             </div>
-          ) : expenseCategories.length === 0 ? (
+          ) : activeCategories.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No expense categories yet —{' '}
+              No {kind} categories yet —{' '}
               <Link to="/categories" className="underline">
                 create one
               </Link>
             </p>
           ) : (
             <CategoryChips
-              categories={expenseCategories}
+              categories={activeCategories}
               selectedId={effective.categoryId}
               onSelect={setPickedCategoryId}
             />

@@ -4,6 +4,7 @@ import { Trash2, WifiOff } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/api/client';
+import { cn } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 import {
   enqueue,
@@ -12,6 +13,11 @@ import {
 } from '@/lib/offline-queue';
 import { useOnline } from '@/hooks/useOnline';
 import { useRecentTransactions } from '@/hooks/useRecentTransactions';
+import {
+  TYPE_EXPENSE,
+  TYPE_INCOME,
+  type TransactionType,
+} from '@/lib/transaction-types';
 import type { Category } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
@@ -30,6 +36,9 @@ interface RecentRow {
   currency: string;
   description: string;
   categoryName: string;
+  /** Income vs expense, so the amount renders with the same +/− + color cue
+   *  as the ledger (AmountDisplay) instead of a kind-ambiguous bare magnitude. */
+  type: TransactionType;
   /** Present on pending rows so Undo re-queues the exact captured payload. */
   payload?: CreateTransactionInput;
 }
@@ -76,6 +85,11 @@ export function RecentlyAdded({
   const nameOf = (id: number): string =>
     categories.find((c) => c.id === id)?.name ?? '';
 
+  // A pending row's kind is derived from its category (the same source of
+  // truth the backend uses); fall back to expense when the category is unknown.
+  const typeOf = (id: number): TransactionType =>
+    categories.find((c) => c.id === id)?.type ?? TYPE_EXPENSE;
+
   // Pending entries are always the newest (they exist only because they
   // couldn't be sent yet), so list them first, then the saved rows in the
   // server's date-desc order. Nothing refetches unsolicited, so the list never
@@ -90,6 +104,7 @@ export function RecentlyAdded({
       currency: q.payload.original_currency ?? baseCode,
       description: q.payload.description,
       categoryName: nameOf(q.payload.category_id),
+      type: typeOf(q.payload.category_id),
       payload: q.payload,
     }));
 
@@ -101,6 +116,7 @@ export function RecentlyAdded({
     currency: t.original_currency ?? baseCode,
     description: t.description,
     categoryName: t.category_name,
+    type: t.category_type,
   }));
 
   const rows = [...pendingRows, ...savedRows].slice(0, MAX_ROWS);
@@ -156,7 +172,13 @@ export function RecentlyAdded({
           <li key={row.key} className="flex items-center gap-3 py-2 pl-3 pr-1">
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
-                <span className="shrink-0 font-mono text-sm font-medium tabular-nums">
+                <span
+                  className={cn(
+                    'shrink-0 font-mono text-sm font-medium tabular-nums',
+                    row.type === TYPE_INCOME && 'text-emerald-500',
+                  )}
+                >
+                  {row.type === TYPE_INCOME ? '+' : '-'}
                   {formatCurrency(row.amount, row.currency)}
                 </span>
                 <span className="truncate text-sm">

@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 import { ApiError } from '@/api/client';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, Currency, Transaction } from '../api/types';
 
 // --- Mocks ----------------------------------------------------------------
@@ -294,6 +295,191 @@ describe('QuickAdd — income scoping', () => {
 
     // Add stays disabled because no (expense) category matched.
     expect(screen.getByRole('button', { name: /^add$/i })).toBeDisabled();
+  });
+});
+
+describe('QuickAdd — Income kind', () => {
+  test('renders an Expense | Income toggle defaulting to Expense', async () => {
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const expenseTab = screen.getByRole('tab', { name: /^expense$/i });
+    const incomeTab = screen.getByRole('tab', { name: /^income$/i });
+    expect(expenseTab).toBeInTheDocument();
+    expect(incomeTab).toBeInTheDocument();
+    // Defaults to Expense.
+    expect(expenseTab).toHaveAttribute('aria-selected', 'true');
+    expect(incomeTab).toHaveAttribute('aria-selected', 'false');
+  });
+
+  test('labels the Type and Entry-mode toggles for assistive tech', async () => {
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+    // The two otherwise-identical tablists carry distinct accessible names so
+    // a screen-reader user can tell the kind toggle from the mode toggle.
+    expect(screen.getByRole('tablist', { name: /^type$/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('tablist', { name: /^entry mode$/i }),
+    ).toBeInTheDocument();
+  });
+
+  test('income preview shows a + sign and income color', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+    await screen.findByRole('button', { name: /^salary$/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'salary 1000');
+
+    const preview = await screen.findByTestId('quick-preview-amount');
+    await waitFor(() => expect(preview.textContent ?? '').toMatch(/^\+/));
+    expect(preview.className).toContain('text-emerald-500');
+  });
+
+  test('switching to Income shows income chips and hides expense chips', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    // Expense mode: Salary (income) chip is absent, Groceries (expense) present.
+    expect(
+      screen.queryByRole('button', { name: /^salary$/i }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+
+    // Income mode: Salary chip appears, expense chips disappear.
+    expect(
+      await screen.findByRole('button', { name: /^salary$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /^groceries$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /^transport$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('in Income mode freeform parsing matches an income category', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+    await screen.findByRole('button', { name: /^salary$/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'salary 1000');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '1,000',
+      );
+    });
+
+    // The Salary income chip is auto-selected by the parser.
+    const salaryChip = screen.getByRole('button', { name: /^salary$/i });
+    expect(salaryChip).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled();
+  });
+
+  test('submitting in Income mode posts with the income category_id', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+    await screen.findByRole('button', { name: /^salary$/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'salary 1000');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '1,000',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalled());
+    const [path, body] = apiPost.mock.calls[0];
+    expect(path).toBe('transactions');
+    expect(body).toMatchObject({
+      amount: 1000,
+      category_id: 2, // Salary (income)
+      description: 'salary',
+    });
+  });
+
+  test('switching kind resets the picked category', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    // Pick an expense category by tap.
+    await user.click(screen.getByRole('button', { name: /^groceries$/i }));
+    expect(
+      screen.getByRole('button', { name: /^groceries$/i }),
+    ).toHaveAttribute('aria-pressed', 'true');
+
+    // Switch to Income — the expense pick must not leak in.
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+    const salaryChip = await screen.findByRole('button', { name: /^salary$/i });
+    expect(salaryChip).toHaveAttribute('aria-pressed', 'false');
+
+    // Switch back to Expense — Groceries is no longer selected either.
+    await user.click(screen.getByRole('tab', { name: /^expense$/i }));
+    expect(
+      await screen.findByRole('button', { name: /^groceries$/i }),
+    ).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  test('shows "No income categories yet" empty state in Income mode when there are none', async () => {
+    apiGet.mockImplementation((path: string) => {
+      // Only an expense category exists; income pool is empty.
+      if (path === 'categories')
+        return Promise.resolve([
+          {
+            id: 1,
+            name: 'Groceries',
+            type: 'expense',
+            icon: null,
+            sort_order: 0,
+            is_active: true,
+            created_at: '',
+          },
+        ]);
+      if (path === 'currencies') return Promise.resolve(currencies);
+      return Promise.resolve([]);
+    });
+
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+
+    expect(
+      await screen.findByText(/no income categories yet/i),
+    ).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /create one/i });
+    expect(link).toHaveAttribute('href', '/categories');
+  });
+
+  test('persists the kind toggle to localStorage', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+
+    expect(localStorage.getItem(STORAGE_KEYS.quickAddKind)).toBe('income');
+
+    await user.click(screen.getByRole('tab', { name: /^expense$/i }));
+    expect(localStorage.getItem(STORAGE_KEYS.quickAddKind)).toBe('expense');
   });
 });
 
