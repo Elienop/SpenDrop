@@ -44,9 +44,13 @@ describe('useRecentTransactions', () => {
     await waitFor(() => {
       expect(result.current.recent).toEqual(listResponse.transactions);
     });
+    // Orders by entry time (created_at), not transaction date, so a just-added
+    // but earlier-dated row still surfaces at the top of "Recently added".
     expect(mockedApi.get).toHaveBeenCalledWith(
-      'transactions?page=1&per_page=5&sort_by=date&sort_dir=desc',
+      'transactions?page=1&per_page=5&sort_by=created_at&sort_dir=desc',
     );
+    const calledPath = mockedApi.get.mock.calls[0][0] as string;
+    expect(calledPath).not.toContain('sort_by=date');
   });
 
   test('does not fetch and returns empty when disabled (offline)', async () => {

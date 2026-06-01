@@ -45,6 +45,15 @@ const categories: Category[] = [
     is_active: true,
     created_at: '',
   },
+  {
+    id: 2,
+    name: 'Salary',
+    type: 'income',
+    icon: null,
+    sort_order: 1,
+    is_active: true,
+    created_at: '',
+  },
 ];
 
 function queued(over: Partial<QueuedTransaction> = {}): QueuedTransaction {
@@ -140,6 +149,38 @@ describe('RecentlyAdded', () => {
     expect(screen.getByText('sdpending')).toBeInTheDocument();
     // Pending rows are labelled; saved rows are not.
     expect(screen.getByText(/not synced/i)).toBeInTheDocument();
+  });
+
+  test('renders a saved income row with a + sign and income color', async () => {
+    apiGet.mockResolvedValue({
+      transactions: [
+        savedTxn({
+          id: 6,
+          description: 'sdincome',
+          category_id: 2,
+          category_name: 'Salary',
+          category_type: 'income',
+          amount: 5970,
+        }),
+      ],
+      total: 1,
+      page: 1,
+      per_page: 5,
+    });
+    renderPanel([]);
+    const li = (await screen.findByText('sdincome')).closest('li');
+    const amount = li?.querySelector('span.font-mono');
+    expect(amount?.textContent?.startsWith('+')).toBe(true);
+    expect(amount?.textContent).toContain('5,970');
+    expect(amount?.className).toContain('text-emerald-500');
+  });
+
+  test('renders an expense row with a minus sign and no income color', async () => {
+    renderPanel([]); // default savedTxn 'sdsaved' is an expense row
+    const li = (await screen.findByText('sdsaved')).closest('li');
+    const amount = li?.querySelector('span.font-mono');
+    expect(amount?.textContent?.startsWith('-')).toBe(true);
+    expect(amount?.className).not.toContain('text-emerald-500');
   });
 
   test('deleting a pending row drops it from the queue (no server call)', async () => {

@@ -4,7 +4,7 @@ import { api } from '@/api/client';
 import type { PaginatedResponse, Transaction } from '@/api/types';
 
 export interface UseRecentTransactionsResult {
-  /** The most recently-dated saved transactions; empty while offline. */
+  /** The most recently-entered saved transactions; empty while offline. */
   recent: Transaction[];
   /** Re-pull the list (after a delete). */
   refetch: () => void;
@@ -12,7 +12,10 @@ export interface UseRecentTransactionsResult {
 
 /**
  * Loads the last `limit` saved transactions for the /quick "Recently added"
- * panel. Only fetches when `enabled` (i.e. online) — saved history lives on
+ * panel, ordered by ENTRY TIME (`created_at`), not transaction date — so a
+ * just-added but earlier-dated row (e.g. a salary dated the 1st entered on the
+ * 15th) still surfaces at the top of the panel instead of sinking below the
+ * cutoff. Only fetches when `enabled` (i.e. online) — saved history lives on
  * the server, so offline the list is empty and the panel shows an offline
  * note. Re-pulls whenever `refreshSignal` changes (the screen bumps it after
  * each add), which is encoded in the query key.
@@ -32,7 +35,7 @@ export function useRecentTransactions(
     queryKey: ['transactions', 'recent', limit, refreshSignal],
     queryFn: () =>
       api.get<PaginatedResponse<Transaction>>(
-        `transactions?page=1&per_page=${limit}&sort_by=date&sort_dir=desc`,
+        `transactions?page=1&per_page=${limit}&sort_by=created_at&sort_dir=desc`,
       ),
     enabled,
   });

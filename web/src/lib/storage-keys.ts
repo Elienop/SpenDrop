@@ -23,6 +23,8 @@ export const STORAGE_KEYS = {
   lastTransactionCurrency: 'spendrop-last-currency',
   /** Quick-add capture screen mode toggle ('freeform' | 'tap'). */
   quickAddMode: 'spendrop-quick-mode',
+  /** Quick-add capture screen kind toggle ('income' | 'expense'). */
+  quickAddKind: 'spendrop-quick-kind',
   /** Dashboard year filter persistence. */
   dashboardYear: 'spendrop-dash-year',
   /** Dashboard month filter persistence. */
