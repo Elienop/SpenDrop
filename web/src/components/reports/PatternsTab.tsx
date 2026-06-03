@@ -34,6 +34,7 @@ import {
   dismissRecurring,
 } from '@/hooks/useReports';
 import { SpendingHeatmap } from './SpendingHeatmap';
+import { tagChartHeightPx } from './tagChart';
 import { MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
@@ -254,8 +255,12 @@ export function PatternsTab() {
           {!tags.loading && !tags.error && tags.data.length > 0 && (
             <ChartContainer
               config={TAG_CONFIG}
+              style={{ height: tagChartHeightPx(tags.data.length) }}
               className={cn(
-                'h-[300px] w-full transition-opacity duration-200',
+                // `aspect-auto` neutralizes ChartContainer's base `aspect-video`
+                // so our explicit data-driven height is the sole sizing input —
+                // matches the variable-height charts in SpendingTab.
+                'aspect-auto w-full transition-opacity duration-200',
                 tags.fetching && !tags.loading && 'opacity-60',
               )}
             >
