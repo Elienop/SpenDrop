@@ -234,8 +234,21 @@ export function Categories() {
                       </Badge>
                     </TableCell>
                     <TableCell className="text-right">
+                      {/*
+                        `modal={false}`: this row-actions menu opens the Edit
+                        Sheet (a modal Radix Dialog). A *modal* dropdown sets
+                        `body { pointer-events: none }`; opening the Sheet from it
+                        can leave a stuck pointer-events lock / lingering
+                        dismissable layer so the first *mouse* click on Save is
+                        swallowed while keyboard Enter still submits (keyboard
+                        skips hit-testing). Making the small actions menu non-modal
+                        removes its body lock entirely — the Sheet's own modal
+                        lifecycle is then the only one in play. This is the
+                        Radix-recommended pattern for a menu that opens a dialog.
+                        See https://github.com/radix-ui/primitives/issues/1241
+                      */}
                       {admin && (
-                        <DropdownMenu>
+                        <DropdownMenu modal={false}>
                           <DropdownMenuTrigger asChild>
                             <Button
                               variant="ghost"
