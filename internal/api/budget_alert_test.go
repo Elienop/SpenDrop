@@ -334,3 +334,42 @@ func TestBudgetCellTagTopicAndBound(t *testing.T) {
 		t.Errorf("topic %q exceeds 32 chars (len %d)", got, len(got))
 	}
 }
+
+func TestEvaluateBudgetAlerts_SingleCrossTagsTheCell(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-1")
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000, // 100.00 limit
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 15000) // 150.00 -> over
+
+	h.evaluateBudgetAlerts(context.Background(),
+		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+
+	if rec.count() != 1 {
+		t.Fatalf("single cross: want exactly 1 push, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	if err := json.Unmarshal(rec.payloads[0], &p); err != nil {
+		t.Fatalf("payload not valid JSON: %v", err)
+	}
+	wantTag := budgetCellTag(catID, 2026, 5) // "budget-<catID>-202605"
+	if p.Tag != wantTag {
+		t.Errorf("single-cell collapse tag: want %q, got %q", wantTag, p.Tag)
+	}
+	// Behavior preserved: dollars + body shape unchanged from the pre-refactor send.
+	if p.LimitDollars != 100 || p.SpentDollars != 150 {
+		t.Errorf("dollars regressed: limit=%v spent=%v", p.LimitDollars, p.SpentDollars)
+	}
+	if p.URL != "/budgets" {
+		t.Errorf("url: want /budgets, got %q", p.URL)
+	}
+}

@@ -108,6 +108,46 @@ func (h *Handler) dispatcher() pushDispatcher {
 	return h.pushSender
 }
 
+// crossedCell is one freshly-crossed (category, month) cell captured during the
+// latch loop so the actual push fan-out can happen ONCE after the loop, not
+// per-iteration. Dollars are pre-converted (Money Wire-Edge DTO discipline).
+type crossedCell struct {
+	cell         budgetCell
+	name         string
+	spentDollars float64
+	limitDollars float64
+}
+
+// sendOverBudgetCell fans out one push for a single freshly-crossed cell,
+// collapsing on the per-cell SW tag budget-<categoryID>-<YYYYMM> and the
+// matching Web Push Topic ob-<categoryID>-<YYYYMM>. Urgency comes from the
+// over_budget mapping (Normal).
+func (h *Handler) sendOverBudgetCell(ctx context.Context, c crossedCell) {
+	tag := budgetCellTag(c.cell.CategoryID, c.cell.Year, c.cell.Month)
+	topic := budgetCellTopic(c.cell.CategoryID, c.cell.Year, c.cell.Month)
+	payload := pushAlertPayload{
+		Title: fmt.Sprintf("Over budget: %s", c.name),
+		Body: fmt.Sprintf("%s is over budget — $%.2f spent of your $%.2f limit this month.",
+			c.name, c.spentDollars, c.limitDollars),
+		URL:          "/budgets",
+		Type:         "budget_over",
+		Tag:          tag,
+		CategoryID:   c.cell.CategoryID,
+		CategoryName: c.name,
+		Year:         c.cell.Year,
+		Month:        c.cell.Month,
+		LimitDollars: c.limitDollars,
+		SpentDollars: c.spentDollars,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("budget alert: marshal cell payload cat=%d: %v", c.cell.CategoryID, err)
+		return
+	}
+	_, _, urgency := pushOptionsFor("over_budget")
+	h.fanOutPush(ctx, "over_budget", body, 0, pushOpts{Tag: tag, Topic: topic, Urgency: urgency})
+}
+
 // evaluateBudgetAlerts is the post-commit over-budget hook. It mirrors the
 // error contract of verifyAffectedCheckpoints exactly: the caller's mutation
 // is already committed, so THIS FUNCTION NEVER RETURNS AN ERROR and never
@@ -124,6 +164,7 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 	if len(cells) == 0 {
 		return
 	}
+	var crossed []crossedCell
 	for _, cell := range cells {
 		over, limitCents, spentCents, catName, err := h.cellOverBudget(ctx, cell)
 		if err != nil {
@@ -162,34 +203,20 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			continue // already latched (dedup) or driver hiccup — stay silent
 		}
 
-		// Fresh cross. Build the dollars payload and fan out. The latch is set
-		// regardless of whether any subscriber exists, so a later subscribe +
-		// re-eval does not retroactively double-fire.
-		limitDollars := centsToDollars(limitCents)
-		spentDollars := centsToDollars(spentCents)
-		payload := pushAlertPayload{
-			Title: fmt.Sprintf("Over budget: %s", catName),
-			Body: fmt.Sprintf("%s is over budget — $%.2f spent of your $%.2f limit this month.",
-				catName, spentDollars, limitDollars),
-			URL:          "/budgets",
-			Type:         "budget_over",
-			CategoryID:   cell.CategoryID,
-			CategoryName: catName,
-			Year:         cell.Year,
-			Month:        cell.Month,
-			LimitDollars: limitDollars,
-			SpentDollars: spentDollars,
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			log.Printf("budget alert: marshal payload cat=%d: %v", cell.CategoryID, err)
-			continue
-		}
-		// state alert: notify everyone, incl. actor. Base over_budget opts only;
-		// real per-cell tag/topic is wired in the OverBudgetSummary area.
-		obTag, obTopic, obUrgency := pushOptionsFor("over_budget")
-		h.fanOutPush(ctx, "over_budget", body, 0,
-			pushOpts{Tag: obTag, Topic: obTopic, Urgency: obUrgency})
+		// Fresh cross: collect it; the send happens once after the loop so two
+		// categories crossing in one request can collapse into a single push.
+		// The latch is set regardless of whether any subscriber exists, so a
+		// later subscribe + re-eval does not retroactively double-fire.
+		crossed = append(crossed, crossedCell{
+			cell:         cell,
+			name:         catName,
+			spentDollars: centsToDollars(spentCents),
+			limitDollars: centsToDollars(limitCents),
+		})
+	}
+
+	for _, c := range crossed {
+		h.sendOverBudgetCell(ctx, c)
 	}
 }
 
