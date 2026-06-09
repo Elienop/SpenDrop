@@ -722,6 +722,25 @@ added"), never one-per-row. A transaction that is both an activity event and ove
 the large threshold sends **only** the large-transaction alert. New types default
 **off**, so enabling push changes nothing until an admin turns a type on.
 
+### Smart delivery
+
+To keep a busy household from being buzzed once per row, notifications are
+shaped before they reach your devices:
+
+- **Collapse:** all transaction activity (added / edited / deleted / large)
+  shares one notification "row" — a new activity replaces the previous one
+  instead of stacking. Over-budget alerts collapse per category-month.
+- **Burst summary:** a run of transaction activity collapses into a single
+  "N new activities" notification (the first one keeps its detailed body), and
+  the app icon shows a badge with the unread count (cleared when you open
+  Transactions).
+- **Over-budget summary:** when two or more categories cross their limit in one
+  action, you get one "N categories over budget" notification, not one each.
+- **Quiet hours & daily digest (household-wide):** in **Settings →
+  Notifications** you can mute real-time activity pushes during a daily quiet
+  window (IANA time zone) and instead receive one daily rollup of what changed.
+  Over-budget alerts can optionally bypass quiet hours.
+
 ### TrueNAS redeploy
 
 Add the four env vars (`PUSH_ENABLED` plus the three `VAPID_*`) to the app's
