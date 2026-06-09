@@ -1965,6 +1965,11 @@ export function NotificationsSection() {
   // so without a hint the user sees their entry silently fail to save. Driven
   // off the live inputs (uncontrolled) via recomputeQuietHalfSet.
   const [quietHalfSet, setQuietHalfSet] = useState(false);
+  // Bumped to force-remount the uncontrolled digest-time input back to the
+  // server value when a user clears it. handleDigestTime skips the PUT on a
+  // blank value (the backend 400s on an empty HH:MM), so without a remount the
+  // field lingers blank, showing a time that no longer matches what is saved.
+  const [digestTimeNonce, setDigestTimeNonce] = useState(0);
 
   function recomputeQuietHalfSet() {
     const start = quietStartRef.current?.value ?? '';
@@ -2024,9 +2029,13 @@ export function NotificationsSection() {
   async function handleDigestTime(value: string) {
     // A native time input can be cleared to '' but digest_time has a NOT NULL
     // default and the backend requires a valid HH:MM (an empty/invalid value
-    // makes the daily anchor unparseable → 400). Treat blank as a no-op so the
-    // visible value reverts to the server echo on the next render.
-    if (value.trim() === '') return;
+    // makes the daily anchor unparseable → 400). Skip the PUT and bump the
+    // remount nonce so the cleared field snaps back to the persisted server
+    // value instead of lingering blank with a time that no longer matches.
+    if (value.trim() === '') {
+      setDigestTimeNonce((n) => n + 1);
+      return;
+    }
     try {
       await update({ digest_time: value });
     } catch (err) {
@@ -2259,7 +2268,7 @@ export function NotificationsSection() {
                   disabled={!canEdit}
                   aria-label="Digest send time"
                   defaultValue={settings.digest_time}
-                  key={`dt-${settings.digest_time}`}
+                  key={`dt-${settings.digest_time}-${digestTimeNonce}`}
                   onBlur={(e) => void handleDigestTime(e.currentTarget.value)}
                 />
               </div>

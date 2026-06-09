@@ -224,6 +224,24 @@ describe('NotificationsSection — digest + quiet hours', () => {
     expect(prefsHook.update).not.toHaveBeenCalled();
   });
 
+  test('reverts a cleared digest send time to the server value and fires no PUT', () => {
+    prefsHook.settings = {
+      ...SETTINGS,
+      digest_mode: 'daily',
+      digest_time: '08:00',
+    };
+    render(<NotificationsSection />);
+    const input = screen.getByLabelText('Digest send time');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    // A cleared field must snap back to the persisted server value rather than
+    // linger blank showing a value that no longer matches the server.
+    expect(
+      (screen.getByLabelText('Digest send time') as HTMLInputElement).value,
+    ).toBe('08:00');
+    expect(prefsHook.update).not.toHaveBeenCalled();
+  });
+
   test('explains that quiet hours need both bounds to take effect', () => {
     render(<NotificationsSection />);
     expect(screen.getByText(/a single bound is ignored/i)).toBeInTheDocument();
