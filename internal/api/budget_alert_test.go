@@ -422,6 +422,63 @@ func TestEvaluateBudgetAlerts_MultiCrossSendsOneSummary(t *testing.T) {
 	}
 }
 
+// TestEvaluateBudgetAlerts_QuietHoursDefersCrossNotDrops drives the fix through
+// evaluateBudgetAlerts: a fresh over-budget cross while over_budget is suppressed
+// by quiet hours (bypass off) must NOT write the dedup latch and must NOT send —
+// otherwise the latch commits, the suppressed send is dropped, and later evals
+// see rows-affected==0 and the crossing is permanently lost. A later evaluation
+// OUTSIDE quiet hours must then fire the cross exactly once.
+func TestEvaluateBudgetAlerts_QuietHoursDefersCrossNotDrops(t *testing.T) {
+	q, db := setupTestDB(t)
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-q")
+	if err := q.UpsertCategoryBudget(ctx, database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000, // 100.00 limit
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 15000) // 150.00 -> over
+
+	// Quiet 22:00->07:00 UTC, bypass OFF -> over_budget is suppressed.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC', quiet_allow_over_budget=0 WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	cell := budgetCell{CategoryID: catID, Year: 2026, Month: 5}
+
+	// Evaluate at 23:00 UTC (inside the window): no send AND no latch written.
+	recQuiet := &recordingSender{}
+	hQuiet := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC)})
+	hQuiet.pushTesterForBudgetAlerts = recQuiet
+	hQuiet.evaluateBudgetAlerts(ctx, []budgetCell{cell})
+	if recQuiet.count() != 0 {
+		t.Fatalf("quiet hours: want 0 sends, got %d", recQuiet.count())
+	}
+	// The latch must NOT have been set — a follow-up clear removes 0 rows.
+	cleared, err := q.ClearBudgetAlertState(ctx, database.ClearBudgetAlertStateParams{
+		CategoryID: catID, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n, _ := cleared.RowsAffected(); n != 0 {
+		t.Fatalf("quiet-hours cross must NOT latch (would drop the crossing); cleared %d rows", n)
+	}
+
+	// Evaluate at 12:00 UTC (outside the window): the cross fires exactly once.
+	recDay := &recordingSender{}
+	hDay := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)})
+	hDay.pushTesterForBudgetAlerts = recDay
+	hDay.evaluateBudgetAlerts(ctx, []budgetCell{cell})
+	if recDay.count() != 1 {
+		t.Fatalf("post-quiet eval must re-fire the cross once, got %d", recDay.count())
+	}
+}
+
 func TestFanOutPush_QuietHoursSuppressesActivity(t *testing.T) {
 	q, db := setupTestDB(t)
 	// 23:00 UTC is inside the 22:00->07:00 quiet window.

@@ -165,6 +165,22 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 	if len(cells) == 0 {
 		return
 	}
+	// Quiet-hours/bypass gate (mirrors fanOutPush): if an over_budget send would
+	// be suppressed by quiet hours RIGHT NOW (window active AND the household
+	// disabled the bypass), do NOT write the dedup latch for a fresh cross. The
+	// latch is otherwise committed BEFORE fanOutPush drops the suppressed send,
+	// so later evals see rows-affected==0 and the crossing is permanently lost
+	// instead of deferred. Skipping the latch leaves the cell un-latched so the
+	// next post-quiet evaluation re-fires it. Only the transient quiet-hours
+	// suppression is consulted here — the over_budget TOGGLE being off keeps its
+	// deliberate latch-anyway behavior (see notifTypeEnabled).
+	suppressOverBudget := false
+	if settings, err := h.queries.GetNotificationSettings(ctx); err != nil {
+		log.Printf("budget alert: read notification settings: %v", err)
+	} else {
+		suppressOverBudget = inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) &&
+			!settings.QuietAllowOverBudget
+	}
 	var crossed []crossedCell
 	for _, cell := range cells {
 		over, limitCents, spentCents, catName, err := h.cellOverBudget(ctx, cell)
@@ -184,6 +200,13 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 				log.Printf("budget alert: clear latch cat=%d %04d-%02d: %v",
 					cell.CategoryID, cell.Year, cell.Month, err)
 			}
+			continue
+		}
+
+		// Over budget. If an over_budget send is currently suppressed by quiet
+		// hours, do NOT latch — leaving the cell un-latched lets the next
+		// post-quiet evaluation re-fire this cross instead of dropping it.
+		if suppressOverBudget {
 			continue
 		}
 
