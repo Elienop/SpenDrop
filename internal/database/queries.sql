@@ -145,8 +145,9 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: CountTransactionsSince :one
--- Digest "what changed" count. LIVE rows only (deleted_at IS NULL) so a
--- tombstoned row never inflates a digest (soft-delete discipline).
+-- Counts transactions ADDED since the given time (by created_at) for the digest.
+-- LIVE rows only (deleted_at IS NULL) so a tombstoned row never inflates a
+-- digest (soft-delete discipline).
 SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS NULL;
 
 -- name: GetTransactionByID :one

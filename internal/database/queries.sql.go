@@ -3025,7 +3025,7 @@ const countTransactionsSince = `-- name: CountTransactionsSince :one
 SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS NULL
 `
 
-// CountTransactionsSince counts LIVE transactions committed after since. The
+// CountTransactionsSince counts LIVE transactions ADDED after since (by created_at). The
 // cutoff is formatted to the column's stored text form ('YYYY-MM-DD HH:MM:SS',
 // UTC) so the comparison is lexicographic against the CURRENT_TIMESTAMP-populated
 // created_at - binding a raw time.Time lets the driver pick an RFC3339 form that

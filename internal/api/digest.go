@@ -28,6 +28,16 @@ func parseHHMM(v string) (hour, minute int, ok bool) {
 	return h, m, true
 }
 
+// validQuietBound reports whether a quiet-hours boundary string is acceptable:
+// an empty string means "no boundary", otherwise it must be a valid 24h HH:MM.
+func validQuietBound(v string) bool {
+	if v == "" {
+		return true
+	}
+	_, _, ok := parseHHMM(v)
+	return ok
+}
+
 // inQuietHours reports whether `now`, evaluated in IANA zone `tz`, falls inside
 // the [start,end) window. start/end are "HH:MM"; an empty or malformed bound (or
 // a zero-length window) means "never quiet". A window whose end is <= start wraps
@@ -93,8 +103,9 @@ func shouldSendDigest(now time.Time, s database.NotificationSettings) bool {
 
 // RunDigestTick is the restart-safe daily digest pass, invoked by a ticker. It
 // reads the household settings, and when shouldSendDigest is true sends ONE
-// rollup built by QUERYING how many live transactions changed since the stored
-// last_digest_at (CountTransactionsSince — soft-delete-safe), then advances the
+// rollup built by QUERYING how many live transactions were ADDED (by created_at)
+// since the stored last_digest_at (CountTransactionsSince — soft-delete-safe),
+// then advances the
 // cursor. Best-effort: every failure is logged, never returned. Count-only body,
 // so no money crosses the wire (no DTO concern).
 func (h *Handler) RunDigestTick(ctx context.Context) {

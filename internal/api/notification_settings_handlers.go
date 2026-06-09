@@ -116,6 +116,25 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Quiet-hours bounds: each is EITHER empty ("no boundary") OR a valid 24h
+	// HH:MM. parseHHMM already enforces the HH:MM range, so an empty string is
+	// the only extra case to allow through.
+	if !validQuietBound(req.QuietStart) {
+		writeError(w, http.StatusBadRequest, "quiet_start must be empty or a 24h HH:MM time")
+		return
+	}
+	if !validQuietBound(req.QuietEnd) {
+		writeError(w, http.StatusBadRequest, "quiet_end must be empty or a 24h HH:MM time")
+		return
+	}
+	// quiet_tz: empty ("no zone") or a loadable IANA zone.
+	if req.QuietTz != "" {
+		if _, err := time.LoadLocation(req.QuietTz); err != nil {
+			writeError(w, http.StatusBadRequest, "quiet_tz must be empty or a valid IANA time zone")
+			return
+		}
+	}
+
 	if err := h.queries.UpdateNotificationSettings(r.Context(), database.UpdateNotificationSettingsParams{
 		OverBudget:             req.OverBudget,
 		TxnAdded:               req.TxnAdded,

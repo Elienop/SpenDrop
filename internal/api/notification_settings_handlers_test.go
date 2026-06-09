@@ -144,6 +144,56 @@ func TestHandleUpdateNotificationSettings_RejectsNegativeThreshold(t *testing.T)
 	}
 }
 
+func TestHandleUpdateNotificationSettings_RejectsBadQuietStart(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","quiet_start":"25:99","quiet_end":"07:00","quiet_tz":"UTC"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad quiet_start: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleUpdateNotificationSettings_RejectsBadQuietTz(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","quiet_start":"22:00","quiet_end":"07:00","quiet_tz":"Mars/Phobos"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad quiet_tz: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Empty quiet bounds/tz mean "no quiet window" and must remain valid (200) —
+// the validator rejects only malformed non-empty values.
+func TestHandleUpdateNotificationSettings_AllowsEmptyQuietFields(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"off","quiet_start":"","quiet_end":"","quiet_tz":""}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("empty quiet fields: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A huge-but-finite threshold (e.g. 1e308) passes a naive ">= 0" check yet
 // overflows int64 in dollarsToCents and would store a NEGATIVE threshold. The
 // MaxTransactionAmount bound must reject it before the DB write.
