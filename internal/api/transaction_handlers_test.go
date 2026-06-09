@@ -3537,6 +3537,11 @@ func TestCreateTransaction_FiresTxnAdded(t *testing.T) {
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
 	}
+	// Actor-first body: the push goes to OTHER members, so it must lead with
+	// the actor's display name (seedTestUser sets DisplayName == username).
+	if !strings.HasPrefix(p.Body, "alice ") {
+		t.Errorf("body must start with actor display name, got %q", p.Body)
+	}
 }
 
 // A push send failure must NEVER fail the (already-committed) mutation.
@@ -3591,6 +3596,9 @@ func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
 	if p.Type != "txn_deleted" {
 		t.Errorf("type: got %q want txn_deleted", p.Type)
 	}
+	if !strings.HasPrefix(p.Body, "alice ") {
+		t.Errorf("body must start with actor display name, got %q", p.Body)
+	}
 }
 
 // A batch create fires exactly ONE aggregate push, never one-per-row.
@@ -3628,6 +3636,9 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 	_ = json.Unmarshal(rec.payloads[0], &p)
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+	if !strings.HasPrefix(p.Body, "alice ") {
+		t.Errorf("body must start with actor display name, got %q", p.Body)
 	}
 }
 
