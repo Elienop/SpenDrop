@@ -2942,7 +2942,8 @@ func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAler
 // / IsActive). updated_at is server-set via datetime('now').
 
 const getNotificationSettings = `-- name: GetNotificationSettings :one
-SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at
+SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at,
+       digest_mode, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 FROM notification_settings WHERE id = 1
 `
 
@@ -2958,6 +2959,12 @@ func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSett
 		&i.LargeTxn,
 		&i.LargeTxnThresholdCents,
 		&i.UpdatedAt,
+		&i.DigestMode,
+		&i.QuietStart,
+		&i.QuietEnd,
+		&i.QuietTz,
+		&i.QuietAllowOverBudget,
+		&i.LastDigestAt,
 	)
 	return i, err
 }
@@ -2965,17 +2972,24 @@ func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSett
 const updateNotificationSettings = `-- name: UpdateNotificationSettings :exec
 UPDATE notification_settings
 SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
-    large_txn_threshold_cents = ?, updated_at = datetime('now')
+    large_txn_threshold_cents = ?,
+    digest_mode = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
+    updated_at = datetime('now')
 WHERE id = 1
 `
 
 type UpdateNotificationSettingsParams struct {
-	OverBudget             bool  `json:"over_budget"`
-	TxnAdded               bool  `json:"txn_added"`
-	TxnDeleted             bool  `json:"txn_deleted"`
-	TxnEdited              bool  `json:"txn_edited"`
-	LargeTxn               bool  `json:"large_txn"`
-	LargeTxnThresholdCents int64 `json:"large_txn_threshold_cents"`
+	OverBudget             bool   `json:"over_budget"`
+	TxnAdded               bool   `json:"txn_added"`
+	TxnDeleted             bool   `json:"txn_deleted"`
+	TxnEdited              bool   `json:"txn_edited"`
+	LargeTxn               bool   `json:"large_txn"`
+	LargeTxnThresholdCents int64  `json:"large_txn_threshold_cents"`
+	DigestMode             string `json:"digest_mode"`
+	QuietStart             string `json:"quiet_start"`
+	QuietEnd               string `json:"quiet_end"`
+	QuietTz                string `json:"quiet_tz"`
+	QuietAllowOverBudget   bool   `json:"quiet_allow_over_budget"`
 }
 
 func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNotificationSettingsParams) error {
@@ -2986,6 +3000,11 @@ func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNoti
 		arg.TxnEdited,
 		arg.LargeTxn,
 		arg.LargeTxnThresholdCents,
+		arg.DigestMode,
+		arg.QuietStart,
+		arg.QuietEnd,
+		arg.QuietTz,
+		arg.QuietAllowOverBudget,
 	)
 	return err
 }

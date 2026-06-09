@@ -898,11 +898,14 @@ DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?;
 -- HAND-WRITTEN in queries.sql.go: sqlc cannot generate this repo. The table is a single seeded row at id=1 (migration 015 CHECK(id=1) + seed), so reads are an unconditional WHERE id = 1 - never a lazy-create. UpdateNotificationSettings rewrites every toggle + threshold and bumps updated_at; the household row always exists so this is a plain UPDATE, never an upsert.
 
 -- name: GetNotificationSettings :one
-SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at
+SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at,
+       digest_mode, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 FROM notification_settings WHERE id = 1;
 
 -- name: UpdateNotificationSettings :exec
 UPDATE notification_settings
 SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
-    large_txn_threshold_cents = ?, updated_at = datetime('now')
+    large_txn_threshold_cents = ?,
+    digest_mode = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
+    updated_at = datetime('now')
 WHERE id = 1;
