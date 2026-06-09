@@ -11,9 +11,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
+
+// defaultHTTPTimeout bounds a single push round-trip. A push gateway that
+// accepts the connection but never responds would otherwise block the serial
+// fan-out / digest send loop forever, permanently wedging all future digests.
+// 30s is generous for a one-shot POST while still guaranteeing the loop makes
+// progress. Applied only when the caller's client has no Timeout of its own.
+const defaultHTTPTimeout = 30 * time.Second
 
 // defaultTTL is the seconds a push service should retain an undelivered
 // message before discarding it. Six hours: long enough to survive a phone
@@ -52,7 +60,17 @@ type Sender struct {
 
 // NewSender builds a Sender. client must be non-nil; pass http.DefaultClient
 // (or a tuned client) — the caller owns its lifetime.
+//
+// If the supplied client has no Timeout, NewSender shallow-copies it and
+// applies defaultHTTPTimeout so a stalled gateway cannot wedge the send loop.
+// The copy shares the original Transport, so a shared http.DefaultClient keeps
+// its connection pool while its own Timeout stays zero for every other caller.
 func NewSender(publicKey, privateKey, subject string, client *http.Client) *Sender {
+	if client.Timeout == 0 {
+		c := *client
+		c.Timeout = defaultHTTPTimeout
+		client = &c
+	}
 	return &Sender{
 		publicKey:  publicKey,
 		privateKey: privateKey,

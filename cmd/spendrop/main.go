@@ -286,12 +286,20 @@ func main() {
 	// at most once per day and only needs to notice the boundary within a minute.
 	go func() {
 		const digestInterval = time.Minute
+		// Per-run deadline mirrors the daily-integrity goroutine. RunDigestTick
+		// fans out pushes serially; without a bound, a single stalled push
+		// gateway would block the loop forever and permanently wedge every
+		// future digest. The per-request push timeout (push.defaultHTTPTimeout)
+		// bounds each send; this caps the whole pass so the ticker never leaks.
+		const digestPerRunTimeout = 2 * time.Minute
 		ticker := time.NewTicker(digestInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ticker.C:
-				h.RunDigestTick(cleanupCtx)
+				dctx, cancel := context.WithTimeout(cleanupCtx, digestPerRunTimeout)
+				h.RunDigestTick(dctx)
+				cancel()
 			case <-cleanupCtx.Done():
 				return
 			}
