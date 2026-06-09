@@ -38,6 +38,11 @@ const SETTINGS: NotificationSettings = {
   txn_edited: false,
   large_txn: false,
   large_txn_threshold_dollars: 500,
+  digest_mode: 'off',
+  quiet_start: '',
+  quiet_end: '',
+  quiet_tz: 'UTC',
+  quiet_allow_over_budget: true,
 };
 
 function asAuth(user: User) {
@@ -89,6 +94,11 @@ describe('useNotificationPrefs', () => {
       txn_edited: false,
       large_txn: false,
       large_txn_threshold_dollars: 500,
+      digest_mode: 'off',
+      quiet_start: '',
+      quiet_end: '',
+      quiet_tz: 'UTC',
+      quiet_allow_over_budget: true,
     });
     expect(result.current.settings).toEqual(updated);
   });

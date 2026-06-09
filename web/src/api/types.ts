@@ -535,4 +535,9 @@ export interface NotificationSettings {
   txn_edited: boolean;
   large_txn: boolean;
   large_txn_threshold_dollars: number;
+  digest_mode: string;
+  quiet_start: string;
+  quiet_end: string;
+  quiet_tz: string;
+  quiet_allow_over_budget: boolean;
 }

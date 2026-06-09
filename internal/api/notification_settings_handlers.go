@@ -22,6 +22,11 @@ type notificationSettingsDTO struct {
 	TxnEdited                bool      `json:"txn_edited"`
 	LargeTxn                 bool      `json:"large_txn"`
 	LargeTxnThresholdDollars float64   `json:"large_txn_threshold_dollars"`
+	DigestMode               string    `json:"digest_mode"`
+	QuietStart               string    `json:"quiet_start"`
+	QuietEnd                 string    `json:"quiet_end"`
+	QuietTz                  string    `json:"quiet_tz"`
+	QuietAllowOverBudget     bool      `json:"quiet_allow_over_budget"`
 	UpdatedAt                time.Time `json:"updated_at"`
 }
 
@@ -33,6 +38,11 @@ func notificationSettingsToDTO(s database.NotificationSettings) notificationSett
 		TxnEdited:                s.TxnEdited,
 		LargeTxn:                 s.LargeTxn,
 		LargeTxnThresholdDollars: centsToDollars(s.LargeTxnThresholdCents),
+		DigestMode:               s.DigestMode,
+		QuietStart:               s.QuietStart,
+		QuietEnd:                 s.QuietEnd,
+		QuietTz:                  s.QuietTz,
+		QuietAllowOverBudget:     s.QuietAllowOverBudget,
 		UpdatedAt:                s.UpdatedAt,
 	}
 }
@@ -47,6 +57,11 @@ type updateNotificationSettingsRequest struct {
 	TxnEdited                bool    `json:"txn_edited"`
 	LargeTxn                 bool    `json:"large_txn"`
 	LargeTxnThresholdDollars float64 `json:"large_txn_threshold_dollars"`
+	DigestMode               string  `json:"digest_mode"`
+	QuietStart               string  `json:"quiet_start"`
+	QuietEnd                 string  `json:"quiet_end"`
+	QuietTz                  string  `json:"quiet_tz"`
+	QuietAllowOverBudget     bool    `json:"quiet_allow_over_budget"`
 }
 
 // handleGetNotificationSettings returns the household notification preferences.
@@ -96,6 +111,11 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if req.DigestMode != "off" && req.DigestMode != "daily" {
+		writeError(w, http.StatusBadRequest, "digest_mode must be 'off' or 'daily'")
+		return
+	}
+
 	if err := h.queries.UpdateNotificationSettings(r.Context(), database.UpdateNotificationSettingsParams{
 		OverBudget:             req.OverBudget,
 		TxnAdded:               req.TxnAdded,
@@ -103,6 +123,11 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		TxnEdited:              req.TxnEdited,
 		LargeTxn:               req.LargeTxn,
 		LargeTxnThresholdCents: dollarsToCents(req.LargeTxnThresholdDollars),
+		DigestMode:             req.DigestMode,
+		QuietStart:             req.QuietStart,
+		QuietEnd:               req.QuietEnd,
+		QuietTz:                req.QuietTz,
+		QuietAllowOverBudget:   req.QuietAllowOverBudget,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update notification settings")
 		return
