@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -215,9 +216,41 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 		})
 	}
 
-	for _, c := range crossed {
-		h.sendOverBudgetCell(ctx, c)
+	switch len(crossed) {
+	case 0:
+		return
+	case 1:
+		h.sendOverBudgetCell(ctx, crossed[0])
+	default:
+		h.sendOverBudgetSummary(ctx, crossed)
 	}
+}
+
+// sendOverBudgetSummary fans out ONE collapsing push when two or more cells
+// crossed in a single request. It uses the fixed budget-summary tag / ob-summary
+// Topic so repeated multi-cross bursts replace rather than stack. The per-category
+// dollar fields are intentionally left zero — the summary is a list, and the SW
+// renders title/body/url, so no *_cents value is ever marshalled here.
+func (h *Handler) sendOverBudgetSummary(ctx context.Context, crossed []crossedCell) {
+	names := make([]string, 0, len(crossed))
+	for _, c := range crossed {
+		names = append(names, c.name)
+	}
+	payload := pushAlertPayload{
+		Title: "Over budget",
+		Body:  fmt.Sprintf("%d categories over budget: %s", len(crossed), strings.Join(names, ", ")),
+		URL:   "/budgets",
+		Type:  "budget_over",
+		Tag:   budgetSummaryTag,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("budget alert: marshal summary payload: %v", err)
+		return
+	}
+	_, _, urgency := pushOptionsFor("over_budget")
+	h.fanOutPush(ctx, "over_budget", body, 0,
+		pushOpts{Tag: budgetSummaryTag, Topic: budgetSummaryTopic, Urgency: urgency})
 }
 
 // cellOverBudget computes whether one (category, month) is over budget by

@@ -373,3 +373,50 @@ func TestEvaluateBudgetAlerts_SingleCrossTagsTheCell(t *testing.T) {
 		t.Errorf("url: want /budgets, got %q", p.URL)
 	}
 }
+
+func TestEvaluateBudgetAlerts_MultiCrossSendsOneSummary(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	groceries := seedExpenseCategory(t, q, "Groceries")
+	dining := seedExpenseCategory(t, q, "Dining")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-1")
+
+	for _, catID := range []int64{groceries, dining} {
+		if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+			Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000, // 100.00 limit
+		}); err != nil {
+			t.Fatalf("budget cat=%d: %v", catID, err)
+		}
+		seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 15000) // 150.00 -> over
+	}
+
+	h.evaluateBudgetAlerts(context.Background(), []budgetCell{
+		{CategoryID: groceries, Year: 2026, Month: 5},
+		{CategoryID: dining, Year: 2026, Month: 5},
+	})
+
+	if rec.count() != 1 {
+		t.Fatalf("two crossings: want exactly 1 summary push, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	if err := json.Unmarshal(rec.payloads[0], &p); err != nil {
+		t.Fatalf("payload not valid JSON: %v", err)
+	}
+	if p.Tag != budgetSummaryTag {
+		t.Errorf("summary collapse tag: want %q, got %q", budgetSummaryTag, p.Tag)
+	}
+	if !strings.Contains(p.Body, "2 categories over budget") {
+		t.Errorf("summary body: want a count prefix '2 categories over budget', got %q", p.Body)
+	}
+	// seedExpenseCategory suffixes names with t.Name(); match on the prefix.
+	if !strings.Contains(p.Body, "Groceries") || !strings.Contains(p.Body, "Dining") {
+		t.Errorf("summary body must list both category names, got %q", p.Body)
+	}
+	if p.URL != "/budgets" {
+		t.Errorf("summary url: want /budgets, got %q", p.URL)
+	}
+}
