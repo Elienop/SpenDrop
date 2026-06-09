@@ -46,6 +46,24 @@ func pushOptionsFor(notifType string) (tag, topic string, urgency push.Urgency) 
 	}
 }
 
+// budgetCellTag / budgetCellTopic format a single freshly-crossed over-budget cell's
+// SW collapse tag and Web Push Topic. PURE. The Topic stays <=32 url-safe chars:
+// "ob-" + up to a 19-digit int64 + "-" + 6-digit YYYYMM = 29 max.
+func budgetCellTag(catID int64, year, month int) string {
+	return fmt.Sprintf("budget-%d-%04d%02d", catID, year, month)
+}
+
+func budgetCellTopic(catID int64, year, month int) string {
+	return fmt.Sprintf("ob-%d-%04d%02d", catID, year, month)
+}
+
+// budgetSummaryTag / budgetSummaryTopic collapse the multi-cell over-budget summary
+// push (>=2 categories crossed in one request) into a single notification row.
+const (
+	budgetSummaryTag   = "budget-summary"
+	budgetSummaryTopic = "ob-summary"
+)
+
 // budgetCell identifies one (category, calendar-month) over-budget evaluation
 // unit. Year/Month are derived from the AFFECTED transaction's own date parsed
 // UTC (Task 17), never from the wall clock, so a back-dated edit re-evaluates

@@ -285,3 +285,22 @@ func TestEvaluateBudgetAlerts_PayloadIsDollarsNotCents(t *testing.T) {
 		t.Errorf("url: want /budgets for the click deep-link, got %q", p.URL)
 	}
 }
+
+func TestBudgetCellTagTopicAndBound(t *testing.T) {
+	if got := budgetCellTag(7, 2026, 5); got != "budget-7-202605" {
+		t.Errorf("budgetCellTag = %q, want budget-7-202605", got)
+	}
+	if got := budgetCellTopic(7, 2026, 5); got != "ob-7-202605" {
+		t.Errorf("budgetCellTopic = %q, want ob-7-202605", got)
+	}
+	if budgetSummaryTag != "budget-summary" {
+		t.Errorf("budgetSummaryTag = %q, want budget-summary", budgetSummaryTag)
+	}
+	if budgetSummaryTopic != "ob-summary" {
+		t.Errorf("budgetSummaryTopic = %q, want ob-summary", budgetSummaryTopic)
+	}
+	// Web Push Topic must stay <=32 url-safe chars even for a max-width category id.
+	if got := budgetCellTopic(9223372036854775807, 2026, 12); len(got) > 32 {
+		t.Errorf("topic %q exceeds 32 chars (len %d)", got, len(got))
+	}
+}
