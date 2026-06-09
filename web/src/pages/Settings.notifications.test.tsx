@@ -166,11 +166,44 @@ describe('NotificationsSection — digest + quiet hours', () => {
     expect(prefsHook.update).toHaveBeenCalledWith({ quiet_allow_over_budget: false });
   });
 
-  test('editing quiet start time PUTs the value on blur', () => {
+  test('a lone quiet-start does not PUT a half-set window', () => {
+    // From the both-empty default, filling only the start is a transitional
+    // half-set state the backend rejects (400). The UI must not send it.
     render(<NotificationsSection />);
     const start = screen.getByLabelText('Quiet hours start');
     fireEvent.change(start, { target: { value: '22:30' } });
     fireEvent.blur(start);
-    expect(prefsHook.update).toHaveBeenCalledWith({ quiet_start: '22:30' });
+    expect(prefsHook.update).not.toHaveBeenCalled();
+  });
+
+  test('setting both bounds PUTs the combined quiet window', () => {
+    render(<NotificationsSection />);
+    const start = screen.getByLabelText('Quiet hours start');
+    const end = screen.getByLabelText('Quiet hours end');
+    fireEvent.change(start, { target: { value: '22:30' } });
+    fireEvent.blur(start);
+    fireEvent.change(end, { target: { value: '08:00' } });
+    fireEvent.blur(end);
+    expect(prefsHook.update).toHaveBeenCalledTimes(1);
+    expect(prefsHook.update).toHaveBeenCalledWith({
+      quiet_start: '22:30',
+      quiet_end: '08:00',
+    });
+  });
+
+  test('clearing both bounds PUTs an empty quiet window', () => {
+    prefsHook.settings = { ...SETTINGS, quiet_start: '22:00', quiet_end: '08:00' };
+    render(<NotificationsSection />);
+    const start = screen.getByLabelText('Quiet hours start');
+    const end = screen.getByLabelText('Quiet hours end');
+    fireEvent.change(start, { target: { value: '' } });
+    fireEvent.blur(start);
+    fireEvent.change(end, { target: { value: '' } });
+    fireEvent.blur(end);
+    expect(prefsHook.update).toHaveBeenCalledTimes(1);
+    expect(prefsHook.update).toHaveBeenCalledWith({
+      quiet_start: '',
+      quiet_end: '',
+    });
   });
 });

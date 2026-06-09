@@ -1958,6 +1958,9 @@ export function NotificationsSection() {
     update,
   } = useNotificationPrefs();
 
+  const quietStartRef = useRef<HTMLInputElement | null>(null);
+  const quietEndRef = useRef<HTMLInputElement | null>(null);
+
   // Per-type rows render in this fixed order. The `key` is the wire field
   // name shared with the backend fan-out type ids (see notifications.go).
   const TYPE_ROWS: { key: keyof NotificationSettings; label: string }[] = [
@@ -2007,12 +2010,27 @@ export function NotificationsSection() {
     }
   }
 
-  async function handleQuietField(
-    key: 'quiet_start' | 'quiet_end' | 'quiet_tz',
-    value: string,
-  ) {
+  async function handleQuietField(key: 'quiet_tz', value: string) {
     try {
       await update({ [key]: value });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  // Quiet start/end must move as a pair: the backend rejects a half-set window
+  // (exactly one bound empty) with a 400. Saving each bound independently makes
+  // the transitional half-set state (e.g. start filled, end still empty) hit the
+  // server. Read both live inputs on every blur and skip the PUT while half-set;
+  // the save lands once the second bound is filled or both are cleared.
+  async function handleQuietWindow() {
+    const quiet_start = quietStartRef.current?.value ?? '';
+    const quiet_end = quietEndRef.current?.value ?? '';
+    if ((quiet_start === '') !== (quiet_end === '')) return;
+    try {
+      await update({ quiet_start, quiet_end });
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : 'Failed to update preferences',
@@ -2216,9 +2234,10 @@ export function NotificationsSection() {
                 className="w-28"
                 disabled={!canEdit}
                 aria-label="Quiet hours start"
+                ref={quietStartRef}
                 defaultValue={settings.quiet_start}
                 key={`qs-${settings.quiet_start}`}
-                onBlur={(e) => void handleQuietField('quiet_start', e.currentTarget.value)}
+                onBlur={() => void handleQuietWindow()}
               />
             </div>
             <div className="flex max-w-md items-center justify-between gap-4">
@@ -2229,9 +2248,10 @@ export function NotificationsSection() {
                 className="w-28"
                 disabled={!canEdit}
                 aria-label="Quiet hours end"
+                ref={quietEndRef}
                 defaultValue={settings.quiet_end}
                 key={`qe-${settings.quiet_end}`}
-                onBlur={(e) => void handleQuietField('quiet_end', e.currentTarget.value)}
+                onBlur={() => void handleQuietWindow()}
               />
             </div>
             <div className="flex max-w-md items-center justify-between gap-4">
