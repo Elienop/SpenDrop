@@ -1454,6 +1454,48 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, bulkUpdateResponse{Updated: updated, Skipped: skipped})
 }
 
+// enumerateFilterCells returns the DISTINCT (category, calendar-month) cells
+// occupied by the live rows a bulk-filter operation matches. It runs the SAME
+// JOIN + liveClause the delete/update-by-filter handlers use to select rows,
+// so the enumerated cells are exactly the rows about to be mutated. The caller
+// passes the already-built liveClause (buildTransactionWhereClause +
+// non-admin user_id append + appendLiveTransactionsFilter) and its args so the
+// enumeration scope matches the mutation scope byte-for-byte.
+//
+// Soft-delete: liveClause carries "AND t.deleted_at IS NULL" via
+// appendLiveTransactionsFilter, so a tombstoned sentinel row never enters the
+// cell set (TestEnumerateFilterCells_HidesTombstoned). The filter family uses
+// raw dynamic SQL in the handler because its WHERE is built from runtime query
+// params and cannot be a static query — but the soft-delete predicate stays
+// centralized in appendLiveTransactionsFilter.
+func (h *Handler) enumerateFilterCells(ctx context.Context, liveClause string, args []any) ([]budgetCell, error) {
+	query := `SELECT DISTINCT t.category_id,
+		CAST(strftime('%Y', t.date) AS INTEGER) AS year,
+		CAST(strftime('%m', t.date) AS INTEGER) AS month
+		FROM transactions t
+		JOIN categories c ON t.category_id = c.id` + liveClause
+	rows, err := h.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate filter cells: %w", err)
+	}
+	defer rows.Close()
+	var cells []budgetCell
+	for rows.Next() {
+		var cell budgetCell
+		var year, month int64
+		if err := rows.Scan(&cell.CategoryID, &year, &month); err != nil {
+			return nil, fmt.Errorf("scan filter cell: %w", err)
+		}
+		cell.Year = int(year)
+		cell.Month = int(month)
+		cells = append(cells, cell)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("filter cell rows: %w", err)
+	}
+	return cells, nil
+}
+
 // handleDeleteTransactionsByFilter deletes every transaction matching the
 // same filter query parameters accepted by handleListTransactions. It exists
 // so the "Select all X across pages" UI action can delete tens of thousands

@@ -3630,3 +3630,41 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 		t.Errorf("type: got %q want txn_added", p.Type)
 	}
 }
+
+func TestEnumerateFilterCells_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", RoleMember)
+
+	liveCat := seedExpenseCategory(t, q, "Groceries")
+	ghostCat := seedExpenseCategory(t, q, "Rent")
+
+	// One live row in liveCat (50.00) and one tombstoned sentinel (999.99) in
+	// ghostCat — distinct cells, so a leak is unambiguous.
+	seedExpenseRow(t, q, user.ID, liveCat, "2026-05-10", 5000)
+	ghost := seedExpenseRow(t, q, user.ID, ghostCat, "2026-05-11", 99900)
+	if err := h.txnStore.Delete(context.Background(), user.ID, ghost.ID); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+
+	cells, err := h.enumerateFilterCells(context.Background(),
+		appendLiveTransactionsFilter(""), nil)
+	if err != nil {
+		t.Fatalf("enumerate: %v", err)
+	}
+	for _, c := range cells {
+		if c.CategoryID == ghostCat {
+			t.Fatalf("tombstoned 999 row leaked into cell set: %+v", c)
+		}
+	}
+	want := budgetCell{CategoryID: liveCat, Year: 2026, Month: 5}
+	found := false
+	for _, c := range cells {
+		if c == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("live cell %+v missing from %+v", want, cells)
+	}
+}
