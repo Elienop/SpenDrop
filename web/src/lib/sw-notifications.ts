@@ -7,10 +7,12 @@ export interface PushPayload {
   title?: string;
   body?: string;
   url?: string;
+  tag?: string;
 }
 
 export function buildNotificationOptions(
   payload: PushPayload,
+  count?: number,
 ): NotificationOptions {
   return {
     body: payload.body ?? '',
@@ -18,6 +20,8 @@ export function buildNotificationOptions(
     // Monochrome white-on-transparent SpenDrop "S" so Android renders the
     // brand mark as a status-bar silhouette (regenerate per the note in sw.ts).
     badge: '/badge-96x96.png',
-    data: { url: payload.url ?? '/' },
-  };
+    tag: payload.tag, // undefined => no collapse (today's behavior)
+    renotify: (payload.tag ?? '').startsWith('budget'), // true ONLY for over_budget tags
+    data: { url: payload.url ?? '/', count },
+  } as NotificationOptions;
 }
