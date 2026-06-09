@@ -140,7 +140,7 @@ func (h *Handler) RunDigestTick(ctx context.Context) {
 			Body:  fmt.Sprintf("%d %s since your last summary.", n, noun),
 			URL:   "/transactions",
 			Type:  "digest",
-			Tag:   "activity",
+			Tag:   "digest",
 		}
 		body, err := json.Marshal(payload)
 		if err != nil {
@@ -148,7 +148,7 @@ func (h *Handler) RunDigestTick(ctx context.Context) {
 			return
 		}
 		h.fanOutPush(ctx, "digest", body, 0, pushOpts{
-			Tag: "activity", Topic: "act", Urgency: push.UrgencyLow,
+			Tag: "digest", Topic: "digest", Urgency: push.UrgencyLow,
 		})
 	}
 	if err := h.queries.SetLastDigestAt(ctx, now); err != nil {

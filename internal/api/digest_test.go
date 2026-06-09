@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -63,6 +64,47 @@ func TestRunDigestTick_SendsOncePerDay(t *testing.T) {
 	h.RunDigestTick(ctx)
 	if rec.count() != 1 {
 		t.Fatalf("second tick same day: want still 1, got %d", rec.count())
+	}
+}
+
+// TestRunDigestTick_UsesOwnCollapseIdentity guards against the digest sharing
+// the "activity" collapse key: the service worker rolls up tag=="activity" into
+// "N new activities" and would swallow the digest. The digest must carry its own
+// tag/topic ("digest") so it renders standalone with its real body.
+func TestRunDigestTick_UsesOwnCollapseIdentity(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-dt")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET digest_mode='daily', quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	h.RunDigestTick(ctx)
+
+	if rec.count() != 1 {
+		t.Fatalf("want 1 digest push, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	if err := json.Unmarshal(rec.payloads[0], &p); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if p.Tag != "digest" {
+		t.Errorf("payload tag = %q, want \"digest\"", p.Tag)
+	}
+	if p.Tag == "activity" {
+		t.Error("payload tag must not be \"activity\" (SW would roll it up)")
+	}
+	if rec.opts[0].Topic != "digest" {
+		t.Errorf("send Topic = %q, want \"digest\"", rec.opts[0].Topic)
 	}
 }
 
