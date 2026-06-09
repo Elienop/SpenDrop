@@ -736,10 +736,15 @@ shaped before they reach your devices:
   Transactions).
 - **Over-budget summary:** when two or more categories cross their limit in one
   action, you get one "N categories over budget" notification, not one each.
-- **Quiet hours & daily digest (household-wide):** in **Settings →
-  Notifications** you can mute real-time activity pushes during a daily quiet
-  window (IANA time zone) and instead receive one daily rollup of what changed.
-  Over-budget alerts can optionally bypass quiet hours.
+- **Quiet hours (household-wide):** in **Settings → Notifications** you can mute
+  non-urgent real-time **activity** pushes during a daily quiet window (IANA time
+  zone). Over-budget alerts can optionally bypass it, so urgent state changes
+  still get through.
+- **Daily digest (household-wide):** independently, set **Digest mode** to
+  *Daily* to receive one rollup of what changed, sent once a day at the
+  configurable **Digest send time** (`digest_time`, default 08:00). The digest
+  runs on its own schedule **regardless of quiet hours** — the two features are
+  decoupled, so a household can use either one without the other.
 
 ### TrueNAS redeploy
 
