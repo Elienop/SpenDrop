@@ -431,9 +431,10 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	}
 	// Quiet-hours gate (household-wide). Inside the window, real-time ACTIVITY
 	// pushes are suppressed; over_budget bypasses unless the household disabled
-	// the bypass toggle. Digest sends use a non-activity type and are scheduled
-	// AFTER quiet_end, so they are never reached here while quiet. Reuses the
-	// settings row already read above (one GetNotificationSettings call).
+	// the bypass toggle. The digest uses a non-activity type, so it passes this
+	// gate untouched even when digest_time falls inside quiet hours — the digest
+	// owns its own schedule. Reuses the settings row already read above (one
+	// GetNotificationSettings call).
 	if inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) {
 		if tag, _, _ := pushOptionsFor(notifType); tag == "activity" {
 			return // activity suppressed during quiet hours
