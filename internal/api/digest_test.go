@@ -32,3 +32,27 @@ func TestCountTransactionsSince_HidesTombstoned(t *testing.T) {
 		t.Fatalf("digest count must exclude the tombstoned row: got %d want 1", n)
 	}
 }
+
+func TestInQuietHours(t *testing.T) {
+	cases := []struct {
+		name           string
+		now            time.Time
+		start, end, tz string
+		want           bool
+	}{
+		{"inside same-day window", time.Date(2026, 1, 1, 23, 30, 0, 0, time.UTC), "22:00", "23:59", "UTC", true},
+		{"outside same-day window", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), "22:00", "23:59", "UTC", false},
+		{"wrap before midnight", time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC), "22:00", "07:00", "UTC", true},
+		{"wrap after midnight", time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), "22:00", "07:00", "UTC", true},
+		{"wrap outside at noon", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC), "22:00", "07:00", "UTC", false},
+		{"empty start disables", time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC), "", "07:00", "UTC", false},
+		{"empty end disables", time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC), "22:00", "", "UTC", false},
+		{"tz shifts window (NY at 03:00 UTC = 22:00 EST)", time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC), "22:00", "07:00", "America/New_York", true},
+		{"bad tz falls back to UTC", time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC), "22:00", "07:00", "Not/AZone", true},
+	}
+	for _, tc := range cases {
+		if got := inQuietHours(tc.now, tc.start, tc.end, tc.tz); got != tc.want {
+			t.Errorf("%s: inQuietHours=%v want %v", tc.name, got, tc.want)
+		}
+	}
+}
