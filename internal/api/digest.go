@@ -76,9 +76,11 @@ func atHHMMOn(day time.Time, hhmm string, loc *time.Location) (time.Time, bool) 
 
 // shouldSendDigest reports whether the household should send its daily digest at
 // `now`. True iff digest is on AND `now` (in quiet_tz) has passed today's
-// quiet_end boundary AND the last digest predates that boundary — so it fires
-// exactly once per day, anchored to the moment quiet hours end. quiet_end is the
-// required anchor; without it there is no daily boundary and we never fire.
+// digest_time boundary AND the last digest predates that boundary — so it fires
+// exactly once per day, anchored to the user-chosen digest_time. The digest owns
+// its own schedule, decoupled from quiet hours; quiet_tz only provides the local
+// clock the digest_time is read in. digest_time carries a NOT NULL default so it
+// is normally present; a malformed value yields no anchor and we never fire.
 func shouldSendDigest(now time.Time, s database.NotificationSettings) bool {
 	if s.DigestMode == "off" {
 		return false
@@ -88,9 +90,9 @@ func shouldSendDigest(now time.Time, s database.NotificationSettings) bool {
 		loc = time.UTC
 	}
 	nowLocal := now.In(loc)
-	boundary, ok := atHHMMOn(nowLocal, s.QuietEnd, loc)
+	boundary, ok := atHHMMOn(nowLocal, s.DigestTime, loc)
 	if !ok {
-		return false // no quiet_end -> no daily anchor
+		return false // no/invalid digest_time -> no daily anchor
 	}
 	if nowLocal.Before(boundary) {
 		return false // today's boundary not reached yet

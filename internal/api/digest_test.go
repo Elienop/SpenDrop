@@ -52,7 +52,7 @@ func TestRunDigestTick_SendsOncePerDay(t *testing.T) {
 	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 2500)
 
 	if _, err := db.ExecContext(ctx,
-		`UPDATE notification_settings SET digest_mode='daily', quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='07:00', quiet_start='22:00', quiet_end='08:00', quiet_tz='UTC' WHERE id=1`); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
 
@@ -84,7 +84,7 @@ func TestRunDigestTick_UsesOwnCollapseIdentity(t *testing.T) {
 	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
 
 	if _, err := db.ExecContext(ctx,
-		`UPDATE notification_settings SET digest_mode='daily', quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='07:00', quiet_start='22:00', quiet_end='08:00', quiet_tz='UTC' WHERE id=1`); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
 
@@ -105,6 +105,34 @@ func TestRunDigestTick_UsesOwnCollapseIdentity(t *testing.T) {
 	}
 	if rec.opts[0].Topic != "digest" {
 		t.Errorf("send Topic = %q, want \"digest\"", rec.opts[0].Topic)
+	}
+}
+
+// TestRunDigestTick_NotSuppressedDuringQuietHours proves the user-scheduled
+// digest pierces quiet hours: the fanOutPush quiet gate suppresses only activity
+// types (and over_budget via its toggle), never the "digest" type. Here the clock
+// (23:30) is INSIDE the 22:00->07:00 quiet window yet past the 08:00 digest_time,
+// so the digest must still send.
+func TestRunDigestTick_NotSuppressedDuringQuietHours(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 23, 30, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-quiet")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='08:00', quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	h.RunDigestTick(ctx)
+	if rec.count() != 1 {
+		t.Fatalf("digest must pierce quiet hours: want 1 push, got %d", rec.count())
 	}
 }
 
@@ -133,13 +161,15 @@ func TestInQuietHours(t *testing.T) {
 }
 
 func TestShouldSendDigest(t *testing.T) {
-	base := database.NotificationSettings{DigestMode: "daily", QuietEnd: "07:00", QuietTz: "UTC"}
+	// The daily anchor is digest_time, decoupled from quiet hours: quiet_end is
+	// deliberately set to a different time to prove it has no effect on firing.
+	base := database.NotificationSettings{DigestMode: "daily", DigestTime: "07:00", QuietEnd: "23:00", QuietTz: "UTC"}
 
-	// Past today's 07:00 boundary, never digested -> fire.
+	// Past today's 07:00 digest_time, never digested -> fire.
 	if !shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), base) {
 		t.Error("want fire: past 07:00, never digested")
 	}
-	// Before today's boundary -> skip.
+	// Before today's digest_time -> skip.
 	if shouldSendDigest(time.Date(2026, 1, 2, 6, 30, 0, 0, time.UTC), base) {
 		t.Error("want skip: before 07:00")
 	}
@@ -160,5 +190,19 @@ func TestShouldSendDigest(t *testing.T) {
 	y.LastDigestAt = sql.NullTime{Time: time.Date(2026, 1, 1, 7, 5, 0, 0, time.UTC), Valid: true}
 	if !shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), y) {
 		t.Error("want fire: last digest was yesterday")
+	}
+}
+
+// TestShouldSendDigest_OutOfBoxDefaultFires proves the digest works with the
+// shipped defaults alone: digest_mode "daily" + the default digest_time "08:00"
+// and NO quiet hours configured (quiet_end empty). Past 08:00 it must fire —
+// the digest owns its own schedule and does not depend on a quiet window.
+func TestShouldSendDigest_OutOfBoxDefaultFires(t *testing.T) {
+	s := database.NotificationSettings{DigestMode: "daily", DigestTime: "08:00", QuietTz: "UTC"}
+	if !shouldSendDigest(time.Date(2026, 1, 2, 8, 30, 0, 0, time.UTC), s) {
+		t.Error("want fire: daily + default digest_time 08:00, no quiet hours")
+	}
+	if shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), s) {
+		t.Error("want skip: before the 08:00 digest_time")
 	}
 }

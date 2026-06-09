@@ -46,13 +46,16 @@ func TestHandleGetNotificationSettings_ReturnsDollarsNotCents(t *testing.T) {
 		t.Errorf("txn_added: got %v want false", resp["txn_added"])
 	}
 	// Digest + quiet-hours fields cross the wire as plain strings/bool (no money).
-	for _, k := range []string{"digest_mode", "quiet_start", "quiet_end", "quiet_tz"} {
+	for _, k := range []string{"digest_mode", "digest_time", "quiet_start", "quiet_end", "quiet_tz"} {
 		if _, ok := resp[k]; !ok {
 			t.Errorf("response missing %s", k)
 		}
 	}
 	if resp["digest_mode"] != "off" {
 		t.Errorf("digest_mode default: got %v want off", resp["digest_mode"])
+	}
+	if resp["digest_time"] != "08:00" {
+		t.Errorf("digest_time default: got %v want 08:00", resp["digest_time"])
 	}
 	if resp["quiet_tz"] != "UTC" {
 		t.Errorf("quiet_tz default: got %v want UTC", resp["quiet_tz"])
@@ -86,7 +89,7 @@ func TestHandleUpdateNotificationSettings_AdminPersistsDollarsAsCents(t *testing
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "alice", RoleAdmin)
 
-	body := strings.NewReader(`{"over_budget":false,"txn_added":true,"txn_deleted":true,"txn_edited":false,"large_txn":true,"large_txn_threshold_dollars":750.25,"digest_mode":"daily","quiet_start":"22:00","quiet_end":"07:00","quiet_tz":"America/New_York","quiet_allow_over_budget":false}`)
+	body := strings.NewReader(`{"over_budget":false,"txn_added":true,"txn_deleted":true,"txn_edited":false,"large_txn":true,"large_txn_threshold_dollars":750.25,"digest_mode":"daily","digest_time":"08:00","quiet_start":"22:00","quiet_end":"07:00","quiet_tz":"America/New_York","quiet_allow_over_budget":false}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -149,7 +152,7 @@ func TestHandleUpdateNotificationSettings_RejectsBadQuietStart(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "alice", RoleAdmin)
 
-	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","quiet_start":"25:99","quiet_end":"07:00","quiet_tz":"UTC"}`)
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","digest_time":"08:00","quiet_start":"25:99","quiet_end":"07:00","quiet_tz":"UTC"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -165,7 +168,7 @@ func TestHandleUpdateNotificationSettings_RejectsBadQuietTz(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "alice", RoleAdmin)
 
-	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","quiet_start":"22:00","quiet_end":"07:00","quiet_tz":"Mars/Phobos"}`)
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","digest_time":"08:00","quiet_start":"22:00","quiet_end":"07:00","quiet_tz":"Mars/Phobos"}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -183,7 +186,7 @@ func TestHandleUpdateNotificationSettings_AllowsEmptyQuietFields(t *testing.T) {
 	h := NewHandler(q, db)
 	admin := seedTestUser(t, q, "alice", RoleAdmin)
 
-	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"off","quiet_start":"","quiet_end":"","quiet_tz":""}`)
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"off","digest_time":"08:00","quiet_start":"","quiet_end":"","quiet_tz":""}`)
 	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
 	req = withUser(req, admin)
 	rec := httptest.NewRecorder()
@@ -191,6 +194,79 @@ func TestHandleUpdateNotificationSettings_AllowsEmptyQuietFields(t *testing.T) {
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("empty quiet fields: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// digest_time has a NOT NULL default so it is always non-empty; when provided it
+// must be a valid 24h HH:MM. A malformed value must be rejected (400) before the
+// write so the daily anchor never parses to "never fire".
+func TestHandleUpdateNotificationSettings_RejectsBadDigestTime(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","digest_time":"99:99","quiet_tz":"UTC"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad digest_time: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// A provided digest_time round-trips and reaches the response DTO in dollars-free
+// plain string form (no money), proving the field crosses the edge both ways.
+func TestHandleUpdateNotificationSettings_PersistsDigestTime(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	body := strings.NewReader(`{"over_budget":true,"txn_added":false,"txn_deleted":false,"txn_edited":false,"large_txn":false,"large_txn_threshold_dollars":500,"digest_mode":"daily","digest_time":"09:15","quiet_tz":"UTC"}`)
+	req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", body)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateNotificationSettings(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp["digest_time"] != "09:15" {
+		t.Errorf("digest_time: got %v want 09:15", resp["digest_time"])
+	}
+	saved, err := q.GetNotificationSettings(req.Context())
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if saved.DigestTime != "09:15" {
+		t.Errorf("digest_time not persisted: got %q want 09:15", saved.DigestTime)
+	}
+}
+
+// inQuietHours needs BOTH bounds to define a window, so the cross-field rule is
+// that quiet_start and quiet_end are both set or both empty. A half-set window
+// (one bound provided, the other empty) is rejected (400).
+func TestHandleUpdateNotificationSettings_RejectsHalfSetQuietBounds(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "alice", RoleAdmin)
+
+	for _, body := range []string{
+		`{"over_budget":true,"large_txn_threshold_dollars":500,"digest_mode":"off","digest_time":"08:00","quiet_start":"22:00","quiet_end":"","quiet_tz":"UTC"}`,
+		`{"over_budget":true,"large_txn_threshold_dollars":500,"digest_mode":"off","digest_time":"08:00","quiet_start":"","quiet_end":"07:00","quiet_tz":"UTC"}`,
+	} {
+		req := httptest.NewRequest(http.MethodPut, "/api/push/preferences", strings.NewReader(body))
+		req = withUser(req, admin)
+		rec := httptest.NewRecorder()
+		h.handleUpdateNotificationSettings(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("half-set quiet bounds: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+		}
 	}
 }
 

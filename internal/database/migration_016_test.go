@@ -17,18 +17,21 @@ func TestMigration016_DigestQuiet_FreshRunIsClean(t *testing.T) {
 	ctx := context.Background()
 
 	var (
-		digestMode, quietStart, quietEnd, quietTz string
-		quietAllowOverBudget                      bool
-		lastDigestAt                              sql.NullTime
+		digestMode, digestTime, quietStart, quietEnd, quietTz string
+		quietAllowOverBudget                                  bool
+		lastDigestAt                                          sql.NullTime
 	)
 	if err := db.QueryRowContext(ctx, `
-		SELECT digest_mode, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
+		SELECT digest_mode, digest_time, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 		FROM notification_settings WHERE id = 1`).
-		Scan(&digestMode, &quietStart, &quietEnd, &quietTz, &quietAllowOverBudget, &lastDigestAt); err != nil {
+		Scan(&digestMode, &digestTime, &quietStart, &quietEnd, &quietTz, &quietAllowOverBudget, &lastDigestAt); err != nil {
 		t.Fatalf("read seeded row: %v", err)
 	}
 	if digestMode != "off" {
 		t.Errorf("digest_mode default: got %q want off", digestMode)
+	}
+	if digestTime != "08:00" {
+		t.Errorf("digest_time default: got %q want 08:00", digestTime)
 	}
 	if quietStart != "" || quietEnd != "" {
 		t.Errorf("quiet window defaults: got start=%q end=%q want empty", quietStart, quietEnd)

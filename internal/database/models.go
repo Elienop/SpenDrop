@@ -88,6 +88,7 @@ type NotificationSettings struct {
 	LargeTxnThresholdCents int64        `json:"large_txn_threshold_cents"`
 	UpdatedAt              time.Time    `json:"updated_at"`
 	DigestMode             string       `json:"digest_mode"`
+	DigestTime             string       `json:"digest_time"`
 	QuietStart             string       `json:"quiet_start"`
 	QuietEnd               string       `json:"quiet_end"`
 	QuietTz                string       `json:"quiet_tz"`

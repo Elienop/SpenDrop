@@ -905,14 +905,14 @@ DELETE FROM budget_alert_state WHERE category_id = ? AND year = ? AND month = ?;
 
 -- name: GetNotificationSettings :one
 SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at,
-       digest_mode, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
+       digest_mode, digest_time, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 FROM notification_settings WHERE id = 1;
 
 -- name: UpdateNotificationSettings :exec
 UPDATE notification_settings
 SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
     large_txn_threshold_cents = ?,
-    digest_mode = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
+    digest_mode = ?, digest_time = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
     updated_at = datetime('now')
 WHERE id = 1;
 

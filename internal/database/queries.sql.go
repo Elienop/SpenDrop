@@ -2943,7 +2943,7 @@ func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAler
 
 const getNotificationSettings = `-- name: GetNotificationSettings :one
 SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at,
-       digest_mode, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
+       digest_mode, digest_time, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 FROM notification_settings WHERE id = 1
 `
 
@@ -2960,6 +2960,7 @@ func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSett
 		&i.LargeTxnThresholdCents,
 		&i.UpdatedAt,
 		&i.DigestMode,
+		&i.DigestTime,
 		&i.QuietStart,
 		&i.QuietEnd,
 		&i.QuietTz,
@@ -2973,7 +2974,7 @@ const updateNotificationSettings = `-- name: UpdateNotificationSettings :exec
 UPDATE notification_settings
 SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
     large_txn_threshold_cents = ?,
-    digest_mode = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
+    digest_mode = ?, digest_time = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
     updated_at = datetime('now')
 WHERE id = 1
 `
@@ -2986,6 +2987,7 @@ type UpdateNotificationSettingsParams struct {
 	LargeTxn               bool   `json:"large_txn"`
 	LargeTxnThresholdCents int64  `json:"large_txn_threshold_cents"`
 	DigestMode             string `json:"digest_mode"`
+	DigestTime             string `json:"digest_time"`
 	QuietStart             string `json:"quiet_start"`
 	QuietEnd               string `json:"quiet_end"`
 	QuietTz                string `json:"quiet_tz"`
@@ -3001,6 +3003,7 @@ func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNoti
 		arg.LargeTxn,
 		arg.LargeTxnThresholdCents,
 		arg.DigestMode,
+		arg.DigestTime,
 		arg.QuietStart,
 		arg.QuietEnd,
 		arg.QuietTz,
