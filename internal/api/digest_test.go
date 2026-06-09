@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/push"
 )
 
 // TestCountTransactionsSince_HidesTombstoned seeds one live and one tombstoned
@@ -34,6 +35,53 @@ func TestCountTransactionsSince_HidesTombstoned(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("digest count must exclude the tombstoned row: got %d want 1", n)
+	}
+}
+
+// cancelOnSendSender cancels the supplied context the moment it is asked to
+// Send, modelling the production regression where a stalled push gateway
+// exhausts the per-run digest budget DURING the serial fan-out — leaving the
+// outer context Done by the time the cursor write runs.
+type cancelOnSendSender struct{ cancel context.CancelFunc }
+
+func (s *cancelOnSendSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
+	s.cancel()
+	return false, nil
+}
+
+// TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext guards the real
+// regression: the daily cursor write must advance even when the fan-out has
+// already burned the per-run context budget. If the cursor write shares the
+// exhausted context, database/sql returns DeadlineExceeded BEFORE running the
+// UPDATE, last_digest_at never advances, and the digest re-fires every tick
+// until recovery. The fix routes SetLastDigestAt through a context independent
+// of the fan-out budget.
+func TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	ctx, cancel := context.WithCancel(context.Background())
+	h.pushTesterForBudgetAlerts = &cancelOnSendSender{cancel: cancel}
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-cancel")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='07:00', quiet_start='22:00', quiet_end='08:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	h.RunDigestTick(ctx)
+
+	var advanced bool
+	row := db.QueryRowContext(context.Background(),
+		`SELECT last_digest_at IS NOT NULL FROM notification_settings WHERE id=1`)
+	if err := row.Scan(&advanced); err != nil {
+		t.Fatalf("read last_digest_at: %v", err)
+	}
+	if !advanced {
+		t.Fatal("last_digest_at must advance even when the fan-out exhausts the context")
 	}
 }
 

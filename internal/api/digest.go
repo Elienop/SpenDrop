@@ -153,7 +153,14 @@ func (h *Handler) RunDigestTick(ctx context.Context) {
 			Tag: "digest", Topic: "digest", Urgency: push.UrgencyLow,
 		})
 	}
-	if err := h.queries.SetLastDigestAt(ctx, now); err != nil {
+	// Advance the cursor on a context INDEPENDENT of the fan-out budget. The
+	// caller bounds `ctx` to digestPerRunTimeout; a stalled push gateway can
+	// exhaust that budget during the serial fan-out above, which would leave
+	// `ctx` Done and make database/sql return DeadlineExceeded BEFORE running
+	// the UPDATE — last_digest_at would never advance and the digest would
+	// re-fire every tick until recovery. WithoutCancel keeps the deadline/cancel
+	// off this write while preserving any request-scoped values on the context.
+	if err := h.queries.SetLastDigestAt(context.WithoutCancel(ctx), now); err != nil {
 		log.Printf("digest: set last_digest_at: %v", err)
 	}
 }
