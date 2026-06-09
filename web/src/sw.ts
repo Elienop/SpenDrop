@@ -10,9 +10,7 @@ import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { urlBase64ToUint8Array } from './lib/vapid';
 import {
-  buildNotificationOptions,
-  applyActivityRollup,
-  applyAppBadge,
+  renderPushNotification,
   type PushPayload,
 } from './lib/sw-notifications';
 
@@ -74,28 +72,11 @@ self.addEventListener('push', (event) => {
     }
   }
   const title = data.title ?? 'SpenDrop';
+  // The rollup + showNotification orchestration (with its try/catch raw-payload
+  // fallback) lives in sw-notifications.ts so it is unit-testable without the SW
+  // shell; pass the worker globals it needs.
   event.waitUntil(
-    (async () => {
-      // Collapse a burst: read any existing same-tag activity notification,
-      // increment its count, and rewrite the body to "N new activities" so the
-      // single collapsing row reflects the total. A lone add (count 1) keeps
-      // its detailed body and is shown immediately.
-      let count: number | undefined;
-      if (data.tag === 'activity') {
-        const existing = await self.registration.getNotifications({
-          tag: 'activity',
-        });
-        const rolled = applyActivityRollup(existing, data);
-        data = rolled.payload;
-        count = rolled.count;
-        // Mirror the running activity count onto the PWA app-icon badge.
-        applyAppBadge(self.navigator, count);
-      }
-      await self.registration.showNotification(
-        title,
-        buildNotificationOptions(data, count),
-      );
-    })(),
+    renderPushNotification(self.registration, self.navigator, data, title),
   );
 });
 

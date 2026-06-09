@@ -110,3 +110,77 @@ describe('applyAppBadge', () => {
     expect(() => applyAppBadge({}, 4)).not.toThrow();
   });
 });
+
+import { renderPushNotification } from './sw-notifications';
+
+type ShowCall = { title: string; options: NotificationOptions };
+
+describe('renderPushNotification', () => {
+  it('rolls up an activity burst into "N new activities" and badges the running count', async () => {
+    const shown: ShowCall[] = [];
+    const badged: number[] = [];
+    await renderPushNotification(
+      {
+        getNotifications: async () => [{ data: { count: 2 } }],
+        showNotification: async (title, options) => {
+          shown.push({ title, options });
+        },
+      },
+      {
+        setAppBadge: async (c?: number) => {
+          badged.push(c ?? -1);
+        },
+      },
+      { tag: 'activity', body: 'detailed', url: '/transactions' },
+      'SpenDrop',
+    );
+    expect(shown).toHaveLength(1);
+    expect(shown[0].options.body).toBe('3 new activities');
+    expect((shown[0].options.data as { count?: number }).count).toBe(3);
+    expect(badged).toEqual([3]);
+  });
+
+  it('falls back to the RAW payload (never drops the notification) when getNotifications rejects', async () => {
+    const shown: ShowCall[] = [];
+    await expect(
+      renderPushNotification(
+        {
+          getNotifications: async () => {
+            throw new Error('boom');
+          },
+          showNotification: async (title, options) => {
+            shown.push({ title, options });
+          },
+        },
+        {},
+        { tag: 'activity', body: '$1.00 in Groceries — milk', url: '/transactions' },
+        'SpenDrop',
+      ),
+    ).resolves.toBeUndefined();
+    // The user still sees a notification — the raw, un-rolled single-event body.
+    expect(shown).toHaveLength(1);
+    expect(shown[0].options.body).toBe('$1.00 in Groceries — milk');
+  });
+
+  it('shows a non-activity (digest) push directly without consulting getNotifications', async () => {
+    const shown: ShowCall[] = [];
+    let getCalls = 0;
+    await renderPushNotification(
+      {
+        getNotifications: async () => {
+          getCalls++;
+          return [];
+        },
+        showNotification: async (title, options) => {
+          shown.push({ title, options });
+        },
+      },
+      {},
+      { tag: 'digest', body: 'Daily summary', url: '/' },
+      'SpenDrop',
+    );
+    expect(getCalls).toBe(0);
+    expect(shown).toHaveLength(1);
+    expect(shown[0].options.body).toBe('Daily summary');
+  });
+});

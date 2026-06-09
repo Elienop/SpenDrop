@@ -67,3 +67,57 @@ export function applyAppBadge(nav: BadgeNavigator, count: number): void {
     void nav.setAppBadge(count);
   }
 }
+
+// Minimal structural surface of ServiceWorkerRegistration that the push render
+// path touches. Declared locally (not imported) so this module pulls in no
+// webworker globals and stays importable by vitest; ServiceWorkerRegistration is
+// structurally assignable to it (Notification.data is `any`).
+interface NotificationRegistrationLike {
+  getNotifications(filter?: {
+    tag?: string;
+  }): Promise<ReadonlyArray<ActivityNotificationLike>>;
+  showNotification(title: string, options: NotificationOptions): Promise<void>;
+}
+
+// Renders one push. Dependencies are injected (the SW shell passes
+// self.registration / self.navigator) so the orchestration is unit-testable
+// without executing the worker. An `activity` push reads its prior same-tag
+// notification, rolls the running count forward, badges the app icon, and shows
+// the collapsed "N new activities" row; every other tag (e.g. `digest`,
+// `budget*`) is shown verbatim.
+//
+// #8: the rollup `count` is CLIENT-DERIVED from getNotifications and can
+// transiently UNDER-count when several activity pushes interleave between the
+// getNotifications read and the showNotification write below — an accepted
+// approximation (it lets the server drop a per-recipient counter). It
+// self-corrects on the next push, and the 'activity' Topic ("act") narrows the
+// race window to same-tag bursts. No behavior change.
+//
+// Robustness: any rejection in the rollup path (e.g. getNotifications) must NEVER
+// drop the user-visible notification. The catch falls back to showing the raw
+// payload so activity AND digest pushes still surface.
+export async function renderPushNotification(
+  registration: NotificationRegistrationLike,
+  nav: BadgeNavigator,
+  data: PushPayload,
+  title: string,
+): Promise<void> {
+  try {
+    let count: number | undefined;
+    let payload = data;
+    if (data.tag === 'activity') {
+      const existing = await registration.getNotifications({ tag: 'activity' });
+      const rolled = applyActivityRollup(existing, data);
+      payload = rolled.payload;
+      count = rolled.count;
+      // Mirror the running activity count onto the PWA app-icon badge.
+      applyAppBadge(nav, count);
+    }
+    await registration.showNotification(
+      title,
+      buildNotificationOptions(payload, count),
+    );
+  } catch {
+    await registration.showNotification(title, buildNotificationOptions(data));
+  }
+}
