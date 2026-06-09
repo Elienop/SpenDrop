@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
+
+	"github.com/elienop/spendrop/internal/database"
 )
 
 // TestCountTransactionsSince_HidesTombstoned seeds one live and one tombstoned
@@ -54,5 +57,36 @@ func TestInQuietHours(t *testing.T) {
 		if got := inQuietHours(tc.now, tc.start, tc.end, tc.tz); got != tc.want {
 			t.Errorf("%s: inQuietHours=%v want %v", tc.name, got, tc.want)
 		}
+	}
+}
+
+func TestShouldSendDigest(t *testing.T) {
+	base := database.NotificationSettings{DigestMode: "daily", QuietEnd: "07:00", QuietTz: "UTC"}
+
+	// Past today's 07:00 boundary, never digested -> fire.
+	if !shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), base) {
+		t.Error("want fire: past 07:00, never digested")
+	}
+	// Before today's boundary -> skip.
+	if shouldSendDigest(time.Date(2026, 1, 2, 6, 30, 0, 0, time.UTC), base) {
+		t.Error("want skip: before 07:00")
+	}
+	// digest_mode off -> skip.
+	off := base
+	off.DigestMode = "off"
+	if shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), off) {
+		t.Error("want skip: digest off")
+	}
+	// Already digested today at/after boundary -> skip (fires once per day).
+	sent := base
+	sent.LastDigestAt = sql.NullTime{Time: time.Date(2026, 1, 2, 7, 5, 0, 0, time.UTC), Valid: true}
+	if shouldSendDigest(time.Date(2026, 1, 2, 8, 0, 0, 0, time.UTC), sent) {
+		t.Error("want skip: already digested today")
+	}
+	// Last digest was yesterday -> fire again today.
+	y := base
+	y.LastDigestAt = sql.NullTime{Time: time.Date(2026, 1, 1, 7, 5, 0, 0, time.UTC), Valid: true}
+	if !shouldSendDigest(time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), y) {
+		t.Error("want fire: last digest was yesterday")
 	}
 }
