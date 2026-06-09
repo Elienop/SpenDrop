@@ -59,3 +59,38 @@ describe('activityCount', () => {
     expect(activityCount(undefined)).toBe(1);
   });
 });
+
+import { applyActivityRollup } from './sw-notifications';
+
+describe('applyActivityRollup', () => {
+  it('increments the prior same-tag count and rewrites the body to "N new activities"', () => {
+    // Simulates registration.getNotifications({ tag: 'activity' }) returning one
+    // existing notification that carried data.count = 3.
+    const existing = [{ data: { count: 3 } }];
+    const result = applyActivityRollup(existing, {
+      tag: 'activity',
+      url: '/transactions',
+      body: '$1.00 in Groceries — milk',
+    });
+    expect(result.count).toBe(4);
+    expect(result.payload.body).toBe('4 new activities');
+    expect(result.payload.tag).toBe('activity'); // other fields preserved
+    expect(result.payload.url).toBe('/transactions');
+  });
+
+  it('keeps the detailed single-event body for the first activity (count 1)', () => {
+    const result = applyActivityRollup([], {
+      tag: 'activity',
+      body: '$1.00 in Groceries — milk',
+    });
+    expect(result.count).toBe(1);
+    expect(result.payload.body).toBe('$1.00 in Groceries — milk');
+  });
+
+  it('rewrites to the plural rollup once a second activity arrives (count 2)', () => {
+    const existing = [{ data: { count: 1 } }];
+    const result = applyActivityRollup(existing, { tag: 'activity', body: 'detailed' });
+    expect(result.count).toBe(2);
+    expect(result.payload.body).toBe('2 new activities');
+  });
+});

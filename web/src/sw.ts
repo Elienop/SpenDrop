@@ -9,7 +9,11 @@ import { StaleWhileRevalidate } from 'workbox-strategies';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { urlBase64ToUint8Array } from './lib/vapid';
-import { buildNotificationOptions, type PushPayload } from './lib/sw-notifications';
+import {
+  buildNotificationOptions,
+  applyActivityRollup,
+  type PushPayload,
+} from './lib/sw-notifications';
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<unknown> };
 
@@ -70,7 +74,25 @@ self.addEventListener('push', (event) => {
   }
   const title = data.title ?? 'SpenDrop';
   event.waitUntil(
-    self.registration.showNotification(title, buildNotificationOptions(data)),
+    (async () => {
+      // Collapse a burst: read any existing same-tag activity notification,
+      // increment its count, and rewrite the body to "N new activities" so the
+      // single collapsing row reflects the total. A lone add (count 1) keeps
+      // its detailed body and is shown immediately.
+      let count: number | undefined;
+      if (data.tag === 'activity') {
+        const existing = await self.registration.getNotifications({
+          tag: 'activity',
+        });
+        const rolled = applyActivityRollup(existing, data);
+        data = rolled.payload;
+        count = rolled.count;
+      }
+      await self.registration.showNotification(
+        title,
+        buildNotificationOptions(data, count),
+      );
+    })(),
   );
 });
 

@@ -32,3 +32,23 @@ export function buildNotificationOptions(
 export function activityCount(existing: number | undefined): number {
   return (existing ?? 0) + 1;
 }
+
+// Structural shape of what registration.getNotifications() returns that we read.
+// Kept local + minimal so this module imports no webworker/DOM globals and stays
+// importable by vitest. Notification.data is `any`, so Notification[] is assignable.
+interface ActivityNotificationLike {
+  readonly data?: { readonly count?: number } | null;
+}
+
+// Given the existing same-tag notifications and an incoming activity payload,
+// return the running count and a payload whose body reads "N new activities"
+// for a burst (n > 1), or keeps the detailed single-event body for the first
+// add (n === 1). Pure — the SW shell supplies `existing` and shows the result.
+export function applyActivityRollup(
+  existing: ReadonlyArray<ActivityNotificationLike>,
+  payload: PushPayload,
+): { payload: PushPayload; count: number } {
+  const n = activityCount(existing[0]?.data?.count);
+  const body = n > 1 ? `${n} new activities` : payload.body;
+  return { payload: { ...payload, body }, count: n };
+}
