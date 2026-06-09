@@ -85,7 +85,8 @@ type pushAlertPayload struct {
 	Title        string  `json:"title"`
 	Body         string  `json:"body"`
 	URL          string  `json:"url"`
-	Type         string  `json:"type"` // "budget_over"
+	Type         string  `json:"type"`          // "budget_over"
+	Tag          string  `json:"tag,omitempty"` // SW collapse key, copied from pushOpts.Tag
 	CategoryID   int64   `json:"category_id"`
 	CategoryName string  `json:"category_name"`
 	Year         int     `json:"year"`
