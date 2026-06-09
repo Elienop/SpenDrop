@@ -3668,3 +3668,52 @@ func TestEnumerateFilterCells_HidesTombstoned(t *testing.T) {
 		t.Fatalf("live cell %+v missing from %+v", want, cells)
 	}
 }
+
+func TestHandleDeleteTransactionsByFilter_ClearsOverBudgetLatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	catID := seedExpenseCategory(t, q, "Groceries")
+
+	// Budget 100.00; two rows summing to 120.00 -> over.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000,
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, admin.ID, catID, "2026-05-10", 6000)
+	seedExpenseRow(t, q, admin.ID, catID, "2026-05-12", 6000)
+
+	// Pre-trip the latch as if a fresh cross already alerted.
+	res, err := q.SetBudgetAlertState(context.Background(), database.SetBudgetAlertStateParams{
+		CategoryID: catID, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("set latch: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("expected latch newly set, rows-affected=%d", n)
+	}
+
+	// Filter-delete every row in this category.
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/transactions/delete-by-filter?category_id=%d", catID), nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleDeleteTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Spend dropped to 0 < limit -> the post-commit re-eval must have cleared
+	// the latch, so a follow-up clear removes 0 rows.
+	cleared, err := q.ClearBudgetAlertState(context.Background(), database.ClearBudgetAlertStateParams{
+		CategoryID: catID, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n, _ := cleared.RowsAffected(); n != 0 {
+		t.Fatalf("latch should have been cleared by delete-by-filter re-eval; got %d rows still set", n)
+	}
+}

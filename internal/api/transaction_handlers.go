@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -1547,6 +1548,18 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	// SQL level for future maintainers reviewing this query.
 	liveClause := appendLiveTransactionsFilter(whereClause)
 
+	// FilterLatchFix: enumerate the (category, month) cells the about-to-be-
+	// tombstoned rows occupy BEFORE the soft-delete UPDATE — afterwards
+	// liveClause filters them out. Post-commit we re-evaluate each so a latch
+	// left set by a now-deleted over-budget row re-arms. Best-effort: an
+	// enumeration error must not block the delete, so we log and proceed with an
+	// empty cell set (mirrors the post-commit hook error contract).
+	affectedCells, err := h.enumerateFilterCells(r.Context(), liveClause, args)
+	if err != nil {
+		log.Printf("delete-by-filter: enumerate affected cells: %v", err)
+		affectedCells = nil
+	}
+
 	// Phase 2.1 turns the DELETE into a soft-delete UPDATE. The outer
 	// UPDATE sets deleted_at on every matching live row in one atomic step;
 	// the inner subquery joins categories (same shape as the list handler)
@@ -1613,16 +1626,20 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
 
-	// Budget-alert hook intentionally skipped here: the bulk UPDATE does not
-	// expose per-row (category, month), so there is no precise cell to
-	// evaluate. Re-import / wipe workflows re-trip alerts on the next
-	// single-row or batch-create. (Phase C, Task 17.)
+	// FilterLatchFix: the bulk soft-delete drops spend out of every (category,
+	// month) the deleted rows occupied, so a latch set by a now-deleted
+	// over-budget row must re-arm. affectedCells was enumerated BEFORE the
+	// UPDATE; evaluate them post-commit (best-effort — never blocks the
+	// response, mirrors verifyAffectedCheckpoints' contract).
+	if deleted > 0 && len(affectedCells) > 0 {
+		h.evaluateBudgetAlerts(r.Context(), affectedCells)
+	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): tombstoned
 	// rows leave the list/dashboard/reports and appear in trash. Budgets are
-	// omitted to match the budget-alert skip above (no precise cell enumerated).
+	// invalidated too now that affected cells are re-evaluated above.
 	if deleted > 0 {
-		h.publishInvalidate("transactions", "dashboard", "reports", "trash")
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets", "trash")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
