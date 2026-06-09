@@ -1997,6 +1997,39 @@ export function NotificationsSection() {
     }
   }
 
+  async function handleDigestMode(next: string) {
+    try {
+      await update({ digest_mode: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleQuietField(
+    key: 'quiet_start' | 'quiet_end' | 'quiet_tz',
+    value: string,
+  ) {
+    try {
+      await update({ [key]: value });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleQuietAllowOverBudget(next: boolean) {
+    try {
+      await update({ quiet_allow_over_budget: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
   async function handleToggle(next: boolean) {
     try {
       if (next) {
@@ -2151,6 +2184,83 @@ export function NotificationsSection() {
                   }
                 />
               </div>
+            </div>
+
+            <Separator />
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="digest-mode" className="flex flex-col gap-1">
+                <span>Daily digest</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  One summary push instead of per-event alerts.
+                </span>
+              </Label>
+              <Select
+                value={settings.digest_mode}
+                disabled={!canEdit}
+                onValueChange={(v) => void handleDigestMode(v)}
+              >
+                <SelectTrigger id="digest-mode" className="w-28" aria-label="Daily digest">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">Off</SelectItem>
+                  <SelectItem value="daily">Daily</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-start">Quiet hours start</Label>
+              <Input
+                id="quiet-start"
+                type="time"
+                className="w-28"
+                disabled={!canEdit}
+                aria-label="Quiet hours start"
+                defaultValue={settings.quiet_start}
+                key={`qs-${settings.quiet_start}`}
+                onBlur={(e) => void handleQuietField('quiet_start', e.currentTarget.value)}
+              />
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-end">Quiet hours end</Label>
+              <Input
+                id="quiet-end"
+                type="time"
+                className="w-28"
+                disabled={!canEdit}
+                aria-label="Quiet hours end"
+                defaultValue={settings.quiet_end}
+                key={`qe-${settings.quiet_end}`}
+                onBlur={(e) => void handleQuietField('quiet_end', e.currentTarget.value)}
+              />
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-tz">Time zone</Label>
+              <Input
+                id="quiet-tz"
+                type="text"
+                className="w-44"
+                disabled={!canEdit}
+                aria-label="Quiet hours time zone"
+                defaultValue={settings.quiet_tz}
+                key={`tz-${settings.quiet_tz}`}
+                onBlur={(e) => void handleQuietField('quiet_tz', e.currentTarget.value)}
+              />
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-allow-ob" className="flex flex-col gap-1">
+                <span>Allow over-budget during quiet hours</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Over-budget alerts still send while quiet hours are on.
+                </span>
+              </Label>
+              <Switch
+                id="quiet-allow-ob"
+                checked={settings.quiet_allow_over_budget}
+                disabled={!canEdit}
+                onCheckedChange={(v) => void handleQuietAllowOverBudget(v)}
+                aria-label="Allow over-budget during quiet hours"
+              />
             </div>
           </div>
         )}

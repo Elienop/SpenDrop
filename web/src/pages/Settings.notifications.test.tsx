@@ -150,3 +150,27 @@ describe('NotificationsSection — household notification types', () => {
     expect(update).not.toHaveBeenCalled();
   });
 });
+
+describe('NotificationsSection — digest + quiet hours', () => {
+  test('renders the digest mode control', () => {
+    render(<NotificationsSection />);
+    expect(screen.getByLabelText('Daily digest')).toBeInTheDocument();
+  });
+
+  test('toggling "Allow over-budget during quiet hours" PUTs the change', () => {
+    prefsHook.settings = { ...SETTINGS, quiet_allow_over_budget: true };
+    render(<NotificationsSection />);
+    fireEvent.click(
+      screen.getByRole('switch', { name: /allow over-budget during quiet hours/i }),
+    );
+    expect(prefsHook.update).toHaveBeenCalledWith({ quiet_allow_over_budget: false });
+  });
+
+  test('editing quiet start time PUTs the value on blur', () => {
+    render(<NotificationsSection />);
+    const start = screen.getByLabelText('Quiet hours start');
+    fireEvent.change(start, { target: { value: '22:30' } });
+    fireEvent.blur(start);
+    expect(prefsHook.update).toHaveBeenCalledWith({ quiet_start: '22:30' });
+  });
+});
