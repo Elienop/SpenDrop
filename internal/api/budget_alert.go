@@ -404,6 +404,19 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	if !notifTypeEnabled(settings, notifType) {
 		return // type disabled household-wide — no-op
 	}
+	// Quiet-hours gate (household-wide). Inside the window, real-time ACTIVITY
+	// pushes are suppressed; over_budget bypasses unless the household disabled
+	// the bypass toggle. Digest sends use a non-activity type and are scheduled
+	// AFTER quiet_end, so they are never reached here while quiet. Reuses the
+	// settings row already read above (one GetNotificationSettings call).
+	if inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) {
+		if tag, _, _ := pushOptionsFor(notifType); tag == "activity" {
+			return // activity suppressed during quiet hours
+		}
+		if notifType == "over_budget" && !settings.QuietAllowOverBudget {
+			return // over_budget suppressed by the bypass toggle
+		}
+	}
 	subs, err := h.queries.ListAllPushSubscriptions(ctx)
 	if err != nil {
 		log.Printf("push fan-out: list subscriptions: %v", err)

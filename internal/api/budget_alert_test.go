@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 	"github.com/elienop/spendrop/internal/push"
@@ -418,5 +419,64 @@ func TestEvaluateBudgetAlerts_MultiCrossSendsOneSummary(t *testing.T) {
 	}
 	if p.URL != "/budgets" {
 		t.Errorf("summary url: want /budgets, got %q", p.URL)
+	}
+}
+
+func TestFanOutPush_QuietHoursSuppressesActivity(t *testing.T) {
+	q, db := setupTestDB(t)
+	// 23:00 UTC is inside the 22:00->07:00 quiet window.
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/ep-q")
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE notification_settings SET txn_added=1, quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	tag, topic, urg := pushOptionsFor("txn_added")
+	h.fanOutPush(context.Background(), "txn_added",
+		[]byte(`{"title":"x","body":"y","url":"/transactions","type":"txn_added"}`), 0,
+		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	if rec.count() != 0 {
+		t.Fatalf("activity inside quiet hours must be suppressed: got %d sends", rec.count())
+	}
+}
+
+func TestFanOutPush_QuietHoursOverBudgetBypassToggle(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/ep-ob")
+	ctx := context.Background()
+
+	// over_budget defaults on; allow_over_budget=1 -> over_budget bypasses quiet hours.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC', quiet_allow_over_budget=1 WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	tag, topic, urg := pushOptionsFor("over_budget")
+	h.fanOutPush(ctx, "over_budget",
+		[]byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0,
+		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	if rec.count() != 1 {
+		t.Fatalf("over_budget with bypass on must deliver in quiet hours: got %d", rec.count())
+	}
+
+	// Flip the toggle off -> over_budget now suppressed during quiet hours.
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET quiet_allow_over_budget=0 WHERE id=1`); err != nil {
+		t.Fatalf("flip toggle: %v", err)
+	}
+	h.fanOutPush(ctx, "over_budget",
+		[]byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0,
+		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	if rec.count() != 1 {
+		t.Fatalf("over_budget with bypass off must be suppressed: got %d (want still 1)", rec.count())
 	}
 }
