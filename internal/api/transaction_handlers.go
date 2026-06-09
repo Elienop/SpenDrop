@@ -1497,6 +1497,41 @@ func (h *Handler) enumerateFilterCells(ctx context.Context, liveClause string, a
 	return cells, nil
 }
 
+// filterUpdateCells derives the union of OLD and NEW over-budget cells a
+// filter-update touches. oldCells are the (category, month) cells of the rows
+// matched BEFORE the update; the patch relocates every matched row uniformly,
+// so each row's NEW cell swaps category_id when patch.CategoryID is set and/or
+// swaps year/month when patch.Date is set. Returns OLD ∪ NEW deduped so a row
+// moved OUT of an over category clears its old latch and a row moved INTO a
+// category re-evaluates the new one. Date is parsed UTC to match cellForDate.
+func filterUpdateCells(oldCells []budgetCell, patch database.UpdatePatch) []budgetCell {
+	set := make(map[budgetCell]struct{}, len(oldCells)*2)
+	for _, c := range oldCells {
+		set[c] = struct{}{}
+	}
+	if patch.CategoryID != nil || patch.Date != nil {
+		for _, c := range oldCells {
+			nc := c
+			if patch.CategoryID != nil {
+				nc.CategoryID = *patch.CategoryID
+			}
+			if patch.Date != nil {
+				if d, err := time.Parse("2006-01-02", *patch.Date); err == nil {
+					du := d.UTC()
+					nc.Year = du.Year()
+					nc.Month = int(du.Month())
+				}
+			}
+			set[nc] = struct{}{}
+		}
+	}
+	cells := make([]budgetCell, 0, len(set))
+	for c := range set {
+		cells = append(cells, c)
+	}
+	return cells
+}
+
 // handleDeleteTransactionsByFilter deletes every transaction matching the
 // same filter query parameters accepted by handleListTransactions. It exists
 // so the "Select all X across pages" UI action can delete tens of thousands

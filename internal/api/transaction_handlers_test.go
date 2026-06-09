@@ -3717,3 +3717,49 @@ func TestHandleDeleteTransactionsByFilter_ClearsOverBudgetLatch(t *testing.T) {
 		t.Fatalf("latch should have been cleared by delete-by-filter re-eval; got %d rows still set", n)
 	}
 }
+
+func cellsContain(cells []budgetCell, want budgetCell) bool {
+	for _, c := range cells {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFilterUpdateCells_CategorySwapUnionsOldAndNew(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	newCat := int64(2)
+	got := filterUpdateCells(old, database.UpdatePatch{CategoryID: &newCat})
+
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 5}) ||
+		!cellsContain(got, budgetCell{CategoryID: 2, Year: 2026, Month: 5}) {
+		t.Fatalf("want old cat 1 AND new cat 2, got %+v", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 deduped cells, got %d: %+v", len(got), got)
+	}
+}
+
+func TestFilterUpdateCells_DateSwapMovesMonth(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	d := "2026-06-15"
+	got := filterUpdateCells(old, database.UpdatePatch{Date: &d})
+
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 6}) {
+		t.Fatalf("date swap must add the June cell; got %+v", got)
+	}
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 5}) {
+		t.Fatalf("old May cell must be retained; got %+v", got)
+	}
+}
+
+func TestFilterUpdateCells_DescriptionOnly_ReturnsOldOnly(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	desc := "renamed"
+	got := filterUpdateCells(old, database.UpdatePatch{Description: &desc})
+
+	if len(got) != 1 || got[0] != old[0] {
+		t.Fatalf("description-only patch must not add cells; got %+v", got)
+	}
+}
