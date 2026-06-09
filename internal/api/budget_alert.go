@@ -18,7 +18,7 @@ import (
 // is a test-only override consulted first so unit tests never need a real
 // VAPID keypair or HTTP round-trip.
 type pushDispatcher interface {
-	Send(ctx context.Context, sub push.Subscription, payload []byte) (prune bool, err error)
+	Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (prune bool, err error)
 }
 
 // budgetCell identifies one (category, calendar-month) over-budget evaluation
@@ -312,7 +312,7 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 			Endpoint: s.Endpoint,
 			P256dh:   s.P256dh,
 			Auth:     s.Auth,
-		}, payload)
+		}, payload, push.Options{})
 		switch {
 		case prune:
 			// 404/410: endpoint permanently gone — delete by endpoint so we

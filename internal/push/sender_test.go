@@ -51,7 +51,7 @@ func TestSend_PrunesOn410(t *testing.T) {
 
 	s := newTestSender(t, srv.Client())
 	sub := Subscription{Endpoint: srv.URL, P256dh: testP256dh, Auth: testAuth}
-	prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`))
+	prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{})
 	if err != nil {
 		t.Fatalf("Send returned error on 410: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestSend_PrunesOn404(t *testing.T) {
 
 	s := newTestSender(t, srv.Client())
 	sub := Subscription{Endpoint: srv.URL, P256dh: testP256dh, Auth: testAuth}
-	prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`))
+	prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{})
 	if err != nil {
 		t.Fatalf("Send returned error on 404: %v", err)
 	}
@@ -87,7 +87,7 @@ func TestSend_KeepsOn401And429(t *testing.T) {
 		}))
 		s := newTestSender(t, srv.Client())
 		sub := Subscription{Endpoint: srv.URL, P256dh: testP256dh, Auth: testAuth}
-		prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`))
+		prune, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{})
 		srv.Close()
 		if prune {
 			t.Errorf("code %d: prune = true, want false (transient/auth error must not delete the row)", code)
@@ -111,11 +111,57 @@ func TestSend_DrainsAndClosesBody(t *testing.T) {
 	})
 	s := newTestSender(t, &http.Client{Transport: rt})
 	sub := Subscription{Endpoint: "https://push.example/x", P256dh: testP256dh, Auth: testAuth}
-	if _, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`)); err != nil {
+	if _, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{}); err != nil {
 		t.Fatalf("Send: %v", err)
 	}
 	if !closed.Load() {
 		t.Error("response body was not closed")
+	}
+}
+
+func TestSend_SetsTopicAndUrgencyHeaders(t *testing.T) {
+	var gotTopic, gotUrgency string
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotTopic = r.Header.Get("Topic")
+		gotUrgency = r.Header.Get("Urgency")
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Body:       &observableBody{onClose: func() {}},
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+	s := newTestSender(t, &http.Client{Transport: rt})
+	sub := Subscription{Endpoint: "https://push.example/x", P256dh: testP256dh, Auth: testAuth}
+	if _, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{Topic: "act", Urgency: UrgencyLow}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotTopic != "act" {
+		t.Errorf("Topic header = %q, want act", gotTopic)
+	}
+	if gotUrgency != "low" {
+		t.Errorf("Urgency header = %q, want low", gotUrgency)
+	}
+}
+
+func TestSend_EmptyUrgencyDefaultsToNormal(t *testing.T) {
+	var gotUrgency string
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotUrgency = r.Header.Get("Urgency")
+		return &http.Response{
+			StatusCode: http.StatusCreated,
+			Body:       &observableBody{onClose: func() {}},
+			Header:     make(http.Header),
+			Request:    r,
+		}, nil
+	})
+	s := newTestSender(t, &http.Client{Transport: rt})
+	sub := Subscription{Endpoint: "https://push.example/x", P256dh: testP256dh, Auth: testAuth}
+	if _, err := s.Send(context.Background(), sub, []byte(`{"title":"t"}`), Options{}); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if gotUrgency != "normal" {
+		t.Errorf("empty Urgency must map to normal, got %q", gotUrgency)
 	}
 }
 

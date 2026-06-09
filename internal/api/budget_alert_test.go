@@ -19,16 +19,18 @@ import (
 type recordingSender struct {
 	mu       sync.Mutex
 	payloads [][]byte
-	prune    bool // when true, every Send reports prune
+	opts     []push.Options // transport opts (Topic/Urgency) per Send — asserted by T05/T24
+	prune    bool           // when true, every Send reports prune
 	err      error
 }
 
-func (s *recordingSender) Send(ctx context.Context, sub push.Subscription, payload []byte) (bool, error) {
+func (s *recordingSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	cp := make([]byte, len(payload))
 	copy(cp, payload)
 	s.payloads = append(s.payloads, cp)
+	s.opts = append(s.opts, opts)
 	return s.prune, s.err
 }
 

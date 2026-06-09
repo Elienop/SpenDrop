@@ -17,7 +17,7 @@ type endpointRecorder struct {
 	seen []string
 }
 
-func (s *endpointRecorder) Send(ctx context.Context, sub push.Subscription, payload []byte) (bool, error) {
+func (s *endpointRecorder) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seen = append(s.seen, sub.Endpoint)
@@ -41,7 +41,7 @@ type pruningSender struct {
 	seen    []push.Subscription
 }
 
-func (s *pruningSender) Send(ctx context.Context, sub push.Subscription, payload []byte) (bool, error) {
+func (s *pruningSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.seen = append(s.seen, sub)

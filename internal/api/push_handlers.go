@@ -210,7 +210,7 @@ func (h *Handler) handlePushTest(w http.ResponseWriter, r *http.Request) {
 			Endpoint: sub.Endpoint,
 			P256dh:   sub.P256dh,
 			Auth:     sub.Auth,
-		}, payload)
+		}, payload, push.Options{})
 		if prune {
 			// Best-effort: a failed prune is not fatal to the request.
 			_ = h.queries.DeletePushSubscriptionByEndpoint(r.Context(), sub.Endpoint)
