@@ -536,6 +536,10 @@ export interface NotificationSettings {
   large_txn: boolean;
   large_txn_threshold_dollars: number;
   digest_mode: string;
+  /** Daily-digest send time as a 24h `HH:MM` string (backend NOT NULL default
+   *  `"08:00"`). Only meaningful when `digest_mode === "daily"`; the backend
+   *  always emits a valid value, never empty. */
+  digest_time: string;
   quiet_start: string;
   quiet_end: string;
   quiet_tz: string;

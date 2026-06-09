@@ -27,6 +27,7 @@ const SETTINGS: NotificationSettings = {
   large_txn: false,
   large_txn_threshold_dollars: 500,
   digest_mode: 'off',
+  digest_time: '08:00',
   quiet_start: '',
   quiet_end: '',
   quiet_tz: 'UTC',
@@ -155,6 +156,53 @@ describe('NotificationsSection — digest + quiet hours', () => {
   test('renders the digest mode control', () => {
     render(<NotificationsSection />);
     expect(screen.getByLabelText('Daily digest')).toBeInTheDocument();
+  });
+
+  test('hides the digest send time when digest mode is off', () => {
+    prefsHook.settings = { ...SETTINGS, digest_mode: 'off' };
+    render(<NotificationsSection />);
+    expect(screen.queryByLabelText('Digest send time')).not.toBeInTheDocument();
+  });
+
+  test('shows the digest send time when daily and PUTs a changed time', () => {
+    prefsHook.settings = {
+      ...SETTINGS,
+      digest_mode: 'daily',
+      digest_time: '08:00',
+    };
+    render(<NotificationsSection />);
+    const input = screen.getByLabelText('Digest send time');
+    fireEvent.change(input, { target: { value: '09:30' } });
+    fireEvent.blur(input);
+    expect(prefsHook.update).toHaveBeenCalledWith({ digest_time: '09:30' });
+  });
+
+  test('does not PUT a cleared (empty) digest send time', () => {
+    prefsHook.settings = {
+      ...SETTINGS,
+      digest_mode: 'daily',
+      digest_time: '08:00',
+    };
+    render(<NotificationsSection />);
+    const input = screen.getByLabelText('Digest send time');
+    fireEvent.change(input, { target: { value: '' } });
+    fireEvent.blur(input);
+    expect(prefsHook.update).not.toHaveBeenCalled();
+  });
+
+  test('explains that quiet hours need both bounds to take effect', () => {
+    render(<NotificationsSection />);
+    expect(screen.getByText(/a single bound is ignored/i)).toBeInTheDocument();
+  });
+
+  test('warns while exactly one quiet bound is set', () => {
+    render(<NotificationsSection />);
+    expect(
+      screen.queryByText(/fill in the other field/i),
+    ).not.toBeInTheDocument();
+    const start = screen.getByLabelText('Quiet hours start');
+    fireEvent.change(start, { target: { value: '22:30' } });
+    expect(screen.getByText(/fill in the other field/i)).toBeInTheDocument();
   });
 
   test('toggling "Allow over-budget during quiet hours" PUTs the change', () => {

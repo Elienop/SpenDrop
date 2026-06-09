@@ -1960,6 +1960,17 @@ export function NotificationsSection() {
 
   const quietStartRef = useRef<HTMLInputElement | null>(null);
   const quietEndRef = useRef<HTMLInputElement | null>(null);
+  // True while exactly one quiet bound is filled. The backend rejects a
+  // half-set window (400), and handleQuietWindow skips the PUT in that state,
+  // so without a hint the user sees their entry silently fail to save. Driven
+  // off the live inputs (uncontrolled) via recomputeQuietHalfSet.
+  const [quietHalfSet, setQuietHalfSet] = useState(false);
+
+  function recomputeQuietHalfSet() {
+    const start = quietStartRef.current?.value ?? '';
+    const end = quietEndRef.current?.value ?? '';
+    setQuietHalfSet((start === '') !== (end === ''));
+  }
 
   // Per-type rows render in this fixed order. The `key` is the wire field
   // name shared with the backend fan-out type ids (see notifications.go).
@@ -2003,6 +2014,21 @@ export function NotificationsSection() {
   async function handleDigestMode(next: string) {
     try {
       await update({ digest_mode: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleDigestTime(value: string) {
+    // A native time input can be cleared to '' but digest_time has a NOT NULL
+    // default and the backend requires a valid HH:MM (an empty/invalid value
+    // makes the daily anchor unparseable → 400). Treat blank as a no-op so the
+    // visible value reverts to the server echo on the next render.
+    if (value.trim() === '') return;
+    try {
+      await update({ digest_time: value });
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : 'Failed to update preferences',
@@ -2226,6 +2252,26 @@ export function NotificationsSection() {
                 </SelectContent>
               </Select>
             </div>
+            {settings.digest_mode === 'daily' && (
+              <div className="flex max-w-md items-center justify-between gap-4">
+                <Label htmlFor="digest-time" className="flex flex-col gap-1">
+                  <span>Digest send time</span>
+                  <span className="text-xs font-normal text-muted-foreground">
+                    When the daily summary push goes out.
+                  </span>
+                </Label>
+                <Input
+                  id="digest-time"
+                  type="time"
+                  className="w-28"
+                  disabled={!canEdit}
+                  aria-label="Digest send time"
+                  defaultValue={settings.digest_time}
+                  key={`dt-${settings.digest_time}`}
+                  onBlur={(e) => void handleDigestTime(e.currentTarget.value)}
+                />
+              </div>
+            )}
             <div className="flex max-w-md items-center justify-between gap-4">
               <Label htmlFor="quiet-start">Quiet hours start</Label>
               <Input
@@ -2237,6 +2283,7 @@ export function NotificationsSection() {
                 ref={quietStartRef}
                 defaultValue={settings.quiet_start}
                 key={`qs-${settings.quiet_start}`}
+                onChange={recomputeQuietHalfSet}
                 onBlur={() => void handleQuietWindow()}
               />
             </div>
@@ -2251,9 +2298,23 @@ export function NotificationsSection() {
                 ref={quietEndRef}
                 defaultValue={settings.quiet_end}
                 key={`qe-${settings.quiet_end}`}
+                onChange={recomputeQuietHalfSet}
                 onBlur={() => void handleQuietWindow()}
               />
             </div>
+            <p className="max-w-md text-xs text-muted-foreground">
+              Set both a start and end to silence non-urgent pushes during those
+              hours. A single bound is ignored.
+            </p>
+            {quietHalfSet && (
+              <p
+                role="alert"
+                className="max-w-md text-xs text-destructive"
+              >
+                Quiet hours need both a start and an end — fill in the other
+                field to save.
+              </p>
+            )}
             <div className="flex max-w-md items-center justify-between gap-4">
               <Label htmlFor="quiet-tz">Time zone</Label>
               <Input
