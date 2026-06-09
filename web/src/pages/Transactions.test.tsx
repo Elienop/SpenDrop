@@ -59,6 +59,7 @@ const defaultTransaction = {
 };
 
 const mockUseTransactions = vi.fn();
+const mockGetReadyRegistration = vi.fn();
 
 vi.mock('../api/client', () => ({
   api: {
@@ -67,6 +68,10 @@ vi.mock('../api/client', () => ({
     put: vi.fn().mockResolvedValue({}),
     del: vi.fn().mockResolvedValue({}),
   },
+}));
+
+vi.mock('@/lib/push-sw', () => ({
+  getReadyRegistration: () => mockGetReadyRegistration(),
 }));
 
 vi.mock('../hooks/useTransactions', () => ({
@@ -133,6 +138,9 @@ describe('Transactions page', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseTransactions.mockReturnValue(defaultHookReturn());
+    // Default: no service worker registration, so the mount effect's
+    // notification-cleanup short-circuits to a no-op in every other test.
+    mockGetReadyRegistration.mockResolvedValue(null);
   });
 
   describe('toolbar', () => {
@@ -992,6 +1000,32 @@ describe('Transactions page', () => {
 
     it('does not throw when the Badging API is unavailable', () => {
       // navigator.clearAppBadge intentionally absent (afterEach deletes it).
+      expect(() => render(<Transactions />)).not.toThrow();
+    });
+  });
+
+  describe('activity notification reset', () => {
+    it('closes the showing activity notification on mount so the rollup baseline resets', async () => {
+      const close = vi.fn();
+      const getNotifications = vi.fn().mockResolvedValue([{ close }, { close }]);
+      mockGetReadyRegistration.mockResolvedValue({ getNotifications });
+
+      render(<Transactions />);
+
+      await waitFor(() =>
+        expect(getNotifications).toHaveBeenCalledWith({ tag: 'activity' }),
+      );
+      await waitFor(() => expect(close).toHaveBeenCalledTimes(2));
+    });
+
+    it('does not throw when no service worker registration is available', () => {
+      mockGetReadyRegistration.mockResolvedValue(null);
+      expect(() => render(<Transactions />)).not.toThrow();
+    });
+
+    it('skips cleanup when getNotifications is unsupported', () => {
+      // Registration present but without the Notifications API surface.
+      mockGetReadyRegistration.mockResolvedValue({});
       expect(() => render(<Transactions />)).not.toThrow();
     });
   });

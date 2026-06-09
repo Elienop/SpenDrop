@@ -68,6 +68,7 @@ import {
 import { cn } from '@/lib/utils';
 import { FORMAT_DATE_SHORT } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
+import { getReadyRegistration } from '@/lib/push-sw';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { TRANSACTION_PAGE_SIZES } from '@/lib/constants';
 
@@ -597,8 +598,23 @@ export function Transactions() {
   // activity push was counting — clear the PWA app-icon badge. Feature-detected:
   // navigator.clearAppBadge is absent on browsers without the Badging API, so the
   // optional call short-circuits there.
+  //
+  // Also close the showing tag:"activity" notification. Its data.count is the
+  // SOLE baseline the SW rollup reads (applyActivityRollup → activityCount), so
+  // leaving it open makes the next activity push over-count ("4 new" instead of
+  // "1"). getReadyRegistration() is bounded (it never awaits a never-resolving
+  // serviceWorker.ready), getNotifications is feature-detected, and every failure
+  // is swallowed — this is best-effort cleanup, never a blocking path.
   useEffect(() => {
     void navigator.clearAppBadge?.();
+    void getReadyRegistration()
+      .then((reg) => {
+        if (!reg || typeof reg.getNotifications !== 'function') return;
+        return reg
+          .getNotifications({ tag: 'activity' })
+          .then((ns) => ns.forEach((n) => n.close()));
+      })
+      .catch(() => {});
   }, []);
 
   const [categories, setCategories] = useState<Category[]>([]);
