@@ -185,7 +185,11 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			log.Printf("budget alert: marshal payload cat=%d: %v", cell.CategoryID, err)
 			continue
 		}
-		h.fanOutPush(ctx, "over_budget", body, 0) // state alert: notify everyone, incl. actor
+		// state alert: notify everyone, incl. actor. Base over_budget opts only;
+		// real per-cell tag/topic is wired in the OverBudgetSummary area.
+		obTag, obTopic, obUrgency := pushOptionsFor("over_budget")
+		h.fanOutPush(ctx, "over_budget", body, 0,
+			pushOpts{Tag: obTag, Topic: obTopic, Urgency: obUrgency})
 	}
 }
 
@@ -324,7 +328,7 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 // (real user ids are positive); over_budget passes 0 because a state alert must
 // reach everyone including the actor. Skipped subscriptions are not counted as
 // sent/pruned/failed.
-func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64) {
+func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64, opts pushOpts) {
 	d := h.dispatcher()
 	if d == nil {
 		return // push disabled — no-op
@@ -356,7 +360,7 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 			Endpoint: s.Endpoint,
 			P256dh:   s.P256dh,
 			Auth:     s.Auth,
-		}, payload, push.Options{})
+		}, payload, push.Options{Topic: opts.Topic, Urgency: opts.Urgency})
 		switch {
 		case prune:
 			// 404/410: endpoint permanently gone — delete by endpoint so we

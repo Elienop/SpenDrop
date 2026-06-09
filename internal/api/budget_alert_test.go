@@ -62,6 +62,36 @@ func TestPushOptionsFor(t *testing.T) {
 	}
 }
 
+func TestEmit_ActivityCarriesTagTopicUrgency(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	seedPushSub(t, q, user.ID, "https://push.example/act")
+	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
+
+	h.emit(context.Background(), "txn_added", "Transaction added", "$1.00 in X — y", "/transactions", 0)
+
+	if rec.count() != 1 {
+		t.Fatalf("want 1 send, got %d", rec.count())
+	}
+	var p pushAlertPayload
+	if err := json.Unmarshal(rec.payloads[0], &p); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if p.Tag != "activity" {
+		t.Errorf("payload tag: got %q want activity", p.Tag)
+	}
+	if rec.opts[0].Topic != "act" {
+		t.Errorf("topic: got %q want act", rec.opts[0].Topic)
+	}
+	if rec.opts[0].Urgency != push.UrgencyLow {
+		t.Errorf("urgency: got %q want low", rec.opts[0].Urgency)
+	}
+}
+
 // seedPushSub inserts one subscription row for userID via the same query the
 // production code uses, so the fan-out reads it back through ListAllPushSubscriptions.
 func seedPushSub(t *testing.T, q *database.Queries, userID int64, endpoint string) {
@@ -87,7 +117,7 @@ func TestFanOutPush_NoOpWhenTypeDisabled(t *testing.T) {
 	seedPushSub(t, q, user.ID, "https://push.example/ep-disabled")
 
 	// txn_added defaults OFF (migration 015) — fan-out must not send.
-	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`), 0)
+	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`), 0, pushOpts{})
 	if rec.count() != 0 {
 		t.Fatalf("disabled type: want 0 sends, got %d", rec.count())
 	}
@@ -103,7 +133,7 @@ func TestFanOutPush_SendsWhenTypeEnabled(t *testing.T) {
 	seedPushSub(t, q, user.ID, "https://push.example/ep-enabled")
 
 	// over_budget defaults ON — fan-out must send to the one subscription.
-	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0)
+	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0, pushOpts{})
 	if rec.count() != 1 {
 		t.Fatalf("enabled type: want 1 send, got %d", rec.count())
 	}
