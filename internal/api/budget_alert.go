@@ -21,6 +21,31 @@ type pushDispatcher interface {
 	Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (prune bool, err error)
 }
 
+// pushOpts bundles the per-send transport + SW-collapse knobs threaded from the
+// emit site through fanOutPush. Tag is copied into the payload by the caller
+// BEFORE marshal; Topic/Urgency are forwarded to push.Options. fanOutPush itself
+// reads only Topic/Urgency — Tag is documentation of what the caller baked in.
+type pushOpts struct {
+	Tag     string
+	Topic   string
+	Urgency push.Urgency
+}
+
+// pushOptionsFor maps a notification type to its base SW collapse tag, Web Push
+// Topic, and delivery Urgency. PURE — no receiver, no I/O — so it is unit-tested
+// directly. over_budget returns the BASE ("budget"/"ob"); per-cell sends override
+// via budgetCellTag/budgetCellTopic or budgetSummaryTag/budgetSummaryTopic.
+func pushOptionsFor(notifType string) (tag, topic string, urgency push.Urgency) {
+	switch notifType {
+	case "over_budget":
+		return "budget", "ob", push.UrgencyNormal
+	case "txn_added", "txn_edited", "txn_deleted", "large_txn":
+		return "activity", "act", push.UrgencyLow
+	default:
+		return "", "", push.UrgencyLow // fail-safe low
+	}
+}
+
 // budgetCell identifies one (category, calendar-month) over-budget evaluation
 // unit. Year/Month are derived from the AFFECTED transaction's own date parsed
 // UTC (Task 17), never from the wall clock, so a back-dated edit re-evaluates

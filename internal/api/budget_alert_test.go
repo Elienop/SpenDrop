@@ -40,6 +40,28 @@ func (s *recordingSender) count() int {
 	return len(s.payloads)
 }
 
+func TestPushOptionsFor(t *testing.T) {
+	for _, tc := range []struct {
+		notifType   string
+		wantTag     string
+		wantTopic   string
+		wantUrgency push.Urgency
+	}{
+		{"over_budget", "budget", "ob", push.UrgencyNormal},
+		{"txn_added", "activity", "act", push.UrgencyLow},
+		{"txn_edited", "activity", "act", push.UrgencyLow},
+		{"txn_deleted", "activity", "act", push.UrgencyLow},
+		{"large_txn", "activity", "act", push.UrgencyLow},
+		{"mystery", "", "", push.UrgencyLow},
+	} {
+		tag, topic, urgency := pushOptionsFor(tc.notifType)
+		if tag != tc.wantTag || topic != tc.wantTopic || urgency != tc.wantUrgency {
+			t.Errorf("pushOptionsFor(%q) = (%q,%q,%q), want (%q,%q,%q)",
+				tc.notifType, tag, topic, urgency, tc.wantTag, tc.wantTopic, tc.wantUrgency)
+		}
+	}
+}
+
 // seedPushSub inserts one subscription row for userID via the same query the
 // production code uses, so the fan-out reads it back through ListAllPushSubscriptions.
 func seedPushSub(t *testing.T, q *database.Queries, userID int64, endpoint string) {
