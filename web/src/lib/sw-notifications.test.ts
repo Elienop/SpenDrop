@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { buildNotificationOptions } from './sw-notifications';
+import { activityCount, buildNotificationOptions } from './sw-notifications';
 
 describe('buildNotificationOptions', () => {
   it('preserves the current notification shape (body, icon, badge, data.url)', () => {
@@ -46,5 +46,16 @@ describe('buildNotificationOptions tag + renotify', () => {
 
   it('leaves tag undefined (no collapse) when not provided', () => {
     expect(buildNotificationOptions({ body: 'x' }).tag).toBeUndefined();
+  });
+});
+
+describe('activityCount', () => {
+  it('increments the existing rolled-up count by one', () => {
+    expect(activityCount(3)).toBe(4);
+    expect(activityCount(2)).toBe(3);
+  });
+
+  it('starts at 1 when there is no existing activity notification', () => {
+    expect(activityCount(undefined)).toBe(1);
   });
 });

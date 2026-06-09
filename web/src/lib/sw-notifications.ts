@@ -25,3 +25,10 @@ export function buildNotificationOptions(
     data: { url: payload.url ?? '/', count },
   } as NotificationOptions;
 }
+
+// Roll-up arithmetic for collapsing activity pushes. `existing` is the count
+// carried on the prior same-tag notification (undefined when none yet); each new
+// activity push increments it by one.
+export function activityCount(existing: number | undefined): number {
+  return (existing ?? 0) + 1;
+}
