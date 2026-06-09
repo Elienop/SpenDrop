@@ -94,3 +94,19 @@ describe('applyActivityRollup', () => {
     expect(result.payload.body).toBe('2 new activities');
   });
 });
+
+import { vi } from 'vitest';
+import { applyAppBadge } from './sw-notifications';
+
+describe('applyAppBadge', () => {
+  it('calls setAppBadge with the count when the Badging API is available', () => {
+    const setAppBadge = vi.fn(() => Promise.resolve());
+    applyAppBadge({ setAppBadge }, 4);
+    expect(setAppBadge).toHaveBeenCalledWith(4);
+  });
+
+  it('is a no-op (no throw) when the Badging API is unavailable', () => {
+    // Browsers without the Badging API (e.g. desktop Firefox) lack setAppBadge.
+    expect(() => applyAppBadge({}, 4)).not.toThrow();
+  });
+});

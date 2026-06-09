@@ -52,3 +52,18 @@ export function applyActivityRollup(
   const body = n > 1 ? `${n} new activities` : payload.body;
   return { payload: { ...payload, body }, count: n };
 }
+
+// Minimal structural type for the Badging API surface we use. Optional, so a
+// WorkerNavigator without setAppBadge (no Badging API) is still assignable and
+// the call simply no-ops.
+interface BadgeNavigator {
+  setAppBadge?: (contents?: number) => Promise<void>;
+}
+
+// Feature-detected app-icon badge set. Pure over an injected navigator-like so
+// it is unit-testable without the worker global.
+export function applyAppBadge(nav: BadgeNavigator, count: number): void {
+  if (typeof nav.setAppBadge === 'function') {
+    void nav.setAppBadge(count);
+  }
+}

@@ -12,6 +12,7 @@ import { urlBase64ToUint8Array } from './lib/vapid';
 import {
   buildNotificationOptions,
   applyActivityRollup,
+  applyAppBadge,
   type PushPayload,
 } from './lib/sw-notifications';
 
@@ -87,6 +88,8 @@ self.addEventListener('push', (event) => {
         const rolled = applyActivityRollup(existing, data);
         data = rolled.payload;
         count = rolled.count;
+        // Mirror the running activity count onto the PWA app-icon badge.
+        applyAppBadge(self.navigator, count);
       }
       await self.registration.showNotification(
         title,
