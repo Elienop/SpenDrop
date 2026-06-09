@@ -152,6 +152,40 @@ describe('NotificationsSection — household notification types', () => {
   });
 });
 
+describe('NotificationsSection — household controls without local push', () => {
+  test('household policy block renders even when web push is unsupported', () => {
+    mockHook.supported = false;
+    render(<NotificationsSection />);
+
+    // The device-agnostic household controls must remain reachable.
+    expect(
+      screen.getByRole('switch', { name: /over budget/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByLabelText(/large transaction threshold/i),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText('Daily digest')).toBeInTheDocument();
+    expect(screen.getByLabelText('Quiet hours start')).toBeInTheDocument();
+  });
+
+  test('per-device push toggle + Send test are hidden when unsupported', () => {
+    mockHook.supported = false;
+    render(<NotificationsSection />);
+
+    expect(
+      screen.getByText(/does not support web push/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('switch', {
+        name: /push notifications on this device/i,
+      }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /send test/i }),
+    ).not.toBeInTheDocument();
+  });
+});
+
 describe('NotificationsSection — digest + quiet hours', () => {
   test('renders the digest mode control', () => {
     render(<NotificationsSection />);

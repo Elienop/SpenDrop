@@ -2099,70 +2099,62 @@ export function NotificationsSection() {
     }
   }
 
-  // Intentional scoping (Task 8): the household notification-type policy is
-  // co-located inside this per-device push card, so a browser without push
-  // support shows only the unsupported notice and not the household block.
-  // Household policy is device-agnostic, but per task scope it lives here.
-  if (!supported) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Notifications</CardTitle>
-          <CardDescription>
-            This browser does not support web push notifications.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
-
+  // The household notification-type policy below is device-agnostic and runs
+  // server-side, so it must stay reachable even where the browser cannot
+  // subscribe to web push. Only the per-device push enable toggle + Send-test
+  // button are gated behind `supported`; the household block stays gated by
+  // canEdit / the API.
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Notifications</CardTitle>
         <CardDescription>
-          Get a push notification on this device when a budget category goes
-          over its limit.
+          {supported
+            ? 'Get a push notification on this device when a budget category goes over its limit.'
+            : 'This browser does not support web push notifications on this device. The household-wide settings below still apply to every subscribed device.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {permission === 'denied' && (
-          <Alert variant="warning">
-            <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>Notifications are blocked</AlertTitle>
-            <AlertDescription>
-              You've blocked notifications for this site in your browser.
-              Re-enable them in your browser's site settings, then toggle this
-              on.
-            </AlertDescription>
-          </Alert>
+        {supported && (
+          <>
+            {permission === 'denied' && (
+              <Alert variant="warning">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertTitle>Notifications are blocked</AlertTitle>
+                <AlertDescription>
+                  You've blocked notifications for this site in your browser.
+                  Re-enable them in your browser's site settings, then toggle
+                  this on.
+                </AlertDescription>
+              </Alert>
+            )}
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="push-toggle" className="flex flex-col gap-1">
+                <span>Push notifications on this device</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Each device subscribes separately.
+                </span>
+              </Label>
+              <Switch
+                id="push-toggle"
+                checked={subscribed}
+                disabled={busy || permission === 'denied'}
+                onCheckedChange={(v) => void handleToggle(v)}
+                aria-label="Push notifications on this device"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-fit"
+              disabled={busy || permission !== 'granted' || !subscribed}
+              onClick={() => void handleSendTest()}
+            >
+              Send test
+            </Button>
+            <Separator />
+          </>
         )}
-        <div className="flex max-w-md items-center justify-between gap-4">
-          <Label htmlFor="push-toggle" className="flex flex-col gap-1">
-            <span>Push notifications on this device</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Each device subscribes separately.
-            </span>
-          </Label>
-          <Switch
-            id="push-toggle"
-            checked={subscribed}
-            disabled={busy || permission === 'denied'}
-            onCheckedChange={(v) => void handleToggle(v)}
-            aria-label="Push notifications on this device"
-          />
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="w-fit"
-          disabled={busy || permission !== 'granted' || !subscribed}
-          onClick={() => void handleSendTest()}
-        >
-          Send test
-        </Button>
-
-        <Separator />
         <div className="flex flex-col gap-1">
           <h3 className="text-sm font-medium">Household notification types</h3>
           <p className="text-xs text-muted-foreground">
