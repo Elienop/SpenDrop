@@ -1,11 +1,16 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/push"
 )
 
 // parseHHMM parses a "HH:MM" 24-hour string. ok is false for empty/malformed
@@ -84,4 +89,58 @@ func shouldSendDigest(now time.Time, s database.NotificationSettings) bool {
 		return false // already digested at/after today's boundary
 	}
 	return true
+}
+
+// RunDigestTick is the restart-safe daily digest pass, invoked by a ticker. It
+// reads the household settings, and when shouldSendDigest is true sends ONE
+// rollup built by QUERYING how many live transactions changed since the stored
+// last_digest_at (CountTransactionsSince — soft-delete-safe), then advances the
+// cursor. Best-effort: every failure is logged, never returned. Count-only body,
+// so no money crosses the wire (no DTO concern).
+func (h *Handler) RunDigestTick(ctx context.Context) {
+	if h.dispatcher() == nil {
+		return // push disabled
+	}
+	s, err := h.queries.GetNotificationSettings(ctx)
+	if err != nil {
+		log.Printf("digest: read settings: %v", err)
+		return
+	}
+	now := h.clock.Now()
+	if !shouldSendDigest(now, s) {
+		return
+	}
+	since := now.Add(-24 * time.Hour)
+	if s.LastDigestAt.Valid {
+		since = s.LastDigestAt.Time
+	}
+	n, err := h.queries.CountTransactionsSince(ctx, since)
+	if err != nil {
+		log.Printf("digest: count since %v: %v", since, err)
+		return
+	}
+	if n > 0 {
+		noun := "transactions"
+		if n == 1 {
+			noun = "transaction"
+		}
+		payload := pushAlertPayload{
+			Title: "Your SpenDrop summary",
+			Body:  fmt.Sprintf("%d %s since your last summary.", n, noun),
+			URL:   "/transactions",
+			Type:  "digest",
+			Tag:   "activity",
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			log.Printf("digest: marshal payload: %v", err)
+			return
+		}
+		h.fanOutPush(ctx, "digest", body, 0, pushOpts{
+			Tag: "activity", Topic: "act", Urgency: push.UrgencyLow,
+		})
+	}
+	if err := h.queries.SetLastDigestAt(ctx, now); err != nil {
+		log.Printf("digest: set last_digest_at: %v", err)
+	}
 }

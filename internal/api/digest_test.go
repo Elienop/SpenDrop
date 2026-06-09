@@ -36,6 +36,36 @@ func TestCountTransactionsSince_HidesTombstoned(t *testing.T) {
 	}
 }
 
+func TestRunDigestTick_SendsOncePerDay(t *testing.T) {
+	q, db := setupTestDB(t)
+	// 07:30 UTC, 30 min past the 07:00 quiet_end boundary.
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-d")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 2500)
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET digest_mode='daily', quiet_start='22:00', quiet_end='07:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	h.RunDigestTick(ctx)
+	if rec.count() != 1 {
+		t.Fatalf("first tick: want 1 digest push, got %d", rec.count())
+	}
+	// Second tick same day: last_digest_at now past today's boundary -> no resend.
+	h.RunDigestTick(ctx)
+	if rec.count() != 1 {
+		t.Fatalf("second tick same day: want still 1, got %d", rec.count())
+	}
+}
+
 func TestInQuietHours(t *testing.T) {
 	cases := []struct {
 		name           string

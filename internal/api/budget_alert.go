@@ -355,6 +355,8 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 		return s.TxnEdited
 	case "large_txn":
 		return s.LargeTxn
+	case "digest":
+		return s.DigestMode != "off"
 	default:
 		return false
 	}
