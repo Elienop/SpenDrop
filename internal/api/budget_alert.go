@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -18,8 +19,51 @@ import (
 // is a test-only override consulted first so unit tests never need a real
 // VAPID keypair or HTTP round-trip.
 type pushDispatcher interface {
-	Send(ctx context.Context, sub push.Subscription, payload []byte) (prune bool, err error)
+	Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (prune bool, err error)
 }
+
+// pushOpts bundles the per-send transport + SW-collapse knobs threaded from the
+// emit site through fanOutPush. Tag is copied into the payload by the caller
+// BEFORE marshal; Topic/Urgency are forwarded to push.Options. fanOutPush itself
+// reads only Topic/Urgency — Tag is documentation of what the caller baked in.
+type pushOpts struct {
+	Tag     string
+	Topic   string
+	Urgency push.Urgency
+}
+
+// pushOptionsFor maps a notification type to its base SW collapse tag, Web Push
+// Topic, and delivery Urgency. PURE — no receiver, no I/O — so it is unit-tested
+// directly. over_budget returns the BASE ("budget"/"ob"); per-cell sends override
+// via budgetCellTag/budgetCellTopic or budgetSummaryTag/budgetSummaryTopic.
+func pushOptionsFor(notifType string) (tag, topic string, urgency push.Urgency) {
+	switch notifType {
+	case "over_budget":
+		return "budget", "ob", push.UrgencyNormal
+	case "txn_added", "txn_edited", "txn_deleted", "large_txn":
+		return "activity", "act", push.UrgencyLow
+	default:
+		return "", "", push.UrgencyLow // fail-safe low
+	}
+}
+
+// budgetCellTag / budgetCellTopic format a single freshly-crossed over-budget cell's
+// SW collapse tag and Web Push Topic. PURE. The Topic stays <=32 url-safe chars:
+// "ob-" + up to a 19-digit int64 + "-" + 6-digit YYYYMM = 29 max.
+func budgetCellTag(catID int64, year, month int) string {
+	return fmt.Sprintf("budget-%d-%04d%02d", catID, year, month)
+}
+
+func budgetCellTopic(catID int64, year, month int) string {
+	return fmt.Sprintf("ob-%d-%04d%02d", catID, year, month)
+}
+
+// budgetSummaryTag / budgetSummaryTopic collapse the multi-cell over-budget summary
+// push (>=2 categories crossed in one request) into a single notification row.
+const (
+	budgetSummaryTag   = "budget-summary"
+	budgetSummaryTopic = "ob-summary"
+)
 
 // budgetCell identifies one (category, calendar-month) over-budget evaluation
 // unit. Year/Month are derived from the AFFECTED transaction's own date parsed
@@ -42,7 +86,8 @@ type pushAlertPayload struct {
 	Title        string  `json:"title"`
 	Body         string  `json:"body"`
 	URL          string  `json:"url"`
-	Type         string  `json:"type"` // "budget_over"
+	Type         string  `json:"type"`          // "budget_over"
+	Tag          string  `json:"tag,omitempty"` // SW collapse key, copied from pushOpts.Tag
 	CategoryID   int64   `json:"category_id"`
 	CategoryName string  `json:"category_name"`
 	Year         int     `json:"year"`
@@ -64,6 +109,46 @@ func (h *Handler) dispatcher() pushDispatcher {
 	return h.pushSender
 }
 
+// crossedCell is one freshly-crossed (category, month) cell captured during the
+// latch loop so the actual push fan-out can happen ONCE after the loop, not
+// per-iteration. Dollars are pre-converted (Money Wire-Edge DTO discipline).
+type crossedCell struct {
+	cell         budgetCell
+	name         string
+	spentDollars float64
+	limitDollars float64
+}
+
+// sendOverBudgetCell fans out one push for a single freshly-crossed cell,
+// collapsing on the per-cell SW tag budget-<categoryID>-<YYYYMM> and the
+// matching Web Push Topic ob-<categoryID>-<YYYYMM>. Urgency comes from the
+// over_budget mapping (Normal).
+func (h *Handler) sendOverBudgetCell(ctx context.Context, c crossedCell) {
+	tag := budgetCellTag(c.cell.CategoryID, c.cell.Year, c.cell.Month)
+	topic := budgetCellTopic(c.cell.CategoryID, c.cell.Year, c.cell.Month)
+	payload := pushAlertPayload{
+		Title: fmt.Sprintf("Over budget: %s", c.name),
+		Body: fmt.Sprintf("%s is over budget — $%.2f spent of your $%.2f limit this month.",
+			c.name, c.spentDollars, c.limitDollars),
+		URL:          "/budgets",
+		Type:         "budget_over",
+		Tag:          tag,
+		CategoryID:   c.cell.CategoryID,
+		CategoryName: c.name,
+		Year:         c.cell.Year,
+		Month:        c.cell.Month,
+		LimitDollars: c.limitDollars,
+		SpentDollars: c.spentDollars,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("budget alert: marshal cell payload cat=%d: %v", c.cell.CategoryID, err)
+		return
+	}
+	_, _, urgency := pushOptionsFor("over_budget")
+	h.fanOutPush(ctx, "over_budget", body, 0, pushOpts{Tag: tag, Topic: topic, Urgency: urgency})
+}
+
 // evaluateBudgetAlerts is the post-commit over-budget hook. It mirrors the
 // error contract of verifyAffectedCheckpoints exactly: the caller's mutation
 // is already committed, so THIS FUNCTION NEVER RETURNS AN ERROR and never
@@ -80,6 +165,23 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 	if len(cells) == 0 {
 		return
 	}
+	// Quiet-hours/bypass gate (mirrors fanOutPush): if an over_budget send would
+	// be suppressed by quiet hours RIGHT NOW (window active AND the household
+	// disabled the bypass), do NOT write the dedup latch for a fresh cross. The
+	// latch is otherwise committed BEFORE fanOutPush drops the suppressed send,
+	// so later evals see rows-affected==0 and the crossing is permanently lost
+	// instead of deferred. Skipping the latch leaves the cell un-latched so the
+	// next post-quiet evaluation re-fires it. Only the transient quiet-hours
+	// suppression is consulted here — the over_budget TOGGLE being off keeps its
+	// deliberate latch-anyway behavior (see notifTypeEnabled).
+	suppressOverBudget := false
+	if settings, err := h.queries.GetNotificationSettings(ctx); err != nil {
+		log.Printf("budget alert: read notification settings: %v", err)
+	} else {
+		suppressOverBudget = inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) &&
+			!settings.QuietAllowOverBudget
+	}
+	var crossed []crossedCell
 	for _, cell := range cells {
 		over, limitCents, spentCents, catName, err := h.cellOverBudget(ctx, cell)
 		if err != nil {
@@ -101,6 +203,13 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			continue
 		}
 
+		// Over budget. If an over_budget send is currently suppressed by quiet
+		// hours, do NOT latch — leaving the cell un-latched lets the next
+		// post-quiet evaluation re-fire this cross instead of dropping it.
+		if suppressOverBudget {
+			continue
+		}
+
 		// Over budget: try to set the latch. rows-affected==1 means a fresh
 		// cross (we won the INSERT); 0 means the latch was already set (dedup).
 		res, err := h.queries.SetBudgetAlertState(ctx, database.SetBudgetAlertStateParams{
@@ -118,31 +227,53 @@ func (h *Handler) evaluateBudgetAlerts(ctx context.Context, cells []budgetCell) 
 			continue // already latched (dedup) or driver hiccup — stay silent
 		}
 
-		// Fresh cross. Build the dollars payload and fan out. The latch is set
-		// regardless of whether any subscriber exists, so a later subscribe +
-		// re-eval does not retroactively double-fire.
-		limitDollars := centsToDollars(limitCents)
-		spentDollars := centsToDollars(spentCents)
-		payload := pushAlertPayload{
-			Title: fmt.Sprintf("Over budget: %s", catName),
-			Body: fmt.Sprintf("%s is over budget — $%.2f spent of your $%.2f limit this month.",
-				catName, spentDollars, limitDollars),
-			URL:          "/budgets",
-			Type:         "budget_over",
-			CategoryID:   cell.CategoryID,
-			CategoryName: catName,
-			Year:         cell.Year,
-			Month:        cell.Month,
-			LimitDollars: limitDollars,
-			SpentDollars: spentDollars,
-		}
-		body, err := json.Marshal(payload)
-		if err != nil {
-			log.Printf("budget alert: marshal payload cat=%d: %v", cell.CategoryID, err)
-			continue
-		}
-		h.fanOutPush(ctx, "over_budget", body, 0) // state alert: notify everyone, incl. actor
+		// Fresh cross: collect it; the send happens once after the loop so two
+		// categories crossing in one request can collapse into a single push.
+		// The latch is set regardless of whether any subscriber exists, so a
+		// later subscribe + re-eval does not retroactively double-fire.
+		crossed = append(crossed, crossedCell{
+			cell:         cell,
+			name:         catName,
+			spentDollars: centsToDollars(spentCents),
+			limitDollars: centsToDollars(limitCents),
+		})
 	}
+
+	switch len(crossed) {
+	case 0:
+		return
+	case 1:
+		h.sendOverBudgetCell(ctx, crossed[0])
+	default:
+		h.sendOverBudgetSummary(ctx, crossed)
+	}
+}
+
+// sendOverBudgetSummary fans out ONE collapsing push when two or more cells
+// crossed in a single request. It uses the fixed budget-summary tag / ob-summary
+// Topic so repeated multi-cross bursts replace rather than stack. The per-category
+// dollar fields are intentionally left zero — the summary is a list, and the SW
+// renders title/body/url, so no *_cents value is ever marshalled here.
+func (h *Handler) sendOverBudgetSummary(ctx context.Context, crossed []crossedCell) {
+	names := make([]string, 0, len(crossed))
+	for _, c := range crossed {
+		names = append(names, c.name)
+	}
+	payload := pushAlertPayload{
+		Title: "Over budget",
+		Body:  fmt.Sprintf("%d categories over budget: %s", len(crossed), strings.Join(names, ", ")),
+		URL:   "/budgets",
+		Type:  "budget_over",
+		Tag:   budgetSummaryTag,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		log.Printf("budget alert: marshal summary payload: %v", err)
+		return
+	}
+	_, _, urgency := pushOptionsFor("over_budget")
+	h.fanOutPush(ctx, "over_budget", body, 0,
+		pushOpts{Tag: budgetSummaryTag, Topic: budgetSummaryTopic, Urgency: urgency})
 }
 
 // cellOverBudget computes whether one (category, month) is over budget by
@@ -247,6 +378,8 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 		return s.TxnEdited
 	case "large_txn":
 		return s.LargeTxn
+	case "digest":
+		return s.DigestMode != "off"
 	default:
 		return false
 	}
@@ -280,7 +413,7 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 // (real user ids are positive); over_budget passes 0 because a state alert must
 // reach everyone including the actor. Skipped subscriptions are not counted as
 // sent/pruned/failed.
-func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64) {
+func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64, opts pushOpts) {
 	d := h.dispatcher()
 	if d == nil {
 		return // push disabled — no-op
@@ -295,6 +428,20 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	}
 	if !notifTypeEnabled(settings, notifType) {
 		return // type disabled household-wide — no-op
+	}
+	// Quiet-hours gate (household-wide). Inside the window, real-time ACTIVITY
+	// pushes are suppressed; over_budget bypasses unless the household disabled
+	// the bypass toggle. The digest uses a non-activity type, so it passes this
+	// gate untouched even when digest_time falls inside quiet hours — the digest
+	// owns its own schedule. Reuses the settings row already read above (one
+	// GetNotificationSettings call).
+	if inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) {
+		if tag, _, _ := pushOptionsFor(notifType); tag == "activity" {
+			return // activity suppressed during quiet hours
+		}
+		if notifType == "over_budget" && !settings.QuietAllowOverBudget {
+			return // over_budget suppressed by the bypass toggle
+		}
 	}
 	subs, err := h.queries.ListAllPushSubscriptions(ctx)
 	if err != nil {
@@ -312,7 +459,7 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 			Endpoint: s.Endpoint,
 			P256dh:   s.P256dh,
 			Auth:     s.Auth,
-		}, payload)
+		}, payload, push.Options{Topic: opts.Topic, Urgency: opts.Urgency})
 		switch {
 		case prune:
 			// 404/410: endpoint permanently gone — delete by endpoint so we

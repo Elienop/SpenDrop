@@ -35,18 +35,20 @@ func (h *Handler) categoryLabel(ctx context.Context, categoryID int64) string {
 // user's id so the action's author is not notified of their own activity (0 =
 // exclude nobody); it is threaded straight through to fanOutPush.
 func (h *Handler) emit(ctx context.Context, notifType, title, body, url string, excludeUserID int64) {
+	tag, topic, urgency := pushOptionsFor(notifType)
 	payload := pushAlertPayload{
 		Title: title,
 		Body:  body,
 		URL:   url,
 		Type:  notifType,
+		Tag:   tag,
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		log.Printf("notify: marshal %s payload: %v", notifType, err)
 		return
 	}
-	h.fanOutPush(ctx, notifType, b, excludeUserID)
+	h.fanOutPush(ctx, notifType, b, excludeUserID, pushOpts{Tag: tag, Topic: topic, Urgency: urgency})
 }
 
 // largeTxnEnabledAndThreshold reads the household large-transaction threshold

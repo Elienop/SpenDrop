@@ -2942,7 +2942,8 @@ func (q *Queries) ClearBudgetAlertState(ctx context.Context, arg ClearBudgetAler
 // / IsActive). updated_at is server-set via datetime('now').
 
 const getNotificationSettings = `-- name: GetNotificationSettings :one
-SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at
+SELECT id, over_budget, txn_added, txn_deleted, txn_edited, large_txn, large_txn_threshold_cents, updated_at,
+       digest_mode, digest_time, quiet_start, quiet_end, quiet_tz, quiet_allow_over_budget, last_digest_at
 FROM notification_settings WHERE id = 1
 `
 
@@ -2958,6 +2959,13 @@ func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSett
 		&i.LargeTxn,
 		&i.LargeTxnThresholdCents,
 		&i.UpdatedAt,
+		&i.DigestMode,
+		&i.DigestTime,
+		&i.QuietStart,
+		&i.QuietEnd,
+		&i.QuietTz,
+		&i.QuietAllowOverBudget,
+		&i.LastDigestAt,
 	)
 	return i, err
 }
@@ -2965,17 +2973,25 @@ func (q *Queries) GetNotificationSettings(ctx context.Context) (NotificationSett
 const updateNotificationSettings = `-- name: UpdateNotificationSettings :exec
 UPDATE notification_settings
 SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn = ?,
-    large_txn_threshold_cents = ?, updated_at = datetime('now')
+    large_txn_threshold_cents = ?,
+    digest_mode = ?, digest_time = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
+    updated_at = datetime('now')
 WHERE id = 1
 `
 
 type UpdateNotificationSettingsParams struct {
-	OverBudget             bool  `json:"over_budget"`
-	TxnAdded               bool  `json:"txn_added"`
-	TxnDeleted             bool  `json:"txn_deleted"`
-	TxnEdited              bool  `json:"txn_edited"`
-	LargeTxn               bool  `json:"large_txn"`
-	LargeTxnThresholdCents int64 `json:"large_txn_threshold_cents"`
+	OverBudget             bool   `json:"over_budget"`
+	TxnAdded               bool   `json:"txn_added"`
+	TxnDeleted             bool   `json:"txn_deleted"`
+	TxnEdited              bool   `json:"txn_edited"`
+	LargeTxn               bool   `json:"large_txn"`
+	LargeTxnThresholdCents int64  `json:"large_txn_threshold_cents"`
+	DigestMode             string `json:"digest_mode"`
+	DigestTime             string `json:"digest_time"`
+	QuietStart             string `json:"quiet_start"`
+	QuietEnd               string `json:"quiet_end"`
+	QuietTz                string `json:"quiet_tz"`
+	QuietAllowOverBudget   bool   `json:"quiet_allow_over_budget"`
 }
 
 func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNotificationSettingsParams) error {
@@ -2986,6 +3002,40 @@ func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNoti
 		arg.TxnEdited,
 		arg.LargeTxn,
 		arg.LargeTxnThresholdCents,
+		arg.DigestMode,
+		arg.DigestTime,
+		arg.QuietStart,
+		arg.QuietEnd,
+		arg.QuietTz,
+		arg.QuietAllowOverBudget,
 	)
 	return err
+}
+
+const setLastDigestAt = `-- name: SetLastDigestAt :exec
+UPDATE notification_settings SET last_digest_at = ? WHERE id = 1
+`
+
+// SetLastDigestAt advances the restart-safe digest cursor. The instant is
+// formatted to SQLite's stored DATETIME text (UTC) so a later GET scans it back
+// into sql.NullTime cleanly.
+func (q *Queries) SetLastDigestAt(ctx context.Context, at time.Time) error {
+	_, err := q.db.ExecContext(ctx, setLastDigestAt, at.UTC().Format("2006-01-02 15:04:05"))
+	return err
+}
+
+const countTransactionsSince = `-- name: CountTransactionsSince :one
+SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS NULL
+`
+
+// CountTransactionsSince counts LIVE transactions ADDED after since (by created_at). The
+// cutoff is formatted to the column's stored text form ('YYYY-MM-DD HH:MM:SS',
+// UTC) so the comparison is lexicographic against the CURRENT_TIMESTAMP-populated
+// created_at - binding a raw time.Time lets the driver pick an RFC3339 form that
+// sorts differently. deleted_at IS NULL keeps tombstoned rows out of the digest.
+func (q *Queries) CountTransactionsSince(ctx context.Context, since time.Time) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTransactionsSince, since.UTC().Format("2006-01-02 15:04:05"))
+	var n int64
+	err := row.Scan(&n)
+	return n, err
 }

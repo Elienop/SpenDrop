@@ -277,6 +277,37 @@ func main() {
 		}
 	}()
 
+	// Digest ticker. Once a minute we ask the Handler whether the household has
+	// passed today's digest_time (read in quiet_tz) and still owes a daily
+	// digest (RunDigestTick is a no-op otherwise). The digest owns its own
+	// schedule anchored solely on digest_time — it is decoupled from quiet hours
+	// and fires even during the quiet window. It is query-based and restart-safe
+	// — the cursor lives in notification_settings.last_digest_at — so a missed
+	// tick during a restart is recovered on the next minute. Shares cleanupCtx so graceful shutdown stops
+	// it before the DB closes. A one-minute cadence is plenty: the digest fires
+	// at most once per day and only needs to notice the boundary within a minute.
+	go func() {
+		const digestInterval = time.Minute
+		// Per-run deadline mirrors the daily-integrity goroutine. RunDigestTick
+		// fans out pushes serially; without a bound, a single stalled push
+		// gateway would block the loop forever and permanently wedge every
+		// future digest. The per-request push timeout (push.defaultHTTPTimeout)
+		// bounds each send; this caps the whole pass so the ticker never leaks.
+		const digestPerRunTimeout = 2 * time.Minute
+		ticker := time.NewTicker(digestInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				dctx, cancel := context.WithTimeout(cleanupCtx, digestPerRunTimeout)
+				h.RunDigestTick(dctx)
+				cancel()
+			case <-cleanupCtx.Done():
+				return
+			}
+		}
+	}()
+
 	// Live-updates SSE broker. The hub holds no application state — it fans
 	// out coarse "invalidate" hints to every connected household device after
 	// a committed mutation. It shares cleanupCtx with the session-cleanup,

@@ -17,7 +17,7 @@ import (
 // rolls back or errors the already-committed transaction mutation.
 type explodingSender struct{ calls int }
 
-func (s *explodingSender) Send(ctx context.Context, sub push.Subscription, payload []byte) (bool, error) {
+func (s *explodingSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
 	s.calls++
 	return false, errors.New("transport boom")
 }

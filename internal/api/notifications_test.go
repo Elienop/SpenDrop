@@ -3,10 +3,34 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
 )
+
+func TestPushAlertPayload_TagOmitemptyMarshal(t *testing.T) {
+	// Zero Tag -> key omitted (over_budget payloads stay byte-identical).
+	zero, err := json.Marshal(pushAlertPayload{Title: "t", Body: "b", URL: "/", Type: "txn_added"})
+	if err != nil {
+		t.Fatalf("marshal zero: %v", err)
+	}
+	if strings.Contains(string(zero), `"tag"`) {
+		t.Errorf("zero tag must be omitted, got %s", zero)
+	}
+	// Set Tag -> key emitted with the right value.
+	set, err := json.Marshal(pushAlertPayload{Title: "t", Type: "txn_added", Tag: "activity"})
+	if err != nil {
+		t.Fatalf("marshal set: %v", err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(set, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if m["tag"] != "activity" {
+		t.Errorf("tag: got %v want activity", m["tag"])
+	}
+}
 
 // enableNotif flips one household type on (defaults are off for activity types).
 func enableNotif(t *testing.T, q *database.Queries, mut func(*database.UpdateNotificationSettingsParams)) {

@@ -79,14 +79,21 @@ type BudgetAlertState struct {
 }
 
 type NotificationSettings struct {
-	ID                     int64     `json:"id"`
-	OverBudget             bool      `json:"over_budget"`
-	TxnAdded               bool      `json:"txn_added"`
-	TxnDeleted             bool      `json:"txn_deleted"`
-	TxnEdited              bool      `json:"txn_edited"`
-	LargeTxn               bool      `json:"large_txn"`
-	LargeTxnThresholdCents int64     `json:"large_txn_threshold_cents"`
-	UpdatedAt              time.Time `json:"updated_at"`
+	ID                     int64        `json:"id"`
+	OverBudget             bool         `json:"over_budget"`
+	TxnAdded               bool         `json:"txn_added"`
+	TxnDeleted             bool         `json:"txn_deleted"`
+	TxnEdited              bool         `json:"txn_edited"`
+	LargeTxn               bool         `json:"large_txn"`
+	LargeTxnThresholdCents int64        `json:"large_txn_threshold_cents"`
+	UpdatedAt              time.Time    `json:"updated_at"`
+	DigestMode             string       `json:"digest_mode"`
+	DigestTime             string       `json:"digest_time"`
+	QuietStart             string       `json:"quiet_start"`
+	QuietEnd               string       `json:"quiet_end"`
+	QuietTz                string       `json:"quiet_tz"`
+	QuietAllowOverBudget   bool         `json:"quiet_allow_over_budget"`
+	LastDigestAt           sql.NullTime `json:"last_digest_at"`
 }
 
 type Category struct {

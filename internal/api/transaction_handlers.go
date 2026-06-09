@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/http"
 	"sort"
@@ -1454,6 +1455,83 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusOK, bulkUpdateResponse{Updated: updated, Skipped: skipped})
 }
 
+// enumerateFilterCells returns the DISTINCT (category, calendar-month) cells
+// occupied by the live rows a bulk-filter operation matches. It runs the SAME
+// JOIN + liveClause the delete/update-by-filter handlers use to select rows,
+// so the enumerated cells are exactly the rows about to be mutated. The caller
+// passes the already-built liveClause (buildTransactionWhereClause +
+// non-admin user_id append + appendLiveTransactionsFilter) and its args so the
+// enumeration scope matches the mutation scope byte-for-byte.
+//
+// Soft-delete: liveClause carries "AND t.deleted_at IS NULL" via
+// appendLiveTransactionsFilter, so a tombstoned sentinel row never enters the
+// cell set (TestEnumerateFilterCells_HidesTombstoned). The filter family uses
+// raw dynamic SQL in the handler because its WHERE is built from runtime query
+// params and cannot be a static query — but the soft-delete predicate stays
+// centralized in appendLiveTransactionsFilter.
+func (h *Handler) enumerateFilterCells(ctx context.Context, liveClause string, args []any) ([]budgetCell, error) {
+	query := `SELECT DISTINCT t.category_id,
+		CAST(strftime('%Y', t.date) AS INTEGER) AS year,
+		CAST(strftime('%m', t.date) AS INTEGER) AS month
+		FROM transactions t
+		JOIN categories c ON t.category_id = c.id` + liveClause
+	rows, err := h.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("enumerate filter cells: %w", err)
+	}
+	defer rows.Close()
+	var cells []budgetCell
+	for rows.Next() {
+		var cell budgetCell
+		var year, month int64
+		if err := rows.Scan(&cell.CategoryID, &year, &month); err != nil {
+			return nil, fmt.Errorf("scan filter cell: %w", err)
+		}
+		cell.Year = int(year)
+		cell.Month = int(month)
+		cells = append(cells, cell)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("filter cell rows: %w", err)
+	}
+	return cells, nil
+}
+
+// filterUpdateCells derives the union of OLD and NEW over-budget cells a
+// filter-update touches. oldCells are the (category, month) cells of the rows
+// matched BEFORE the update; the patch relocates every matched row uniformly,
+// so each row's NEW cell swaps category_id when patch.CategoryID is set and/or
+// swaps year/month when patch.Date is set. Returns OLD ∪ NEW deduped so a row
+// moved OUT of an over category clears its old latch and a row moved INTO a
+// category re-evaluates the new one. Date is parsed UTC to match cellForDate.
+func filterUpdateCells(oldCells []budgetCell, patch database.UpdatePatch) []budgetCell {
+	set := make(map[budgetCell]struct{}, len(oldCells)*2)
+	for _, c := range oldCells {
+		set[c] = struct{}{}
+	}
+	if patch.CategoryID != nil || patch.Date != nil {
+		for _, c := range oldCells {
+			nc := c
+			if patch.CategoryID != nil {
+				nc.CategoryID = *patch.CategoryID
+			}
+			if patch.Date != nil {
+				if d, err := time.Parse("2006-01-02", *patch.Date); err == nil {
+					du := d.UTC()
+					nc.Year = du.Year()
+					nc.Month = int(du.Month())
+				}
+			}
+			set[nc] = struct{}{}
+		}
+	}
+	cells := make([]budgetCell, 0, len(set))
+	for c := range set {
+		cells = append(cells, c)
+	}
+	return cells
+}
+
 // handleDeleteTransactionsByFilter deletes every transaction matching the
 // same filter query parameters accepted by handleListTransactions. It exists
 // so the "Select all X across pages" UI action can delete tens of thousands
@@ -1504,6 +1582,18 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 	// in practice, but the outer guard makes that invariant explicit at the
 	// SQL level for future maintainers reviewing this query.
 	liveClause := appendLiveTransactionsFilter(whereClause)
+
+	// FilterLatchFix: enumerate the (category, month) cells the about-to-be-
+	// tombstoned rows occupy BEFORE the soft-delete UPDATE — afterwards
+	// liveClause filters them out. Post-commit we re-evaluate each so a latch
+	// left set by a now-deleted over-budget row re-arms. Best-effort: an
+	// enumeration error must not block the delete, so we log and proceed with an
+	// empty cell set (mirrors the post-commit hook error contract).
+	affectedCells, err := h.enumerateFilterCells(r.Context(), liveClause, args)
+	if err != nil {
+		log.Printf("delete-by-filter: enumerate affected cells: %v", err)
+		affectedCells = nil
+	}
 
 	// Phase 2.1 turns the DELETE into a soft-delete UPDATE. The outer
 	// UPDATE sets deleted_at on every matching live row in one atomic step;
@@ -1571,16 +1661,20 @@ func (h *Handler) handleDeleteTransactionsByFilter(w http.ResponseWriter, r *htt
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
 
-	// Budget-alert hook intentionally skipped here: the bulk UPDATE does not
-	// expose per-row (category, month), so there is no precise cell to
-	// evaluate. Re-import / wipe workflows re-trip alerts on the next
-	// single-row or batch-create. (Phase C, Task 17.)
+	// FilterLatchFix: the bulk soft-delete drops spend out of every (category,
+	// month) the deleted rows occupied, so a latch set by a now-deleted
+	// over-budget row must re-arm. affectedCells was enumerated BEFORE the
+	// UPDATE; evaluate them post-commit (best-effort — never blocks the
+	// response, mirrors verifyAffectedCheckpoints' contract).
+	if deleted > 0 && len(affectedCells) > 0 {
+		h.evaluateBudgetAlerts(r.Context(), affectedCells)
+	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): tombstoned
 	// rows leave the list/dashboard/reports and appear in trash. Budgets are
-	// omitted to match the budget-alert skip above (no precise cell enumerated).
+	// invalidated too now that affected cells are re-evaluated above.
 	if deleted > 0 {
-		h.publishInvalidate("transactions", "dashboard", "reports", "trash")
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets", "trash")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"deleted": deleted})
@@ -1660,6 +1754,28 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// FilterLatchFix: enumerate the OLD (category, month) cells the matched live
+	// rows occupy BEFORE the update; T18b derives the NEW cells the patch moves
+	// them to post-commit. Rebuild liveClause here exactly as the branch helpers
+	// do (buildTransactionWhereClause + non-admin user_id append +
+	// appendLiveTransactionsFilter) so the enumeration scope matches the rows
+	// the UPDATE will touch. Best-effort — an enumeration error must not block
+	// the update.
+	enumWhere, enumArgs := buildTransactionWhereClause(r.URL.Query())
+	if user.Role != RoleAdmin {
+		if enumWhere == "" {
+			enumWhere = " WHERE t.user_id = ?"
+		} else {
+			enumWhere += " AND t.user_id = ?"
+		}
+		enumArgs = append(enumArgs, user.ID)
+	}
+	oldCells, err := h.enumerateFilterCells(r.Context(), appendLiveTransactionsFilter(enumWhere), enumArgs)
+	if err != nil {
+		log.Printf("update-by-filter: enumerate affected cells: %v", err)
+		oldCells = nil
+	}
+
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
@@ -1720,19 +1836,23 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
 	}
 
-	// Budget-alert hook intentionally skipped here: the no-tags fast path is a
-	// single SQL UPDATE that does not enumerate per-row (category, month), so
-	// there is no precise old/new cell to evaluate (unlike the ID-list
-	// handleBatchUpdateTransactions, which does enumerate). Wipe-and-reimport
-	// workflows re-trip alerts on the next single-row, batch-create, or
-	// import. (Phase C, Task 17.)
+	// FilterLatchFix: a filter update relocates spend across (category, month)
+	// cells — a category a row LEFT may drop back under budget (latch clears) and
+	// a category it ENTERED may cross over. Evaluate the union of OLD and NEW
+	// cells post-commit, best-effort (never blocks the response).
+	if updated > 0 {
+		cells := filterUpdateCells(oldCells, patch)
+		if len(cells) > 0 {
+			h.evaluateBudgetAlerts(r.Context(), cells)
+		}
+	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): a filter
 	// update can move amount/category/date, so list, dashboard totals, and
-	// reports may change. Budgets are omitted to match the budget-alert skip
-	// above (no precise cell enumerated). Fire only when rows actually updated.
+	// reports may change. Budgets may change now that affected cells are
+	// re-evaluated above. Fire only when rows actually updated.
 	if updated > 0 {
-		h.publishInvalidate("transactions", "dashboard", "reports")
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})

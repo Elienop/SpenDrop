@@ -22,6 +22,12 @@ type notificationSettingsDTO struct {
 	TxnEdited                bool      `json:"txn_edited"`
 	LargeTxn                 bool      `json:"large_txn"`
 	LargeTxnThresholdDollars float64   `json:"large_txn_threshold_dollars"`
+	DigestMode               string    `json:"digest_mode"`
+	DigestTime               string    `json:"digest_time"`
+	QuietStart               string    `json:"quiet_start"`
+	QuietEnd                 string    `json:"quiet_end"`
+	QuietTz                  string    `json:"quiet_tz"`
+	QuietAllowOverBudget     bool      `json:"quiet_allow_over_budget"`
 	UpdatedAt                time.Time `json:"updated_at"`
 }
 
@@ -33,6 +39,12 @@ func notificationSettingsToDTO(s database.NotificationSettings) notificationSett
 		TxnEdited:                s.TxnEdited,
 		LargeTxn:                 s.LargeTxn,
 		LargeTxnThresholdDollars: centsToDollars(s.LargeTxnThresholdCents),
+		DigestMode:               s.DigestMode,
+		DigestTime:               s.DigestTime,
+		QuietStart:               s.QuietStart,
+		QuietEnd:                 s.QuietEnd,
+		QuietTz:                  s.QuietTz,
+		QuietAllowOverBudget:     s.QuietAllowOverBudget,
 		UpdatedAt:                s.UpdatedAt,
 	}
 }
@@ -47,6 +59,12 @@ type updateNotificationSettingsRequest struct {
 	TxnEdited                bool    `json:"txn_edited"`
 	LargeTxn                 bool    `json:"large_txn"`
 	LargeTxnThresholdDollars float64 `json:"large_txn_threshold_dollars"`
+	DigestMode               string  `json:"digest_mode"`
+	DigestTime               string  `json:"digest_time"`
+	QuietStart               string  `json:"quiet_start"`
+	QuietEnd                 string  `json:"quiet_end"`
+	QuietTz                  string  `json:"quiet_tz"`
+	QuietAllowOverBudget     bool    `json:"quiet_allow_over_budget"`
 }
 
 // handleGetNotificationSettings returns the household notification preferences.
@@ -96,6 +114,46 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		return
 	}
 
+	if req.DigestMode != "off" && req.DigestMode != "daily" {
+		writeError(w, http.StatusBadRequest, "digest_mode must be 'off' or 'daily'")
+		return
+	}
+
+	// digest_time owns the daily send schedule (decoupled from quiet hours). It
+	// has a NOT NULL default so it is always non-empty; a malformed or empty value
+	// would make shouldSendDigest's anchor unparseable ("never fire"), so require
+	// a valid 24h HH:MM here.
+	if _, _, ok := parseHHMM(req.DigestTime); !ok {
+		writeError(w, http.StatusBadRequest, "digest_time must be a 24h HH:MM time")
+		return
+	}
+
+	// Quiet-hours bounds: each is EITHER empty ("no boundary") OR a valid 24h
+	// HH:MM. parseHHMM already enforces the HH:MM range, so an empty string is
+	// the only extra case to allow through.
+	if !validQuietBound(req.QuietStart) {
+		writeError(w, http.StatusBadRequest, "quiet_start must be empty or a 24h HH:MM time")
+		return
+	}
+	if !validQuietBound(req.QuietEnd) {
+		writeError(w, http.StatusBadRequest, "quiet_end must be empty or a 24h HH:MM time")
+		return
+	}
+	// Cross-field rule: inQuietHours needs BOTH bounds to define a window, so
+	// quiet_start and quiet_end must be both set or both empty. A half-set window
+	// is meaningless (one bound alone never makes a window) and is rejected.
+	if (req.QuietStart == "") != (req.QuietEnd == "") {
+		writeError(w, http.StatusBadRequest, "quiet_start and quiet_end must both be set or both empty")
+		return
+	}
+	// quiet_tz: empty ("no zone") or a loadable IANA zone.
+	if req.QuietTz != "" {
+		if _, err := time.LoadLocation(req.QuietTz); err != nil {
+			writeError(w, http.StatusBadRequest, "quiet_tz must be empty or a valid IANA time zone")
+			return
+		}
+	}
+
 	if err := h.queries.UpdateNotificationSettings(r.Context(), database.UpdateNotificationSettingsParams{
 		OverBudget:             req.OverBudget,
 		TxnAdded:               req.TxnAdded,
@@ -103,6 +161,12 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		TxnEdited:              req.TxnEdited,
 		LargeTxn:               req.LargeTxn,
 		LargeTxnThresholdCents: dollarsToCents(req.LargeTxnThresholdDollars),
+		DigestMode:             req.DigestMode,
+		DigestTime:             req.DigestTime,
+		QuietStart:             req.QuietStart,
+		QuietEnd:               req.QuietEnd,
+		QuietTz:                req.QuietTz,
+		QuietAllowOverBudget:   req.QuietAllowOverBudget,
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update notification settings")
 		return

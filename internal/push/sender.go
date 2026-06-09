@@ -11,9 +11,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"time"
 
 	webpush "github.com/SherClockHolmes/webpush-go"
 )
+
+// defaultHTTPTimeout bounds a single push round-trip. A push gateway that
+// accepts the connection but never responds would otherwise block the serial
+// fan-out / digest send loop forever, permanently wedging all future digests.
+// 30s is generous for a one-shot POST while still guaranteeing the loop makes
+// progress. Applied only when the caller's client has no Timeout of its own.
+const defaultHTTPTimeout = 30 * time.Second
 
 // defaultTTL is the seconds a push service should retain an undelivered
 // message before discarding it. Six hours: long enough to survive a phone
@@ -52,13 +60,43 @@ type Sender struct {
 
 // NewSender builds a Sender. client must be non-nil; pass http.DefaultClient
 // (or a tuned client) — the caller owns its lifetime.
+//
+// If the supplied client has no Timeout, NewSender shallow-copies it and
+// applies defaultHTTPTimeout so a stalled gateway cannot wedge the send loop.
+// The copy shares the original Transport, so a shared http.DefaultClient keeps
+// its connection pool while its own Timeout stays zero for every other caller.
 func NewSender(publicKey, privateKey, subject string, client *http.Client) *Sender {
+	if client.Timeout == 0 {
+		c := *client
+		c.Timeout = defaultHTTPTimeout
+		client = &c
+	}
 	return &Sender{
 		publicKey:  publicKey,
 		privateKey: privateKey,
 		subject:    subject,
 		client:     client,
 	}
+}
+
+// Urgency hints to the push service how to trade delivery promptness against the
+// device's battery. It is an ALIAS of webpush.Urgency so the api package can set
+// push.UrgencyLow / push.UrgencyNormal WITHOUT importing webpush-go — the transport
+// library stays confined to this package (single swappable seam).
+type Urgency = webpush.Urgency
+
+const (
+	UrgencyLow    = webpush.UrgencyLow    // "low": deliver when on power or Wi-Fi (activity)
+	UrgencyNormal = webpush.UrgencyNormal // "normal": deliver unless battery is low (over_budget)
+)
+
+// Options carries the per-send Web Push transport knobs the caller controls. Topic
+// is the server-side collapse key: a later message with the same Topic REPLACES an
+// earlier still-undelivered one at the push service (<=32 url-safe chars). An empty
+// Urgency is normalised to UrgencyNormal in Send.
+type Options struct {
+	Topic   string
+	Urgency Urgency
 }
 
 // Send encrypts payload for sub and POSTs it to the push service. It returns
@@ -71,7 +109,7 @@ func NewSender(publicKey, privateKey, subject string, client *http.Client) *Send
 // The response body is ALWAYS drained and closed so the underlying connection
 // can be reused by the shared client — a leaked body pins the connection and
 // eventually exhausts the pool under fan-out.
-func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) (prune bool, err error) {
+func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte, opts Options) (prune bool, err error) {
 	wsub := &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys: webpush.Keys{
@@ -83,13 +121,18 @@ func (s *Sender) Send(ctx context.Context, sub Subscription, payload []byte) (pr
 	// #nosec G115 -- payload length is a small JSON blob, never near uint32 max.
 	recordSize := uint32(len(payload) + payloadRecordSlack)
 
+	urgency := opts.Urgency
+	if urgency == "" {
+		urgency = UrgencyNormal
+	}
 	resp, err := webpush.SendNotificationWithContext(ctx, payload, wsub, &webpush.Options{
 		HTTPClient:      s.client,
 		Subscriber:      s.subject,
 		VAPIDPublicKey:  s.publicKey,
 		VAPIDPrivateKey: s.privateKey,
 		TTL:             defaultTTL,
-		Urgency:         webpush.UrgencyNormal,
+		Topic:           opts.Topic,
+		Urgency:         urgency,
 		RecordSize:      recordSize,
 	})
 	if err != nil {

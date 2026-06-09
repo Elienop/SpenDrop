@@ -9,6 +9,10 @@ import { StaleWhileRevalidate } from 'workbox-strategies';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { urlBase64ToUint8Array } from './lib/vapid';
+import {
+  renderPushNotification,
+  type PushPayload,
+} from './lib/sw-notifications';
 
 declare const self: ServiceWorkerGlobalScope & { __WB_MANIFEST: Array<unknown> };
 
@@ -51,12 +55,6 @@ self.addEventListener('activate', () => {
 
 // --- Web Push -----------------------------------------------------------------
 
-interface PushPayload {
-  title?: string;
-  body?: string;
-  url?: string;
-}
-
 // PushSubscriptionChangeEvent is not in the default TS DOM lib for all targets;
 // declare a minimal local interface so the handler typechecks.
 interface PushSubscriptionChangeEvent extends ExtendableEvent {
@@ -74,18 +72,11 @@ self.addEventListener('push', (event) => {
     }
   }
   const title = data.title ?? 'SpenDrop';
-  const url = data.url ?? '/';
+  // The rollup + showNotification orchestration (with its try/catch raw-payload
+  // fallback) lives in sw-notifications.ts so it is unit-testable without the SW
+  // shell; pass the worker globals it needs.
   event.waitUntil(
-    self.registration.showNotification(title, {
-      body: data.body ?? '',
-      icon: '/pwa-192x192.png',
-      // Monochrome white-on-transparent SpenDrop "S" so Android renders the
-      // brand mark as a status-bar silhouette (not a generic bell, and not the
-      // solid white square a full-color PNG would mask to). Regenerate from the
-      // favicon glyph via: rsvg-convert -w 96 -h 96 <S-glyph>.svg -o badge-96x96.png
-      badge: '/badge-96x96.png',
-      data: { url },
-    }),
+    renderPushNotification(self.registration, self.navigator, data, title),
   );
 });
 

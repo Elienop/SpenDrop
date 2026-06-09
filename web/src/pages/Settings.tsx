@@ -1958,6 +1958,25 @@ export function NotificationsSection() {
     update,
   } = useNotificationPrefs();
 
+  const quietStartRef = useRef<HTMLInputElement | null>(null);
+  const quietEndRef = useRef<HTMLInputElement | null>(null);
+  // True while exactly one quiet bound is filled. The backend rejects a
+  // half-set window (400), and handleQuietWindow skips the PUT in that state,
+  // so without a hint the user sees their entry silently fail to save. Driven
+  // off the live inputs (uncontrolled) via recomputeQuietHalfSet.
+  const [quietHalfSet, setQuietHalfSet] = useState(false);
+  // Bumped to force-remount the uncontrolled digest-time input back to the
+  // server value when a user clears it. handleDigestTime skips the PUT on a
+  // blank value (the backend 400s on an empty HH:MM), so without a remount the
+  // field lingers blank, showing a time that no longer matches what is saved.
+  const [digestTimeNonce, setDigestTimeNonce] = useState(0);
+
+  function recomputeQuietHalfSet() {
+    const start = quietStartRef.current?.value ?? '';
+    const end = quietEndRef.current?.value ?? '';
+    setQuietHalfSet((start === '') !== (end === ''));
+  }
+
   // Per-type rows render in this fixed order. The `key` is the wire field
   // name shared with the backend fan-out type ids (see notifications.go).
   const TYPE_ROWS: { key: keyof NotificationSettings; label: string }[] = [
@@ -1997,6 +2016,73 @@ export function NotificationsSection() {
     }
   }
 
+  async function handleDigestMode(next: string) {
+    try {
+      await update({ digest_mode: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleDigestTime(value: string) {
+    // A native time input can be cleared to '' but digest_time has a NOT NULL
+    // default and the backend requires a valid HH:MM (an empty/invalid value
+    // makes the daily anchor unparseable → 400). Skip the PUT and bump the
+    // remount nonce so the cleared field snaps back to the persisted server
+    // value instead of lingering blank with a time that no longer matches.
+    if (value.trim() === '') {
+      setDigestTimeNonce((n) => n + 1);
+      return;
+    }
+    try {
+      await update({ digest_time: value });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleQuietField(key: 'quiet_tz', value: string) {
+    try {
+      await update({ [key]: value });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  // Quiet start/end must move as a pair: the backend rejects a half-set window
+  // (exactly one bound empty) with a 400. Saving each bound independently makes
+  // the transitional half-set state (e.g. start filled, end still empty) hit the
+  // server. Read both live inputs on every blur and skip the PUT while half-set;
+  // the save lands once the second bound is filled or both are cleared.
+  async function handleQuietWindow() {
+    const quiet_start = quietStartRef.current?.value ?? '';
+    const quiet_end = quietEndRef.current?.value ?? '';
+    if ((quiet_start === '') !== (quiet_end === '')) return;
+    try {
+      await update({ quiet_start, quiet_end });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
+  async function handleQuietAllowOverBudget(next: boolean) {
+    try {
+      await update({ quiet_allow_over_budget: next });
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update preferences',
+      );
+    }
+  }
+
   async function handleToggle(next: boolean) {
     try {
       if (next) {
@@ -2022,70 +2108,62 @@ export function NotificationsSection() {
     }
   }
 
-  // Intentional scoping (Task 8): the household notification-type policy is
-  // co-located inside this per-device push card, so a browser without push
-  // support shows only the unsupported notice and not the household block.
-  // Household policy is device-agnostic, but per task scope it lives here.
-  if (!supported) {
-    return (
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Notifications</CardTitle>
-          <CardDescription>
-            This browser does not support web push notifications.
-          </CardDescription>
-        </CardHeader>
-      </Card>
-    );
-  }
-
+  // The household notification-type policy below is device-agnostic and runs
+  // server-side, so it must stay reachable even where the browser cannot
+  // subscribe to web push. Only the per-device push enable toggle + Send-test
+  // button are gated behind `supported`; the household block stays gated by
+  // canEdit / the API.
   return (
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Notifications</CardTitle>
         <CardDescription>
-          Get a push notification on this device when a budget category goes
-          over its limit.
+          {supported
+            ? 'Get a push notification on this device when a budget category goes over its limit.'
+            : 'This browser does not support web push notifications on this device. The household-wide settings below still apply to every subscribed device.'}
         </CardDescription>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
-        {permission === 'denied' && (
-          <Alert variant="warning">
-            <AlertTriangle className="h-4 w-4" />
-            <AlertTitle>Notifications are blocked</AlertTitle>
-            <AlertDescription>
-              You've blocked notifications for this site in your browser.
-              Re-enable them in your browser's site settings, then toggle this
-              on.
-            </AlertDescription>
-          </Alert>
+        {supported && (
+          <>
+            {permission === 'denied' && (
+              <Alert variant="warning">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertTitle>Notifications are blocked</AlertTitle>
+                <AlertDescription>
+                  You've blocked notifications for this site in your browser.
+                  Re-enable them in your browser's site settings, then toggle
+                  this on.
+                </AlertDescription>
+              </Alert>
+            )}
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="push-toggle" className="flex flex-col gap-1">
+                <span>Push notifications on this device</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Each device subscribes separately.
+                </span>
+              </Label>
+              <Switch
+                id="push-toggle"
+                checked={subscribed}
+                disabled={busy || permission === 'denied'}
+                onCheckedChange={(v) => void handleToggle(v)}
+                aria-label="Push notifications on this device"
+              />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="w-fit"
+              disabled={busy || permission !== 'granted' || !subscribed}
+              onClick={() => void handleSendTest()}
+            >
+              Send test
+            </Button>
+            <Separator />
+          </>
         )}
-        <div className="flex max-w-md items-center justify-between gap-4">
-          <Label htmlFor="push-toggle" className="flex flex-col gap-1">
-            <span>Push notifications on this device</span>
-            <span className="text-xs font-normal text-muted-foreground">
-              Each device subscribes separately.
-            </span>
-          </Label>
-          <Switch
-            id="push-toggle"
-            checked={subscribed}
-            disabled={busy || permission === 'denied'}
-            onCheckedChange={(v) => void handleToggle(v)}
-            aria-label="Push notifications on this device"
-          />
-        </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="w-fit"
-          disabled={busy || permission !== 'granted' || !subscribed}
-          onClick={() => void handleSendTest()}
-        >
-          Send test
-        </Button>
-
-        <Separator />
         <div className="flex flex-col gap-1">
           <h3 className="text-sm font-medium">Household notification types</h3>
           <p className="text-xs text-muted-foreground">
@@ -2151,6 +2229,120 @@ export function NotificationsSection() {
                   }
                 />
               </div>
+            </div>
+
+            <Separator />
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="digest-mode" className="flex flex-col gap-1">
+                <span>Daily digest</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  One summary push instead of per-event alerts.
+                </span>
+              </Label>
+              <Select
+                value={settings.digest_mode}
+                disabled={!canEdit}
+                onValueChange={(v) => void handleDigestMode(v)}
+              >
+                <SelectTrigger id="digest-mode" className="w-28" aria-label="Daily digest">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="off">Off</SelectItem>
+                  <SelectItem value="daily">Daily</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {settings.digest_mode === 'daily' && (
+              <div className="flex max-w-md items-center justify-between gap-4">
+                <Label htmlFor="digest-time" className="flex flex-col gap-1">
+                  <span>Digest send time</span>
+                  <span className="text-xs font-normal text-muted-foreground">
+                    When the daily summary push goes out.
+                  </span>
+                </Label>
+                <Input
+                  id="digest-time"
+                  type="time"
+                  className="w-28"
+                  disabled={!canEdit}
+                  aria-label="Digest send time"
+                  defaultValue={settings.digest_time}
+                  key={`dt-${settings.digest_time}-${digestTimeNonce}`}
+                  onBlur={(e) => void handleDigestTime(e.currentTarget.value)}
+                />
+              </div>
+            )}
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-start">Quiet hours start</Label>
+              <Input
+                id="quiet-start"
+                type="time"
+                className="w-28"
+                disabled={!canEdit}
+                aria-label="Quiet hours start"
+                ref={quietStartRef}
+                defaultValue={settings.quiet_start}
+                key={`qs-${settings.quiet_start}`}
+                onChange={recomputeQuietHalfSet}
+                onBlur={() => void handleQuietWindow()}
+              />
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-end">Quiet hours end</Label>
+              <Input
+                id="quiet-end"
+                type="time"
+                className="w-28"
+                disabled={!canEdit}
+                aria-label="Quiet hours end"
+                ref={quietEndRef}
+                defaultValue={settings.quiet_end}
+                key={`qe-${settings.quiet_end}`}
+                onChange={recomputeQuietHalfSet}
+                onBlur={() => void handleQuietWindow()}
+              />
+            </div>
+            <p className="max-w-md text-xs text-muted-foreground">
+              Set both a start and end to silence non-urgent pushes during those
+              hours. A single bound is ignored.
+            </p>
+            {quietHalfSet && (
+              <p
+                role="alert"
+                className="max-w-md text-xs text-destructive"
+              >
+                Quiet hours need both a start and an end — fill in the other
+                field to save.
+              </p>
+            )}
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-tz">Time zone</Label>
+              <Input
+                id="quiet-tz"
+                type="text"
+                className="w-44"
+                disabled={!canEdit}
+                aria-label="Quiet hours time zone"
+                defaultValue={settings.quiet_tz}
+                key={`tz-${settings.quiet_tz}`}
+                onBlur={(e) => void handleQuietField('quiet_tz', e.currentTarget.value)}
+              />
+            </div>
+            <div className="flex max-w-md items-center justify-between gap-4">
+              <Label htmlFor="quiet-allow-ob" className="flex flex-col gap-1">
+                <span>Allow over-budget during quiet hours</span>
+                <span className="text-xs font-normal text-muted-foreground">
+                  Over-budget alerts still send while quiet hours are on.
+                </span>
+              </Label>
+              <Switch
+                id="quiet-allow-ob"
+                checked={settings.quiet_allow_over_budget}
+                disabled={!canEdit}
+                onCheckedChange={(v) => void handleQuietAllowOverBudget(v)}
+                aria-label="Allow over-budget during quiet hours"
+              />
             </div>
           </div>
         )}

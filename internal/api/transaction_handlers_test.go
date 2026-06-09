@@ -3630,3 +3630,185 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 		t.Errorf("type: got %q want txn_added", p.Type)
 	}
 }
+
+func TestEnumerateFilterCells_HidesTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", RoleMember)
+
+	liveCat := seedExpenseCategory(t, q, "Groceries")
+	ghostCat := seedExpenseCategory(t, q, "Rent")
+
+	// One live row in liveCat (50.00) and one tombstoned sentinel (999.99) in
+	// ghostCat — distinct cells, so a leak is unambiguous.
+	seedExpenseRow(t, q, user.ID, liveCat, "2026-05-10", 5000)
+	ghost := seedExpenseRow(t, q, user.ID, ghostCat, "2026-05-11", 99900)
+	if err := h.txnStore.Delete(context.Background(), user.ID, ghost.ID); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+
+	cells, err := h.enumerateFilterCells(context.Background(),
+		appendLiveTransactionsFilter(""), nil)
+	if err != nil {
+		t.Fatalf("enumerate: %v", err)
+	}
+	for _, c := range cells {
+		if c.CategoryID == ghostCat {
+			t.Fatalf("tombstoned 999 row leaked into cell set: %+v", c)
+		}
+	}
+	want := budgetCell{CategoryID: liveCat, Year: 2026, Month: 5}
+	found := false
+	for _, c := range cells {
+		if c == want {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("live cell %+v missing from %+v", want, cells)
+	}
+}
+
+func TestHandleDeleteTransactionsByFilter_ClearsOverBudgetLatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	catID := seedExpenseCategory(t, q, "Groceries")
+
+	// Budget 100.00; two rows summing to 120.00 -> over.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000,
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, admin.ID, catID, "2026-05-10", 6000)
+	seedExpenseRow(t, q, admin.ID, catID, "2026-05-12", 6000)
+
+	// Pre-trip the latch as if a fresh cross already alerted.
+	res, err := q.SetBudgetAlertState(context.Background(), database.SetBudgetAlertStateParams{
+		CategoryID: catID, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("set latch: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("expected latch newly set, rows-affected=%d", n)
+	}
+
+	// Filter-delete every row in this category.
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/transactions/delete-by-filter?category_id=%d", catID), nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleDeleteTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Spend dropped to 0 < limit -> the post-commit re-eval must have cleared
+	// the latch, so a follow-up clear removes 0 rows.
+	cleared, err := q.ClearBudgetAlertState(context.Background(), database.ClearBudgetAlertStateParams{
+		CategoryID: catID, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n, _ := cleared.RowsAffected(); n != 0 {
+		t.Fatalf("latch should have been cleared by delete-by-filter re-eval; got %d rows still set", n)
+	}
+}
+
+func cellsContain(cells []budgetCell, want budgetCell) bool {
+	for _, c := range cells {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFilterUpdateCells_CategorySwapUnionsOldAndNew(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	newCat := int64(2)
+	got := filterUpdateCells(old, database.UpdatePatch{CategoryID: &newCat})
+
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 5}) ||
+		!cellsContain(got, budgetCell{CategoryID: 2, Year: 2026, Month: 5}) {
+		t.Fatalf("want old cat 1 AND new cat 2, got %+v", got)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 deduped cells, got %d: %+v", len(got), got)
+	}
+}
+
+func TestFilterUpdateCells_DateSwapMovesMonth(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	d := "2026-06-15"
+	got := filterUpdateCells(old, database.UpdatePatch{Date: &d})
+
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 6}) {
+		t.Fatalf("date swap must add the June cell; got %+v", got)
+	}
+	if !cellsContain(got, budgetCell{CategoryID: 1, Year: 2026, Month: 5}) {
+		t.Fatalf("old May cell must be retained; got %+v", got)
+	}
+}
+
+func TestFilterUpdateCells_DescriptionOnly_ReturnsOldOnly(t *testing.T) {
+	old := []budgetCell{{CategoryID: 1, Year: 2026, Month: 5}}
+	desc := "renamed"
+	got := filterUpdateCells(old, database.UpdatePatch{Description: &desc})
+
+	if len(got) != 1 || got[0] != old[0] {
+		t.Fatalf("description-only patch must not add cells; got %+v", got)
+	}
+}
+
+func TestHandleUpdateTransactionsByFilter_MoveOutClearsOldLatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	overCat := seedExpenseCategory(t, q, "Dining")
+	otherCat := seedExpenseCategory(t, q, "Misc")
+
+	// overCat: budget 100.00, two rows summing to 120.00 -> over + latched.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: overCat, AmountCents: 10000,
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, admin.ID, overCat, "2026-05-10", 6000)
+	seedExpenseRow(t, q, admin.ID, overCat, "2026-05-12", 6000)
+	res, err := q.SetBudgetAlertState(context.Background(), database.SetBudgetAlertStateParams{
+		CategoryID: overCat, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("set latch: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("expected latch newly set, rows-affected=%d", n)
+	}
+
+	// Move every Dining row into Misc via update-by-filter.
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, otherCat)
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", overCat),
+		strings.NewReader(body))
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// overCat now has 0 spend < 100 limit -> its latch must have re-armed.
+	cleared, err := q.ClearBudgetAlertState(context.Background(), database.ClearBudgetAlertStateParams{
+		CategoryID: overCat, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n, _ := cleared.RowsAffected(); n != 0 {
+		t.Fatalf("old category latch should have cleared after move-out; got %d still set", n)
+	}
+}

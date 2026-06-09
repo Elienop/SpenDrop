@@ -308,7 +308,7 @@ func TestPublishInvalidate_DeleteByFilter_BroadcastsTxnResourcesPlusTrash(t *tes
 		t.Fatalf("delete-by-filter: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 	assertResources(t, drainResources(t, ch),
-		[]string{"transactions", "dashboard", "reports", "trash"})
+		[]string{"transactions", "dashboard", "reports", "budgets", "trash"})
 }
 
 func TestPublishInvalidate_UpdateByFilter_BroadcastsTxnResources(t *testing.T) {
@@ -331,7 +331,7 @@ func TestPublishInvalidate_UpdateByFilter_BroadcastsTxnResources(t *testing.T) {
 		t.Fatalf("update-by-filter: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 	assertResources(t, drainResources(t, ch),
-		[]string{"transactions", "dashboard", "reports"})
+		[]string{"transactions", "dashboard", "reports", "budgets"})
 }
 
 func TestPublishInvalidate_BulkRename_BroadcastsTransactionsAndReports(t *testing.T) {
