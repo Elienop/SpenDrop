@@ -3763,3 +3763,52 @@ func TestFilterUpdateCells_DescriptionOnly_ReturnsOldOnly(t *testing.T) {
 		t.Fatalf("description-only patch must not add cells; got %+v", got)
 	}
 }
+
+func TestHandleUpdateTransactionsByFilter_MoveOutClearsOldLatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	overCat := seedExpenseCategory(t, q, "Dining")
+	otherCat := seedExpenseCategory(t, q, "Misc")
+
+	// overCat: budget 100.00, two rows summing to 120.00 -> over + latched.
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: overCat, AmountCents: 10000,
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	seedExpenseRow(t, q, admin.ID, overCat, "2026-05-10", 6000)
+	seedExpenseRow(t, q, admin.ID, overCat, "2026-05-12", 6000)
+	res, err := q.SetBudgetAlertState(context.Background(), database.SetBudgetAlertStateParams{
+		CategoryID: overCat, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("set latch: %v", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		t.Fatalf("expected latch newly set, rows-affected=%d", n)
+	}
+
+	// Move every Dining row into Misc via update-by-filter.
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, otherCat)
+	req := httptest.NewRequest(http.MethodPost,
+		fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", overCat),
+		strings.NewReader(body))
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// overCat now has 0 spend < 100 limit -> its latch must have re-armed.
+	cleared, err := q.ClearBudgetAlertState(context.Background(), database.ClearBudgetAlertStateParams{
+		CategoryID: overCat, Year: 2026, Month: 5,
+	})
+	if err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if n, _ := cleared.RowsAffected(); n != 0 {
+		t.Fatalf("old category latch should have cleared after move-out; got %d still set", n)
+	}
+}

@@ -1754,6 +1754,28 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// FilterLatchFix: enumerate the OLD (category, month) cells the matched live
+	// rows occupy BEFORE the update; T18b derives the NEW cells the patch moves
+	// them to post-commit. Rebuild liveClause here exactly as the branch helpers
+	// do (buildTransactionWhereClause + non-admin user_id append +
+	// appendLiveTransactionsFilter) so the enumeration scope matches the rows
+	// the UPDATE will touch. Best-effort — an enumeration error must not block
+	// the update.
+	enumWhere, enumArgs := buildTransactionWhereClause(r.URL.Query())
+	if user.Role != RoleAdmin {
+		if enumWhere == "" {
+			enumWhere = " WHERE t.user_id = ?"
+		} else {
+			enumWhere += " AND t.user_id = ?"
+		}
+		enumArgs = append(enumArgs, user.ID)
+	}
+	oldCells, err := h.enumerateFilterCells(r.Context(), appendLiveTransactionsFilter(enumWhere), enumArgs)
+	if err != nil {
+		log.Printf("update-by-filter: enumerate affected cells: %v", err)
+		oldCells = nil
+	}
+
 	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
@@ -1814,19 +1836,23 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
 	}
 
-	// Budget-alert hook intentionally skipped here: the no-tags fast path is a
-	// single SQL UPDATE that does not enumerate per-row (category, month), so
-	// there is no precise old/new cell to evaluate (unlike the ID-list
-	// handleBatchUpdateTransactions, which does enumerate). Wipe-and-reimport
-	// workflows re-trip alerts on the next single-row, batch-create, or
-	// import. (Phase C, Task 17.)
+	// FilterLatchFix: a filter update relocates spend across (category, month)
+	// cells — a category a row LEFT may drop back under budget (latch clears) and
+	// a category it ENTERED may cross over. Evaluate the union of OLD and NEW
+	// cells post-commit, best-effort (never blocks the response).
+	if updated > 0 {
+		cells := filterUpdateCells(oldCells, patch)
+		if len(cells) > 0 {
+			h.evaluateBudgetAlerts(r.Context(), cells)
+		}
+	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): a filter
 	// update can move amount/category/date, so list, dashboard totals, and
-	// reports may change. Budgets are omitted to match the budget-alert skip
-	// above (no precise cell enumerated). Fire only when rows actually updated.
+	// reports may change. Budgets may change now that affected cells are
+	// re-evaluated above. Fire only when rows actually updated.
 	if updated > 0 {
-		h.publishInvalidate("transactions", "dashboard", "reports")
+		h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 	}
 
 	writeJSON(w, http.StatusOK, map[string]int64{"updated": updated})

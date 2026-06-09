@@ -331,7 +331,7 @@ func TestPublishInvalidate_UpdateByFilter_BroadcastsTxnResources(t *testing.T) {
 		t.Fatalf("update-by-filter: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
 	assertResources(t, drainResources(t, ch),
-		[]string{"transactions", "dashboard", "reports"})
+		[]string{"transactions", "dashboard", "reports", "budgets"})
 }
 
 func TestPublishInvalidate_BulkRename_BroadcastsTransactionsAndReports(t *testing.T) {
