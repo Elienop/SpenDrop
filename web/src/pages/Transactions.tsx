@@ -593,6 +593,14 @@ export function Transactions() {
     deleteFilter: deleteSavedFilter,
   } = useSavedFilters();
 
+  // When the activity ledger is opened, the user has seen whatever the rolled-up
+  // activity push was counting — clear the PWA app-icon badge. Feature-detected:
+  // navigator.clearAppBadge is absent on browsers without the Badging API, so the
+  // optional call short-circuits there.
+  useEffect(() => {
+    void navigator.clearAppBadge?.();
+  }, []);
+
   const [categories, setCategories] = useState<Category[]>([]);
 
   useEffect(() => {

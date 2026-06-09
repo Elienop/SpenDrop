@@ -6,7 +6,7 @@ import {
   type RenderOptions,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactElement, type ReactNode } from 'react';
 
@@ -970,6 +970,29 @@ describe('Transactions page', () => {
       expect(
         screen.getByRole('button', { name: /^edit \(1\)$/i }),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe('app badge', () => {
+    afterEach(() => {
+      Reflect.deleteProperty(navigator, 'clearAppBadge');
+    });
+
+    it('clears the PWA app-icon badge on mount (Badging API available)', () => {
+      const clearAppBadge = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clearAppBadge', {
+        configurable: true,
+        value: clearAppBadge,
+      });
+
+      render(<Transactions />);
+
+      expect(clearAppBadge).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not throw when the Badging API is unavailable', () => {
+      // navigator.clearAppBadge intentionally absent (afterEach deletes it).
+      expect(() => render(<Transactions />)).not.toThrow();
     });
   });
 });
