@@ -65,53 +65,53 @@ func (h *Handler) largeTxnEnabledAndThreshold(ctx context.Context) (enabled bool
 // notifyTxnAdded fires after a single transaction create. LARGE-TXN PRECEDENCE:
 // when large_txn is enabled and the amount is at/over the household threshold,
 // we send ONE "large_txn" push INSTEAD OF "txn_added" — never both.
-func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction, excludeUserID int64) {
+func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
 	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
-		h.emitLarge(ctx, txn, "added", excludeUserID)
+		h.emitLarge(ctx, txn, "added", actor, excludeUserID)
 		return
 	}
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_added",
 		"Transaction added",
-		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
+		fmt.Sprintf("%s added $%.2f in %s — %s", actor, dollars, cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // notifyTxnEdited fires after a single transaction update. Same large-txn
 // precedence as create.
-func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction, excludeUserID int64) {
+func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
 	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
-		h.emitLarge(ctx, txn, "edited", excludeUserID)
+		h.emitLarge(ctx, txn, "edited", actor, excludeUserID)
 		return
 	}
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_edited",
 		"Transaction edited",
-		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
+		fmt.Sprintf("%s edited $%.2f in %s — %s", actor, dollars, cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // notifyTxnDeleted fires after a single transaction delete. No large-txn
 // precedence on delete — a removal is activity, not a large spend signal.
-func (h *Handler) notifyTxnDeleted(ctx context.Context, txn database.Transaction, excludeUserID int64) {
+func (h *Handler) notifyTxnDeleted(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_deleted",
 		"Transaction deleted",
-		fmt.Sprintf("$%.2f in %s — %s", dollars, cat, txn.Description),
+		fmt.Sprintf("%s deleted $%.2f in %s — %s", actor, dollars, cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // emitLarge sends the "large_txn" payload. verb is the originating op
 // ("added"/"edited") purely for the body wording.
-func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb string, excludeUserID int64) {
+func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb string, actor string, excludeUserID int64) {
 	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "large_txn",
 		"Large transaction",
-		fmt.Sprintf("$%.2f %s in %s — %s", dollars, verb, cat, txn.Description),
+		fmt.Sprintf("%s %s $%.2f in %s — %s", actor, verb, dollars, cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
@@ -120,7 +120,7 @@ func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb 
 // "deleted" and selects the txn_added / txn_deleted type. Batches send only the
 // activity aggregate; large_txn is intentionally NOT evaluated for batches in
 // v1 (a bulk import should not fan out N large alerts).
-func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int, excludeUserID int64) {
+func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int, actor string, excludeUserID int64) {
 	if count <= 0 {
 		return
 	}
@@ -138,6 +138,6 @@ func (h *Handler) notifyTxnBatch(ctx context.Context, kind string, count int, ex
 		noun = "transaction"
 	}
 	h.emit(ctx, notifType, title,
-		fmt.Sprintf("%d %s %s", count, noun, kind),
+		fmt.Sprintf("%s %s %d %s", actor, kind, count, noun),
 		"/transactions", excludeUserID)
 }

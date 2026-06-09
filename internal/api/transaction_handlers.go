@@ -376,7 +376,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 
 	// Activity notification (post-commit, best-effort). notifyTxnAdded applies
 	// large-txn precedence internally; both no-op when the type is disabled.
-	h.notifyTxnAdded(r.Context(), txn, user.ID)
+	h.notifyTxnAdded(r.Context(), txn, user.DisplayName, user.ID)
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): tell every
 	// open household device to refetch. A new row changes the list, the
@@ -504,7 +504,7 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 			AmountCents: updated.AmountCents,
 			CategoryID:  updated.CategoryID,
 			Description: updated.Description,
-		}, user.ID)
+		}, user.DisplayName, user.ID)
 	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): an edit can
@@ -578,7 +578,7 @@ func (h *Handler) handleDeleteTransaction(w http.ResponseWriter, r *http.Request
 		AmountCents: existing.AmountCents,
 		CategoryID:  existing.CategoryID,
 		Description: existing.Description,
-	}, user.ID)
+	}, user.DisplayName, user.ID)
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): a delete
 	// tombstones the row — it leaves the list/dashboard/reports/budgets and
@@ -698,7 +698,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	// Activity notification: ONE aggregate push for the whole batch, never
 	// one-per-row. len(results) is the count of successful inserts.
 	if n := len(results); n > 0 {
-		h.notifyTxnBatch(r.Context(), "added", n, user.ID)
+		h.notifyTxnBatch(r.Context(), "added", n, user.DisplayName, user.ID)
 	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): ONE signal
@@ -1178,7 +1178,7 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 
 	// Activity notification: ONE aggregate push for the whole batch delete.
 	if deleted > 0 {
-		h.notifyTxnBatch(r.Context(), "deleted", deleted, user.ID)
+		h.notifyTxnBatch(r.Context(), "deleted", deleted, user.DisplayName, user.ID)
 	}
 
 	// Live-updates broadcast (post-commit, best-effort, nil-safe): ONE signal

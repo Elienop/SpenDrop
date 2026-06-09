@@ -80,11 +80,14 @@ func TestNotifyTxnAdded_FiresWhenEnabled(t *testing.T) {
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234) // $12.34, below default $500 threshold
-	h.notifyTxnAdded(context.Background(), txn, 0)
+	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
 
 	p := decodeOnly(t, rec)
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+	if !strings.HasPrefix(p.Body, user.DisplayName+" ") {
+		t.Errorf("body must start with actor display name, got %q", p.Body)
 	}
 }
 
@@ -96,9 +99,9 @@ func TestNotifyTxnDeleted_And_Edited_FireWithType(t *testing.T) {
 		wantTyp string
 	}{
 		{"deleted", func(p *database.UpdateNotificationSettingsParams) { p.TxnDeleted = true },
-			func(h *Handler, txn database.Transaction) { h.notifyTxnDeleted(context.Background(), txn, 0) }, "txn_deleted"},
+			func(h *Handler, txn database.Transaction) { h.notifyTxnDeleted(context.Background(), txn, "alice", 0) }, "txn_deleted"},
 		{"edited", func(p *database.UpdateNotificationSettingsParams) { p.TxnEdited = true },
-			func(h *Handler, txn database.Transaction) { h.notifyTxnEdited(context.Background(), txn, 0) }, "txn_edited"},
+			func(h *Handler, txn database.Transaction) { h.notifyTxnEdited(context.Background(), txn, "alice", 0) }, "txn_edited"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, db := setupTestDB(t)
@@ -115,6 +118,9 @@ func TestNotifyTxnDeleted_And_Edited_FireWithType(t *testing.T) {
 			p := decodeOnly(t, rec)
 			if p.Type != tc.wantTyp {
 				t.Errorf("type: got %q want %q", p.Type, tc.wantTyp)
+			}
+			if !strings.HasPrefix(p.Body, "alice ") {
+				t.Errorf("body must start with actor display name, got %q", p.Body)
 			}
 		})
 	}
@@ -137,7 +143,7 @@ func TestNotifyTxnAdded_LargePrecedence(t *testing.T) {
 	})
 
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 120000) // $1200 >= $500
-	h.notifyTxnAdded(context.Background(), txn, 0)
+	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
 
 	p := decodeOnly(t, rec) // exactly one push, not two
 	if p.Type != "large_txn" {
@@ -157,7 +163,7 @@ func TestNotifyTxnAdded_NoOpWhenDisabled(t *testing.T) {
 	// txn_added stays at its default (off); do not enable.
 
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234)
-	h.notifyTxnAdded(context.Background(), txn, 0)
+	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
 	if rec.count() != 0 {
 		t.Fatalf("disabled: want 0 sends, got %d", rec.count())
 	}
@@ -172,9 +178,12 @@ func TestNotifyTxnBatch_AggregatesOneSend(t *testing.T) {
 	seedPushSub(t, q, user.ID, "https://push.example/batch")
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
-	h.notifyTxnBatch(context.Background(), "added", 7, 0)
+	h.notifyTxnBatch(context.Background(), "added", 7, user.DisplayName, 0)
 	p := decodeOnly(t, rec) // ONE aggregate push, not 7
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
+	}
+	if !strings.HasPrefix(p.Body, user.DisplayName+" ") {
+		t.Errorf("body must start with actor display name, got %q", p.Body)
 	}
 }

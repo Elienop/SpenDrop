@@ -37,6 +37,16 @@ describe('buildNotificationOptions tag + renotify', () => {
     expect((opts.data as { count?: number }).count).toBe(3);
   });
 
+  it('persists data.lines so the next rollup can accumulate from it', () => {
+    const opts = buildNotificationOptions(
+      { body: 'x', url: '/transactions', tag: 'activity' },
+      3,
+      ['a', 'b'],
+    );
+    expect((opts.data as { lines?: readonly string[] }).lines).toEqual(['a', 'b']);
+    expect((opts.data as { count?: number }).count).toBe(3);
+  });
+
   it('sets renotify true ONLY for budget* tags', () => {
     expect((buildNotificationOptions({ tag: 'budget-7-202606' }) as OptsWithRenotify).renotify).toBe(true);
     expect((buildNotificationOptions({ tag: 'budget-summary' }) as OptsWithRenotify).renotify).toBe(true);
@@ -63,35 +73,60 @@ describe('activityCount', () => {
 import { applyActivityRollup } from './sw-notifications';
 
 describe('applyActivityRollup', () => {
-  it('increments the prior same-tag count and rewrites the body to "N new activities"', () => {
-    // Simulates registration.getNotifications({ tag: 'activity' }) returning one
-    // existing notification that carried data.count = 3.
-    const existing = [{ data: { count: 3 } }];
+  it('rolls a burst: COUNT in the title, newest-first item lines in the body', () => {
+    // Simulates getNotifications({ tag: 'activity' }) returning one existing
+    // notification that carried data.count = 3 and two prior item lines.
+    const existing = [{ data: { count: 3, lines: ['old1', 'old2'] } }];
     const result = applyActivityRollup(existing, {
       tag: 'activity',
       url: '/transactions',
-      body: '$1.00 in Groceries — milk',
+      body: 'Sara added $20.00 in Coffee — Latte',
     });
     expect(result.count).toBe(4);
-    expect(result.payload.body).toBe('4 new activities');
+    // Newest item is prepended so the COLLAPSED first body line is the newest.
+    expect(result.lines).toEqual([
+      'Sara added $20.00 in Coffee — Latte',
+      'old1',
+      'old2',
+    ]);
+    expect(result.payload.title).toBe('4 new activities');
+    // overflow = running count(4) - shown lines(3) = 1
+    expect(result.payload.body).toBe(
+      'Sara added $20.00 in Coffee — Latte\nold1\nold2\n+1 more',
+    );
     expect(result.payload.tag).toBe('activity'); // other fields preserved
     expect(result.payload.url).toBe('/transactions');
   });
 
-  it('keeps the detailed single-event body for the first activity (count 1)', () => {
-    const result = applyActivityRollup([], {
-      tag: 'activity',
-      body: '$1.00 in Groceries — milk',
-    });
-    expect(result.count).toBe(1);
-    expect(result.payload.body).toBe('$1.00 in Groceries — milk');
+  it('caps accumulated lines at MAX_ROLLUP_LINES (4), newest-first', () => {
+    const existing = [{ data: { count: 5, lines: ['l4', 'l3', 'l2', 'l1'] } }];
+    const result = applyActivityRollup(existing, { tag: 'activity', body: 'newest' });
+    expect(result.count).toBe(6);
+    expect(result.lines).toEqual(['newest', 'l4', 'l3', 'l2']);
+    // overflow uses the RUNNING count, not the (capped) array length: 6 - 4 = 2
+    expect(result.payload.body).toBe('newest\nl4\nl3\nl2\n+2 more');
+    expect(result.payload.title).toBe('6 new activities');
   });
 
-  it('rewrites to the plural rollup once a second activity arrives (count 2)', () => {
-    const existing = [{ data: { count: 1 } }];
-    const result = applyActivityRollup(existing, { tag: 'activity', body: 'detailed' });
+  it('omits "+N more" when the running count fits within the shown lines', () => {
+    const existing = [{ data: { count: 1, lines: ['old'] } }];
+    const result = applyActivityRollup(existing, { tag: 'activity', body: 'new' });
     expect(result.count).toBe(2);
-    expect(result.payload.body).toBe('2 new activities');
+    expect(result.lines).toEqual(['new', 'old']);
+    expect(result.payload.body).toBe('new\nold'); // overflow 2 - 2 = 0 => no "+N more"
+    expect(result.payload.title).toBe('2 new activities');
+  });
+
+  it('keeps the detailed single-event body AND title for the first activity (count 1)', () => {
+    const result = applyActivityRollup([], {
+      tag: 'activity',
+      title: 'SpenDrop',
+      body: 'Sara added $1.00 in Groceries — milk',
+    });
+    expect(result.count).toBe(1);
+    expect(result.payload.body).toBe('Sara added $1.00 in Groceries — milk');
+    expect(result.payload.title).toBe('SpenDrop'); // unchanged
+    expect(result.lines).toEqual(['Sara added $1.00 in Groceries — milk']);
   });
 });
 
@@ -116,12 +151,12 @@ import { renderPushNotification } from './sw-notifications';
 type ShowCall = { title: string; options: NotificationOptions };
 
 describe('renderPushNotification', () => {
-  it('rolls up an activity burst into "N new activities" and badges the running count', async () => {
+  it('rolls up an activity burst: "N new activities" TITLE, newest-first body, persisted lines, badge', async () => {
     const shown: ShowCall[] = [];
     const badged: number[] = [];
     await renderPushNotification(
       {
-        getNotifications: async () => [{ data: { count: 2 } }],
+        getNotifications: async () => [{ data: { count: 2, lines: ['prev'] } }],
         showNotification: async (title, options) => {
           shown.push({ title, options });
         },
@@ -131,13 +166,42 @@ describe('renderPushNotification', () => {
           badged.push(c ?? -1);
         },
       },
-      { tag: 'activity', body: 'detailed', url: '/transactions' },
+      { tag: 'activity', body: 'Sara added $20.00 in Coffee — Latte', url: '/transactions' },
       'SpenDrop',
     );
     expect(shown).toHaveLength(1);
-    expect(shown[0].options.body).toBe('3 new activities');
+    // The COUNT goes in the title; the collapsed first body line is the NEWEST item.
+    expect(shown[0].title).toBe('3 new activities');
+    expect(shown[0].options.body).toBe('Sara added $20.00 in Coffee — Latte\nprev\n+1 more');
     expect((shown[0].options.data as { count?: number }).count).toBe(3);
+    expect((shown[0].options.data as { lines?: readonly string[] }).lines).toEqual([
+      'Sara added $20.00 in Coffee — Latte',
+      'prev',
+    ]);
     expect(badged).toEqual([3]);
+  });
+
+  it('shows the detailed single-event body with the original title for the first activity', async () => {
+    const shown: ShowCall[] = [];
+    await renderPushNotification(
+      {
+        getNotifications: async () => [],
+        showNotification: async (title, options) => {
+          shown.push({ title, options });
+        },
+      },
+      { setAppBadge: async () => {} },
+      {
+        tag: 'activity',
+        title: 'SpenDrop',
+        body: 'Sara added $1.00 in Groceries — milk',
+        url: '/transactions',
+      },
+      'SpenDrop',
+    );
+    expect(shown).toHaveLength(1);
+    expect(shown[0].title).toBe('SpenDrop');
+    expect(shown[0].options.body).toBe('Sara added $1.00 in Groceries — milk');
   });
 
   it('falls back to the RAW payload (never drops the notification) when getNotifications rejects', async () => {
