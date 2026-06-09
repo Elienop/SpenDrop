@@ -3008,3 +3008,31 @@ func (q *Queries) UpdateNotificationSettings(ctx context.Context, arg UpdateNoti
 	)
 	return err
 }
+
+const setLastDigestAt = `-- name: SetLastDigestAt :exec
+UPDATE notification_settings SET last_digest_at = ? WHERE id = 1
+`
+
+// SetLastDigestAt advances the restart-safe digest cursor. The instant is
+// formatted to SQLite's stored DATETIME text (UTC) so a later GET scans it back
+// into sql.NullTime cleanly.
+func (q *Queries) SetLastDigestAt(ctx context.Context, at time.Time) error {
+	_, err := q.db.ExecContext(ctx, setLastDigestAt, at.UTC().Format("2006-01-02 15:04:05"))
+	return err
+}
+
+const countTransactionsSince = `-- name: CountTransactionsSince :one
+SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS NULL
+`
+
+// CountTransactionsSince counts LIVE transactions committed after since. The
+// cutoff is formatted to the column's stored text form ('YYYY-MM-DD HH:MM:SS',
+// UTC) so the comparison is lexicographic against the CURRENT_TIMESTAMP-populated
+// created_at - binding a raw time.Time lets the driver pick an RFC3339 form that
+// sorts differently. deleted_at IS NULL keeps tombstoned rows out of the digest.
+func (q *Queries) CountTransactionsSince(ctx context.Context, since time.Time) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTransactionsSince, since.UTC().Format("2006-01-02 15:04:05"))
+	var n int64
+	err := row.Scan(&n)
+	return n, err
+}

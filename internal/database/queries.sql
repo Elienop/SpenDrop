@@ -144,6 +144,11 @@ INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, or
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
+-- name: CountTransactionsSince :one
+-- Digest "what changed" count. LIVE rows only (deleted_at IS NULL) so a
+-- tombstoned row never inflates a digest (soft-delete discipline).
+SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS NULL;
+
 -- name: GetTransactionByID :one
 -- Mutation-only caller: used by TransactionStore.Update/Delete to emit the
 -- audit before/after rows. Deliberately leaks tombstoned rows so Delete can
@@ -909,3 +914,6 @@ SET over_budget = ?, txn_added = ?, txn_deleted = ?, txn_edited = ?, large_txn =
     digest_mode = ?, quiet_start = ?, quiet_end = ?, quiet_tz = ?, quiet_allow_over_budget = ?,
     updated_at = datetime('now')
 WHERE id = 1;
+
+-- name: SetLastDigestAt :exec
+UPDATE notification_settings SET last_digest_at = ? WHERE id = 1;
