@@ -13,6 +13,7 @@ export interface PushPayload {
 export function buildNotificationOptions(
   payload: PushPayload,
   count?: number,
+  lines?: readonly string[],
 ): NotificationOptions {
   return {
     body: payload.body ?? '',
@@ -22,9 +23,16 @@ export function buildNotificationOptions(
     badge: '/badge-96x96.png',
     tag: payload.tag, // undefined => no collapse (today's behavior)
     renotify: (payload.tag ?? '').startsWith('budget'), // true ONLY for over_budget tags
-    data: { url: payload.url ?? '/', count },
+    // `lines` carries the accumulated per-item detail forward so the next
+    // same-tag push can prepend its newest item (see applyActivityRollup).
+    data: { url: payload.url ?? '/', count, lines },
   } as NotificationOptions;
 }
+
+// Cap on the per-item detail lines carried in an activity rollup body. Web push
+// has no list/InboxStyle, so the only lever is a single multi-line `body`; we
+// keep the newest few items + a "+N more" tail.
+const MAX_ROLLUP_LINES = 4;
 
 // Roll-up arithmetic for collapsing activity pushes. `existing` is the count
 // carried on the prior same-tag notification (undefined when none yet); each new
@@ -37,20 +45,37 @@ export function activityCount(existing: number | undefined): number {
 // Kept local + minimal so this module imports no webworker/DOM globals and stays
 // importable by vitest. Notification.data is `any`, so Notification[] is assignable.
 interface ActivityNotificationLike {
-  readonly data?: { readonly count?: number } | null;
+  readonly data?: {
+    readonly count?: number;
+    readonly lines?: readonly string[];
+  } | null;
 }
 
 // Given the existing same-tag notifications and an incoming activity payload,
-// return the running count and a payload whose body reads "N new activities"
-// for a burst (n > 1), or keeps the detailed single-event body for the first
-// add (n === 1). Pure — the SW shell supplies `existing` and shows the result.
+// return the running count, the accumulated per-item lines (newest-first, capped
+// at MAX_ROLLUP_LINES), and a payload to show. For a burst (n > 1) the COUNT goes
+// in the TITLE and the item lines fill the BODY — so the collapsed first body
+// line on Android is the NEWEST item, not the count. For the first add (n === 1)
+// the detailed single-event body AND title are returned UNCHANGED. Pure — the SW
+// shell supplies `existing` and shows the result.
 export function applyActivityRollup(
   existing: ReadonlyArray<ActivityNotificationLike>,
   payload: PushPayload,
-): { payload: PushPayload; count: number } {
-  const n = activityCount(existing[0]?.data?.count);
-  const body = n > 1 ? `${n} new activities` : payload.body;
-  return { payload: { ...payload, body }, count: n };
+): { payload: PushPayload; count: number; lines: readonly string[] } {
+  const prior = existing[0]?.data;
+  const priorLines = prior?.lines ?? [];
+  const count = activityCount(prior?.count);
+  // Newest-first so the collapsed first body line is the latest item.
+  const lines = [payload.body ?? '', ...priorLines].slice(0, MAX_ROLLUP_LINES);
+  if (count === 1) {
+    return { payload, count, lines };
+  }
+  const title = `${count} new activities`;
+  // Overflow uses the RUNNING count (not the capped array length) so items that
+  // scrolled past the cap are still tallied in the "+N more" tail.
+  const overflow = count - lines.length;
+  const body = lines.join('\n') + (overflow > 0 ? `\n+${overflow} more` : '');
+  return { payload: { ...payload, title, body }, count, lines };
 }
 
 // Minimal structural type for the Badging API surface we use. Optional, so a
@@ -104,18 +129,22 @@ export async function renderPushNotification(
 ): Promise<void> {
   try {
     let count: number | undefined;
+    let lines: readonly string[] | undefined;
     let payload = data;
     if (data.tag === 'activity') {
       const existing = await registration.getNotifications({ tag: 'activity' });
       const rolled = applyActivityRollup(existing, data);
       payload = rolled.payload;
       count = rolled.count;
+      lines = rolled.lines;
       // Mirror the running activity count onto the PWA app-icon badge.
       applyAppBadge(nav, count);
     }
+    // Show the ROLLED title (e.g. "N new activities" for a burst); falls back to
+    // the per-event title arg for the single-event / non-activity paths.
     await registration.showNotification(
-      title,
-      buildNotificationOptions(payload, count),
+      payload.title ?? title,
+      buildNotificationOptions(payload, count, lines),
     );
   } catch {
     await registration.showNotification(title, buildNotificationOptions(data));
