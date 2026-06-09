@@ -740,7 +740,7 @@ shaped before they reach your devices:
   non-urgent real-time **activity** pushes during a daily quiet window (IANA time
   zone). Over-budget alerts can optionally bypass it, so urgent state changes
   still get through.
-- **Daily digest (household-wide):** independently, set **Digest mode** to
+- **Daily digest (household-wide):** independently, set **Daily digest** to
   *Daily* to receive one rollup of what changed, sent once a day at the
   configurable **Digest send time** (`digest_time`, default 08:00). The digest
   runs on its own schedule **regardless of quiet hours** — the two features are
