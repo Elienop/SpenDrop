@@ -21,7 +21,7 @@ import (
 //     batch. Without enforcement, an UPDATE that points category_id at a
 //     nonexistent category would silently succeed (orphan FK) and the
 //     test would pass for the wrong reason.
-//   - A future cross-user admin-bypass test (also Task 3+) relies on the
+//   - TestUpdateTx_AdminBypassesOwnership relies on the
 //     ownership predicate being the ONLY thing standing between actorA
 //     and actorB's rows; FKs being on means a typo in the helper can't
 //     accidentally paper over a missing scope check.
@@ -190,7 +190,7 @@ func TestUpdateTx_HappyPath_AppliesOnlySetFields(t *testing.T) {
 
 	newCat := catB
 	patch := UpdatePatch{CategoryID: &newCat}
-	before, after, err := store.UpdateTx(ctx, tx, userID, txnID, patch)
+	before, after, err := store.UpdateTx(ctx, tx, Actor{UserID: userID}, txnID, patch)
 	if err != nil {
 		t.Fatalf("UpdateTx: %v", err)
 	}
@@ -254,16 +254,15 @@ func TestUpdateTx_TombstonedRow_ReturnsErrTombstoned(t *testing.T) {
 	defer tx.Rollback()
 
 	newCat := catA
-	_, _, err = store.UpdateTx(ctx, tx, userID, txnID, UpdatePatch{CategoryID: &newCat})
+	_, _, err = store.UpdateTx(ctx, tx, Actor{UserID: userID}, txnID, UpdatePatch{CategoryID: &newCat})
 	if !errors.Is(err, ErrTombstoned) {
 		t.Errorf("expected ErrTombstoned, got %v", err)
 	}
 }
 
-// TestUpdateTx_NonOwnedRow_ReturnsErrNotOwned asserts that a user trying
-// to patch another user's row gets the typed ErrNotOwned sentinel. The
-// store enforces strict ownership; admin-bypass is a handler concern (and
-// the v1 batch path does not support cross-user admin mutation).
+// TestUpdateTx_NonOwnedRow_ReturnsErrNotOwned asserts that a NON-ADMIN user
+// trying to patch another user's row gets the typed ErrNotOwned sentinel.
+// Admins bypass this check — see TestUpdateTx_AdminBypassesOwnership.
 func TestUpdateTx_NonOwnedRow_ReturnsErrNotOwned(t *testing.T) {
 	db, store, q := newTestStore(t)
 	ctx := context.Background()
@@ -280,9 +279,85 @@ func TestUpdateTx_NonOwnedRow_ReturnsErrNotOwned(t *testing.T) {
 	defer tx.Rollback()
 
 	newCat := cat
-	_, _, err = store.UpdateTx(ctx, tx, bob, txnID, UpdatePatch{CategoryID: &newCat})
+	_, _, err = store.UpdateTx(ctx, tx, Actor{UserID: bob}, txnID, UpdatePatch{CategoryID: &newCat})
 	if !errors.Is(err, ErrNotOwned) {
 		t.Errorf("expected ErrNotOwned, got %v", err)
+	}
+}
+
+// TestUpdateTx_AdminBypassesOwnership asserts that an admin actor may patch a
+// row owned by another household member. This is design spec §3.9 ("Admin
+// (user.Role == RoleAdmin) bypass matches existing transaction handlers") and
+// matches every sibling mutation path: single-row update's RoleAdmin check
+// (transaction_handlers.go), batch-delete's `user.Role != RoleAdmin &&
+// existing.UserID != user.ID` skip, and update-by-filter's omitted user_id
+// predicate for admins. The batch-update path enforced strict ownership
+// regardless of role, so an admin bulk-editing a mixed-owner selection
+// silently skipped every row they had not personally created.
+func TestUpdateTx_AdminBypassesOwnership(t *testing.T) {
+	db, store, q := newTestStore(t)
+	ctx := context.Background()
+
+	alice := seedTestStoreUser(t, q, "alice")
+	admin := seedTestStoreUser(t, q, "admin")
+	catA := seedTestStoreCategory(t, q, "CatA")
+	catB := seedTestStoreCategory(t, q, "CatB")
+	txnID := seedTestStoreTransaction(t, q, alice, catA, "2026-04-01", "X", 5.0, "")
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	before, after, err := store.UpdateTx(ctx, tx, Actor{UserID: admin, IsAdmin: true}, txnID, UpdatePatch{CategoryID: &catB})
+	if err != nil {
+		t.Fatalf("admin patching another member's row: %v", err)
+	}
+	if before.CategoryID != catA {
+		t.Errorf("before.CategoryID = %d, want %d", before.CategoryID, catA)
+	}
+	if after.CategoryID != catB {
+		t.Errorf("after.CategoryID = %d, want %d", after.CategoryID, catB)
+	}
+	// An admin edit must NOT re-home the row: ownership is data, not a
+	// permission artifact, and the audit trail keys off the original owner.
+	if after.UserID != alice {
+		t.Errorf("after.UserID = %d, want %d (admin edit must not re-home the row)", after.UserID, alice)
+	}
+}
+
+// TestUpdateTx_AdminDoesNotResurrectTombstoned pins that the admin bypass
+// loosens ownership ONLY: the tombstone check still rejects an admin, so an
+// admin bulk edit can never silently resurrect a row the household deleted.
+//
+// Note it does NOT pin the relative ORDER of the tombstone and ownership
+// checks — for an admin actor both orderings yield ErrTombstoned. What it
+// catches is the tombstone check being weakened or removed for admins, which
+// is the failure that matters.
+func TestUpdateTx_AdminDoesNotResurrectTombstoned(t *testing.T) {
+	db, store, q := newTestStore(t)
+	ctx := context.Background()
+
+	alice := seedTestStoreUser(t, q, "alice")
+	admin := seedTestStoreUser(t, q, "admin")
+	catA := seedTestStoreCategory(t, q, "CatA")
+	catB := seedTestStoreCategory(t, q, "CatB")
+	txnID := seedTestStoreTransaction(t, q, alice, catA, "2026-04-01", "X", 5.0, "")
+
+	if _, err := db.ExecContext(ctx, `UPDATE transactions SET deleted_at = CURRENT_TIMESTAMP WHERE id = ?`, txnID); err != nil {
+		t.Fatalf("tombstone: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	_, _, err = store.UpdateTx(ctx, tx, Actor{UserID: admin, IsAdmin: true}, txnID, UpdatePatch{CategoryID: &catB})
+	if !errors.Is(err, ErrTombstoned) {
+		t.Errorf("expected ErrTombstoned for admin patching a tombstoned row, got %v", err)
 	}
 }
 
@@ -303,7 +378,7 @@ func TestUpdateTx_MissingID_ReturnsErrNotFound(t *testing.T) {
 	defer tx.Rollback()
 
 	cat := int64(1)
-	_, _, err = store.UpdateTx(ctx, tx, user, 99999, UpdatePatch{CategoryID: &cat})
+	_, _, err = store.UpdateTx(ctx, tx, Actor{UserID: user}, 99999, UpdatePatch{CategoryID: &cat})
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("expected ErrNotFound, got %v", err)
 	}
@@ -329,7 +404,7 @@ func TestUpdateTx_PreservesUnsetFields(t *testing.T) {
 	defer tx.Rollback()
 
 	newDate := "2026-05-01"
-	_, after, err := store.UpdateTx(ctx, tx, userID, txnID, UpdatePatch{Date: &newDate})
+	_, after, err := store.UpdateTx(ctx, tx, Actor{UserID: userID}, txnID, UpdatePatch{Date: &newDate})
 	if err != nil {
 		t.Fatalf("UpdateTx: %v", err)
 	}

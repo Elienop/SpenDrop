@@ -18,6 +18,7 @@ import (
 
 	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
+	"github.com/elienop/spendrop/internal/ratelimit"
 )
 
 // errSendBoom is a shared sentinel for tests that force every push Send to
@@ -2848,6 +2849,332 @@ func TestBatchUpdate_PartialSkip_TombstonedAndNonOwnedAreSkipped(t *testing.T) {
 	db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, aliveBob.ID).Scan(&bobCat)
 	if bobCat != catA.ID {
 		t.Errorf("bob's row was wrongly touched: %d", bobCat)
+	}
+}
+
+// TestBatchUpdate_AdminUpdatesOtherMembersRows is the regression test for the
+// reported bug: an admin bulk-editing a mixed-owner selection updated only the
+// rows they had personally created and silently skipped the rest ("updated 1,
+// skipped N" in the toast). The transactions list is household-wide
+// (handleListTransactions: "Transactions are visible to all authenticated
+// users"), so a normal admin selection spans several members' rows.
+//
+// Every sibling mutation path already grants the admin bypass — single-row
+// update (`user.Role != RoleAdmin && existing.UserID != user.ID` → 403),
+// batch-delete (same predicate → skip), update-by-filter (no user_id predicate
+// appended for admins). Only the batch-update path enforced strict ownership,
+// which is also what design spec §3.9 said it must not do.
+func TestBatchUpdate_AdminUpdatesOtherMembersRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", RoleAdmin)
+	bob := seedTestUser(t, q, "bob", RoleMember)
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+
+	own := seedTestTransaction(t, q, admin.ID, catA.ID, "2026-04-01", 10.0, "admin-own")
+	bobs1 := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-02", 20.0, "bob-1")
+	bobs2 := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-03", 30.0, "bob-2")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d],"patch":{"category_id":%d}}`,
+		own.ID, bobs1.ID, bobs2.ID, catB.ID)
+	rec := postBatchUpdate(t, h, admin, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 3 || resp.Skipped != 0 {
+		t.Errorf("got updated=%d skipped=%d, want 3 0", resp.Updated, resp.Skipped)
+	}
+
+	// All three rows moved to the new category...
+	for _, tc := range []struct {
+		id    int64
+		owner int64
+	}{{own.ID, admin.ID}, {bobs1.ID, bob.ID}, {bobs2.ID, bob.ID}} {
+		var gotCat, gotOwner int64
+		if err := db.QueryRow(
+			`SELECT category_id, user_id FROM transactions WHERE id = ?`, tc.id,
+		).Scan(&gotCat, &gotOwner); err != nil {
+			t.Fatal(err)
+		}
+		if gotCat != catB.ID {
+			t.Errorf("id=%d category: %d, want %d", tc.id, gotCat, catB.ID)
+		}
+		// ...and ownership is untouched: an admin edit must not re-home a
+		// member's row onto the admin.
+		if gotOwner != tc.owner {
+			t.Errorf("id=%d user_id: %d, want %d (admin edit must not re-home the row)",
+				tc.id, gotOwner, tc.owner)
+		}
+	}
+}
+
+// TestBatchUpdate_AdminStillSkipsTombstoned pins that the admin bypass loosens
+// the OWNERSHIP predicate only. A tombstoned row stays untouchable for every
+// role, so an admin bulk edit can never silently resurrect deleted rows into
+// the ledger. The load-bearing assertions are that the row's category is
+// unchanged and its tombstone intact — amount is not reachable from
+// UpdatePatch at all, so this is a write-path skip test, not an instance of
+// the CLAUDE.md sentinel-amount pattern (which guards reads leaking
+// tombstoned rows into aggregates).
+func TestBatchUpdate_AdminStillSkipsTombstoned(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", RoleAdmin)
+	bob := seedTestUser(t, q, "bob", RoleMember)
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+
+	live := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-01", 10.0, "bob-live")
+	ts := seedTombstonedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-02", 999.0, "tombstoned-sentinel")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"category_id":%d}}`, live.ID, ts.ID, catB.ID)
+	rec := postBatchUpdate(t, h, admin, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp struct {
+		Updated int64 `json:"updated"`
+		Skipped int64 `json:"skipped"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Updated != 1 || resp.Skipped != 1 {
+		t.Errorf("got updated=%d skipped=%d, want 1 1", resp.Updated, resp.Skipped)
+	}
+
+	var tsCat int64
+	var tsDeleted sql.NullString
+	if err := db.QueryRow(
+		`SELECT category_id, deleted_at FROM transactions WHERE id = ?`, ts.ID,
+	).Scan(&tsCat, &tsDeleted); err != nil {
+		t.Fatal(err)
+	}
+	if tsCat != catA.ID {
+		t.Errorf("tombstoned row was mutated by an admin batch update: category %d, want %d", tsCat, catA.ID)
+	}
+	if !tsDeleted.Valid {
+		t.Error("tombstoned row was resurrected by an admin batch update")
+	}
+}
+
+// TestBatchUpdate_AdminTagsMode_MergesAgainstEachRowsOwnTags covers the branch
+// where the admin bypass intersects the per-row tag pre-load. For non-replace
+// tag modes the handler reads each row's CURRENT tags before calling UpdateTx,
+// and with the bypass in place those reads now span other members' rows. Each
+// row must merge against its OWN tags — a future refactor that hoists the
+// pre-load out of the loop or caches curTags across iterations would smear one
+// member's tags onto another's rows. (TestBatchUpdate_TagsAdd_AppendsAndDedup-
+// licates already covers the multi-row merge for a single owner; this test adds
+// the cross-owner axis the bypass newly makes reachable, and fails outright if
+// the bypass is removed.)
+func TestBatchUpdate_AdminTagsMode_MergesAgainstEachRowsOwnTags(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", RoleAdmin)
+	bob := seedTestUser(t, q, "bob", RoleMember)
+	cat := seedTestCategory(t, q, "A", "expense")
+
+	adminRow := seedTestTransactionWithTags(t, q, admin.ID, cat.ID, "2026-04-01", 10.0, "admin-row", "adminonly")
+	bobRow := seedTestTransactionWithTags(t, q, bob.ID, cat.ID, "2026-04-02", 20.0, "bob-row", "bobonly")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d],"patch":{"tags":"shared"},"tagsMode":"add"}`, adminRow.ID, bobRow.ID)
+	rec := postBatchUpdate(t, h, admin, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	for _, tc := range []struct {
+		id       int64
+		wantTags string
+	}{
+		{adminRow.ID, "adminonly, shared"},
+		{bobRow.ID, "bobonly, shared"},
+	} {
+		var got sql.NullString
+		if err := db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, tc.id).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		if got.String != tc.wantTags {
+			t.Errorf("id=%d tags = %q, want %q (each row must merge against its own tags)",
+				tc.id, got.String, tc.wantTags)
+		}
+	}
+}
+
+// TestBatchUpdate_AdminCrossUserEdit_AuditAttributesActorNotOwner pins the
+// forensics contract for the newly-reachable cross-user edit: the audit row
+// records the ADMIN who made the change, while the transaction itself stays
+// owned by the member. Without both halves an operator reading the audit log
+// could not tell who recategorized someone else's spending.
+func TestBatchUpdate_AdminCrossUserEdit_AuditAttributesActorNotOwner(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", RoleAdmin)
+	bob := seedTestUser(t, q, "bob", RoleMember)
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+
+	bobRow := seedTestTransaction(t, q, bob.ID, catA.ID, "2026-04-01", 10.0, "bob-row")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"category_id":%d}}`, bobRow.ID, catB.ID)
+	rec := postBatchUpdate(t, h, admin, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var actor sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT actor_user_id FROM transaction_audit WHERE transaction_id = ? AND action = ?`,
+		bobRow.ID, "update",
+	).Scan(&actor); err != nil {
+		t.Fatal(err)
+	}
+	if !actor.Valid || actor.Int64 != admin.ID {
+		t.Errorf("audit actor_user_id = %v, want %d (the acting admin)", actor, admin.ID)
+	}
+
+	var owner int64
+	if err := db.QueryRow(`SELECT user_id FROM transactions WHERE id = ?`, bobRow.ID).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != bob.ID {
+		t.Errorf("transaction user_id = %d, want %d (an admin edit must not re-home the row)", owner, bob.ID)
+	}
+}
+
+// registerAndSessionCookie registers a user through the real handler and
+// returns their session cookie. The first user to register becomes admin;
+// later ones become members (registration_enabled must be on for those).
+func registerAndSessionCookie(t *testing.T, h *Handler, username string) *http.Cookie {
+	t.Helper()
+	body := strings.NewReader(fmt.Sprintf(`{"username":%q,"password":"longpassword"}`, username))
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/register", body)
+	// registerAttempts is a package-level map keyed by client IP that is never
+	// reset between tests. Nothing increments it on a SUCCESSFUL register
+	// today, so this helper is currently safe — but a future duplicate-username
+	// or low-RATE_LIMIT_MAX test in this package would make it order-dependent
+	// (a 429 instead of a 201, depending on test order). Clear our IP up front
+	// so this test never becomes that flake.
+	rateLimitMu.Lock()
+	delete(registerAttempts, extractIP(req.RemoteAddr))
+	rateLimitMu.Unlock()
+	rec := httptest.NewRecorder()
+	h.handleRegister(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register %q: got %d, body: %s", username, rec.Code, rec.Body.String())
+	}
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == "session" {
+			return c
+		}
+	}
+	t.Fatalf("register %q: no session cookie set", username)
+	return nil
+}
+
+// TestBatchUpdate_RoleComesFromTheDatabaseNotTheWire drives the endpoint
+// through the REAL auth middleware instead of injecting a user into the
+// request context the way every other handler test in this file does.
+//
+// The admin bypass is derived from user.Role, so the security question is
+// whether a member can cause `user.Role == RoleAdmin` to evaluate true. The
+// middleware resolves the session cookie to a user id and re-reads the row
+// (including role) from the users table on every request, so it cannot — this
+// test pins that end-to-end, in both directions, over the wire.
+func TestBatchUpdate_RoleComesFromTheDatabaseNotTheWire(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+
+	// First registered user becomes admin.
+	adminCookie := registerAndSessionCookie(t, h, "adminuser")
+	// Open registration so a second (member-role) user can be created.
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
+	}
+	memberCookie := registerAndSessionCookie(t, h, "memberuser")
+
+	var adminID, memberID int64
+	if err := db.QueryRow(`SELECT id FROM users WHERE username = ?`, "adminuser").Scan(&adminID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT id FROM users WHERE username = ?`, "memberuser").Scan(&memberID); err != nil {
+		t.Fatal(err)
+	}
+	catA := seedTestCategory(t, q, "A", "expense")
+	catB := seedTestCategory(t, q, "B", "expense")
+	// Each arm targets a row the actor does NOT own, so both arms exercise the
+	// bypass rather than plain ownership. (Pointing both at the admin's own row
+	// would make the admin arm succeed via ownership and prove nothing — it
+	// would stay green even if the bypass were deleted entirely.)
+	adminRow := seedTestTransaction(t, q, adminID, catA.ID, "2026-04-01", 10.0, "admin-owned")
+	memberRow := seedTestTransaction(t, q, memberID, catA.ID, "2026-04-02", 20.0, "member-owned")
+
+	limiter := ratelimit.NewBucket(30, 10*time.Minute, h.clock)
+	r := chi.NewRouter()
+	r.Route("/api", func(r chi.Router) {
+		r.Use(auth.RequireAuthOrAPIToken(h.queries, limiter))
+		r.Post("/transactions/batch-update", h.handleBatchUpdateTransactions)
+	})
+
+	post := func(c *http.Cookie, targetID int64) (updated, skipped int64) {
+		t.Helper()
+		body := fmt.Sprintf(`{"ids":[%d],"patch":{"category_id":%d}}`, targetID, catB.ID)
+		req := httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.AddCookie(c)
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("got %d, want 200; body: %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Updated int64 `json:"updated"`
+			Skipped int64 `json:"skipped"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return resp.Updated, resp.Skipped
+	}
+
+	// A member over a genuine session must NOT get the bypass on a row they
+	// don't own.
+	if updated, skipped := post(memberCookie, adminRow.ID); updated != 0 || skipped != 1 {
+		t.Errorf("member session: updated=%d skipped=%d, want 0 1 — a member reached the admin bypass", updated, skipped)
+	}
+	var gotCat int64
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, adminRow.ID).Scan(&gotCat); err != nil {
+		t.Fatal(err)
+	}
+	if gotCat != catA.ID {
+		t.Fatalf("member mutated a row they do not own: category %d, want %d", gotCat, catA.ID)
+	}
+
+	// The admin's session DOES get the bypass on a row they don't own. This
+	// arm fails if the bypass is removed, so it is a real control, not a
+	// restatement of ownership.
+	if updated, skipped := post(adminCookie, memberRow.ID); updated != 1 || skipped != 0 {
+		t.Errorf("admin session: updated=%d skipped=%d, want 1 0", updated, skipped)
+	}
+	if err := db.QueryRow(`SELECT category_id FROM transactions WHERE id = ?`, memberRow.ID).Scan(&gotCat); err != nil {
+		t.Fatal(err)
+	}
+	if gotCat != catB.ID {
+		t.Errorf("admin failed to edit a member's row: category %d, want %d", gotCat, catB.ID)
 	}
 }
 

@@ -588,6 +588,230 @@ func TestHandleUpdateTransaction_FiresCheckpointHook(t *testing.T) {
 	}
 }
 
+// TestHandleBatchUpdate_CategoryOnlyPatch_FiresCheckpointHook covers the gap
+// that the batch-update checkpoint hook used to gate solely on
+// `patch.Date != nil`. balance_checkpoints.scope_type is total | category |
+// tag, and VerifyCheckpointTotal filters on t.category_id for a category
+// scope — so a category-only patch (the single most common bulk edit) moves
+// a category-scoped checkpoint's real total while leaving every date intact.
+// Under the old gate the hook never fired and the checkpoint kept reporting
+// 'ok' while its actual sum had gone to zero, including in /healthz/data.
+func TestHandleBatchUpdate_CategoryOnlyPatch_FiresCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_bhookcat", "member")
+	catA := seedTestCategory(t, q, "HookCatA", "expense")
+	catB := seedTestCategory(t, q, "HookCatB", "expense")
+
+	txn := seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 50.00, "moves away")
+	// Category-scoped checkpoint on catA that currently matches ($50).
+	cp := seedCheckpoint(t, q, user.ID, "category", catA.ID, "", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "ok")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"category_id":%d}}`, txn.ID, catB.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch update status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want mismatch (catA's real total is now 0)", got.LastVerificationStatus)
+	}
+}
+
+// TestHandleBatchUpdate_TagsOnlyPatch_FiresCheckpointHook is the tag-scope
+// twin of the category test: VerifyCheckpointTotal matches a tag scope with
+// a LIKE over t.tags, so replacing a row's tags moves a tag-scoped
+// checkpoint's total with no date change.
+func TestHandleBatchUpdate_TagsOnlyPatch_FiresCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_bhooktag", "member")
+	cat := seedTestCategory(t, q, "HookTagCat", "expense")
+
+	txn := seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 50.00, "tagged", "holiday")
+	cp := seedCheckpoint(t, q, user.ID, "tag", 0, "holiday", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "ok")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"everyday"},"tagsMode":"replace"}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch update status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want mismatch (no row carries the 'holiday' tag now)", got.LastVerificationStatus)
+	}
+}
+
+// TestHandleBatchUpdate_DescriptionOnlyPatch_SkipsCheckpointHook pins the
+// NEGATIVE half of the widened gate: description is not a checkpoint scope,
+// so a description-only patch must not trigger a verification walk.
+//
+// The assertion is inverted to stay discriminating: the checkpoint is seeded
+// so that a verification WOULD flip it (stored 'mismatch', real total
+// matches). If the hook fired it would correct the row to 'ok'; the test
+// asserts it stays 'mismatch', proving no walk ran.
+func TestHandleBatchUpdate_DescriptionOnlyPatch_SkipsCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_bhookdesc", "member")
+	cat := seedTestCategory(t, q, "HookDescCat", "expense")
+
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 50.00, "before")
+	cp := seedCheckpoint(t, q, user.ID, "total", 0, "", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "mismatch")
+
+	body := fmt.Sprintf(`{"ids":[%d],"patch":{"description":"after"}}`, txn.ID)
+	rec := postBatchUpdate(t, h, user, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("batch update status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// Sanity: the patch really landed, so a no-op isn't why the hook stayed quiet.
+	var gotDesc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, txn.ID).Scan(&gotDesc); err != nil {
+		t.Fatal(err)
+	}
+	if gotDesc != "after" {
+		t.Fatalf("description = %q, want %q — patch did not land", gotDesc, "after")
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want it left at mismatch — a description-only patch must not trigger a checkpoint walk", got.LastVerificationStatus)
+	}
+}
+
+// TestHandleUpdateByFilter_CategoryOnlyPatch_FiresCheckpointHook is the
+// filter-mode twin: handleUpdateTransactionsByFilter carried the identical
+// `patch.Date != nil` gate. Its no-tags fast path has no per-row dates, so
+// the hook runs with a zero time.Time ("reverify every checkpoint").
+func TestHandleUpdateByFilter_CategoryOnlyPatch_FiresCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_fhookcat", "member")
+	catA := seedTestCategory(t, q, "FHookCatA", "expense")
+	catB := seedTestCategory(t, q, "FHookCatB", "expense")
+
+	seedTestTransaction(t, q, user.ID, catA.ID, "2026-04-01", 50.00, "moves away")
+	cp := seedCheckpoint(t, q, user.ID, "category", catA.ID, "", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "ok")
+
+	body := fmt.Sprintf(`{"patch":{"category_id":%d}}`, catB.ID)
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", catA.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want mismatch (catA's real total is now 0)", got.LastVerificationStatus)
+	}
+}
+
+// TestHandleUpdateByFilter_TagsOnlyPatch_FiresCheckpointHook covers the one
+// gate cell with a quirk: filter-mode's tags branch is a read-then-write loop,
+// so unlike the no-tags fast path it CAN supply a real per-row date floor. It
+// used to accumulate minDate only for date patches, which meant a tags-only
+// filter edit fired the hook with a zero time and conservatively reverified
+// every checkpoint in the table.
+func TestHandleUpdateByFilter_TagsOnlyPatch_FiresCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_fhooktag", "member")
+	cat := seedTestCategory(t, q, "FHookTagCat", "expense")
+
+	seedTestTransactionWithTags(t, q, user.ID, cat.ID, "2026-04-01", 50.00, "tagged", "holiday")
+	cp := seedCheckpoint(t, q, user.ID, "tag", 0, "holiday", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "ok")
+
+	// A checkpoint dated BEFORE every touched row cannot be affected by this
+	// edit, so the hook must not walk it — which only holds if the tags branch
+	// hands back a real date floor instead of the zero-time "reverify all"
+	// fallback.
+	//
+	// The fixture has to be one a walk would CHANGE, or the assertion proves
+	// nothing: expected $99.99 against a real total of $0 (the only row is
+	// dated after this checkpoint), stored as 'ok'. Re-verifying it flips it
+	// to 'mismatch'; skipping it leaves 'ok'.
+	early := seedCheckpoint(t, q, user.ID, "total", 0, "", "2026-01-31", 9999)
+	mustUpdateCheckpointStatus(t, db, early.ID, "ok")
+
+	body := `{"patch":{"tags":"everyday"},"tagsMode":"replace"}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want mismatch (no row carries the 'holiday' tag now)", got.LastVerificationStatus)
+	}
+
+	gotEarly, err := q.GetCheckpoint(context.Background(), early.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint(early): %v", err)
+	}
+	if !gotEarly.LastVerificationStatus.Valid || gotEarly.LastVerificationStatus.String != "ok" {
+		t.Errorf("checkpoint dated before every touched row was reverified (status=%v, want ok) — the tags branch lost its date floor and fell back to walking every checkpoint", gotEarly.LastVerificationStatus)
+	}
+}
+
+// TestHandleUpdateByFilter_DescriptionOnlyPatch_SkipsCheckpointHook is the
+// filter-mode negative case, inverted the same way as its batch-update twin:
+// the checkpoint is stored 'mismatch' while its real total matches, so a
+// verification walk would correct it to 'ok'. It must stay 'mismatch'.
+func TestHandleUpdateByFilter_DescriptionOnlyPatch_SkipsCheckpointHook(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice_fhookdesc", "member")
+	cat := seedTestCategory(t, q, "FHookDescCat", "expense")
+
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 50.00, "before")
+	cp := seedCheckpoint(t, q, user.ID, "total", 0, "", "2026-04-30", 5000)
+	mustUpdateCheckpointStatus(t, db, cp.ID, "mismatch")
+
+	body := `{"patch":{"description":"after"}}`
+	rec := postUpdateByFilter(t, h, user, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var gotDesc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, txn.ID).Scan(&gotDesc); err != nil {
+		t.Fatal(err)
+	}
+	if gotDesc != "after" {
+		t.Fatalf("description = %q, want %q — patch did not land", gotDesc, "after")
+	}
+
+	got, err := q.GetCheckpoint(context.Background(), cp.ID)
+	if err != nil {
+		t.Fatalf("GetCheckpoint: %v", err)
+	}
+	if !got.LastVerificationStatus.Valid || got.LastVerificationStatus.String != "mismatch" {
+		t.Errorf("stored status=%v, want it left at mismatch — a description-only filter patch must not trigger a checkpoint walk", got.LastVerificationStatus)
+	}
+}
+
 func TestHandleDeleteTransaction_FiresCheckpointHook(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

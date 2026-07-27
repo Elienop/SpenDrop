@@ -415,11 +415,17 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	//   - user_id changed: impossible — no endpoint mutates user_id, so
 	//     ownership cannot retroactively flip under us.
 	//
-	// Pushing the ownership check into the store would couple database
-	// code to HTTP-level role semantics (member vs. admin) and force
-	// every future chokepoint method to grow a scope parameter. We keep
-	// the check here and rely on the store's own tx-scoped read to catch
-	// the one failure mode (row vanished) that actually matters.
+	// The check stays HERE rather than moving into the store because this
+	// handler must return a hard 403 (not a skip) and already reads the row
+	// to do so; the store's own tx-scoped read then catches the one failure
+	// mode (row vanished) that actually matters.
+	//
+	// The batch path resolves this differently and deliberately: UpdateTx
+	// takes a database.Actor, because it is already loading `before` inside
+	// the tx and a handler-side pre-check would mean a second read for each
+	// of up to MaxBatchUpdateIDs rows. Actor carries authority, not HTTP
+	// semantics — the api package maps user.Role to it at the call site — so
+	// the coupling that argument was written to avoid does not apply.
 	existing, err := h.queries.GetTransactionByID(r.Context(), id)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -1116,6 +1122,12 @@ func (h *Handler) handleBatchDeleteTransactions(w http.ResponseWriter, r *http.R
 			continue
 		}
 
+		// Ownership is checked HERE rather than in the store because this
+		// loop already loads the row for its own tombstone check above.
+		// batch-update does the reverse — it passes a database.Actor into
+		// UpdateTx, which is already loading `before` inside the tx — so
+		// neither path pays for a redundant read. Same rule, same admin
+		// bypass, two placements for the same reason.
 		if user.Role != RoleAdmin && existing.UserID != user.ID {
 			skipped = append(skipped, id)
 			continue
@@ -1276,8 +1288,10 @@ func applyTagsMode(existing, newTags, mode string) string {
 }
 
 // handleBatchUpdateTransactions applies a partial-field patch to a list of
-// transaction IDs in one tx. Tombstoned / non-owned / missing rows are
-// skipped (consistent with handleBatchDeleteTransactions). Per-row audit
+// transaction IDs in one tx. Tombstoned / missing rows are skipped for every
+// role; non-owned rows are skipped for members only, since admins bypass
+// ownership (consistent with handleBatchDeleteTransactions — see the
+// database.Actor construction at the call site below). Per-row audit
 // rows commit alongside the data updates; a summary audit row records
 // skipped count if any. Mid-batch SQL/constraint errors roll back the
 // entire tx — caller sees no partial progress.
@@ -1382,7 +1396,13 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 			rowPatch.Tags = &merged
 		}
 
-		before, after, err := h.txnStore.UpdateTx(r.Context(), tx, user.ID, id, rowPatch)
+		// Admins may patch any household row (design spec §3.9) — the same
+		// bypass handleUpdateTransaction, handleBatchDeleteTransactions and
+		// update-by-filter already grant. Without it an admin bulk-editing a
+		// mixed-owner selection out of the household-wide list silently
+		// skipped every row they had not personally created.
+		actor := database.Actor{UserID: user.ID, IsAdmin: user.Role == RoleAdmin}
+		before, after, err := h.txnStore.UpdateTx(r.Context(), tx, actor, id, rowPatch)
 		switch {
 		case errors.Is(err, database.ErrTombstoned),
 			errors.Is(err, database.ErrNotOwned),
@@ -1394,11 +1414,18 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 			return
 		default:
 			updated++
-			if patch.Date != nil {
-				// earliestDate is 2-arg; nest the call to fold three
-				// values into one floor.
-				minDate = earliestDate(minDate, earliestDate(before.Date, after.Date))
-			}
+			// Accumulate the date floor for EVERY updated row, not just
+			// date patches. balance_checkpoints.scope_type is total |
+			// category | tag, and VerifyCheckpointTotal filters on
+			// t.category_id / t.tags for the latter two — so a category-
+			// or tags-only patch moves a scoped checkpoint's real total
+			// exactly like a date patch moves a total-scoped one. The
+			// affected checkpoints are those on or after the earliest date
+			// this batch touched, which is a tighter (and cheaper) floor
+			// than the zero-time "reverify everything" fallback.
+			// earliestDate is 2-arg; nest the call to fold three values
+			// into one floor.
+			minDate = earliestDate(minDate, earliestDate(before.Date, after.Date))
 			// Record both the old and new cells: a category/date patch
 			// relocates the row's spend, dropping the old cell (latch may
 			// clear) and possibly crossing the new cell over budget. When
@@ -1413,10 +1440,17 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 		// rolls both the data updates and this audit row back together.
 		// RecordBulkTx wraps the JSON envelope itself; pass the struct,
 		// not a marshalled string.
+		// scope= mirrors batch-delete and bulk-rename: now that admins bypass
+		// ownership, a skip count alone no longer tells an operator whether a
+		// member hit the ownership wall or an admin hit tombstones.
+		scope := "own"
+		if user.Role == RoleAdmin {
+			scope = "all"
+		}
 		if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate,
 			database.BulkAuditSummary{
 				Count:  skipped,
-				Filter: fmt.Sprintf("skipped_during_batch_update:%d_of_%d", skipped, len(req.IDs)),
+				Filter: fmt.Sprintf("skipped_during_batch_update:%d_of_%d scope=%s", skipped, len(req.IDs), scope),
 			}); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to record audit")
 			return
@@ -1428,9 +1462,14 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Phase 3.3 checkpoint hook: only fires when patch.Date was set AND at
-	// least one row was actually updated (minDate stays zero otherwise).
-	if patch.Date != nil && !minDate.IsZero() {
+	// Phase 3.3 checkpoint hook: fires when at least one row was actually
+	// updated (minDate stays zero otherwise) AND the patch touched a field
+	// that can move a checkpoint's computed sum. Date moves rows across a
+	// total-scoped checkpoint's cutoff; CategoryID and Tags move them in and
+	// out of category-/tag-scoped checkpoints (see VerifyCheckpointTotal).
+	// A description-only patch cannot change any scope's sum, so it is
+	// deliberately excluded.
+	if !minDate.IsZero() && (patch.Date != nil || patch.CategoryID != nil || patch.Tags != nil) {
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
 	}
 
@@ -1812,8 +1851,16 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 	// human-greppable Filter field. The raw URL.RawQuery is %q-quoted so
 	// trailing whitespace, embedded quotes, and escape characters survive
 	// a round-trip.
+	// scope= completes the set: batch-delete, bulk-rename, delete-by-filter and
+	// batch-update all record it. This path needs it MOST — a member's filter
+	// is scoped to their own rows in SQL while an admin's runs household-wide,
+	// and unlike batch-update there is no skipped count to hint at which ran.
+	scope := "own"
+	if user.Role == RoleAdmin {
+		scope = "all"
+	}
 	patchSummary := summarizePatch(patch)
-	filterDesc := fmt.Sprintf("update-by-filter query=%q patch=%s", r.URL.RawQuery, patchSummary)
+	filterDesc := fmt.Sprintf("update-by-filter scope=%s query=%q patch=%s", scope, r.URL.RawQuery, patchSummary)
 	if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate, database.BulkAuditSummary{
 		Count:  updated,
 		Filter: filterDesc,
@@ -1827,12 +1874,21 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Phase 3.3 checkpoint hook (spec §3.10): only fires when patch.Date was
-	// set. The no-tags fast path doesn't enumerate per-row dates, so the
-	// hook is invoked with a zero time.Time — the verifier treats that as
-	// "walk all checkpoints regardless of date" (matches
-	// handleDeleteTransactionsByFilter's conservative reverify).
-	if patch.Date != nil {
+	// Phase 3.3 checkpoint hook (spec §3.10). Fires for any patch that can
+	// move a checkpoint's computed sum: Date (total-scoped checkpoints) plus
+	// CategoryID and Tags, which move rows in and out of category-/tag-scoped
+	// checkpoints via VerifyCheckpointTotal's scope predicates.
+	//
+	// DO NOT "unify" this with batch-update's !minDate.IsZero() gate. The
+	// no-tags fast path is a single SQL UPDATE with no per-row dates to
+	// enumerate, so it ALWAYS returns a zero minDate and the verifier treats
+	// that as "walk every checkpoint regardless of date" (the same
+	// conservative reverify handleDeleteTransactionsByFilter does). Gating
+	// this path on a non-zero minDate would therefore silently disable the
+	// checkpoint hook for every no-tags bulk filter edit. updated > 0 is the
+	// correct liveness signal HERE; minDate is the correct one in
+	// batch-update, where every updated row contributes a real date.
+	if updated > 0 && (patch.Date != nil || patch.CategoryID != nil || patch.Tags != nil) {
 		h.verifyAffectedCheckpoints(r.Context(), minDate)
 	}
 
@@ -1942,10 +1998,12 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 // row's update inside the caller's tx. Rollback covers the whole batch.
 //
 // minDate is the earliest of (each row's pre-edit date, patch.Date) across
-// every enumerated row. The caller passes that floor into
-// verifyAffectedCheckpoints when patch.Date is set, so the post-commit hook
-// can scope its work precisely instead of conservatively reverifying every
-// checkpoint (the no-tags path's behavior).
+// every enumerated row, accumulated for every row this branch touches. The
+// caller passes that floor into verifyAffectedCheckpoints for any patch that
+// can move a checkpoint sum (Date, CategoryID or Tags — and this branch always
+// carries Tags), so the post-commit hook scopes its work precisely instead of
+// conservatively reverifying every checkpoint (the no-tags path's behavior,
+// which has no per-row dates to offer).
 //
 // SQL scaffolding mirrors runUpdateByFilterNoTags exactly: same
 // buildTransactionWhereClause + non-admin user_id append +
@@ -2065,11 +2123,16 @@ func (h *Handler) runUpdateByFilterTags(r *http.Request, tx *sql.Tx, user databa
 			return 0, time.Time{}, fmt.Errorf("update id=%d: %w", m.id, err)
 		}
 
-		if patch.Date != nil {
-			// Fold three values into one floor: previous minDate, this
-			// row's pre-edit date, and the patched date.
-			minDate = earliestDate(minDate, earliestDate(m.date, afterDate))
-		}
+		// Accumulate the floor for EVERY row this branch touches, not just
+		// date patches. This path always runs with patch.Tags != nil, and
+		// tags move tag-scoped checkpoints exactly like dates move
+		// total-scoped ones — so the caller's hook now fires here even when
+		// patch.Date is nil, and it needs a real floor to scope the walk.
+		// Gating this on patch.Date left tags-only filter edits reverifying
+		// every checkpoint in the table via the zero-time fallback.
+		// afterDate == m.date when patch.Date is nil, so folding all three
+		// stays correct in both cases.
+		minDate = earliestDate(minDate, earliestDate(m.date, afterDate))
 	}
 
 	return int64(len(matched)), minDate, nil

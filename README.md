@@ -36,6 +36,9 @@ Select multiple transactions (via checkboxes or the "Select all N matching" bann
 - Tags support **Add**, **Remove**, and **Replace** modes via a radio group above the tag input. Tag matching is byte-for-byte case-sensitive (e.g. `Tax` and `tax` are different).
 - **Page mode** (visible-page IDs only) fires immediately. **All-matching mode** (everything matching the current filter) opens a confirmation step listing the changes before submitting.
 - Selection is pruned after submit: rows that the edit kicks off the current filter naturally drop out of the selection. A toast tells you when this happens.
+- **Ownership:** the transactions list is household-wide, so a selection routinely spans several members' rows. **Admins can bulk-edit any household row**; members can only edit rows they created. This matches bulk delete, bulk rename, and single-row edit (which returns a 403 rather than skipping). Deleted (tombstoned) rows are always skipped, for every role.
+  - In **page mode**, rows a member can't edit are counted in the toast as skipped ("Updated 3 transactions, skipped 2").
+  - In **all-matching mode**, a member's filter is scoped to their own rows in SQL, so other members' rows are never matched in the first place and there is no skipped count to report — the toast shows only what was updated.
 
 API endpoints:
 - `POST /api/transactions/batch-update` — body `{ ids, patch, tagsMode? }`
@@ -827,8 +830,8 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/batch` | Batch create transactions |
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
-| POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/non-owned/missing IDs skipped. Capped at 500 IDs. |
-| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
+| POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/missing IDs skipped, plus non-owned IDs for members (admins may patch any household row). Capped at 500 IDs. |
+| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Scoped to the caller's own rows for members, household-wide for admins, so there is no skipped count. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
 | PUT | `/api/transactions/{id}` | Update a transaction |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
