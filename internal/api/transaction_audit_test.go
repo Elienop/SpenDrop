@@ -753,8 +753,15 @@ func TestAudit_BatchUpdate_WithSkips_WritesSummaryRow(t *testing.T) {
 	if len(summary) != 1 {
 		t.Fatalf("expected 1 summary row, got %d (all rows: %d)", len(summary), len(rows))
 	}
-	if filter, _ := summary[0].Before["filter"].(string); !strings.Contains(filter, "skipped_during_batch_update:1_of_2") {
+	filter, _ := summary[0].Before["filter"].(string)
+	if !strings.Contains(filter, "skipped_during_batch_update:1_of_2") {
 		t.Errorf("summary filter: %q, want it to contain skipped_during_batch_update:1_of_2", filter)
+	}
+	// scope= distinguishes a member hitting the ownership wall from an admin
+	// hitting only tombstones, now that admins bypass ownership. Mirrors the
+	// scope marker batch-delete and bulk-rename already record.
+	if !strings.Contains(filter, "scope=own") {
+		t.Errorf("summary filter: %q, want it to contain scope=own for a member actor", filter)
 	}
 }
 

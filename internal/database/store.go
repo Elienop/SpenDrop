@@ -22,6 +22,30 @@ var (
 	ErrNotFound   = errors.New("transaction not found")
 )
 
+// Actor identifies who is performing a mutation and what authority they carry.
+//
+// It is a struct rather than a pair of positional arguments specifically
+// because IsAdmin gates an authorization check: `UpdateTx(ctx, tx, uid, true,
+// id, patch)` would compile cleanly while silently granting a full ownership
+// bypass, and a bare `true` greps as noise. `database.Actor{UserID: user.ID,
+// IsAdmin: true}` names the escalation at the call site and is greppable.
+type Actor struct {
+	// UserID is the acting user. Every audit row is attributed to it —
+	// including cross-user admin edits, where the row's own user_id is
+	// deliberately left untouched so an admin edit never re-homes a
+	// member's transaction.
+	UserID int64
+
+	// IsAdmin lifts the row-OWNERSHIP restriction and nothing else, per
+	// design spec §3.9 ("Admin bypass matches existing transaction
+	// handlers" — handleUpdateTransaction, handleBatchDeleteTransactions,
+	// handleBulkRename and update-by-filter all drop the user_id predicate
+	// for RoleAdmin). Tombstoned and missing rows are checked FIRST and
+	// stay skip-worthy for every role, so an admin can never resurrect a
+	// soft-deleted row through this path.
+	IsAdmin bool
+}
+
 // Audit actions recorded by TransactionStore. These string literals MUST
 // match the CHECK constraint in migrations/009_transaction_audit.sql. Adding
 // a new action requires editing both places in lockstep.
@@ -145,14 +169,16 @@ func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTr
 // (success), the audit row is committed alongside the data update; if it
 // returns any error, both are rolled back together.
 //
-// Admin-bypass is a HANDLER concern. The store enforces strict ownership;
-// the handler does not pass admin sentinels through this surface. The v1
-// batch-update path does not support cross-user admin mutation; admins use
-// the single-row endpoint for that.
+// The Actor carries the caller's authority across this surface because the
+// ownership predicate is evaluated HERE, against the `before` row this method
+// already loads — making the handler re-read every row just to pre-check
+// ownership would double the per-row query count for no gain. (batch-delete
+// does the reverse and checks in the handler; it already loads the row there
+// for its own tombstone check, so neither path is doing redundant work.)
 func (s *TransactionStore) UpdateTx(
 	ctx context.Context,
 	tx *sql.Tx,
-	actorUserID int64,
+	actor Actor,
 	id int64,
 	patch UpdatePatch,
 ) (before, after GetTransactionByIDRow, err error) {
@@ -168,7 +194,7 @@ func (s *TransactionStore) UpdateTx(
 	if before.DeletedAt.Valid {
 		return before, after, ErrTombstoned
 	}
-	if before.UserID != actorUserID {
+	if before.UserID != actor.UserID && !actor.IsAdmin {
 		return before, after, ErrNotOwned
 	}
 
@@ -232,7 +258,7 @@ func (s *TransactionStore) UpdateTx(
 	if err != nil {
 		return before, after, fmt.Errorf("load after: %w", err)
 	}
-	if err := writeUpdateAudit(ctx, qtx, actorUserID, id, before, after); err != nil {
+	if err := writeUpdateAudit(ctx, qtx, actor.UserID, id, before, after); err != nil {
 		return before, after, fmt.Errorf("write audit: %w", err)
 	}
 	return before, after, nil
