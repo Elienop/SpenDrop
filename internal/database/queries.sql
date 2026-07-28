@@ -342,6 +342,11 @@ ON CONFLICT(year) DO UPDATE SET
     target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP;
 
+-- name: DeleteSavingsGoal :execresult
+-- :execresult so the handler can distinguish "removed" from "no such year"
+-- and return 404 rather than a misleading 200.
+DELETE FROM savings_goals WHERE year = ?;
+
 -- name: ListSavingsGoals :many
 SELECT * FROM savings_goals ORDER BY year DESC;
 

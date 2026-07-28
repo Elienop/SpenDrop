@@ -160,6 +160,7 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// Savings Goals
 		r.Get("/savings-goals", h.handleGetSavingsGoals)
 		r.Put("/savings-goals/{year}", h.handleSetSavingsGoal)
+		r.Delete("/savings-goals/{year}", h.handleDeleteSavingsGoal)
 
 		// Dashboard
 		r.Get("/dashboard/summary", h.handleDashboardSummary)

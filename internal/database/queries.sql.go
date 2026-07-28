@@ -1150,6 +1150,14 @@ func (q *Queries) ListSavedFilters(ctx context.Context, userID int64) ([]SavedFi
 	return items, nil
 }
 
+const deleteSavingsGoal = `-- name: DeleteSavingsGoal :execresult
+DELETE FROM savings_goals WHERE year = ?
+`
+
+func (q *Queries) DeleteSavingsGoal(ctx context.Context, year int64) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deleteSavingsGoal, year)
+}
+
 const listSavingsGoals = `-- name: ListSavingsGoals :many
 SELECT id, year, updated_at, target_amount_cents FROM savings_goals ORDER BY year DESC
 `

@@ -884,7 +884,8 @@ All require an admin session.
 | PUT | `/api/category-budgets/{year}/{month}/{categoryId}` | Set a category's monthly limit (admin; expense categories only; amount > 0) |
 | DELETE | `/api/category-budgets/{year}/{month}/{categoryId}` | Clear a category's monthly limit (admin) |
 | GET | `/api/savings-goals` | Get savings goals |
-| PUT | `/api/savings-goals/{year}` | Set yearly savings goal |
+| PUT | `/api/savings-goals/{year}` | Set yearly savings goal. A `target_amount` of `0` is a real "no target this year" value, not a removal |
+| DELETE | `/api/savings-goals/{year}` | Remove a yearly savings goal. 404 if no goal exists for that year. Admin only |
 
 ### Dashboard & Reports
 | Method | Endpoint | Description |
