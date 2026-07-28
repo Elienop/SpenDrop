@@ -371,16 +371,21 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	amountCents := dollarsToCents(amount)
 	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
-		AmountCents:         dollarsToCents(amount),
+		AmountCents:         amountCents,
 		OriginalAmountCents: nullableDollarsToCents(origAmt),
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
 		Tags:                toNullString(req.Tags),
 		Notes:               notesFromPtr(req.Notes),
+		// Manual entries used to store NULL here, so import dedupe could not
+		// see them and re-imported them as duplicates.
+		ContentHash: h.contentHashForManualEntry(
+			r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
@@ -2188,6 +2193,39 @@ func validateMoneyAmount(d float64, field string) error {
 		return fmt.Errorf("%s exceeds the maximum allowed value", field)
 	}
 	return nil
+}
+
+// contentHashForManualEntry computes the dedupe identity for a hand-entered
+// transaction, or returns NULL when that identity is already taken.
+//
+// Manual rows previously stored content_hash = NULL unconditionally, so import
+// dedupe could not see them: importing a spreadsheet containing a transaction
+// the user had already typed in created a second copy.
+//
+// Collisions must NOT be an error here. Real household data contains
+// legitimate duplicates — two identical coffees on the same day, a recurring
+// subscription entered twice on purpose — and the partial UNIQUE index
+// idx_transactions_content_hash would reject the second one. This follows the
+// same earliest-id-wins rule the migration-008 backfill uses: the first row to
+// claim a hash keeps it as the canonical anchor, later identical rows are
+// stored with NULL and remain fully intact in the ledger. The consequence,
+// deliberately accepted: a later import of that content dedupes against the
+// canonical row only.
+func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Queries, date time.Time, amountCents int64, description string, categoryID int64) sql.NullString {
+	cat, err := q.GetCategoryByID(ctx, categoryID)
+	if err != nil {
+		// Category already validated upstream; if it vanished underneath us,
+		// fall back to the previous behaviour rather than failing the write.
+		return sql.NullString{}
+	}
+	hash := database.ComputeContentHash(date, amountCents, description, cat.Name)
+	if _, err := q.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true}); err == nil {
+		// Identity already anchored by an earlier row.
+		return sql.NullString{}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: hash, Valid: true}
 }
 
 // notesFromPtr converts an optional notes field to its stored form. A nil
