@@ -2922,35 +2922,49 @@ func TestHandleImportConfirm_WritesPerRowInsertAudit(t *testing.T) {
 
 	// Each audit row must reference a live transactions.id and carry a
 	// non-NULL after_json snapshot.
-	rows, err := db.Query(
-		`SELECT transaction_id, after_json FROM transaction_audit WHERE action = ? AND transaction_id != ?`,
-		database.AuditInsert, database.BulkAuditTransactionID,
-	)
-	if err != nil {
-		t.Fatal(err)
+	// Drain the cursor fully before issuing the per-row existence checks.
+	// setupTestDB pins the pool to a single connection to match production,
+	// so a QueryRow issued while these rows are still open would wait forever
+	// for the connection this cursor holds.
+	type auditRow struct {
+		txID      int64
+		afterJSON sql.NullString
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var txID int64
-		var afterJSON sql.NullString
-		if err := rows.Scan(&txID, &afterJSON); err != nil {
+	var auditRows []auditRow
+	func() {
+		rows, err := db.Query(
+			`SELECT transaction_id, after_json FROM transaction_audit WHERE action = ? AND transaction_id != ?`,
+			database.AuditInsert, database.BulkAuditTransactionID,
+		)
+		if err != nil {
 			t.Fatal(err)
 		}
-		if !afterJSON.Valid {
-			t.Errorf("insert audit row for transaction_id=%d has NULL after_json", txID)
+		defer rows.Close()
+		for rows.Next() {
+			var a auditRow
+			if err := rows.Scan(&a.txID, &a.afterJSON); err != nil {
+				t.Fatal(err)
+			}
+			auditRows = append(auditRows, a)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	for _, a := range auditRows {
+		if !a.afterJSON.Valid {
+			t.Errorf("insert audit row for transaction_id=%d has NULL after_json", a.txID)
 		}
 		var exists int
 		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM transactions WHERE id = ?`, txID,
+			`SELECT COUNT(*) FROM transactions WHERE id = ?`, a.txID,
 		).Scan(&exists); err != nil {
 			t.Fatal(err)
 		}
 		if exists != 1 {
-			t.Errorf("audit transaction_id=%d does not match a live transactions row", txID)
+			t.Errorf("audit transaction_id=%d does not match a live transactions row", a.txID)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
 	}
 }
 
