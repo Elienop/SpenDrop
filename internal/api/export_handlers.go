@@ -61,16 +61,26 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 	// exact-integer semantics of the cents column. Comparing against the
 	// legacy REAL column could drop edge-case rows where a float roundtrip
 	// shifted the stored value by one ULP from the user's input.
+	// safeDollarsToCents, not dollarsToCents: ParseFloat happily accepts
+	// "1e308", "NaN" and "Inf", all of which convert to int64 minimum. That
+	// turned `amount_cents >= ?` into a match-everything predicate and
+	// `amount_cents <= ?` into a match-nothing one — the filter silently
+	// inverted instead of erroring. An unrepresentable bound is now skipped,
+	// exactly as an unparseable one already was.
 	if v := q.Get("amount_min"); v != "" {
 		if min, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount_cents >= ?")
-			args = append(args, dollarsToCents(min))
+			if cents, ok := safeDollarsToCents(min); ok {
+				conditions = append(conditions, "t.amount_cents >= ?")
+				args = append(args, cents)
+			}
 		}
 	}
 	if v := q.Get("amount_max"); v != "" {
 		if max, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount_cents <= ?")
-			args = append(args, dollarsToCents(max))
+			if cents, ok := safeDollarsToCents(max); ok {
+				conditions = append(conditions, "t.amount_cents <= ?")
+				args = append(args, cents)
+			}
 		}
 	}
 

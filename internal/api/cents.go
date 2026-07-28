@@ -23,11 +23,34 @@ import (
 // backfill and a subsequent edit cannot drift by one cent.
 
 // dollarsToCents converts a float64 dollar amount to int64 cents using
-// half-away-from-zero rounding. Callers pre-validate that the value is
-// finite and within MaxTransactionAmount so we do not need to worry about
-// NaN/Inf here - the validator rejects those before this point is reached.
+// half-away-from-zero rounding.
+//
+// It assumes the caller has already rejected non-finite and out-of-range
+// input. That assumption is NOT self-enforcing: converting NaN, +/-Inf, or
+// anything past ~9.2e16 dollars to int64 is undefined in Go and lands on
+// int64 minimum (-9223372036854775808) on amd64 — a silently huge NEGATIVE
+// number. Prefer safeDollarsToCents at any boundary fed by user input.
 func dollarsToCents(d float64) int64 {
 	return int64(math.Round(d * 100))
+}
+
+// safeDollarsToCents is dollarsToCents with the precondition enforced. It
+// reports false for NaN, +/-Inf, and any magnitude beyond
+// MaxTransactionAmount, so an out-of-range value can never be laundered into
+// int64 minimum.
+//
+// Measured before this existed: "1e308", "-1e308", "NaN", "Inf" and even
+// "1e17" every one of them produced -9223372036854775808. On a filter that
+// turned `amount_cents >= ?` into "match every row"; on a write path it
+// stored a transaction with a hugely negative amount.
+func safeDollarsToCents(d float64) (int64, bool) {
+	if math.IsNaN(d) || math.IsInf(d, 0) {
+		return 0, false
+	}
+	if d > MaxTransactionAmount || d < -MaxTransactionAmount {
+		return 0, false
+	}
+	return int64(math.Round(d * 100)), true
 }
 
 // centsToDollars converts int64 cents back to float64 dollars for the

@@ -153,9 +153,12 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	origCur := sql.NullString{}
 
 	if req.OriginalCurrency == "" {
-		// No foreign currency — use amount directly
-		if req.Amount <= 0 {
-			return 0, origAmt, origCur, fmt.Errorf("amount must be positive")
+		// No foreign currency — use amount directly.
+		// `<= 0` alone lets 1e308 and NaN through (NaN compares false against
+		// everything), and both convert to int64 minimum downstream — a
+		// hugely NEGATIVE stored amount from a positive-looking request.
+		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
+			return 0, origAmt, origCur, err
 		}
 		return req.Amount, origAmt, origCur, nil
 	}
@@ -167,8 +170,8 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 
 	if currency.IsBase {
 		// It's the base currency — use amount directly, no conversion needed
-		if req.Amount <= 0 {
-			return 0, origAmt, origCur, fmt.Errorf("amount must be positive")
+		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
+			return 0, origAmt, origCur, err
 		}
 		return req.Amount, origAmt, origCur, nil
 	}
@@ -176,6 +179,9 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	// Foreign currency: must have original_amount
 	if req.OriginalAmount == nil || *req.OriginalAmount <= 0 {
 		return 0, origAmt, origCur, fmt.Errorf("original_amount is required for non-base currency")
+	}
+	if err := validateMoneyAmount(*req.OriginalAmount, "original_amount"); err != nil {
+		return 0, origAmt, origCur, err
 	}
 
 	if currency.RateToBase == 0 {
@@ -189,6 +195,13 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	// stored cents. Kept deliberately to avoid churning a money path for zero
 	// behavior change; see audit item h-resolvecurrency-double-round.
 	converted = math.Round(converted*100) / 100
+
+	// The division can carry an in-range original_amount out of range: a small
+	// rate_to_base multiplies it up. Bound the converted value too, or
+	// dollarsToCents launders it into int64 minimum at the storage edge.
+	if err := validateMoneyAmount(converted, "converted amount"); err != nil {
+		return 0, origAmt, origCur, err
+	}
 
 	origAmt = sql.NullFloat64{Float64: *req.OriginalAmount, Valid: true}
 	origCur = sql.NullString{String: req.OriginalCurrency, Valid: true}
@@ -2157,6 +2170,24 @@ func toNullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// validateMoneyAmount rejects the float values that cannot survive conversion
+// to int64 cents: NaN, +/-Inf, and anything beyond MaxTransactionAmount. A
+// bare `<= 0` check is NOT sufficient — NaN compares false against every
+// operator, and 1e308 is comfortably positive right up until int64 conversion
+// turns it into -9223372036854775808.
+func validateMoneyAmount(d float64, field string) error {
+	if math.IsNaN(d) || math.IsInf(d, 0) {
+		return fmt.Errorf("%s must be a finite number", field)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s must be positive", field)
+	}
+	if d > MaxTransactionAmount {
+		return fmt.Errorf("%s exceeds the maximum allowed value", field)
+	}
+	return nil
 }
 
 // notesFromPtr converts an optional notes field to its stored form. A nil
