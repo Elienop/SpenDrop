@@ -30,6 +30,17 @@ func (q *Queries) CountAllTransactions(ctx context.Context) (CountAllTransaction
 	return i, err
 }
 
+const countTransactionsByUser = `-- name: CountTransactionsByUser :one
+SELECT COUNT(*) FROM transactions WHERE user_id = ?
+`
+
+func (q *Queries) CountTransactionsByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countTransactionsByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countCheckpointsByStatus = `-- name: CountCheckpointsByStatus :one
 SELECT
     CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'ok' THEN 1 ELSE 0 END), 0) AS INTEGER) AS ok,

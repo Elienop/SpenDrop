@@ -216,6 +216,32 @@ func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse to delete a user who still owns ledger rows.
+	//
+	// transactions.user_id is declared ON DELETE CASCADE
+	// (migrations/002_cascade_deletes.sql, re-declared in 010), and production
+	// runs with _foreign_keys=on, so a bare DELETE here permanently destroys
+	// every transaction the user ever created: no tombstone, no Trash entry,
+	// no transaction_audit row, no restore path. That bypasses the entire
+	// soft-delete contract the rest of the app is built on, and it silently
+	// rewrites every historical report.
+	//
+	// The count deliberately includes tombstoned rows — a row in the Trash is
+	// still recoverable history, and the cascade destroys it just as
+	// permanently. Mirrors handleDeleteCategory's 409 on FK conflict; the
+	// difference is that categories have no CASCADE so SQLite raises the
+	// error itself, whereas here the cascade would succeed silently.
+	txnCount, err := h.queries.CountTransactionsByUser(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check user transactions")
+		return
+	}
+	if txnCount > 0 {
+		writeError(w, http.StatusConflict,
+			"cannot delete a user who has transactions — reassign or purge their transactions first")
+		return
+	}
+
 	// Clean up sessions before deleting the user
 	_ = h.queries.DeleteSessionsByUserID(r.Context(), id)
 

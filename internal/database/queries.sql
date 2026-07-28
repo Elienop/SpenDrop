@@ -117,6 +117,9 @@ ON CONFLICT(code) DO UPDATE SET
 --   * ListDeletedTransactions / CountDeletedTransactions: the trash view
 --     specifically wants tombstoned rows.
 --   * CountAllTransactions: the live/deleted split used by operator tools.
+--   * CountTransactionsByUser: handleDeleteUser's guard must see tombstoned
+--     rows too — they are recoverable ledger history that ON DELETE CASCADE
+--     would destroy just as permanently as a live row.
 -- When adding a new transactions read, place it in queries.sql (not raw
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 --
@@ -228,6 +231,13 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS deleted
 FROM transactions;
+
+-- name: CountTransactionsByUser :one
+-- Deliberately counts tombstoned rows as well (see the exemption note in this
+-- section's header). transactions.user_id carries ON DELETE CASCADE, so
+-- deleting a user silently destroys every row they created; handleDeleteUser
+-- calls this first and refuses with 409 when the count is non-zero.
+SELECT COUNT(*) FROM transactions WHERE user_id = ?;
 
 -- name: GetTransactionByContentHash :one
 -- Phase 3.4 import-idempotency lookup. Returns the live row whose content
