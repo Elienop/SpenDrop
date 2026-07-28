@@ -44,7 +44,7 @@ describe('Register', () => {
   test('renders username, password, and display name inputs', () => {
     renderRegister();
     expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
     expect(screen.getByLabelText(/display name/i)).toBeInTheDocument();
   });
 
@@ -68,7 +68,7 @@ describe('Register', () => {
     renderRegister();
 
     await user.type(screen.getByLabelText(/username/i), 'bob');
-    await user.type(screen.getByLabelText(/password/i), 'pass456');
+    await user.type(screen.getByLabelText('Password'), 'pass456');
     await user.type(screen.getByLabelText(/display name/i), 'Bob');
     await user.click(screen.getByRole('button', { name: /create account/i }));
 
@@ -81,7 +81,7 @@ describe('Register', () => {
     renderRegister();
 
     await user.type(screen.getByLabelText(/username/i), 'bob');
-    await user.type(screen.getByLabelText(/password/i), 'pass456');
+    await user.type(screen.getByLabelText('Password'), 'pass456');
     await user.type(screen.getByLabelText(/display name/i), 'Bob');
     await user.click(screen.getByRole('button', { name: /create account/i }));
 
@@ -96,7 +96,7 @@ describe('Register', () => {
     renderRegister();
 
     await user.type(screen.getByLabelText(/username/i), 'bob');
-    await user.type(screen.getByLabelText(/password/i), 'pass456');
+    await user.type(screen.getByLabelText('Password'), 'pass456');
     await user.type(screen.getByLabelText(/display name/i), 'Bob');
     const submit = screen.getByRole('button', { name: /create account/i });
     await user.click(submit);

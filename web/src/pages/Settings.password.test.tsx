@@ -100,14 +100,49 @@ describe('Account tab — change password', () => {
     expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
   });
 
+  test('each password field has its own independently-scoped reveal toggle', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    // All three start masked.
+    expect(screen.getByLabelText('Current password')).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(screen.getByLabelText('New password')).toHaveAttribute(
+      'type',
+      'password',
+    );
+
+    // Field-scoped accessible names: three buttons all called "Show password"
+    // would be ambiguous in a screen-reader rotor and unqueryable here.
+    await user.click(
+      screen.getByRole('button', { name: 'Show current password' }),
+    );
+
+    // Revealing one field must not reveal its siblings.
+    expect(screen.getByLabelText('Current password')).toHaveAttribute(
+      'type',
+      'text',
+    );
+    expect(screen.getByLabelText('New password')).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(screen.getByLabelText('Confirm new password')).toHaveAttribute(
+      'type',
+      'password',
+    );
+  });
+
   test('renders the change-password form with three fields and a sign-out warning', async () => {
     renderSettings();
     expect(
-      screen.getByLabelText(/current password/i),
+      screen.getByLabelText('Current password'),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText(/^new password$/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('New password')).toBeInTheDocument();
     expect(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
     ).toBeInTheDocument();
     // Inline warning about signing out everywhere + revoking tokens.
     expect(
@@ -121,10 +156,10 @@ describe('Account tab — change password', () => {
   test('shows a validation error when new and confirm do not match', async () => {
     const user = userEvent.setup();
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'oldpass123');
-    await user.type(screen.getByLabelText(/^new password$/i), 'newpass123');
+    await user.type(screen.getByLabelText('Current password'), 'oldpass123');
+    await user.type(screen.getByLabelText('New password'), 'newpass123');
     await user.type(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
       'different123',
     );
     await user.click(
@@ -139,9 +174,9 @@ describe('Account tab — change password', () => {
   test('shows a validation error when new password is too short', async () => {
     const user = userEvent.setup();
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'oldpass123');
-    await user.type(screen.getByLabelText(/^new password$/i), 'short');
-    await user.type(screen.getByLabelText(/confirm new password/i), 'short');
+    await user.type(screen.getByLabelText('Current password'), 'oldpass123');
+    await user.type(screen.getByLabelText('New password'), 'short');
+    await user.type(screen.getByLabelText('Confirm new password'), 'short');
     await user.click(
       screen.getByRole('button', { name: /change password/i }),
     );
@@ -160,10 +195,10 @@ describe('Account tab — change password', () => {
       tokens_revoked: 2,
     });
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'oldpass123');
-    await user.type(screen.getByLabelText(/^new password$/i), 'newpass123');
+    await user.type(screen.getByLabelText('Current password'), 'oldpass123');
+    await user.type(screen.getByLabelText('New password'), 'newpass123');
     await user.type(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
       'newpass123',
     );
     await user.click(
@@ -184,10 +219,10 @@ describe('Account tab — change password', () => {
       tokens_revoked: 3,
     });
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'oldpass123');
-    await user.type(screen.getByLabelText(/^new password$/i), 'newpass123');
+    await user.type(screen.getByLabelText('Current password'), 'oldpass123');
+    await user.type(screen.getByLabelText('New password'), 'newpass123');
     await user.type(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
       'newpass123',
     );
     await user.click(
@@ -210,10 +245,10 @@ describe('Account tab — change password', () => {
       new ApiError('invalid credentials', 401),
     );
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'wrongpass1');
-    await user.type(screen.getByLabelText(/^new password$/i), 'newpass123');
+    await user.type(screen.getByLabelText('Current password'), 'wrongpass1');
+    await user.type(screen.getByLabelText('New password'), 'newpass123');
     await user.type(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
       'newpass123',
     );
     await user.click(
@@ -233,10 +268,10 @@ describe('Account tab — change password', () => {
       new Error('password must be at least 12 characters'),
     );
     renderSettings();
-    await user.type(screen.getByLabelText(/current password/i), 'oldpass123');
-    await user.type(screen.getByLabelText(/^new password$/i), 'newpass123');
+    await user.type(screen.getByLabelText('Current password'), 'oldpass123');
+    await user.type(screen.getByLabelText('New password'), 'newpass123');
     await user.type(
-      screen.getByLabelText(/confirm new password/i),
+      screen.getByLabelText('Confirm new password'),
       'newpass123',
     );
     await user.click(
@@ -290,11 +325,11 @@ describe('Users tab — admin reset password', () => {
     );
     const dialog = await screen.findByRole('alertdialog');
     await user.type(
-      within(dialog).getByLabelText(/^new password$/i),
+      within(dialog).getByLabelText('New password'),
       'newpass123',
     );
     await user.type(
-      within(dialog).getByLabelText(/confirm/i),
+      within(dialog).getByLabelText('Confirm new password'),
       'mismatch123',
     );
     await user.click(
@@ -323,11 +358,11 @@ describe('Users tab — admin reset password', () => {
     );
     const dialog = await screen.findByRole('alertdialog');
     await user.type(
-      within(dialog).getByLabelText(/^new password$/i),
+      within(dialog).getByLabelText('New password'),
       'newpass123',
     );
     await user.type(
-      within(dialog).getByLabelText(/confirm/i),
+      within(dialog).getByLabelText('Confirm new password'),
       'newpass123',
     );
     await user.click(
