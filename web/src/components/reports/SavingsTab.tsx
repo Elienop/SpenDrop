@@ -35,6 +35,7 @@ import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { cn } from '@/lib/utils';
+import { monthsToCoverYear } from './utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
 import { api } from '@/api/client';
 
@@ -62,7 +63,18 @@ function buildYoYData(data: YoYResponse | null) {
 
 export function SavingsTab() {
   const [year, setYear] = useState(new Date().getFullYear());
-  const incExp = useIncomeExpenses(24);
+  // The window must reach back to January of the SELECTED year, not a fixed
+  // 24 months. yearOptions offers every year from HISTORICAL_YEAR_START, so a
+  // hardcoded 24 silently truncated any year more than two back: in mid-2026
+  // the window began in August 2024, and picking 2024 rendered five months as
+  // though they were the whole year — the cumulative savings curve started
+  // mid-year and the goal progress was computed against a partial total.
+  // MaxTrendMonths on the backend is 120, so the clamp below stays in range.
+  const months = useMemo(
+    () => monthsToCoverYear(year, new Date().getFullYear()),
+    [year],
+  );
+  const incExp = useIncomeExpenses(months);
   const yoy = useYearOverYear(year);
   const gradientId = useId();
 
