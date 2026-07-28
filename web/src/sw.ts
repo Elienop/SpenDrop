@@ -5,7 +5,7 @@ import {
   createHandlerBoundToURL,
 } from 'workbox-precaching';
 import { registerRoute, NavigationRoute } from 'workbox-routing';
-import { StaleWhileRevalidate } from 'workbox-strategies';
+import { NetworkFirst } from 'workbox-strategies';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { urlBase64ToUint8Array } from './lib/vapid';
@@ -30,15 +30,27 @@ registerRoute(
 );
 
 // Runtime-cache ONLY the two read-only reference lists the /quick capture
-// screen needs offline: categories and currencies. StaleWhileRevalidate serves
-// the last-known list instantly and refreshes in the background. Every other
-// /api GET falls through to the network so views never show stale figures.
+// screen needs offline: categories and currencies. Every other /api GET falls
+// through to the network so views never show stale figures.
+//
+// NetworkFirst, NOT StaleWhileRevalidate. These are the same bare URLs the
+// whole app uses — useCategories and useCurrencies both fetch `categories` /
+// `currencies` with no query string — so under SWR a post-mutation refetch was
+// served the PRE-mutation body from cache. Renaming a category, adding one, or
+// changing a rate left every picker and the management list showing the old
+// data until a second refetch happened to land after the background
+// revalidate. Network-first keeps an online device always correct; the cache
+// is now purely the offline fallback it was meant to be, which is all /quick
+// ever needed.
 registerRoute(
   ({ url, request }) =>
     request.method === 'GET' &&
     /\/api\/(categories|currencies)$/.test(url.pathname),
-  new StaleWhileRevalidate({
+  new NetworkFirst({
     cacheName: 'spendrop-api-lists',
+    // Bounded so a hung connection still falls back to the cached list rather
+    // than blocking the capture screen indefinitely.
+    networkTimeoutSeconds: 3,
     plugins: [
       new CacheableResponsePlugin({ statuses: [200] }),
       new ExpirationPlugin({ maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 7 }),
