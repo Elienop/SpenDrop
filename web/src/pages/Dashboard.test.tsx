@@ -174,6 +174,67 @@ describe('Dashboard', () => {
     expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
   });
 
+  // The KPI delta badges only render when the trend contains the month BEFORE
+  // the one the Dashboard has selected, and the Dashboard defaults to today.
+  // These helpers build a fixture anchored to the current date so the badge
+  // actually appears — with a fixed 2026-04 fixture no badge renders and the
+  // assertions below would pass vacuously.
+  function trendForCurrentMonth(thisSpent: number, prevSpent: number) {
+    const now = new Date();
+    const y = now.getFullYear();
+    const m = now.getMonth() + 1;
+    const prevM = m === 1 ? 12 : m - 1;
+    const prevY = m === 1 ? y - 1 : y;
+    return [
+      { year: y, month: m, total_spent: thisSpent, total_income: 4500 },
+      { year: prevY, month: prevM, total_spent: prevSpent, total_income: 4200 },
+    ];
+  }
+
+  function expensesBadge() {
+    // "Expenses" also appears in the cash-flow chart config, so pick the
+    // occurrence whose CardHeader actually carries a delta badge.
+    const found = screen
+      .getAllByText('Expenses')
+      .map((el) => el.parentElement)
+      .find((p) => p?.textContent?.includes('%'));
+    if (!found) throw new Error('no Expenses KPI badge rendered');
+    return found;
+  }
+
+  test('the Expenses KPI reports a spending increase as an increase', async () => {
+    // Spending ROSE from 2800 to 3200 — up 14.3%. The badge used to negate the
+    // expenses delta and render that rise as "-14.3%" with a downward arrow.
+    // KpiCard applies no good/bad colouring, so the flipped sign was not
+    // conveying "spending more is bad"; it told the user their spending had
+    // fallen when it had grown.
+    localStorage.clear();
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      summary: { ...defaultDashboardData.summary!, total_spent: 3200 },
+      trend: trendForCurrentMonth(3200, 2800),
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+    const header = await waitFor(expensesBadge);
+    expect(header).toHaveTextContent('+14.3%');
+    expect(header).not.toHaveTextContent('-14.3%');
+  });
+
+  test('the Expenses KPI reports a spending decrease as a decrease', async () => {
+    // Spending FELL from 4000 to 3200 — down 20%.
+    localStorage.clear();
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      summary: { ...defaultDashboardData.summary!, total_spent: 3200 },
+      trend: trendForCurrentMonth(3200, 4000),
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+    const header = await waitFor(expensesBadge);
+    expect(header).toHaveTextContent('-20.0%');
+  });
+
   test('renders KPI cards with Total Balance', async () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     await waitFor(() => {

@@ -376,7 +376,11 @@ export function Dashboard() {
             label="Expenses"
             dollars={expenseSplit.dollars}
             cents={expenseSplit.cents}
-            delta={toDelta(expenseDelta == null ? null : -expenseDelta)}
+            // Not negated. KpiCard renders the arrow and the signed magnitude
+            // with no good/bad colouring, so flipping the sign here did not
+            // convey "spending more is bad" — it just reported a 15% rise in
+            // spending as "↓ -15.0% vs last month".
+            delta={toDelta(expenseDelta)}
             footnote="vs last month"
           />
           <KpiCard
