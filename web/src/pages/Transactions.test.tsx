@@ -766,6 +766,62 @@ describe('Transactions page', () => {
       ).toBeInTheDocument();
     });
 
+    it('extra Apply clicks do not fire additional bulk updates', async () => {
+      const user = userEvent.setup();
+      // Never resolves — models a bulk PATCH still in flight.
+      const bulkUpdate = vi.fn(() => new Promise(() => {}));
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(3),
+          total: 3,
+          bulkUpdate,
+          bulkUpdateByFilter: vi.fn(),
+        }),
+      );
+      const { api } = await import('../api/client');
+      (api.get as ReturnType<typeof vi.fn>).mockImplementation(
+        (path: string) => {
+          if (path === 'categories') {
+            return Promise.resolve([
+              {
+                id: 5,
+                name: 'Cleaning',
+                type: 'expense',
+                icon: null,
+                sort_order: 0,
+                is_active: true,
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('button', { name: /^edit \(2\)$/i }));
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+
+      const trigger = categoryTriggerInDialog();
+      await user.click(trigger);
+      await user.click(await screen.findByRole('option', { name: /cleaning/i }));
+
+      const dialog = screen.getByRole('dialog', { name: /edit 2 transactions/i });
+      const apply = within(dialog).getByRole('button', { name: /apply.*to 2/i });
+
+      await user.click(apply);
+      await user.click(apply);
+      await user.click(apply);
+
+      // The dialog awaits onSubmit so RHF holds formState.isSubmitting for the
+      // duration — but only if the page RETURNS the dispatch promise. With a
+      // discarded `void dispatchBulkEdit(p)` the flag flips back before the
+      // request leaves and every extra click fires another bulk PATCH.
+      await waitFor(() => expect(bulkUpdate).toHaveBeenCalledTimes(1));
+    });
+
     it('page-mode submit dispatches bulkUpdate, NOT bulkUpdateByFilter', async () => {
       const user = userEvent.setup();
       const bulkUpdate = vi

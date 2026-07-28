@@ -1064,9 +1064,14 @@ export function Transactions() {
         onSubmit={(p) => {
           if (selectionScope === 'all-matching') {
             setBulkConfirm(p);
-          } else {
-            void dispatchBulkEdit(p);
+            return;
           }
+          // RETURN the promise. BulkEditDialog awaits onSubmit so RHF holds
+          // formState.isSubmitting for the duration, which is what makes the
+          // Apply button and the Cmd/Ctrl+Enter chord refuse re-entry. With a
+          // discarded `void dispatchBulkEdit(p)` the flag flipped back before
+          // the request left, so every extra click fired another bulk PATCH.
+          return dispatchBulkEdit(p);
         }}
       />
 

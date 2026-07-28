@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import { Controller, useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -83,6 +84,20 @@ export function BulkEditDialog({
       tagsMode: 'add',
     },
   });
+
+  // The dialog is mounted for the lifetime of the Transactions page — only
+  // `open` toggles — so RHF state survives every close. Without this reset a
+  // patch the user typed and then abandoned (Cancel, Escape, backdrop click)
+  // stayed in the form and was silently re-applied the next time the dialog
+  // was opened, against whatever selection was active by then: a different
+  // set of rows, often a different member's, in a different month.
+  //
+  // Resetting on OPEN rather than on close is deliberate — it is the state
+  // the user is about to see, so it stays correct even if a close path is
+  // interrupted or a future caller forgets to route through onClose.
+  useEffect(() => {
+    if (open) form.reset();
+  }, [open, form]);
 
   const values = form.watch();
   const computed = computePatch(values as BulkEditFormValues);
