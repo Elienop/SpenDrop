@@ -893,7 +893,7 @@ func TestValidateTransactionRequest_NotesTooLong_ReturnsError(t *testing.T) {
 		Amount:      50.0,
 		Description: "Test",
 		CategoryID:  1,
-		Notes:       strings.Repeat("x", 2001),
+		Notes:       ptr(strings.Repeat("x", 2001)),
 	}
 	err := validateTransactionRequest(req)
 	if err == nil {
@@ -908,7 +908,7 @@ func TestValidateTransactionRequest_ValidLengths_NoError(t *testing.T) {
 		Description: strings.Repeat("x", 500),
 		CategoryID:  1,
 		Tags:        strings.Repeat("x", 500),
-		Notes:       strings.Repeat("x", 2000),
+		Notes:       ptr(strings.Repeat("x", 2000)),
 	}
 	err := validateTransactionRequest(req)
 	if err != nil {

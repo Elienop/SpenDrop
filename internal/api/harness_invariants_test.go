@@ -2,6 +2,10 @@ package api
 
 import "testing"
 
+// ptr returns a pointer to v, for populating optional request fields such as
+// transactionRequest.Notes where nil and empty mean different things.
+func ptr[T any](v T) *T { return &v }
+
 // TestSetupTestDB_MatchesProductionPoolAndFKInvariants guards the two DSN/pool
 // properties that make whole classes of bug visible to this suite.
 //

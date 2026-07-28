@@ -832,7 +832,7 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
 | POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/missing IDs skipped, plus non-owned IDs for members (admins may patch any household row). Capped at 500 IDs. |
 | POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Scoped to the caller's own rows for members, household-wide for admins, so there is no skipped count. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
-| PUT | `/api/transactions/{id}` | Update a transaction |
+| PUT | `/api/transactions/{id}` | Update a transaction. Full replace, with one exception: `notes` is optional — **omit the key to leave the stored note unchanged**, or send `"notes": ""` to clear it. Every other field is overwritten by what you send. |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
 #### Trash view (admin only)

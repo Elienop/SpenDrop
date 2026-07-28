@@ -68,7 +68,17 @@ type transactionRequest struct {
 	Description      string   `json:"description"`
 	CategoryID       int64    `json:"category_id"`
 	Tags             string   `json:"tags"`
-	Notes            string   `json:"notes"`
+	// Notes is a pointer so an ABSENT key is distinguishable from an empty
+	// one. PUT /transactions/{id} is a full replace, and clients that build
+	// their payload field-by-field (the inline row editor, the API-token
+	// surface) legitimately omit notes because they have no notes editor. A
+	// plain string decoded "" for those callers and silently NULLed a note
+	// the user had imported — invisible loss, recoverable only from
+	// transaction_audit.before_json.
+	//
+	// nil          -> leave the stored note unchanged (update) / no note (create)
+	// pointer to "" -> explicitly clear the note
+	Notes *string `json:"notes"`
 }
 
 // transactionResponse is the JSON output for a single transaction including
@@ -357,7 +367,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
 		Tags:                toNullString(req.Tags),
-		Notes:               toNullString(req.Notes),
+		Notes:               notesFromPtr(req.Notes),
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
@@ -478,8 +488,11 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
 		Tags:                toNullString(req.Tags),
-		Notes:               toNullString(req.Notes),
-		ID:                  id,
+		// PUT is a full replace, so an absent notes key must carry the
+		// stored value forward rather than clearing it. `existing` was
+		// already loaded above for the tombstone/ownership checks.
+		Notes: notesForUpdate(req.Notes, existing.Notes),
+		ID:    id,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update transaction")
@@ -665,7 +678,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			Description:         req.Description,
 			CategoryID:          req.CategoryID,
 			Tags:                toNullString(req.Tags),
-			Notes:               toNullString(req.Notes),
+			Notes:               notesFromPtr(req.Notes),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -789,7 +802,7 @@ func validateTransactionRequest(req transactionRequest) error {
 	if _, err := validateTagsField(req.Tags); err != nil {
 		return err
 	}
-	if len(req.Notes) > MaxNotesLength {
+	if req.Notes != nil && len(*req.Notes) > MaxNotesLength {
 		return fmt.Errorf("notes must be %d characters or less", MaxNotesLength)
 	}
 	if _, err := validateCategoryID(req.CategoryID); err != nil {
@@ -2144,6 +2157,26 @@ func toNullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// notesFromPtr converts an optional notes field to its stored form. A nil
+// pointer (key absent from the JSON body) means "no note" on a create path;
+// update paths must not call this and should keep the existing value instead.
+func notesFromPtr(p *string) sql.NullString {
+	if p == nil {
+		return sql.NullString{}
+	}
+	return toNullString(*p)
+}
+
+// notesForUpdate resolves the notes column for a full-replace update: an
+// absent key (nil) keeps whatever is already stored, an explicit value
+// (including "") overwrites it.
+func notesForUpdate(p *string, existing sql.NullString) sql.NullString {
+	if p == nil {
+		return existing
+	}
+	return toNullString(*p)
 }
 
 func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Request) {
