@@ -6,6 +6,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"github.com/elienop/spendrop/internal/auth"
 
 	"github.com/elienop/spendrop/internal/config"
 	"github.com/elienop/spendrop/internal/database"
@@ -26,13 +29,21 @@ func postRegister(t *testing.T, h *Handler, username, remoteAddr string) *httpte
 	return rec
 }
 
-// TestHandleRegister_ClosedInstanceRejectsAndThrottles covers 15a.
+// TestHandleRegister_ClosedInstanceRejectsCheaplyWithoutLockout covers 15a and
+// the regression a first attempt at it introduced.
 //
-// Registration used to hash the password with bcrypt BEFORE checking whether
-// registration was open, and the attempt counter was only incremented when
-// CreateUser failed. So probing a closed instance cost the attacker nothing,
-// cost the server a full bcrypt each time, and never tripped the limiter.
-func TestHandleRegister_ClosedInstanceRejectsAndThrottles(t *testing.T) {
+// The defect: registration hashed the password with bcrypt BEFORE checking
+// whether registration was open, so probing a closed instance cost the
+// attacker nothing and the server a full hash each time.
+//
+// The regression: a first fix also counted those rejections against the rate
+// limiter. registration_enabled is never seeded by any migration, so "closed"
+// is the normal steady state, and the bucket is keyed by client IP — the SAME
+// IP for every user behind the documented reverse proxy. Ten requests from
+// anyone on the internet then 429'd registration for the whole household.
+//
+// The correct behaviour is a cheap 403 that never throttles.
+func TestHandleRegister_ClosedInstanceRejectsCheaplyWithoutLockout(t *testing.T) {
 	h := setupHandler(t)
 	// An existing user means this is no longer the bootstrap case, and the
 	// registration-enabled setting is absent, so registration is closed.
@@ -40,24 +51,64 @@ func TestHandleRegister_ClosedInstanceRejectsAndThrottles(t *testing.T) {
 
 	resetRegisterAttempts()
 
-	first := postRegister(t, h, "attacker1", "203.0.113.9:1234")
-	if first.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 on a closed instance; body = %s",
-			first.Code, first.Body.String())
-	}
-
-	// The rejection must be counted, or the abuse path never throttles.
-	var throttled bool
-	for i := 0; i < getRateLimitMax()+2; i++ {
-		rec := postRegister(t, h, "attacker", "203.0.113.9:1234")
-		if rec.Code == http.StatusTooManyRequests {
-			throttled = true
-			break
+	const attackerIP = "203.0.113.9:1234"
+	for i := 0; i < getRateLimitMax()*3; i++ {
+		rec := postRegister(t, h, "attacker", attackerIP)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("attempt %d: status = %d, want 403 every time; body = %s",
+				i, rec.Code, rec.Body.String())
 		}
 	}
-	if !throttled {
-		t.Error("repeated rejected registrations never produced a 429 — " +
-			"the limiter is not counting the abuse path")
+
+	// The bucket must be untouched, or a legitimate user sharing that IP —
+	// which behind a reverse proxy is everyone — is now locked out.
+	rateLimitMu.Lock()
+	attempts := registerAttempts[extractIP(attackerIP)]
+	rateLimitMu.Unlock()
+	if attempts != 0 {
+		t.Errorf("closed-registration rejections were counted against the limiter (%d) — "+
+			"one attacker can lock out every user behind the same proxy IP", attempts)
+	}
+}
+
+// TestHandleRegister_ClosedInstanceSkipsBcrypt proves the ORDERING, which the
+// lockout test above cannot see: it asserts a 403 either way, whether that 403
+// arrives before or after a full password hash.
+//
+// Calibrated rather than hardcoded: it measures one real hash on this machine
+// and requires the closed-registration path to come back in a small fraction of
+// it. With the gate below bcrypt the rejection costs a whole hash, so the
+// margin is enormous; the assertion only needs to separate "one hash" from
+// "no hash".
+func TestHandleRegister_ClosedInstanceSkipsBcrypt(t *testing.T) {
+	// A cost high enough that one hash dominates all other request work.
+	auth.Configure(12, 72)
+	t.Cleanup(func() { auth.SetBcryptCostForTesting() })
+
+	h := setupHandler(t)
+	seedTestUser(t, h.queries, "existing", "admin")
+	resetRegisterAttempts()
+
+	start := time.Now()
+	if _, err := auth.HashPassword("correct-horse-battery"); err != nil {
+		t.Fatalf("calibration hash: %v", err)
+	}
+	oneHash := time.Since(start)
+	if oneHash < 10*time.Millisecond {
+		t.Skipf("bcrypt too fast on this machine to distinguish (%v)", oneHash)
+	}
+
+	start = time.Now()
+	rec := postRegister(t, h, "attacker", "203.0.113.9:1234")
+	rejection := time.Since(start)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	if rejection > oneHash/2 {
+		t.Errorf("closed-registration rejection took %v, comparable to one bcrypt hash (%v) — "+
+			"the open/closed gate is running AFTER the hash, so probing a closed "+
+			"instance still burns server CPU", rejection, oneHash)
 	}
 }
 

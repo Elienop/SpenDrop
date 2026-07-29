@@ -479,7 +479,7 @@ SpenDrop takes a consistent, WAL-aware backup of your database every 24 hours by
 2. `PRAGMA integrity_check` returns `ok`
 3. Row-count parity against the live `transactions` table (tolerates a single in-flight write that landed between the count and the snapshot)
 
-If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups (it ignores `.corrupt` files entirely, leaving them for you to inspect).
+If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups. `.corrupt` files sit outside the GFS buckets but are **not** kept forever: the newest `BACKUP_KEEP_CORRUPT` (default 2) are retained for you to inspect and the rest are swept. Each one is a full-size copy of the database and `BACKUP_DIR` shares a volume with the live database, so an unbounded quarantine would eventually fill the disk and take the database down with it.
 
 Old backups are pruned on a grandfather-father-son schedule: by default, 7 daily, 4 weekly, 12 monthly — roughly 115 MB of backup history for a typical household database.
 

@@ -182,13 +182,17 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Gate BEFORE hashing. bcrypt is deliberately expensive, so hashing first
 	// and checking afterwards let an unauthenticated caller burn a full hash
-	// per request against an instance that has registration closed. The
-	// rejection is also counted against the limiter — previously only a failed
-	// CreateUser incremented it, so the abuse path never throttled at all.
+	// per request against an instance that has registration closed. Moving the
+	// check ahead of the hash is the entire fix: the rejection is now cheap.
+	//
+	// Deliberately NOT counted against the rate limiter. An earlier version of
+	// this fix did count it, which introduced a worse bug than the one it
+	// closed: registration_enabled is never seeded by a migration, so "closed"
+	// is the normal steady state, and the bucket is keyed by client IP — which
+	// behind the documented reverse proxy is the SAME IP for everyone. Ten
+	// requests from anyone on the internet then 429'd registration for the
+	// entire household. A cheap rejection needs no throttle.
 	if !h.registrationOpen(r) {
-		rateLimitMu.Lock()
-		registerAttempts[clientIP]++
-		rateLimitMu.Unlock()
 		writeError(w, http.StatusForbidden, "registration is disabled")
 		return
 	}

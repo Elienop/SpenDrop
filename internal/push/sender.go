@@ -66,11 +66,31 @@ type Sender struct {
 // The copy shares the original Transport, so a shared http.DefaultClient keeps
 // its connection pool while its own Timeout stays zero for every other caller.
 func NewSender(publicKey, privateKey, subject string, client *http.Client) *Sender {
-	if client.Timeout == 0 {
-		c := *client
+	// Always copy: we install an SSRF-guarded transport and a redirect refusal,
+	// and both must be scoped to this sender rather than mutating a client the
+	// caller (often http.DefaultClient) shares with the rest of the process.
+	c := *client
+	if c.Timeout == 0 {
 		c.Timeout = defaultHTTPTimeout
-		client = &c
 	}
+	// The endpoint is attacker-influenced: any authenticated household member
+	// can register one, and the sender then fetches it repeatedly. Validating
+	// the URL at subscribe time cannot hold — DNS resolves at connect time and
+	// can change afterwards — so the guarantee is enforced here, at the dial.
+	// Wrap only a real network transport. A caller that supplied its own
+	// RoundTripper (the tests' stubs) is not talking to the network at all, so
+	// there is nothing to guard and replacing it would defeat the seam. The
+	// production path — main.go passes http.DefaultClient, whose Transport is
+	// nil — always lands in the wrapped branch.
+	switch base := c.Transport.(type) {
+	case nil:
+		c.Transport = GuardedTransport(http.DefaultTransport.(*http.Transport))
+	case *http.Transport:
+		c.Transport = GuardedTransport(base)
+	}
+	// Redirect refusal is transport-independent, so it applies unconditionally.
+	c.CheckRedirect = refuseRedirects
+	client = &c
 	return &Sender{
 		publicKey:  publicKey,
 		privateKey: privateKey,

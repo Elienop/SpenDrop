@@ -51,19 +51,23 @@ func (h *Handler) handleGetVAPIDPublicKey(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"publicKey": getVAPIDPublicKey()})
 }
 
-// validatePushEndpoint checks that a subscription endpoint is a URL this
-// server is willing to make outbound requests to.
+// validatePushEndpoint rejects subscription endpoints that are obviously not a
+// real push service, so the user gets a 400 instead of a silent delivery
+// failure later.
 //
-// The endpoint is stored and later fetched by the push sender, so an
-// authenticated user could otherwise aim the server at any host reachable from
-// it — the classic SSRF shape, and on a self-hosted box the interesting
-// targets (router admin pages, other containers, cloud metadata endpoints) all
-// sit on private ranges the server can reach and the attacker cannot.
+// This is a convenience filter, NOT the SSRF control. It cannot be: DNS
+// resolves at connect time and the endpoint is fetched repeatedly for the
+// lifetime of the subscription, so a name that resolves publicly now can
+// resolve to 192.168.1.1 later (DNS rebinding). The real guarantee is enforced
+// at the dial, in push.GuardedTransport, which resolves the host itself,
+// rejects every non-public answer, and connects to the exact address it
+// checked. Redirects are refused there too, so a public host cannot bounce the
+// sender inward.
 //
-// Real push services are all public HTTPS endpoints, so the restriction costs
-// nothing legitimate. DNS names are not resolved here: resolution happens at
-// send time and could differ (DNS rebinding), so this is a cheap first filter,
-// not a complete SSRF defence.
+// An earlier version of this function checked ONLY net.ParseIP(host), which is
+// the one form an attacker never needs — "https://router.lan/admin" sailed
+// straight through. Keeping the literal-IP check is still worthwhile as a fast,
+// clear rejection; it just is not what makes the system safe.
 func validatePushEndpoint(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -72,15 +76,18 @@ func validatePushEndpoint(raw string) error {
 	if u.Scheme != "https" {
 		return fmt.Errorf("endpoint must use https")
 	}
+	if u.User != nil {
+		return fmt.Errorf("endpoint must not contain credentials")
+	}
 	host := u.Hostname()
 	if host == "" {
 		return fmt.Errorf("endpoint must include a host")
 	}
-	if ip := net.ParseIP(host); ip != nil {
-		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
-			return fmt.Errorf("endpoint must not target a private or loopback address")
-		}
+	// Literal address: decide now. push.IsPubliclyRoutable handles the forms a
+	// hand-rolled check misses — IPv4-mapped IPv6 (::ffff:10.0.0.1), CGNAT,
+	// link-local, multicast.
+	if ip := net.ParseIP(host); ip != nil && !push.IsPubliclyRoutable(ip) {
+		return fmt.Errorf("endpoint must not target a private, loopback or link-local address")
 	}
 	return nil
 }
