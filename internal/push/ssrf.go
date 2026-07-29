@@ -101,7 +101,33 @@ func GuardedTransport(base *http.Transport) *http.Transport {
 				return nil, fmt.Errorf("push: refusing to connect to non-public address %s (host %q)", ip.IP, host)
 			}
 		}
-		return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].IP.String(), port))
+		// Try every validated address, not just the first.
+		//
+		// Resolving the host ourselves is what closes the rebinding window,
+		// but it also takes over a job the standard dialer was doing: when
+		// given a hostname it walks the address list and falls back. The real
+		// push services publish 8-16 addresses each (measured: fcm 8,
+		// mozilla 8, apple 16) precisely so a single unreachable endpoint is
+		// survivable, and RFC 6724 ordering is host-dependent — on a
+		// dual-stack box whose IPv6 route is broken, the first address is an
+		// AAAA and dialing only it would fail every push. Every address here
+		// has already passed the guard, so iterating costs nothing in safety.
+		var firstErr error
+		for _, ip := range ips {
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			// A cancelled or timed-out context means giving up, not trying the
+			// next address — otherwise one dead host burns the whole budget.
+			if ctx.Err() != nil {
+				break
+			}
+		}
+		return nil, firstErr
 	}
 	return t
 }

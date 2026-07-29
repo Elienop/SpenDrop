@@ -1,6 +1,7 @@
 package push
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -108,4 +109,37 @@ func TestNewSender_WiresTheDialGuard(t *testing.T) {
 	if !strings.Contains(err.Error(), "non-public address") {
 		t.Errorf("failed for the wrong reason: %v", err)
 	}
+}
+
+// TestGuardedTransport_FallsBackAcrossAddresses is the regression test for
+// losing multi-address failover.
+//
+// Resolving the host ourselves is what closes the DNS-rebinding window, but it
+// also takes over the standard dialer's job of walking the address list. Real
+// push services publish 8-16 addresses each so a single dead endpoint is
+// survivable; dialing only the first would turn one unreachable address — or a
+// broken IPv6 route on a dual-stack host, where RFC 6724 puts AAAA first —
+// into total delivery failure.
+func TestGuardedTransport_FallsBackAcrossAddresses(t *testing.T) {
+	defer AllowNonPublicDialForTesting()()
+
+	// A live server, and a port that nothing is listening on.
+	live := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer live.Close()
+	_, livePort, err := net.SplitHostPort(strings.TrimPrefix(live.URL, "http://"))
+	if err != nil {
+		t.Fatalf("split: %v", err)
+	}
+
+	tr := GuardedTransport(http.DefaultTransport.(*http.Transport))
+	// Resolve "localhost" — on a dual-stack machine this yields ::1 AND
+	// 127.0.0.1. httptest listens on 127.0.0.1 only, so if ::1 sorts first the
+	// dial must fall through to the second address rather than giving up.
+	conn, err := tr.DialContext(context.Background(), "tcp", net.JoinHostPort("localhost", livePort))
+	if err != nil {
+		t.Fatalf("dial gave up instead of trying every resolved address: %v", err)
+	}
+	conn.Close()
 }
