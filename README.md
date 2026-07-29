@@ -293,7 +293,8 @@ Most deployments only need the first handful of variables. Everything below is a
 | `BACKUP_ENABLED` | `true` | Enable the in-process scheduled backup loop. Set `false` to disable it entirely; no other `BACKUP_*` variables are validated when disabled |
 | `BACKUP_INTERVAL` | `24h` | How often the scheduler runs a backup. Must be at least `1h` |
 | `BACKUP_DIR` | `backups` | Where backups are written. The Docker image overrides this to `/app/data/backups` so the files land in the mounted volume |
-| `BACKUP_KEEP_DAILY` | `7` | Most-recent daily backups retained |
+| `BACKUP_KEEP_DAILY` | `7` | Distinct calendar days retained, **plus** the most-recent 7 snapshots so a sub-daily `BACKUP_INTERVAL` also keeps intra-day restore points. The calendar half is what makes the recovery window independent of `BACKUP_INTERVAL` |
+| `BACKUP_KEEP_CORRUPT` | `2` | Quarantined `.corrupt` backups retained for forensics. Bounded deliberately: a failed verify writes a full-size copy of the database into `BACKUP_DIR`, which shares a volume with the live database, so an unbounded quarantine ends in ENOSPC |
 | `BACKUP_KEEP_WEEKLY` | `4` | Distinct ISO weeks retained |
 | `BACKUP_KEEP_MONTHLY` | `12` | Distinct calendar months retained. The sum of the three `BACKUP_KEEP_*` counts must be ≥ 1 — setting all three to `0` is rejected at startup because the current tick's own backup would be pruned on the same tick |
 
@@ -500,7 +501,7 @@ The subcommand refuses to overwrite an existing file and writes both the `.db` a
 
 #### Tunables
 
-Backup behavior is controlled by six environment variables — `BACKUP_ENABLED`, `BACKUP_INTERVAL`, `BACKUP_DIR`, `BACKUP_KEEP_DAILY`, `BACKUP_KEEP_WEEKLY`, `BACKUP_KEEP_MONTHLY`. All six are documented in the [Uploads, database, and backups](#uploads-database-and-backups) section of the environment variables table. Most deployments never need to change any of them; the common adjustments are `BACKUP_INTERVAL=12h` for twice-daily backups and `BACKUP_ENABLED=false` for throwaway test environments.
+Backup behavior is controlled by seven environment variables — `BACKUP_ENABLED`, `BACKUP_INTERVAL`, `BACKUP_DIR`, `BACKUP_KEEP_DAILY`, `BACKUP_KEEP_WEEKLY`, `BACKUP_KEEP_MONTHLY`, `BACKUP_KEEP_CORRUPT`. All seven are documented in the [Uploads, database, and backups](#uploads-database-and-backups) section of the environment variables table. Most deployments never need to change any of them; the common adjustments are `BACKUP_INTERVAL=12h` for twice-daily backups and `BACKUP_ENABLED=false` for throwaway test environments.
 
 #### Restore drill — do this at least once before you trust the system
 

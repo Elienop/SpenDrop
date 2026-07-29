@@ -195,6 +195,7 @@ func main() {
 		Enabled:     cfg.Backup.Enabled,
 		Dir:         cfg.Backup.Dir,
 		Interval:    cfg.Backup.Interval,
+		KeepCorrupt: cfg.Backup.KeepCorrupt,
 		KeepDaily:   cfg.Backup.KeepDaily,
 		KeepWeekly:  cfg.Backup.KeepWeekly,
 		KeepMonthly: cfg.Backup.KeepMonthly,
