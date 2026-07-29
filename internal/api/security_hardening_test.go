@@ -125,10 +125,10 @@ func TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured(t *testing.T) {
 	}
 
 	setTrustProxyHeadersForTest(t, true)
-	// RIGHTMOST, not leftmost: that is the entry our own proxy appended. The
-	// leftmost is whatever the client claimed.
+	// One trusted hop -> the client is the rightmost entry, the one our own
+	// proxy appended. The leftmost is whatever the client claimed.
 	if got := clientIPForRateLimit(req); got != "203.0.113.4" {
-		t.Errorf("trusted: got %q, want 203.0.113.4 (rightmost XFF entry)", got)
+		t.Errorf("trusted, 1 hop: got %q, want 203.0.113.4", got)
 	}
 
 	// With no header at all, fall back to the socket address either way.
@@ -278,5 +278,40 @@ func TestHandleCreatePushSubscription_RejectsPrivateEndpoint(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("a private-address endpoint was stored anyway (%d rows)", n)
+	}
+}
+
+// TestClientIPFromXFF_HopCount is the regression test for hard-coding
+// "rightmost".
+//
+// Each appending proxy adds the address it saw, so the client sits
+// hops-from-the-right. With two hops — the README documents a Cloudflare
+// Tunnel in front of Caddy — the rightmost entry is the outer edge, which is
+// the SAME address for every visitor. Keying the limiter on it collapses the
+// household back into one bucket, which is the exact bug TRUST_PROXY_HEADERS
+// was added to fix.
+func TestClientIPFromXFF_HopCount(t *testing.T) {
+	const header = "198.51.100.7, 203.0.113.4, 192.0.2.9"
+
+	cases := []struct {
+		hops int
+		want string
+		why  string
+	}{
+		{1, "192.0.2.9", "single proxy: client is the last entry"},
+		{2, "203.0.113.4", "two hops: the last entry is the outer edge, not the client"},
+		{3, "198.51.100.7", "three hops walks back to the original client"},
+		// More hops than entries means upstream is not appending as configured;
+		// falling back to the socket address is the safe reading.
+		{4, "", "more hops than entries falls back"},
+	}
+	for _, tc := range cases {
+		if got := clientIPFromXFF(header, tc.hops); got != tc.want {
+			t.Errorf("hops=%d: got %q, want %q (%s)", tc.hops, got, tc.want, tc.why)
+		}
+	}
+
+	if got := clientIPFromXFF("", 1); got != "" {
+		t.Errorf("empty header: got %q, want \"\"", got)
 	}
 }

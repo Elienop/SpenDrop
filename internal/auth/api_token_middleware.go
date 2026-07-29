@@ -134,15 +134,20 @@ func extractRemoteIP(remoteAddr string) string {
 var (
 	trustProxyHeadersMu sync.RWMutex
 	trustProxyHeaders   bool
+	trustedProxyHops    = 1
 )
 
 // SetTrustProxyHeaders mirrors the api package's TRUST_PROXY_HEADERS runtime
 // flag into this package. Called from api.ApplyConfig; the two packages cannot
 // share state directly because internal/auth must not import internal/api.
-func SetTrustProxyHeaders(v bool) {
+func SetTrustProxyHeaders(v bool, hops int) {
 	trustProxyHeadersMu.Lock()
 	defer trustProxyHeadersMu.Unlock()
 	trustProxyHeaders = v
+	if hops < 1 {
+		hops = 1
+	}
+	trustedProxyHops = hops
 }
 
 // clientIP resolves the address the auth-failure limiter keys on.
@@ -157,12 +162,17 @@ func SetTrustProxyHeaders(v bool) {
 func clientIP(r *http.Request) string {
 	trustProxyHeadersMu.RLock()
 	trusted := trustProxyHeaders
+	hops := trustedProxyHops
 	trustProxyHeadersMu.RUnlock()
 	if trusted {
+		// Entry hops-from-the-right; see the long note on the api package's
+		// clientIPForRateLimit for why this is a count and not "rightmost".
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			if candidate := strings.TrimSpace(parts[len(parts)-1]); candidate != "" {
-				return candidate
+			if idx := len(parts) - hops; idx >= 0 && idx < len(parts) {
+				if candidate := strings.TrimSpace(parts[idx]); candidate != "" {
+					return candidate
+				}
 			}
 		}
 	}

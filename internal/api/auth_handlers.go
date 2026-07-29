@@ -33,21 +33,36 @@ func extractIP(remoteAddr string) string {
 // anyone mint a fresh identity per request and bypass the limiter completely.
 // Hence TRUST_PROXY_HEADERS, defaulting to off.
 //
-// When trusted, the RIGHTMOST entry is used, not the leftmost. A proxy appends
-// the address it observed, so given "spoofed, spoofed, realclient" the last
-// entry is the one our own proxy wrote and the only one a client cannot forge.
-// The leftmost is whatever the client claimed.
+// Which entry to take is a COUNT, not a guess. Each appending proxy adds the
+// address it saw, so with N trusted hops the client is N-from-the-right.
+// Hard-coding "rightmost" is correct for exactly one hop and wrong for two —
+// and the README documents a Cloudflare Tunnel in front of Caddy, where the
+// rightmost entry is the outer edge: identical for every visitor, collapsing
+// the household back into one bucket. Everything left of the trusted hops is
+// client-supplied and must never be trusted.
 func clientIPForRateLimit(r *http.Request) string {
 	if getTrustProxyHeaders() {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			candidate := strings.TrimSpace(parts[len(parts)-1])
-			if candidate != "" {
-				return candidate
-			}
+		if ip := clientIPFromXFF(r.Header.Get("X-Forwarded-For"), getTrustedProxyHops()); ip != "" {
+			return ip
 		}
 	}
 	return extractIP(r.RemoteAddr)
+}
+
+// clientIPFromXFF picks the entry hops-from-the-right, or "" when the header
+// is absent or has fewer entries than the configured hop count (a shorter
+// header than expected means something upstream is not appending as assumed —
+// falling back to the socket address is the safe reading).
+func clientIPFromXFF(xff string, hops int) string {
+	if xff == "" {
+		return ""
+	}
+	parts := strings.Split(xff, ",")
+	idx := len(parts) - hops
+	if idx < 0 || idx >= len(parts) {
+		return ""
+	}
+	return strings.TrimSpace(parts[idx])
 }
 
 // userResponse is the JSON representation of a user, excluding password_hash.
