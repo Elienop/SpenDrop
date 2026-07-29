@@ -97,6 +97,17 @@ type RateLimitConfig struct {
 	// address, so the whole household shares one bucket and a single attacker
 	// locks everyone out.
 	TrustProxyHeaders bool
+	// TrustedProxyHops is how many proxies sit in front of SpenDrop, i.e. how
+	// many entries each request's X-Forwarded-For gains before it arrives.
+	// Only meaningful when TrustProxyHeaders is true. Default 1.
+	//
+	// This has to be a count, not a guess. With exactly one appending proxy
+	// the client is the rightmost entry. With two — the README documents a
+	// Cloudflare Tunnel in front of Caddy — the rightmost entry is the outer
+	// edge, which is the SAME address for every visitor, so the whole
+	// household collapses into one rate-limit bucket again. Counting hops from
+	// the right lands on the address the outermost proxy you control observed.
+	TrustedProxyHops int
 }
 
 // PasswordConfig holds bcrypt cost and password length policy.
@@ -201,6 +212,7 @@ func Defaults() Config {
 			MaxAttempts:       10,
 			Window:            time.Minute,
 			TrustProxyHeaders: false,
+			TrustedProxyHops:  1,
 		},
 		Password: PasswordConfig{
 			BcryptCost: 12,
@@ -331,6 +343,9 @@ func Load() (*Config, error) {
 	if err := parseBool("TRUST_PROXY_HEADERS", &cfg.RateLimit.TrustProxyHeaders); err != nil {
 		return nil, err
 	}
+	if err := parseInt("TRUSTED_PROXY_HOPS", &cfg.RateLimit.TrustedProxyHops); err != nil {
+		return nil, err
+	}
 	if err := parseBool("PUSH_ENABLED", &cfg.Push.Enabled); err != nil {
 		return nil, err
 	}
@@ -386,6 +401,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("SESSION_TOKEN_BYTES must be >= 16 for sufficient entropy: %d", c.Session.TokenBytes)
 	}
 
+	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops < 1 {
+		return fmt.Errorf("TRUSTED_PROXY_HOPS must be >= 1 when TRUST_PROXY_HEADERS is enabled: %d",
+			c.RateLimit.TrustedProxyHops)
+	}
 	if c.RateLimit.MaxAttempts < 1 {
 		return fmt.Errorf("RATE_LIMIT_MAX must be >= 1: %d", c.RateLimit.MaxAttempts)
 	}
