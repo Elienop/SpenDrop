@@ -125,8 +125,9 @@ func TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured(t *testing.T) {
 	}
 
 	setTrustProxyHeadersForTest(t, true)
-	// One trusted hop -> the client is the rightmost entry, the one our own
-	// proxy appended. The leftmost is whatever the client claimed.
+	// One trusted hop -> the client is the last entry, the one our own proxy
+	// appended. Hop-count behaviour itself is covered in internal/auth; this
+	// asserts the api handler path actually delegates there.
 	if got := clientIPForRateLimit(req); got != "203.0.113.4" {
 		t.Errorf("trusted, 1 hop: got %q, want 203.0.113.4", got)
 	}
@@ -229,17 +230,14 @@ func resetRegisterAttempts() {
 	rateLimitMu.Unlock()
 }
 
+// setTrustProxyHeadersForTest drives the REAL state — the shared one in
+// internal/auth. api used to keep its own copy; it was removed once the
+// resolution logic was consolidated, because duplicated config state that
+// looks live is exactly how the two implementations drifted apart.
 func setTrustProxyHeadersForTest(t *testing.T, v bool) {
 	t.Helper()
-	runtimeMu.Lock()
-	prev := trustProxyHeaders
-	trustProxyHeaders = v
-	runtimeMu.Unlock()
-	t.Cleanup(func() {
-		runtimeMu.Lock()
-		trustProxyHeaders = prev
-		runtimeMu.Unlock()
-	})
+	auth.SetTrustProxyHeaders(v, 1)
+	t.Cleanup(func() { auth.SetTrustProxyHeaders(false, 1) })
 }
 
 // TestHandleCreatePushSubscription_RejectsPrivateEndpoint proves the validator
@@ -278,40 +276,5 @@ func TestHandleCreatePushSubscription_RejectsPrivateEndpoint(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("a private-address endpoint was stored anyway (%d rows)", n)
-	}
-}
-
-// TestClientIPFromXFF_HopCount is the regression test for hard-coding
-// "rightmost".
-//
-// Each appending proxy adds the address it saw, so the client sits
-// hops-from-the-right. With two hops — the README documents a Cloudflare
-// Tunnel in front of Caddy — the rightmost entry is the outer edge, which is
-// the SAME address for every visitor. Keying the limiter on it collapses the
-// household back into one bucket, which is the exact bug TRUST_PROXY_HEADERS
-// was added to fix.
-func TestClientIPFromXFF_HopCount(t *testing.T) {
-	const header = "198.51.100.7, 203.0.113.4, 192.0.2.9"
-
-	cases := []struct {
-		hops int
-		want string
-		why  string
-	}{
-		{1, "192.0.2.9", "single proxy: client is the last entry"},
-		{2, "203.0.113.4", "two hops: the last entry is the outer edge, not the client"},
-		{3, "198.51.100.7", "three hops walks back to the original client"},
-		// More hops than entries means upstream is not appending as configured;
-		// falling back to the socket address is the safe reading.
-		{4, "", "more hops than entries falls back"},
-	}
-	for _, tc := range cases {
-		if got := clientIPFromXFF(header, tc.hops); got != tc.want {
-			t.Errorf("hops=%d: got %q, want %q (%s)", tc.hops, got, tc.want, tc.why)
-		}
-	}
-
-	if got := clientIPFromXFF("", 1); got != "" {
-		t.Errorf("empty header: got %q, want \"\"", got)
 	}
 }

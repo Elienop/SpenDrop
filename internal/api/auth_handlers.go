@@ -23,46 +23,15 @@ func extractIP(remoteAddr string) string {
 	return host
 }
 
-// clientIPForRateLimit resolves the address the rate limiter should key on.
+// clientIPForRateLimit delegates to the shared implementation in internal/auth.
 //
-// Behind the reverse proxy the README documents, r.RemoteAddr is the PROXY's
-// address for every request, so the whole household shares a single bucket and
-// one attacker's failed logins lock everyone out. Reading X-Forwarded-For
-// fixes that — but only when a proxy is actually in front, because on a
-// directly-exposed server the header is attacker-controlled and would let
-// anyone mint a fresh identity per request and bypass the limiter completely.
-// Hence TRUST_PROXY_HEADERS, defaulting to off.
-//
-// Which entry to take is a COUNT, not a guess. Each appending proxy adds the
-// address it saw, so with N trusted hops the client is N-from-the-right.
-// Hard-coding "rightmost" is correct for exactly one hop and wrong for two —
-// and the README documents a Cloudflare Tunnel in front of Caddy, where the
-// rightmost entry is the outer edge: identical for every visitor, collapsing
-// the household back into one bucket. Everything left of the trusted hops is
-// client-supplied and must never be trusted.
+// It used to be a second copy of that logic. The copy drifted from its own doc
+// comment inside one commit — the comment still claimed "rightmost" after the
+// behaviour became hop-counted — which is exactly the failure mode duplicated
+// security logic produces. api already imports auth, so there is no reason for
+// two.
 func clientIPForRateLimit(r *http.Request) string {
-	if getTrustProxyHeaders() {
-		if ip := clientIPFromXFF(r.Header.Get("X-Forwarded-For"), getTrustedProxyHops()); ip != "" {
-			return ip
-		}
-	}
-	return extractIP(r.RemoteAddr)
-}
-
-// clientIPFromXFF picks the entry hops-from-the-right, or "" when the header
-// is absent or has fewer entries than the configured hop count (a shorter
-// header than expected means something upstream is not appending as assumed —
-// falling back to the socket address is the safe reading).
-func clientIPFromXFF(xff string, hops int) string {
-	if xff == "" {
-		return ""
-	}
-	parts := strings.Split(xff, ",")
-	idx := len(parts) - hops
-	if idx < 0 || idx >= len(parts) {
-		return ""
-	}
-	return strings.TrimSpace(parts[idx])
+	return auth.ClientIPForRateLimit(r)
 }
 
 // userResponse is the JSON representation of a user, excluding password_hash.
