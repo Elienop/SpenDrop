@@ -568,7 +568,19 @@ func TestShortenHash(t *testing.T) {
 // MaxSize = 10 × 4096 = 40960. The test source DB is seeded with enough
 // rows that VACUUM INTO produces a file comfortably larger than 40960,
 // tripping Verify's "size too large" check by a wide margin.
-func TestScheduler_VerifyFailureRenamesCorrupt(t *testing.T) {
+// TestScheduler_LargeGrowthDoesNotFreezeBackups was formerly
+// TestScheduler_VerifyFailureRenamesCorrupt: it planted a tiny fake "previous
+// backup" so the real one would exceed 10x it and be quarantined.
+//
+// That setup is now exactly the regression scenario. The size cap used to be
+// 10x the newest SIDECAR'D backup, and a failed verify writes no sidecar, so a
+// single large jump froze the baseline permanently — every later backup was
+// quarantined and the app never recovered, silently. The cap is now derived
+// from the live database, which is stateless and cannot freeze.
+//
+// The rename path this test used to exercise is covered directly by
+// TestScheduler_RenameCorrupt below.
+func TestScheduler_LargeGrowthDoesNotFreezeBackups(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.db")
@@ -665,57 +677,70 @@ func TestScheduler_VerifyFailureRenamesCorrupt(t *testing.T) {
 	<-done
 
 	logs := logBuf.String()
-	if !strings.Contains(logs, "verification failed") {
-		t.Fatalf("expected 'verification failed' log line; got: %q", logs)
+
+	// The backup must SUCCEED. Under the old rule it was quarantined for
+	// "size too large" against a 4 KB fake previous backup, and because no
+	// sidecar is written on failure the baseline stayed 4 KB forever.
+	if strings.Contains(logs, "verification failed") {
+		t.Fatalf("a legitimate backup was quarantined — the size baseline is frozen again: %q", logs)
 	}
-	if !strings.Contains(logs, "size too large") {
-		t.Errorf("expected 'size too large' as the verify reason; got: %q", logs)
+	if !strings.Contains(logs, "backup ok:") {
+		t.Fatalf("expected a successful backup; got: %q", logs)
 	}
-	if !strings.Contains(logs, ".corrupt") {
-		t.Errorf("expected '.corrupt' rename mention; got: %q", logs)
+	// The growth signal must survive as a warning rather than a quarantine.
+	if !strings.Contains(logs, "more than 10x the previous backup") {
+		t.Errorf("expected a runaway-growth WARNING; got: %q", logs)
 	}
 
-	// Assert the filesystem: exactly one *.corrupt file, no sidecar for
-	// the failed backup, and the fake previous backup still present.
-	//
-	// NOTE: we do NOT check for a ".corrupt.sha256" suffix. No code path
-	// in the package ever writes a sidecar for a failed backup (runOnce
-	// returns before WriteSidecar on verify failure), so any stray sidecar
-	// for the failed file would appear as "<base>.db.sha256" — caught by
-	// the plainSidecars assertion below.
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read dir: %v", err)
 	}
-	var (
-		corruptFiles     []string
-		plainSidecars    []string
-		fakePrevFound    bool
-		fakeSidecarFound bool
-	)
+	var corrupt, sidecars int
 	for _, e := range entries {
-		name := e.Name()
 		switch {
-		case name == "spendrop-2025-01-01T0000Z.db":
-			fakePrevFound = true
-		case name == "spendrop-2025-01-01T0000Z.db.sha256":
-			fakeSidecarFound = true
-		case strings.HasSuffix(name, ".db.corrupt"):
-			corruptFiles = append(corruptFiles, name)
-		case strings.HasSuffix(name, ".sha256"):
-			plainSidecars = append(plainSidecars, name)
+		case strings.HasSuffix(e.Name(), ".corrupt"):
+			corrupt++
+		case strings.HasSuffix(e.Name(), ".sha256"):
+			sidecars++
 		}
 	}
-	if !fakePrevFound || !fakeSidecarFound {
-		t.Errorf("fake previous backup or its sidecar was removed: %v", entries)
+	if corrupt != 0 {
+		t.Errorf("got %d .corrupt files, want 0", corrupt)
 	}
-	if len(corruptFiles) != 1 {
-		t.Errorf("got %d .corrupt files, want 1: %v", len(corruptFiles), corruptFiles)
+	// A sidecar proves the backup became TRUSTED, which is what lets the
+	// next run's baseline advance.
+	if sidecars < 2 {
+		t.Errorf("got %d sidecars, want the fake previous one plus the new backup's", sidecars)
 	}
-	// The fake prev's sidecar is already counted via fakeSidecarFound;
-	// no other .sha256 file should exist, because the failed backup must
-	// not have had a sidecar written for it.
-	if len(plainSidecars) != 0 {
-		t.Errorf("unexpected sidecar(s) present: %v", plainSidecars)
+}
+
+// TestScheduler_RenameCorrupt covers the quarantine rename directly, replacing
+// the coverage the repurposed test above used to provide via an induced size
+// failure.
+func TestScheduler_RenameCorrupt(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "spendrop-2026-04-13T0301Z.db")
+	if err := os.WriteFile(dst, []byte("not a real db"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	logBuf := &syncBuffer{}
+	s := &Scheduler{Dir: dir, Logger: newSilentLogger(logBuf)}
+	s.renameCorrupt(dst, fmt.Errorf("integrity_check failed"), newSilentLogger(logBuf))
+
+	if _, err := os.Stat(dst); !os.IsNotExist(err) {
+		t.Errorf("original file still present after quarantine rename")
+	}
+	if _, err := os.Stat(dst + ".corrupt"); err != nil {
+		t.Errorf("quarantined file missing: %v", err)
+	}
+	if _, err := os.Stat(dst + ".sha256"); !os.IsNotExist(err) {
+		t.Errorf("a sidecar exists for a failed backup — it would be treated as trusted")
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "verification failed") || !strings.Contains(logs, ".corrupt") {
+		t.Errorf("rename was not logged usefully: %q", logs)
 	}
 }

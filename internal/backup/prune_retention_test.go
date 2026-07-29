@@ -1,9 +1,12 @@
 package backup
 
 import (
+	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -155,5 +158,159 @@ func TestPrune_BoundsCorruptQuarantine(t *testing.T) {
 		if !surviving[name] {
 			t.Errorf("operator file %s was deleted", name)
 		}
+	}
+}
+
+// TestPruneAndLog_RunsWhenSnapshotFails is the regression test for the
+// quarantine bound being unreachable in the one state it exists to resolve.
+//
+// pruneAndLog used to be deferred only AFTER Snapshot succeeded. On a full
+// BACKUP_DIR volume — the ENOSPC end state a runaway quarantine produces —
+// Snapshot is precisely what fails, so retention never ran and the disk stayed
+// full forever. An operator upgrading specifically to reclaim the quarantine
+// would have seen nothing happen.
+func TestPruneAndLog_RunsWhenSnapshotFails(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	// Six quarantined files: four are past the keep bound and must be swept.
+	for i := 0; i < 6; i++ {
+		name := FormatFilename(now.AddDate(0, 0, -i)) + ".corrupt"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("corrupt"), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	logBuf := &syncBuffer{}
+	s := &Scheduler{
+		Enabled:     true,
+		Dir:         dir,
+		Interval:    time.Hour,
+		KeepDaily:   7,
+		KeepCorrupt: 2,
+		// A source path that does not exist, so Snapshot fails — standing in
+		// for the ENOSPC failure without needing a full filesystem.
+		DBPath:      filepath.Join(dir, "nonexistent-source.db"),
+		BusyTimeout: testBusyTimeout,
+		Now:         func() time.Time { return now },
+		Logger:      newSilentLogger(logBuf),
+	}
+
+	s.runOnce(context.Background(), newSilentLogger(logBuf))
+
+	var corrupt int
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".corrupt") {
+			corrupt++
+		}
+	}
+	if corrupt != 2 {
+		t.Errorf("got %d quarantined files after a failed snapshot, want 2 — "+
+			"retention never ran, so a full volume can never be reclaimed", corrupt)
+	}
+}
+
+// TestScheduler_BaselineDoesNotFreezeAcrossTicks is the regression test for the
+// permanent, silent backup outage.
+//
+// The cap used to be 10x the newest SIDECAR'D backup, and a failed verify
+// writes no sidecar — so the baseline could never advance past a failure. One
+// large jump (measured trigger: importing ~2,700 transactions after a fresh
+// install's first backup of an empty DB) quarantined every subsequent run
+// forever, with the app healthy and /healthz green throughout.
+//
+// A single-tick assertion would be vacuous: tick 1 always succeeded even with
+// the bug. The failure only shows from tick 2 onward, so this drives several.
+func TestScheduler_BaselineDoesNotFreezeAcrossTicks(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	dir := filepath.Join(tmp, "backups")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	db, err := sql.Open("sqlite3", "file:"+src+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE transactions (id INTEGER PRIMARY KEY, pad TEXT)`); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	tick := 0
+	logBuf := &syncBuffer{}
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 100, KeepCorrupt: 2,
+		DBPath: src, BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { tick++; return time.Date(2026, 4, 13, tick, 0, 0, 0, time.UTC) },
+		Logger: newSilentLogger(logBuf),
+	}
+
+	// Tick 1: backup of a near-empty DB. This is the anchor that used to
+	// freeze everything after it.
+	s.runOnce(context.Background(), newSilentLogger(logBuf))
+
+	// The user then imports their spreadsheet history.
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	stmt, err := tx.Prepare(`INSERT INTO transactions (pad) VALUES (?)`)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	pad := strings.Repeat("x", 200)
+	for i := 0; i < 5000; i++ {
+		if _, err := stmt.Exec(pad); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	stmt.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	// Several more ticks. Every one must produce a TRUSTED backup.
+	for i := 0; i < 3; i++ {
+		s.runOnce(context.Background(), newSilentLogger(logBuf))
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	var corrupt, sidecars int
+	for _, e := range entries {
+		switch {
+		case strings.HasSuffix(e.Name(), ".corrupt"):
+			corrupt++
+		case strings.HasSuffix(e.Name(), ".sha256"):
+			sidecars++
+		}
+	}
+	if corrupt != 0 {
+		t.Errorf("%d backups were quarantined after the DB grew — the baseline is frozen, "+
+			"so backups have stopped permanently: %s", corrupt, logBuf.String())
+	}
+	// One sidecar per successful tick: the anchor plus the three post-growth runs.
+	if sidecars != 4 {
+		t.Errorf("got %d trusted backups, want 4 (one per tick)", sidecars)
+	}
+
+	// And the baseline must now track the GROWN database, not the day-one stub.
+	size, err := previousBackupSize(dir)
+	if err != nil {
+		t.Fatalf("previousBackupSize: %v", err)
+	}
+	if size < 500_000 {
+		t.Errorf("newest trusted backup is only %d bytes — still anchored to the empty stub", size)
 	}
 }

@@ -43,6 +43,15 @@ func TestNewSender_DoesNotMutateCallerClient(t *testing.T) {
 	if shared.Timeout != 0 {
 		t.Errorf("NewSender mutated the caller's client Timeout to %v; the shared client must stay untouched", shared.Timeout)
 	}
+	// NewSender also installs an SSRF-guarded transport and a redirect refusal.
+	// Both must land on its private copy: putting them on http.DefaultClient
+	// would silently change every other HTTP call in the process.
+	if shared.Transport != nil {
+		t.Error("NewSender replaced the transport on the caller's shared client")
+	}
+	if shared.CheckRedirect != nil {
+		t.Error("NewSender installed a redirect policy on the caller's shared client")
+	}
 }
 
 // testKeys generates a throwaway VAPID keypair and a syntactically valid
@@ -68,6 +77,15 @@ const (
 	testAuth   = "zqbxT6JKstKSY9JKibZLSQ"
 )
 
+// allowLoopbackDial lets a test reach an httptest server past the SSRF dial
+// guard. Scoped per-test so the guard is on by default everywhere else.
+func allowLoopbackDial(t *testing.T) {
+	t.Helper()
+	prev := allowNonPublicDial
+	allowNonPublicDial = true
+	t.Cleanup(func() { allowNonPublicDial = prev })
+}
+
 func newTestSender(t *testing.T, client *http.Client) *Sender {
 	t.Helper()
 	pub, priv := testKeys(t)
@@ -76,6 +94,7 @@ func newTestSender(t *testing.T, client *http.Client) *Sender {
 
 func TestSend_PrunesOn410(t *testing.T) {
 	var hits int32
+	allowLoopbackDial(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&hits, 1)
 		w.WriteHeader(http.StatusGone) // 410
@@ -97,6 +116,7 @@ func TestSend_PrunesOn410(t *testing.T) {
 }
 
 func TestSend_PrunesOn404(t *testing.T) {
+	allowLoopbackDial(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound) // 404
 	}))
@@ -115,6 +135,7 @@ func TestSend_PrunesOn404(t *testing.T) {
 
 func TestSend_KeepsOn401And429(t *testing.T) {
 	for _, code := range []int{http.StatusUnauthorized, http.StatusTooManyRequests} {
+		allowLoopbackDial(t)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(code)
 		}))

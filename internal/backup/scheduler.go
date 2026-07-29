@@ -3,7 +3,9 @@ package backup
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -141,6 +143,17 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	now := s.now()
 	dst := filepath.Join(s.Dir, FormatFilename(now))
 
+	// Retention runs on EVERY exit path, including the early ones.
+	//
+	// This was previously deferred only after Snapshot succeeded, which made
+	// the quarantine bound unreachable in the exact state it exists to
+	// resolve: a BACKUP_DIR volume full of `.corrupt` copies, where the
+	// snapshot is what fails. Placing it here rather than merely before
+	// Snapshot also covers a failure in step 1 — reclaiming space must not
+	// depend on the source database being readable this tick. Prune tolerates
+	// a missing directory, so this is harmless before the first backup.
+	defer s.pruneAndLog(now, logger)
+
 	// Step 1: measure the live transaction count. This is the
 	// verification baseline — the number Verify will compare against.
 	liveCount, err := countLiveTransactions(ctx, s.DBPath, s.BusyTimeout)
@@ -149,19 +162,30 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 		return
 	}
 
-	// Step 2: find the previous successful backup's size to set MaxSize.
-	// An error here is non-fatal — we treat it as "no baseline available"
-	// and let Verify run without an upper bound. The first-ever run in a
-	// new directory is the common case, and it is indistinguishable from
-	// "dir exists but is empty" or "dir does not exist yet", all of which
-	// map to prevSize=0.
-	prevSize, prevErr := previousBackupSize(s.Dir)
-	if prevErr != nil {
-		logger.Printf("backup: warning: reading previous backup size: %v", prevErr)
+	// Step 2: bound the backup's size against its OWN SOURCE, not against the
+	// last trusted backup.
+	//
+	// The previous rule was maxSize = 10 x the newest SIDECAR'D backup. A
+	// failed verify writes no sidecar, so the baseline could never advance
+	// past a failure: once the live DB outgrew 10x the last good backup, every
+	// subsequent run failed the size check, was quarantined, wrote no sidecar,
+	// and re-read the same stale baseline. Backups stopped permanently while
+	// the app stayed healthy and /healthz stayed green. Measured trigger from
+	// a fresh install: the first backup captures a ~212 KB empty database, and
+	// importing roughly 2,700 transactions (about two years at 4/day) crosses
+	// the cap — on an app built to ingest the user's spreadsheet history, that
+	// is the expected first week, not a corner case.
+	//
+	// Comparing against the source is stateless, so it cannot freeze, and it
+	// still catches what the check is for: VACUUM INTO output is normally
+	// SMALLER than its source, so a copy 10x the source is a copy bug.
+	srcSize, srcErr := liveDBSize(s.DBPath)
+	if srcErr != nil {
+		logger.Printf("backup: warning: measuring source database size: %v", srcErr)
 	}
 	var maxSize int64
-	if prevSize > 0 {
-		maxSize = 10 * prevSize
+	if srcSize > 0 {
+		maxSize = 10 * srcSize
 	}
 
 	// Step 3: take the snapshot.
@@ -170,13 +194,6 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 		logger.Printf("backup: error writing %s: %v", dst, err)
 		return
 	}
-
-	// From here on the backup directory exists and any subsequent failure
-	// path leaves the ticker able to retry. Schedule the prune for all
-	// post-Snapshot exits via defer so the retention policy keeps running
-	// regardless of whether Verify, WriteSidecar, or the success path is
-	// what finally returns.
-	defer s.pruneAndLog(now, logger)
 
 	// Step 4: verify the snapshot against the baseline.
 	params := VerifyParams{
@@ -189,6 +206,17 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	if verifyErr := Verify(dst, params); verifyErr != nil {
 		s.renameCorrupt(dst, verifyErr, logger)
 		return
+	}
+
+	// The previous-backup comparison survives as a WARNING only. It used to
+	// gate the verify, which is what let a single large jump wedge backups
+	// forever; as a log line it still tells an operator that something grew
+	// unexpectedly, without the power to quarantine a faithful copy.
+	if prevSize, prevErr := previousBackupSize(s.Dir); prevErr == nil && prevSize > 0 {
+		if fi, statErr := os.Stat(dst); statErr == nil && fi.Size() > 10*prevSize {
+			logger.Printf("backup: warning: %s is %d bytes, more than 10x the previous backup (%d bytes) — confirm this growth is expected",
+				filepath.Base(dst), fi.Size(), prevSize)
+		}
 	}
 
 	// Step 5: write the sidecar. Verified + sidecar = trusted backup.
@@ -225,6 +253,11 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 	kept, removed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	if err != nil {
+		// Now that prune also runs when Snapshot fails, a not-yet-created
+		// backup directory is an ordinary state rather than a fault.
+		if errors.Is(err, fs.ErrNotExist) {
+			return
+		}
 		logger.Printf("backup: prune error in %s: %v", s.Dir, err)
 		return
 	}
@@ -240,9 +273,13 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 // to later phases that the file is not trusted, and a future prune tick
 // will sweep it under normal retention.
 //
-// The renamed file also no longer matches ParseFilename's prefix, so the
-// GFS prune logic automatically leaves it alone. That is deliberate: the
-// operator decides when to delete a *.corrupt file, not the scheduler.
+// The renamed file no longer matches ParseFilename, so it is outside the GFS
+// buckets — but it is NOT unbounded. Prune strips the ".corrupt" suffix,
+// re-parses, and keeps only the newest KeepCorrupt samples. Retaining every
+// sample forever was the original behaviour and it was a disk-exhaustion bug:
+// each file is a full-size copy of the database, BACKUP_DIR shares a volume
+// with the live database, and a sustained verify failure deposits one per
+// tick. Evidence needs one or two samples, not all of them.
 func (s *Scheduler) renameCorrupt(dst string, verifyErr error, logger *log.Logger) {
 	corruptPath := dst + ".corrupt"
 	if renameErr := os.Rename(dst, corruptPath); renameErr != nil {
@@ -295,6 +332,22 @@ func countLiveTransactions(ctx context.Context, dbPath string, busyTimeout time.
 		return 0, fmt.Errorf("count live transactions: %w", err)
 	}
 	return n, nil
+}
+
+// liveDBSize returns the on-disk footprint of the source database: the main
+// file plus its -wal, since uncheckpointed pages live there and VACUUM INTO's
+// output includes them. A missing -wal is normal (checkpointed or non-WAL) and
+// contributes zero rather than an error.
+func liveDBSize(dbPath string) (int64, error) {
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		return 0, fmt.Errorf("stat database: %w", err)
+	}
+	total := fi.Size()
+	if wal, err := os.Stat(dbPath + "-wal"); err == nil {
+		total += wal.Size()
+	}
+	return total, nil
 }
 
 // previousBackupSize returns the byte size of the newest trusted backup in
