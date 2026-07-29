@@ -143,6 +143,12 @@ type BackupConfig struct {
 	// and would blow past the retention policy's granularity.
 	// Env: BACKUP_INTERVAL. Default: 24h.
 	Interval time.Duration
+	// KeepCorrupt is how many quarantined `.corrupt` backups to retain for
+	// forensics. Bounded because the quarantine is otherwise outside every
+	// retention mechanism, and a sustained verify failure writes one
+	// full-size database copy per tick onto the live database's volume.
+	// Env: BACKUP_KEEP_CORRUPT. Default: 2.
+	KeepCorrupt int
 	// KeepDaily is the number of most-recent daily backups to retain.
 	// Env: BACKUP_KEEP_DAILY. Default: 7.
 	KeepDaily int
@@ -214,6 +220,7 @@ func Defaults() Config {
 			Enabled:     true,
 			Dir:         "backups",
 			Interval:    24 * time.Hour,
+			KeepCorrupt: 2,
 			KeepDaily:   7,
 			KeepWeekly:  4,
 			KeepMonthly: 12,
@@ -305,6 +312,9 @@ func Load() (*Config, error) {
 		cfg.Backup.Dir = v
 	}
 	if err := parseDuration("BACKUP_INTERVAL", &cfg.Backup.Interval); err != nil {
+		return nil, err
+	}
+	if err := parseInt("BACKUP_KEEP_CORRUPT", &cfg.Backup.KeepCorrupt); err != nil {
 		return nil, err
 	}
 	if err := parseInt("BACKUP_KEEP_DAILY", &cfg.Backup.KeepDaily); err != nil {
@@ -425,6 +435,9 @@ func (c *Config) Validate() error {
 		}
 		if c.Backup.Interval < time.Hour {
 			return fmt.Errorf("BACKUP_INTERVAL must be >= 1h: %s", c.Backup.Interval)
+		}
+		if c.Backup.KeepCorrupt < 0 {
+			return fmt.Errorf("BACKUP_KEEP_CORRUPT must be >= 0: %d", c.Backup.KeepCorrupt)
 		}
 		if c.Backup.KeepDaily < 0 || c.Backup.KeepWeekly < 0 || c.Backup.KeepMonthly < 0 {
 			return fmt.Errorf("BACKUP_KEEP_* must be >= 0 (daily=%d weekly=%d monthly=%d)",

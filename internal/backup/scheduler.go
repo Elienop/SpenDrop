@@ -27,6 +27,11 @@ type Scheduler struct {
 	KeepDaily   int
 	KeepWeekly  int
 	KeepMonthly int
+	// KeepCorrupt bounds the quarantine. A failed verify renames the backup
+	// to .corrupt and never writes a sidecar, so the size baseline never
+	// advances and a stuck failure used to deposit one full-size copy of the
+	// database per tick, forever, onto the same volume as the live database.
+	KeepCorrupt int
 	DBPath      string
 	BusyTimeout time.Duration
 
@@ -218,7 +223,7 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 // failure, sidecar failure, or success — the retention policy is orthogonal
 // to the fate of the current tick's file.
 func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
-	kept, removed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly)
+	kept, removed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	if err != nil {
 		logger.Printf("backup: prune error in %s: %v", s.Dir, err)
 		return
