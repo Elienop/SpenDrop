@@ -281,6 +281,7 @@ Most deployments only need the first handful of variables. Everything below is a
 |----------|---------|-------------|
 | `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
 | `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
+| `TRUST_PROXY_HEADERS` | `false` | Derive the rate-limit client IP from `X-Forwarded-For` instead of the socket address. **Set this to `true` if and only if SpenDrop sits behind a reverse proxy you control.** Behind a proxy with it `false`, every request carries the proxy's address, so the whole household shares one bucket and a single attacker locks everyone out. Directly exposed with it `true`, the header is attacker-controlled and anyone can mint a fresh bucket per request, bypassing the limiter entirely. When trusted, the **rightmost** `X-Forwarded-For` entry is used — that is the one your proxy appended and the only one a client cannot forge |
 
 #### Uploads, database, and backups
 

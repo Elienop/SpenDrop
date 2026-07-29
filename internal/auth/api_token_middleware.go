@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -30,7 +31,7 @@ func RequireAPIToken(
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := extractRemoteIP(r.RemoteAddr)
+			ip := clientIP(r)
 
 			authz := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authz, "Bearer ") {
@@ -128,4 +129,42 @@ func extractRemoteIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+var (
+	trustProxyHeadersMu sync.RWMutex
+	trustProxyHeaders   bool
+)
+
+// SetTrustProxyHeaders mirrors the api package's TRUST_PROXY_HEADERS runtime
+// flag into this package. Called from api.ApplyConfig; the two packages cannot
+// share state directly because internal/auth must not import internal/api.
+func SetTrustProxyHeaders(v bool) {
+	trustProxyHeadersMu.Lock()
+	defer trustProxyHeadersMu.Unlock()
+	trustProxyHeaders = v
+}
+
+// clientIP resolves the address the auth-failure limiter keys on.
+//
+// Same reasoning as the api package's clientIPForRateLimit: behind the
+// documented reverse proxy every request carries the proxy's address, so all
+// callers share one bucket and a single attacker exhausts it for everyone. On
+// a directly-exposed server X-Forwarded-For is attacker-controlled, so it is
+// only consulted when TRUST_PROXY_HEADERS says a proxy is really in front.
+// The rightmost entry is the one our own proxy appended and the only one a
+// client cannot forge.
+func clientIP(r *http.Request) string {
+	trustProxyHeadersMu.RLock()
+	trusted := trustProxyHeaders
+	trustProxyHeadersMu.RUnlock()
+	if trusted {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			if candidate := strings.TrimSpace(parts[len(parts)-1]); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return extractRemoteIP(r.RemoteAddr)
 }

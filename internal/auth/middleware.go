@@ -69,6 +69,14 @@ func RequireAuthOrAPIToken(
 	}
 }
 
+const (
+	// minSessionTokenHexLen mirrors config's SESSION_TOKEN_BYTES >= 16 floor
+	// (16 bytes -> 32 hex chars). maxSessionTokenHexLen is a hygiene cap so an
+	// attacker cannot make us hash an unbounded cookie value.
+	minSessionTokenHexLen = 32
+	maxSessionTokenHexLen = 512
+)
+
 // authenticateSession validates the session cookie and returns a new
 // *http.Request whose context carries the authenticated user under
 // UserContextKey. On failure it writes the appropriate 401 JSON body to w
@@ -82,8 +90,19 @@ func authenticateSession(w http.ResponseWriter, r *http.Request, queries *databa
 		return nil, false
 	}
 
-	// Valid tokens are exactly 64 hex characters (32 bytes)
-	if len(cookie.Value) != 64 {
+	// Cheap sanity filter before hashing — NOT an equality check on 64.
+	//
+	// Config accepts SESSION_TOKEN_BYTES >= 16, so the cookie is 2*N hex
+	// characters for whatever N the operator chose. Hardcoding 64 meant any
+	// value other than 32 bricked the deployment in the most confusing way
+	// possible: login succeeded and set a cookie, then every subsequent
+	// request 401'd, with nothing in the logs pointing at the setting.
+	//
+	// The authoritative check is the session lookup below — a token of the
+	// wrong length simply hashes to something no row holds. This bound only
+	// rejects input too short to be any legal token, and caps absurdly long
+	// values so we do not hash unbounded attacker-supplied data.
+	if len(cookie.Value) < minSessionTokenHexLen || len(cookie.Value) > maxSessionTokenHexLen {
 		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 		return nil, false
 	}

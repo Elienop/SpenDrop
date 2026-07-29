@@ -940,6 +940,15 @@ DELETE FROM push_subscriptions WHERE endpoint = ?;
 -- out-of-band cannot delete that user's subscription. Idempotent.
 DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?;
 
+-- name: DeletePushSubscriptionsByUser :execresult
+-- Revokes every push device for a user. Called by the password-change /
+-- admin-reset cascade alongside session and API-token revocation: a push
+-- subscription is a standing capability to receive household activity, so
+-- leaving it alive after a credential rotation means a compromised device
+-- keeps getting notifications from an account its holder can no longer log
+-- into. :execresult so the caller can report how many were revoked.
+DELETE FROM push_subscriptions WHERE user_id = ?;
+
 -- name: CountPushSubscriptionsByUser :one
 SELECT CAST(COUNT(*) AS INTEGER) AS n FROM push_subscriptions WHERE user_id = ?;
 
