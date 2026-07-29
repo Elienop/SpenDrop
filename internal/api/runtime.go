@@ -4,6 +4,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/config"
 )
 
@@ -39,6 +40,12 @@ var (
 	// return 429. The reset ticker runs in startRateLimitReset.
 	rateLimitMax = runtimeDefaults.RateLimit.MaxAttempts
 
+	// trustProxyHeaders gates whether the rate limiter reads the client IP
+	// from X-Forwarded-For. See RateLimitConfig.TrustProxyHeaders — off is the
+	// safe default for a directly-exposed server, on is required behind the
+	// documented reverse proxy.
+	trustProxyHeaders = runtimeDefaults.RateLimit.TrustProxyHeaders
+
 	// rateLimitTickerWindow is how often rate limit counters are reset.
 	rateLimitTickerWindow = runtimeDefaults.RateLimit.Window
 
@@ -70,6 +77,10 @@ func ApplyConfig(cfg *config.Config) {
 	maxJSONBodyBytes = cfg.Upload.MaxJSONBytes
 	maxUploadBodyBytes = cfg.Upload.MaxFileBytes
 	rateLimitMax = cfg.RateLimit.MaxAttempts
+	trustProxyHeaders = cfg.RateLimit.TrustProxyHeaders
+	// internal/auth keys its own auth-failure limiter by IP and must make the
+	// same trust decision; it cannot import internal/api, so mirror the flag.
+	auth.SetTrustProxyHeaders(cfg.RateLimit.TrustProxyHeaders)
 	rateLimitTickerWindow = cfg.RateLimit.Window
 	sessionTTL = cfg.Session.TTL
 	passwordMinLength = cfg.Password.MinLength
@@ -98,6 +109,13 @@ func getRateLimitMax() int {
 	runtimeMu.RLock()
 	defer runtimeMu.RUnlock()
 	return rateLimitMax
+}
+
+// getTrustProxyHeaders reports whether X-Forwarded-For may be trusted.
+func getTrustProxyHeaders() bool {
+	runtimeMu.RLock()
+	defer runtimeMu.RUnlock()
+	return trustProxyHeaders
 }
 
 // getSessionTTL returns the current session cookie lifetime.

@@ -2,7 +2,10 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/elienop/spendrop/internal/auth"
@@ -48,6 +51,40 @@ func (h *Handler) handleGetVAPIDPublicKey(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"publicKey": getVAPIDPublicKey()})
 }
 
+// validatePushEndpoint checks that a subscription endpoint is a URL this
+// server is willing to make outbound requests to.
+//
+// The endpoint is stored and later fetched by the push sender, so an
+// authenticated user could otherwise aim the server at any host reachable from
+// it — the classic SSRF shape, and on a self-hosted box the interesting
+// targets (router admin pages, other containers, cloud metadata endpoints) all
+// sit on private ranges the server can reach and the attacker cannot.
+//
+// Real push services are all public HTTPS endpoints, so the restriction costs
+// nothing legitimate. DNS names are not resolved here: resolution happens at
+// send time and could differ (DNS rebinding), so this is a cheap first filter,
+// not a complete SSRF defence.
+func validatePushEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("endpoint is not a valid URL")
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("endpoint must use https")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("endpoint must include a host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("endpoint must not target a private or loopback address")
+		}
+	}
+	return nil
+}
+
 // handleCreatePushSubscription registers (or refreshes) a browser subscription
 // for the authenticated caller. The owner is taken from auth.GetUser — NEVER
 // from the body — so a forged user_id cannot plant a subscription under
@@ -71,6 +108,10 @@ func (h *Handler) handleCreatePushSubscription(w http.ResponseWriter, r *http.Re
 	}
 	if req.Endpoint == "" || req.Keys.P256dh == "" || req.Keys.Auth == "" {
 		writeError(w, http.StatusBadRequest, "endpoint and keys are required")
+		return
+	}
+	if err := validatePushEndpoint(req.Endpoint); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

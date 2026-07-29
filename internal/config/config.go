@@ -85,6 +85,18 @@ type RateLimitConfig struct {
 	MaxAttempts int
 	// Window is how often the attempt counters are reset.
 	Window time.Duration
+	// TrustProxyHeaders makes the rate limiter derive the client IP from
+	// X-Forwarded-For instead of the socket address.
+	//
+	// Default false, and that default is load-bearing: X-Forwarded-For is
+	// attacker-controlled on a directly-exposed server, so trusting it there
+	// would let anyone forge a fresh identity per request and bypass the
+	// limiter entirely. Enable it ONLY when SpenDrop sits behind a reverse
+	// proxy you control (the documented deployment). Behind such a proxy the
+	// opposite failure occurs with it off: every request carries the proxy's
+	// address, so the whole household shares one bucket and a single attacker
+	// locks everyone out.
+	TrustProxyHeaders bool
 }
 
 // PasswordConfig holds bcrypt cost and password length policy.
@@ -180,8 +192,9 @@ func Defaults() Config {
 			TokenBytes:      32,
 		},
 		RateLimit: RateLimitConfig{
-			MaxAttempts: 10,
-			Window:      time.Minute,
+			MaxAttempts:       10,
+			Window:            time.Minute,
+			TrustProxyHeaders: false,
 		},
 		Password: PasswordConfig{
 			BcryptCost: 12,
@@ -305,6 +318,9 @@ func Load() (*Config, error) {
 	}
 
 	// Push
+	if err := parseBool("TRUST_PROXY_HEADERS", &cfg.RateLimit.TrustProxyHeaders); err != nil {
+		return nil, err
+	}
 	if err := parseBool("PUSH_ENABLED", &cfg.Push.Enabled); err != nil {
 		return nil, err
 	}

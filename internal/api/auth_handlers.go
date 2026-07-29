@@ -23,6 +23,33 @@ func extractIP(remoteAddr string) string {
 	return host
 }
 
+// clientIPForRateLimit resolves the address the rate limiter should key on.
+//
+// Behind the reverse proxy the README documents, r.RemoteAddr is the PROXY's
+// address for every request, so the whole household shares a single bucket and
+// one attacker's failed logins lock everyone out. Reading X-Forwarded-For
+// fixes that — but only when a proxy is actually in front, because on a
+// directly-exposed server the header is attacker-controlled and would let
+// anyone mint a fresh identity per request and bypass the limiter completely.
+// Hence TRUST_PROXY_HEADERS, defaulting to off.
+//
+// When trusted, the RIGHTMOST entry is used, not the leftmost. A proxy appends
+// the address it observed, so given "spoofed, spoofed, realclient" the last
+// entry is the one our own proxy wrote and the only one a client cannot forge.
+// The leftmost is whatever the client claimed.
+func clientIPForRateLimit(r *http.Request) string {
+	if getTrustProxyHeaders() {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			parts := strings.Split(xff, ",")
+			candidate := strings.TrimSpace(parts[len(parts)-1])
+			if candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return extractIP(r.RemoteAddr)
+}
+
 // userResponse is the JSON representation of a user, excluding password_hash.
 type userResponse struct {
 	ID          int64     `json:"id"`
@@ -80,10 +107,32 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userI
 	return nil
 }
 
+// registrationOpen reports whether a new account may be created right now.
+//
+// This duplicates the authoritative check performed inside handleRegister's
+// transaction. The duplicate is deliberate: the in-transaction version is the
+// TOCTOU-safe one, but it runs AFTER bcrypt, and bcrypt is intentionally
+// expensive. Without a pre-flight, an unauthenticated caller could force a
+// full password hash per request against a closed instance — the rejection
+// costs the attacker nothing and the server a deliberate CPU burn.
+func (h *Handler) registrationOpen(r *http.Request) bool {
+	users, err := h.queries.ListUsers(r.Context())
+	if err != nil {
+		// Fail closed on a read error; the in-tx check is still authoritative.
+		return false
+	}
+	if len(users) == 0 {
+		// Bootstrap: the very first account is always allowed.
+		return true
+	}
+	setting, err := h.queries.GetSetting(r.Context(), SettingRegistrationEnabled)
+	return err == nil && setting.Value == "true"
+}
+
 // handleRegister creates a new user account. The first registered user is
 // assigned the "admin" role; subsequent users get "member".
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
-	clientIP := extractIP(r.RemoteAddr)
+	clientIP := clientIPForRateLimit(r)
 	rateLimitMu.Lock()
 	attempts := registerAttempts[clientIP]
 	rateLimitMu.Unlock()
@@ -128,6 +177,19 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Password) > maxLen {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
+		return
+	}
+
+	// Gate BEFORE hashing. bcrypt is deliberately expensive, so hashing first
+	// and checking afterwards let an unauthenticated caller burn a full hash
+	// per request against an instance that has registration closed. The
+	// rejection is also counted against the limiter — previously only a failed
+	// CreateUser incremented it, so the abuse path never throttled at all.
+	if !h.registrationOpen(r) {
+		rateLimitMu.Lock()
+		registerAttempts[clientIP]++
+		rateLimitMu.Unlock()
+		writeError(w, http.StatusForbidden, "registration is disabled")
 		return
 	}
 
@@ -241,7 +303,7 @@ func startRateLimitReset() {
 
 // handleLogin authenticates a user by username and password.
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	clientIP := extractIP(r.RemoteAddr)
+	clientIP := clientIPForRateLimit(r)
 	if h.loginFailureLimiter.Exhausted(clientIP) {
 		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")

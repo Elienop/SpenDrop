@@ -223,6 +223,17 @@ func (h *Handler) runPasswordResetCascade(r *http.Request, userID int64, newHash
 		return 0, fmt.Errorf("delete sessions: %w", err)
 	}
 
+	// Push subscriptions are a standing capability to receive household
+	// activity: whoever holds the endpoint keeps getting notifications
+	// regardless of sessions or tokens. Revoking sessions and API tokens but
+	// leaving these alive meant a compromised or lost device carried on
+	// receiving every transaction after the password was rotated — precisely
+	// the thing the rotation was meant to stop. Revoked in the SAME
+	// transaction as the password write so the cascade cannot half-apply.
+	if _, err := qtx.DeletePushSubscriptionsByUser(r.Context(), userID); err != nil {
+		return 0, fmt.Errorf("revoke push subscriptions: %w", err)
+	}
+
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("commit: %w", err)
 	}
