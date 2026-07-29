@@ -40,13 +40,6 @@ var (
 	// return 429. The reset ticker runs in startRateLimitReset.
 	rateLimitMax = runtimeDefaults.RateLimit.MaxAttempts
 
-	// trustProxyHeaders gates whether the rate limiter reads the client IP
-	// from X-Forwarded-For. See RateLimitConfig.TrustProxyHeaders — off is the
-	// safe default for a directly-exposed server, on is required behind the
-	// documented reverse proxy.
-	trustProxyHeaders = runtimeDefaults.RateLimit.TrustProxyHeaders
-	trustedProxyHops  = runtimeDefaults.RateLimit.TrustedProxyHops
-
 	// rateLimitTickerWindow is how often rate limit counters are reset.
 	rateLimitTickerWindow = runtimeDefaults.RateLimit.Window
 
@@ -78,8 +71,6 @@ func ApplyConfig(cfg *config.Config) {
 	maxJSONBodyBytes = cfg.Upload.MaxJSONBytes
 	maxUploadBodyBytes = cfg.Upload.MaxFileBytes
 	rateLimitMax = cfg.RateLimit.MaxAttempts
-	trustProxyHeaders = cfg.RateLimit.TrustProxyHeaders
-	trustedProxyHops = cfg.RateLimit.TrustedProxyHops
 	// internal/auth keys its own auth-failure limiter by IP and must make the
 	// same trust decision; it cannot import internal/api, so mirror the flag.
 	auth.SetTrustProxyHeaders(cfg.RateLimit.TrustProxyHeaders, cfg.RateLimit.TrustedProxyHops)
@@ -111,23 +102,6 @@ func getRateLimitMax() int {
 	runtimeMu.RLock()
 	defer runtimeMu.RUnlock()
 	return rateLimitMax
-}
-
-// getTrustProxyHeaders reports whether X-Forwarded-For may be trusted.
-func getTrustProxyHeaders() bool {
-	runtimeMu.RLock()
-	defer runtimeMu.RUnlock()
-	return trustProxyHeaders
-}
-
-// getTrustedProxyHops returns how many proxies sit in front of this server.
-func getTrustedProxyHops() int {
-	runtimeMu.RLock()
-	defer runtimeMu.RUnlock()
-	if trustedProxyHops < 1 {
-		return 1
-	}
-	return trustedProxyHops
 }
 
 // getSessionTTL returns the current session cookie lifetime.

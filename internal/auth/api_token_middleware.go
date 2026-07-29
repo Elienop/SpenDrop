@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -31,7 +32,7 @@ func RequireAPIToken(
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := clientIP(r)
+			ip := ClientIPForRateLimit(r)
 
 			authz := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authz, "Bearer ") {
@@ -150,31 +151,78 @@ func SetTrustProxyHeaders(v bool, hops int) {
 	trustedProxyHops = hops
 }
 
-// clientIP resolves the address the auth-failure limiter keys on.
+// ClientIPForRateLimit resolves the address a rate limiter should key on.
 //
-// Same reasoning as the api package's clientIPForRateLimit: behind the
-// documented reverse proxy every request carries the proxy's address, so all
-// callers share one bucket and a single attacker exhausts it for everyone. On
-// a directly-exposed server X-Forwarded-For is attacker-controlled, so it is
-// only consulted when TRUST_PROXY_HEADERS says a proxy is really in front.
-// The rightmost entry is the one our own proxy appended and the only one a
-// client cannot forge.
-func clientIP(r *http.Request) string {
+// Exported and shared: internal/api keys its login/register limiter on the
+// same value, and the second copy of this logic drifted from its own doc
+// comment within a single commit. One implementation, one set of semantics.
+//
+// Behind the reverse proxy the README documents, r.RemoteAddr is the PROXY's
+// address for every request, so the whole household shares one bucket and one
+// attacker's failed logins lock everyone out. Reading X-Forwarded-For fixes
+// that — but only when a proxy is really in front, because on a directly
+// exposed server the header is attacker-controlled and would let anyone mint a
+// fresh identity per request. Hence TRUST_PROXY_HEADERS, defaulting to off.
+//
+// Which entry to take is a COUNT: each appending proxy adds the address it
+// saw, so with N trusted hops the client is N-from-the-right. Everything
+// further left is client-supplied and is never trusted.
+//
+// The count MUST match the real chain, and getting it wrong fails in two
+// directions. Too high, and honest clients — who send no X-Forwarded-For at
+// all — produce a header shorter than the count and fall back to the socket
+// address, putting everyone in one bucket. Worse, an attacker who PREPENDS an
+// entry makes the header exactly long enough that the selected index lands on
+// their own forged value, giving them unlimited buckets and defeating the
+// limiter entirely. That is a misconfiguration rather than a design flaw, but
+// it is silent, so the short-header case warns.
+func ClientIPForRateLimit(r *http.Request) string {
 	trustProxyHeadersMu.RLock()
 	trusted := trustProxyHeaders
 	hops := trustedProxyHops
 	trustProxyHeadersMu.RUnlock()
+
 	if trusted {
-		// Entry hops-from-the-right; see the long note on the api package's
-		// clientIPForRateLimit for why this is a count and not "rightmost".
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 			parts := strings.Split(xff, ",")
-			if idx := len(parts) - hops; idx >= 0 && idx < len(parts) {
-				if candidate := strings.TrimSpace(parts[idx]); candidate != "" {
+			idx := len(parts) - hops
+			if idx < 0 {
+				// Fewer entries than configured hops. Under any overcount this
+				// fires on the FIRST ordinary request, because honest clients
+				// send no X-Forwarded-For — which makes it a reliable detector
+				// for both failure modes described above.
+				warnProxyHopMismatch(hops, len(parts))
+			} else if idx < len(parts) {
+				candidate := strings.TrimSpace(parts[idx])
+				// Must parse as an address: a garbage or empty entry would
+				// otherwise become a rate-limit key in its own right.
+				if candidate != "" && net.ParseIP(candidate) != nil {
 					return candidate
 				}
 			}
 		}
 	}
 	return extractRemoteIP(r.RemoteAddr)
+}
+
+// proxyHopWarnInterval throttles the misconfiguration warning. The condition is
+// evaluated per request and is permanent once tripped, so an unthrottled log
+// line would be one per request forever.
+const proxyHopWarnInterval = 10 * time.Minute
+
+var (
+	proxyWarnMu   sync.Mutex
+	proxyWarnLast time.Time
+)
+
+func warnProxyHopMismatch(hops, got int) {
+	proxyWarnMu.Lock()
+	defer proxyWarnMu.Unlock()
+	if !proxyWarnLast.IsZero() && time.Since(proxyWarnLast) < proxyHopWarnInterval {
+		return
+	}
+	proxyWarnLast = time.Now()
+	log.Printf("rate-limit: TRUSTED_PROXY_HOPS=%d but X-Forwarded-For carried %d entries; "+
+		"falling back to the socket address, so every client now shares one rate-limit "+
+		"bucket. Check how many proxies actually append to the header.", hops, got)
 }
