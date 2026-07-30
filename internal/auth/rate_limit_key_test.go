@@ -2,6 +2,7 @@ package auth
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -172,6 +173,69 @@ func TestClientIPForRateLimit_PassesThroughUnkeyableAddresses(t *testing.T) {
 	withTrustedProxyCIDRs(t, false, nil)
 	if got := ClientIPForRateLimit(reqWithXFF("", "/tmp/spendrop.sock")); got != "/tmp/spendrop.sock" {
 		t.Errorf("got %q, want the raw value passed through", got)
+	}
+}
+
+// TestRateLimitKey pins the helper directly, on inputs ClientIP cannot
+// currently hand it.
+//
+// ClientIP normalises through parseXFFAddr, which already unmaps and strips
+// zones, so the equivalent assertions driven through ClientIPForRateLimit
+// cannot fail if rateLimitKey's own Unmap is deleted — mutation-tested and
+// confirmed green. That makes the unmap a FORWARD guard rather than a
+// regression fix, and an unpinned guard is one nobody is holding: if ClientIP
+// ever stops normalising, "::ffff:10.0.0.1" would be masked as IPv6 and every
+// mapped IPv4 client on the internet would share the single bucket
+// ::ffff:0:0/64. This is the test that would catch that.
+func TestRateLimitKey(t *testing.T) {
+	cases := map[string]string{
+		// IPv4: the host itself, unchanged.
+		"203.0.113.9": "203.0.113.9/32",
+		"10.0.0.1":    "10.0.0.1/32",
+		// IPv4-mapped IPv6 is an IPv4 host and must key as one.
+		"::ffff:10.0.0.1": "10.0.0.1/32",
+		"::ffff:10.0.0.2": "10.0.0.2/32",
+		// IPv6: the delegated /64.
+		"2001:db8:1:2::1":    "2001:db8:1:2::/64",
+		"2001:db8:1:2::ffff": "2001:db8:1:2::/64",
+		"2001:db8:1:3::1":    "2001:db8:1:3::/64",
+		// A zone must not defeat the mask. netip.PrefixFrom drops the zone
+		// itself, so nothing in rateLimitKey handles this — the case is here to
+		// pin that stdlib behaviour, since a future change that stopped
+		// relying on it would silently return the address unmasked.
+		"fe80::1%eth0": "fe80::/64",
+		// Not an address: passed through, because an empty key would merge
+		// every unix-socket client into one bucket.
+		"/tmp/spendrop.sock": "/tmp/spendrop.sock",
+		"":                   "",
+	}
+	for in, want := range cases {
+		if got := rateLimitKey(in); got != want {
+			t.Errorf("rateLimitKey(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestRateLimitKeyPrefixWidths pins the two constants in range.
+//
+// netip.PrefixFrom returns an INVALID Prefix when bits exceeds the address's
+// BitLen, and Masked().String() on that is the literal "invalid Prefix" — one
+// key for every client on earth, i.e. a household-wide 429 the moment anyone
+// fails a login. rateLimitKey falls back to the unmasked address rather than
+// emit that, but the real defence is the constants never leaving range.
+func TestRateLimitKeyPrefixWidths(t *testing.T) {
+	if rateLimitPrefixV4 < 0 || rateLimitPrefixV4 > 32 {
+		t.Errorf("rateLimitPrefixV4 = %d, must be within 0..32", rateLimitPrefixV4)
+	}
+	if rateLimitPrefixV6 < 0 || rateLimitPrefixV6 > 128 {
+		t.Errorf("rateLimitPrefixV6 = %d, must be within 0..128", rateLimitPrefixV6)
+	}
+	// A key must never be the stringification of an invalid prefix, whatever
+	// the constants are set to.
+	for _, in := range []string{"203.0.113.9", "2001:db8:1:2::1", "::ffff:10.0.0.1"} {
+		if got := rateLimitKey(in); strings.Contains(got, "invalid") {
+			t.Errorf("rateLimitKey(%q) = %q — an invalid prefix is being used as a key", in, got)
+		}
 	}
 }
 

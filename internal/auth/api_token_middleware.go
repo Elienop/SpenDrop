@@ -377,13 +377,22 @@ func rateLimitKey(s string) string {
 	// Unmap first. An IPv4-mapped address is an IPv4 host, and masking it as
 	// IPv6 would drop every mapped client into the single bucket ::ffff:0:0/64
 	// while the same host arriving unmapped got its own — two failures at once.
-	a = a.Unmap().WithZone("")
+	//
+	// A zone needs no handling here: netip.PrefixFrom drops it (netip.go,
+	// withoutZone), so "fe80::1%eth0" masks to fe80::/64 like anything else.
+	a = a.Unmap()
 	bits := rateLimitPrefixV6
 	if a.Is4() {
 		bits = rateLimitPrefixV4
 	}
 	p := netip.PrefixFrom(a, bits)
 	if !p.IsValid() {
+		// Unreachable for any address ParseAddr accepted; the only way here is
+		// a prefix constant edited out of range. Failing to the unmasked
+		// address is the safe direction — Masked().String() on an invalid
+		// Prefix returns the literal "invalid Prefix", which would key every
+		// client on earth into one bucket. TestRateLimitKeyPrefixWidths pins
+		// the constants so this stays unreachable.
 		return s
 	}
 	return p.Masked().String()
