@@ -67,7 +67,7 @@ func TestPrune_NegativeKeepCorruptUsesTheDefault(t *testing.T) {
 // quarantine bound failing silently.
 //
 // Every per-file os.Remove error was dropped with a bare `continue`, and
-// pruneAndLog only logged when something HAD been removed. So on a volume where
+// pruneAndReport only logged when something HAD been removed. So on a volume where
 // unlink fails — a read-only remount after an I/O error, a share holding the
 // file open, which is precisely when backups matter — retention quietly stopped
 // working and produced not one line of output. Silence there is indistinguishable
@@ -200,7 +200,7 @@ func TestPruneAndLog_LogsRemovalFailures(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(logBuf),
 	}
-	s.pruneAndLog(now, newSilentLogger(logBuf))
+	s.pruneAndReport(now, newSilentLogger(logBuf))
 
 	out := logBuf.String()
 	if !strings.Contains(out, "could not remove") {
@@ -212,7 +212,7 @@ func TestPruneAndLog_LogsRemovalFailures(t *testing.T) {
 // TestPruneAndLog_SilentWhenBackupDirDoesNotExist pins the fs.ErrNotExist
 // branch, which was previously untested.
 //
-// runOnce defers pruneAndLog before Snapshot runs, so on a fresh install — and
+// runOnce defers pruneAndReport before Snapshot runs, so on a fresh install — and
 // on every tick where step 1 fails before Snapshot's MkdirAll — Prune is called
 // against a directory that does not exist yet. That is the ordinary state of a
 // new deployment, not a fault, so it must produce no output at all: an operator
@@ -238,7 +238,7 @@ func TestPruneAndLog_SilentWhenBackupDirDoesNotExist(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(logBuf),
 	}
-	s.pruneAndLog(now, newSilentLogger(logBuf))
+	s.pruneAndReport(now, newSilentLogger(logBuf))
 
 	if out := logBuf.String(); out != "" {
 		t.Errorf("a not-yet-created backup directory produced operator output, which "+
@@ -279,7 +279,7 @@ func TestPruneAndLog_WarnsWhenNoBackupsRemain(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(logBuf),
 	}
-	s.pruneAndLog(now, newSilentLogger(logBuf))
+	s.pruneAndReport(now, newSilentLogger(logBuf))
 
 	if n := countSuffix(t, dir, ".corrupt"); n != 0 {
 		t.Fatalf("%d quarantined files survived KEEP_CORRUPT=0; the fixture is not "+
@@ -316,7 +316,7 @@ func TestPruneAndLog_NoWarningWhileBackupsRemain(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(logBuf),
 	}
-	s.pruneAndLog(now, newSilentLogger(logBuf))
+	s.pruneAndReport(now, newSilentLogger(logBuf))
 
 	if n := countSuffix(t, dir, ".corrupt"); n != 2 {
 		t.Fatalf("%d quarantined files remain, want 2; the fixture is not exercising "+

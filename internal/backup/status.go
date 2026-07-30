@@ -103,28 +103,48 @@ func (s *Scheduler) Status() Status {
 	return st
 }
 
-// recordOutcome stamps how the tick that is finishing ended. Called from every
-// exit path of runOnce, including the early ones — a tick that failed before
-// writing anything is still an observation, and reporting it as "never ran"
-// would hide exactly the failure the operator needs to see.
-func (s *Scheduler) recordOutcome(at time.Time, outcome Outcome) {
+// recordTick publishes ONE tick as ONE observation: how the tick ended and
+// what it learned about BACKUP_DIR, under a single statusMu acquisition.
+//
+// Atomicity is the point, not an implementation detail. Publishing the run
+// stamp and the directory scan through two separate acquisitions let a
+// Status() read land between them and see a tick that had run, had succeeded,
+// and reported zero restore points — which /healthz/data maps to 503. There is
+// no ordering of two sections that fixes it; only one section does.
+//
+// Called from every exit path of runOnce, including the early ones — a tick
+// that failed before writing anything is still an observation, and reporting
+// it as "never ran" would hide exactly the failure the operator needs to see.
+//
+// An UNOBSERVED directory leaves the counts alone. The previous scan is the
+// last thing we actually saw on the volume, and overwriting it with zeros
+// because this tick could not read the directory would manufacture a "no
+// backups on disk" alarm out of a read failure. Which is also why the counts
+// live behind obs.observed rather than being written unconditionally: a long
+// run of failing ticks still reports the age of the last good backup.
+func (s *Scheduler) recordTick(at time.Time, outcome Outcome, obs dirObservation) {
 	s.statusMu.Lock()
 	defer s.statusMu.Unlock()
 	s.status.LastRunAt = at
 	s.status.LastOutcome = outcome
+	if obs.observed {
+		s.status.NewestBackupAt = obs.scan.newestTrustedAt
+		s.status.TrustedCount = obs.scan.trustedCount
+		s.status.QuarantinedCount = obs.scan.quarantinedCount
+		s.status.PruneFailedCount = obs.pruneFailed
+	}
 }
 
-// recordDirState stamps the post-prune view of the backup directory. Called
-// from pruneAndLog, which runOnce defers, so it runs on every tick regardless
-// of that tick's fate — which is what lets a long run of failures still report
-// the age of the last good backup rather than an absent measurement.
-func (s *Scheduler) recordDirState(scan dirScan, pruneFailed int) {
-	s.statusMu.Lock()
-	defer s.statusMu.Unlock()
-	s.status.NewestBackupAt = scan.newestTrustedAt
-	s.status.TrustedCount = scan.trustedCount
-	s.status.QuarantinedCount = scan.quarantinedCount
-	s.status.PruneFailedCount = pruneFailed
+// dirObservation is what a single pruneAndReport call established about
+// BACKUP_DIR. It exists so the scan and the tick's outcome can be handed to
+// recordTick together instead of being published independently.
+//
+// observed false means the directory could not be read this tick, so the scan
+// and pruneFailed fields carry nothing and must not be published.
+type dirObservation struct {
+	observed    bool
+	scan        dirScan
+	pruneFailed int
 }
 
 // dirScan is one pass over the backup directory. It answers the questions

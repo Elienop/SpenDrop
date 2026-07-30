@@ -164,7 +164,7 @@ func TestPrune_BoundsCorruptQuarantine(t *testing.T) {
 // TestPruneAndLog_RunsWhenSnapshotFails is the regression test for the
 // quarantine bound being unreachable in the one state it exists to resolve.
 //
-// pruneAndLog used to be deferred only AFTER Snapshot succeeded. On a full
+// pruneAndReport used to be deferred only AFTER Snapshot succeeded. On a full
 // BACKUP_DIR volume — the ENOSPC end state a runaway quarantine produces —
 // Snapshot is precisely what fails, so retention never ran and the disk stayed
 // full forever. An operator upgrading specifically to reclaim the quarantine
