@@ -664,9 +664,11 @@ func TestHandleDashboardTrend_MonthsCappedAtMaxTrendMonths(t *testing.T) {
 		Trend []map[string]any `json:"trend"`
 	}
 	decodeResponse(t, rec, &resp)
-	// Asserted against the constant, not a literal: MaxTrendMonths is sized so
-	// the Savings tab's window can always reach HISTORICAL_YEAR_START, and it
-	// must be free to grow without a test pinning it to a stale number.
+	// Asserted against the constant, not a literal: MaxTrendMonths is derived
+	// as (MaxYear - MinYear + 1) * 12, so the Savings tab's window can always
+	// reach January of the oldest selectable year — which is MinYear, the floor
+	// GET /api/settings/report-year-floor clamps to. It must be free to move
+	// with those bounds without a test pinning it to a stale number.
 	if len(resp.Trend) != MaxTrendMonths {
 		t.Errorf("expected %d trend entries (capped), got %d", MaxTrendMonths, len(resp.Trend))
 	}
