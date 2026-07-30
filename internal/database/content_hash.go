@@ -47,9 +47,24 @@ import (
 //     identical to a human reading the spreadsheet.
 //
 // The function does not touch the database; the caller passes in the
-// category name (resolved from category_id via a join) because the
-// content hash must be stable even if the category is later renamed.
-// A rename should not retroactively change a row's identity.
+// category name (resolved from category_id via a join) so that the import
+// path and the startup backfill can both reach it without a lookup and
+// still agree byte-for-byte.
+//
+// A rename DOES move the identity of every row filed under that category,
+// and that is deliberate. The import path hashes the category's CURRENT
+// name (import_handlers.go resolves the row's category and then reads
+// CatIDToName), so a stored digest computed from the old name would no
+// longer match anything the importer can produce — every row in the
+// renamed category would silently re-import as new. handleUpdateCategory
+// therefore clears content_hash for the affected rows (gated on
+// CategoryRenameChangesHashes) and lets BackfillContentHashes re-anchor
+// them under the new name on the next boot.
+//
+// This paragraph previously claimed the opposite — that the hash "must be
+// stable even if the category is later renamed". That was never true of
+// the import path it describes, and it is the reason the staleness went
+// unnoticed. Do not restore it without changing the importer to match.
 //
 // The date is normalized to UTC before formatting. The current callers
 // (import path, backfill) both store or read UTC midnight already, so
