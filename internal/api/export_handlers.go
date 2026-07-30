@@ -200,11 +200,16 @@ type categoryTotalRow struct {
 // production pool cap of one connection (see exportTxnRow) an open *sql.Rows
 // holds the process's only connection, so ANY query the caller issues next —
 // getBaseCurrency, the transactions query, the category query — waits on a
-// cursor that is only released when the handler returns. Iterating to
-// exhaustion happens to auto-close the cursor, which is what kept the previous
-// inline loops working, but that made the safety incidental: one `break` or one
-// early `return` added to the loop deadlocked the whole server. Returning a
-// slice moves the release into a deferred Close that no control flow can skip.
+// cursor that is only released when the handler returns.
+//
+// The inline loops this replaced were not themselves broken: they ran to
+// exhaustion, and an exhausted *sql.Rows auto-closes. (The export deadlock that
+// did reach production was handleExportTransactions issuing a query with its
+// cursor still open, fixed separately.) What draining buys is that the safety
+// stops being incidental — under the inline shape one `break` or one early
+// `return` added to a loop would have deadlocked the whole server, with nothing
+// in the code or the tests to catch it. Returning a slice moves the release into
+// a deferred Close that no control flow can skip.
 //
 // The row count is bounded by the number of categories, so the memory ceiling
 // is the same one the categories table already imposes.
