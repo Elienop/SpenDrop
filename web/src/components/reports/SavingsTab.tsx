@@ -65,8 +65,9 @@ function buildYoYData(data: YoYResponse | null) {
 export function SavingsTab() {
   const [year, setYear] = useState(new Date().getFullYear());
   // The window must reach back to January of the SELECTED year, not a fixed
-  // 24 months. yearOptions offers every year from HISTORICAL_YEAR_START, so a
-  // hardcoded 24 silently truncated any year more than two back: in mid-2026
+  // 24 months. The year Select now reaches back to the ledger-derived floor
+  // (it was a hard-coded 2024 when this was written), so a hardcoded 24
+  // silently truncated any year more than two back: in mid-2026
   // the window began in August 2024, and picking 2024 rendered five months as
   // though they were the whole year — the cumulative savings curve started
   // mid-year and the goal progress was computed against a partial total.
