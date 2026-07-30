@@ -146,6 +146,24 @@ func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams
 	)
 }
 
+// CategoryRenameChangesHashes reports whether renaming a category from
+// oldName to newName actually MOVES the ComputeContentHash digest of the
+// transactions filed under it. It is the sole gate on
+// Queries.ClearContentHashForCategory.
+//
+// It exists so the api layer cannot hand-copy the normalization. The hash
+// mixes in lower(trim(category_name)), so "Food" -> "  FOOD  " renders
+// different bytes in categories.name and an IDENTICAL digest: nothing about
+// any row's identity moved, and clearing there would de-anchor the whole
+// category from import dedupe for nothing — letting a re-import of the file
+// those rows came from double all of them until the next boot re-anchors
+// them. Comparing the raw strings would do exactly that. This is the same
+// discipline as hashInputsMoved: decide from the prior VALUE, never from the
+// shape of the statement.
+func CategoryRenameChangesHashes(oldName, newName string) bool {
+	return normalizeHashText(oldName) != normalizeHashText(newName)
+}
+
 // backfillPageSize is the number of rows BackfillContentHashes pulls
 // per iteration. Small enough that a single page fits comfortably in
 // RAM, large enough that a 10K-row household database finishes in ~10
