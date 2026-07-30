@@ -69,7 +69,9 @@ export function SavingsTab() {
   // the window began in August 2024, and picking 2024 rendered five months as
   // though they were the whole year — the cumulative savings curve started
   // mid-year and the goal progress was computed against a partial total.
-  // MaxTrendMonths on the backend is 120, so the clamp below stays in range.
+  // monthsToCoverYear clamps at MAX_REPORT_MONTHS (./utils.ts), which is kept
+  // in step with the backend's MaxTrendMonths — see the comment there for why
+  // that cap must stay out of reach of the year Select.
   const months = useMemo(
     () => monthsToCoverYear(year, new Date().getFullYear()),
     [year],
