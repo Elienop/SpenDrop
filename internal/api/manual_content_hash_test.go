@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -118,5 +120,94 @@ func TestHandleCreateTransaction_DuplicateEntryIsAcceptedWithNullHash(t *testing
 	}
 	if h2 := hashOf(t, h, decodedSecond.ID); h2.Valid {
 		t.Errorf("the duplicate should carry a NULL hash, got %q", h2.String)
+	}
+}
+
+// TestHandleCreateTransaction_ConcurrentIdenticalCreatesAllSucceed is the
+// regression test for the check-then-act race in contentHashForManualEntry.
+//
+// The duplicate pre-check (GetTransactionByContentHash) runs on h.queries,
+// which returns its connection to the pool before txnStore.Create opens its
+// own transaction. SetMaxOpenConns(1) therefore does NOT serialise probe and
+// insert as one unit: several concurrent identical creates can all observe
+// "hash free", after which every loser hits the partial UNIQUE index
+// idx_transactions_content_hash and has its whole create rolled back with a
+// 500. A legitimate duplicate entry must never be lost that way.
+//
+// Rounds x workers rather than a single burst: the race is probabilistic
+// (~25% at 8-way in manual reproduction), so one round could pass by luck
+// even with the recovery removed.
+func TestHandleCreateTransaction_ConcurrentIdenticalCreatesAllSucceed(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "owner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Coffee")
+
+	const rounds = 6
+	const workers = 8
+
+	for round := 0; round < rounds; round++ {
+		desc := fmt.Sprintf("Flat white %d", round)
+		recs := make([]*httptest.ResponseRecorder, workers)
+		start := make(chan struct{})
+		var wg sync.WaitGroup
+		for i := 0; i < workers; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				recs[i] = createTxnViaAPI(t, h, user, catID, desc, 4.50)
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		for i, rec := range recs {
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("round %d worker %d: status = %d, want 201; body = %s",
+					round, i, rec.Code, rec.Body.String())
+			}
+		}
+	}
+
+	// Status codes alone are not enough — a 201 whose row had been rolled
+	// back would still read as success. Assert the rows actually landed.
+	counts, err := h.queries.CountAllTransactions(t.Context())
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.Live != rounds*workers {
+		t.Fatalf("live rows = %d, want %d — a concurrent create was lost",
+			counts.Live, rounds*workers)
+	}
+
+	// Exactly one row per identity may anchor the hash; the rest carry NULL
+	// (earliest-id-wins, the same rule the migration-008 backfill uses).
+	rows, err := h.db.Query(`
+		SELECT description, COUNT(*), SUM(CASE WHEN content_hash IS NOT NULL THEN 1 ELSE 0 END)
+		FROM transactions GROUP BY description`)
+	if err != nil {
+		t.Fatalf("group query: %v", err)
+	}
+	defer rows.Close()
+	groups := 0
+	for rows.Next() {
+		var desc string
+		var total, hashed int
+		if err := rows.Scan(&desc, &total, &hashed); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		groups++
+		if total != workers {
+			t.Errorf("%q: %d rows stored, want %d", desc, total, workers)
+		}
+		if hashed != 1 {
+			t.Errorf("%q: %d rows hold a content_hash, want exactly 1", desc, hashed)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows: %v", err)
+	}
+	if groups != rounds {
+		t.Errorf("distinct descriptions stored = %d, want %d", groups, rounds)
 	}
 }

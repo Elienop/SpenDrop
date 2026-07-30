@@ -372,7 +372,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	amountCents := dollarsToCents(amount)
-	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
+	params := database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
 		AmountCents:         amountCents,
@@ -386,7 +386,24 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		// see them and re-imported them as duplicates.
 		ContentHash: h.contentHashForManualEntry(
 			r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID),
-	})
+	}
+	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
+	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
+	// on h.queries and hands its connection back to the pool before Create
+	// opens its own transaction, so SetMaxOpenConns(1) does not fuse probe and
+	// insert into one unit. Two concurrent identical creates therefore both
+	// see "hash free", and the loser hits idx_transactions_content_hash. That
+	// is the same legitimate-duplicate situation the pre-check handles, so
+	// recover exactly as it would have: drop the hash and retry once, leaving
+	// the winner as the canonical anchor (earliest-id-wins). The check stays
+	// as the cheap common path; this is the correctness guarantee.
+	//
+	// IsContentHashUniqueViolation is scoped to that one index by design —
+	// a users.username or categories.name violation must still surface.
+	if err != nil && database.IsContentHashUniqueViolation(err) {
+		params.ContentHash = sql.NullString{}
+		txn, err = h.txnStore.Create(r.Context(), user.ID, params)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
 		return
@@ -2197,6 +2214,12 @@ func validateMoneyAmount(d float64, field string) error {
 
 // contentHashForManualEntry computes the dedupe identity for a hand-entered
 // transaction, or returns NULL when that identity is already taken.
+//
+// This probe is advisory, NOT a guarantee: it runs on a pooled connection that
+// is released before the caller's INSERT opens its own transaction, so a
+// concurrent create can claim the identity in between. handleCreateTransaction
+// therefore catches IsContentHashUniqueViolation and retries with a NULL hash;
+// any new caller must do the same.
 //
 // Manual rows previously stored content_hash = NULL unconditionally, so import
 // dedupe could not see them: importing a spreadsheet containing a transaction
