@@ -209,6 +209,87 @@ func TestPruneAndLog_LogsRemovalFailures(t *testing.T) {
 	}
 }
 
+// TestPruneAndLog_WarnsWhenNoBackupsRemain covers the one outcome that
+// honouring BACKUP_KEEP_CORRUPT=0 makes reachable: a prune tick that ends with
+// no copy of the database on disk at all.
+//
+// It takes a sustained verify failure to get there (every backup quarantined,
+// then swept by an explicit 0), which this branch made much rarer by demoting
+// the frozen previousBackupSize baseline to a warning. But "bound the
+// quarantine" and "delete the last remaining copy of the database" are
+// different acts, and the second one must not happen quietly.
+//
+// The operator's 0 is deliberately still honoured — they opted in, and silently
+// overriding them is the bug the sibling test guards. They just have to be told.
+func TestPruneAndLog_WarnsWhenNoBackupsRemain(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	// Every backup quarantined: the sustained-verify-failure end state.
+	for i := 0; i < 4; i++ {
+		name := FormatFilename(now.AddDate(0, 0, -i)) + ".corrupt"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("corrupt"), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	logBuf := &syncBuffer{}
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 12, KeepCorrupt: 0,
+		DBPath: filepath.Join(dir, "nonexistent.db"), BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { return now },
+		Logger: newSilentLogger(logBuf),
+	}
+	s.pruneAndLog(now, newSilentLogger(logBuf))
+
+	if n := countSuffix(t, dir, ".corrupt"); n != 0 {
+		t.Fatalf("%d quarantined files survived KEEP_CORRUPT=0; the fixture is not "+
+			"reaching the zero-backups state this test is about", n)
+	}
+	if out := logBuf.String(); !strings.Contains(out, "no backup files remain") {
+		t.Errorf("prune emptied the backup directory without saying so — the operator "+
+			"has no copy of the database left and nothing in the log reports it; got: %q", out)
+	}
+}
+
+// TestPruneAndLog_NoWarningWhileBackupsRemain keeps the warning above from
+// degrading into a line that fires on every ordinary tick. A warning an
+// operator learns to scroll past is not a warning.
+func TestPruneAndLog_NoWarningWhileBackupsRemain(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	// Four quarantined files with the bound at 2: prune removes two and two
+	// survive, so the directory is emphatically not empty.
+	for i := 0; i < 4; i++ {
+		name := FormatFilename(now.AddDate(0, 0, -i)) + ".corrupt"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("corrupt"), 0o600); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+
+	logBuf := &syncBuffer{}
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 12, KeepCorrupt: 2,
+		DBPath: filepath.Join(dir, "nonexistent.db"), BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { return now },
+		Logger: newSilentLogger(logBuf),
+	}
+	s.pruneAndLog(now, newSilentLogger(logBuf))
+
+	if n := countSuffix(t, dir, ".corrupt"); n != 2 {
+		t.Fatalf("%d quarantined files remain, want 2; the fixture is not exercising "+
+			"the backups-still-present case", n)
+	}
+	if out := logBuf.String(); strings.Contains(out, "no backup files remain") {
+		t.Errorf("warned that no backups remain while two are sitting on disk; got: %q", out)
+	}
+}
+
 // TestScheduler_StartupLogReportsKeepCorrupt makes the effective quarantine
 // bound observable. It was the one retention value absent from the startup line,
 // so an operator had no way to see what was actually in force.

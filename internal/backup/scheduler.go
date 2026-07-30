@@ -273,6 +273,32 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 			"enforced; check permissions and whether the volume is read-only): %s",
 			len(failed), s.Dir, strings.Join(failed, ", "))
 	}
+
+	// Every backup file Prune knows about either survived (kept) or resisted
+	// deletion (failed); anything in removed is gone. So kept+failed empty means
+	// there is no copy of the database left in BACKUP_DIR at all.
+	//
+	// Honouring BACKUP_KEEP_CORRUPT=0 is what makes this reachable: with a
+	// sustained verify failure every backup ends up quarantined, and an explicit
+	// 0 then sweeps the lot. The operator's 0 is deliberately NOT overridden —
+	// silently substituting the default is the bug this branch fixed, and they
+	// asked for the bound on a volume that presumably needs it. But "bound the
+	// quarantine" and "delete the last remaining copy of the database" are
+	// different acts, and only the first one was opted into knowingly. Say so,
+	// loudly, rather than leaving the discovery for a restore attempt.
+	//
+	// This cannot become routine noise: pruneAndLog is deferred from runOnce, so
+	// on any successful tick the file just written is in kept. A missing
+	// directory returns above, which keeps a fresh install quiet until the first
+	// snapshot has actually been attempted.
+	if len(kept) == 0 && len(failed) == 0 {
+		logger.Printf("backup: WARNING: no backup files remain in %s — there is no copy of "+
+			"the database left on disk. Retention is doing exactly what it was configured "+
+			"to do (keep=%d daily, %d weekly, %d monthly, %d quarantined); if a run of "+
+			"failed verifications quarantined everything, raise BACKUP_KEEP_CORRUPT and "+
+			"investigate why verification is failing.",
+			s.Dir, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
+	}
 }
 
 // renameCorrupt renames a failed-verification backup to "*.corrupt" so an
