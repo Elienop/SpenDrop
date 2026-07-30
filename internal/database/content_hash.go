@@ -98,10 +98,18 @@ func normalizeHashText(s string) string { return strings.ToLower(strings.TrimSpa
 // hand-written SELECT — can still ask the canonical question through
 // HashInputsMoved instead of reimplementing the comparison.
 //
-// CategoryID rather than the category name: the hash mixes in the NAME, but a
-// rename must NOT retroactively change a row's identity (see the note on
-// ComputeContentHash), so id is the correct proxy for "this row now belongs to
-// different content".
+// CategoryID rather than the category name: the hash mixes in the NAME, but
+// every caller of HashInputsMoved compares one row against ITSELF across a
+// single edit, and no such edit can rename a category. The name is therefore
+// invariant between before and after, which makes the id an exact proxy for
+// "this row now belongs to different content" — a differing id is the only way
+// the name can differ here, and an identical id guarantees an identical name.
+//
+// A rename genuinely DOES move the identity of every row in the category (see
+// ComputeContentHash). It is out of scope for this predicate and handled on its
+// own path: CategoryRenameChangesHashes gates
+// Queries.ClearContentHashForCategory, which un-anchors the whole category in
+// the same transaction as the rename.
 type HashInputs struct {
 	Date        time.Time
 	AmountCents int64
