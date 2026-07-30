@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -43,27 +44,16 @@ func IsPubliclyRoutable(ip net.IP) bool {
 	return true
 }
 
-// GuardedTransport returns an http.RoundTripper that refuses to connect to any
-// address that is not publicly routable.
-//
-// This is the load-bearing SSRF control, and it lives here rather than in the
-// endpoint validator for two reasons the validator cannot address:
-//
-//   - A validator can only check the hostname it was given. DNS resolves at
-//     connect time, so an attacker who controls a name can point it at a public
-//     address for validation and a private one for the send (DNS rebinding).
-//   - The endpoint is stored once and fetched repeatedly for the lifetime of
-//     the subscription; DNS can change at any point in between.
-//
-// The dialer resolves the host itself, checks every returned address, and then
-// dials the specific IP it validated — never a re-resolution — so there is no
-// window between the check and the connection.
-// allowNonPublicDial relaxes ONLY the dial guard, for tests that must reach an
-// httptest server on 127.0.0.1. Deliberately UNEXPORTED and package-private:
-// it cannot be set from outside internal/push, so no production caller and no
-// other package's tests can switch the control off. It does not weaken
+// allowNonPublicDial relaxes the address checks for tests that must reach an
+// httptest server on 127.0.0.1. Deliberately UNEXPORTED and package-private: it
+// cannot be set from outside internal/push, so no production caller and no other
+// package's tests can switch the control off. It does not weaken
 // IsPubliclyRoutable, so the API-layer validator is unaffected by it.
-var allowNonPublicDial bool
+//
+// Atomic because the dialer runs on the transport's own goroutine: a plain bool
+// written by a test helper and read there is a data race, which `go test -race`
+// reports as a failure rather than a warning.
+var allowNonPublicDial atomic.Bool
 
 // AllowNonPublicDialForTesting relaxes the dial guard so a test can reach an
 // httptest server on 127.0.0.1, and returns a function that restores it.
@@ -75,9 +65,81 @@ var allowNonPublicDial bool
 // It does not weaken IsPubliclyRoutable, so the API-layer validator is
 // unaffected either way.
 func AllowNonPublicDialForTesting() func() {
-	prev := allowNonPublicDial
-	allowNonPublicDial = true
-	return func() { allowNonPublicDial = prev }
+	prev := allowNonPublicDial.Load()
+	allowNonPublicDial.Store(true)
+	return func() { allowNonPublicDial.Store(prev) }
+}
+
+// validateHostIsPublic resolves host and requires every answer to be publicly
+// routable. A literal address skips the lookup.
+//
+// Rejecting on ANY non-public answer, rather than filtering to the good ones, is
+// deliberate: filtering would let an attacker publish one public and one private
+// record and let resolver ordering decide.
+func validateHostIsPublic(ctx context.Context, host string) error {
+	if allowNonPublicDial.Load() {
+		return nil
+	}
+	if host == "" {
+		return fmt.Errorf("push: refusing a request with no host")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if !IsPubliclyRoutable(ip) {
+			return fmt.Errorf("push: refusing to connect to non-public address %s (host %q)", ip, host)
+		}
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return fmt.Errorf("push: resolve %q: %w", host, err)
+	}
+	return allAddrsPublic(host, ips)
+}
+
+// allAddrsPublic requires EVERY answer to be routable, and is split out so the
+// mixed public/private case can be tested — no real hostname resolves that way,
+// and it is the case the rule exists for.
+func allAddrsPublic(host string, ips []net.IPAddr) error {
+	if len(ips) == 0 {
+		return fmt.Errorf("push: %q resolved to no addresses", host)
+	}
+	for _, ip := range ips {
+		if !IsPubliclyRoutable(ip.IP) {
+			return fmt.Errorf("push: refusing to connect to non-public address %s (host %q)", ip.IP, host)
+		}
+	}
+	return nil
+}
+
+// endpointGuard validates the REQUEST URL's host before the request is sent.
+//
+// The dial-time guard alone is not sufficient, because it can only judge the
+// address being dialled — and when an egress proxy is configured that address is
+// the PROXY, never the endpoint. The consequence was that configuring
+// HTTP(S)_PROXY silently switched the SSRF control off entirely: a subscription
+// registered against http://10.0.0.5/... was handed to the proxy and fetched,
+// with the guard none the wiser. Measured: status 200, and the proxy logged the
+// internal target.
+//
+// So the two checks answer different questions and both are needed. This one
+// asks "is the endpoint we were asked for allowed?", which survives a proxy. The
+// dial guard asks "is the address we are about to connect to allowed?", which is
+// what closes the DNS-rebinding window, since it runs after resolution and dials
+// the exact address it validated.
+type endpointGuard struct{ next http.RoundTripper }
+
+func (g endpointGuard) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := validateHostIsPublic(req.Context(), req.URL.Hostname()); err != nil {
+		return nil, err
+	}
+	return g.next.RoundTrip(req)
+}
+
+// GuardedRoundTripper is the full control: endpoint validation wrapped around a
+// guarded dialer. Production callers want this rather than GuardedTransport,
+// which is exported only so tests can drive the dialer directly.
+func GuardedRoundTripper(base *http.Transport) http.RoundTripper {
+	return endpointGuard{next: GuardedTransport(base)}
 }
 
 // canonicalProxyAddr renders a proxy URL as the "host:port" the transport will
@@ -178,6 +240,26 @@ func interleaveByFamily(ips []net.IPAddr) []net.IPAddr {
 // address per request could grow it, and that must not become a memory leak.
 const maxTrackedProxies = 64
 
+// GuardedTransport returns a transport whose DIALER refuses any address that is
+// not publicly routable.
+//
+// This half of the control is what closes the DNS-rebinding window, which an
+// endpoint validator cannot do on its own:
+//
+//   - A validator can only check the hostname it was given. DNS resolves at
+//     connect time, so an attacker who controls a name can point it at a public
+//     address for validation and a private one for the send.
+//   - The endpoint is stored once and fetched repeatedly for the lifetime of
+//     the subscription; DNS can change at any point in between.
+//
+// The dialer resolves the host itself, checks every returned address, and then
+// dials the specific IP it validated — never a re-resolution — so there is no
+// window between the check and the connection.
+//
+// It is NOT sufficient alone: with an egress proxy the address dialled is the
+// proxy, so the endpoint is never examined. Production should use
+// GuardedRoundTripper, which adds that check. This is exported so tests can
+// drive the dialer directly.
 func GuardedTransport(base *http.Transport) *http.Transport {
 	t := base.Clone()
 
@@ -244,7 +326,7 @@ func GuardedTransport(base *http.Transport) *http.Transport {
 		// would let an attacker mix a public and a private record and rely on
 		// resolver ordering.
 		for _, ip := range ips {
-			if !allowNonPublicDial && !IsPubliclyRoutable(ip.IP) {
+			if !allowNonPublicDial.Load() && !IsPubliclyRoutable(ip.IP) {
 				return nil, fmt.Errorf("push: refusing to connect to non-public address %s (host %q)", ip.IP, host)
 			}
 		}

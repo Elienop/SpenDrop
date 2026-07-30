@@ -84,9 +84,9 @@ func NewSender(publicKey, privateKey, subject string, client *http.Client) *Send
 	// nil — always lands in the wrapped branch.
 	switch base := c.Transport.(type) {
 	case nil:
-		c.Transport = GuardedTransport(http.DefaultTransport.(*http.Transport))
+		c.Transport = GuardedRoundTripper(http.DefaultTransport.(*http.Transport))
 	case *http.Transport:
-		c.Transport = GuardedTransport(base)
+		c.Transport = GuardedRoundTripper(base)
 	}
 	// Redirect refusal is transport-independent, so it applies unconditionally.
 	c.CheckRedirect = refuseRedirects
