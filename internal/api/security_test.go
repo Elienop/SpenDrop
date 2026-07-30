@@ -566,12 +566,13 @@ func TestParseYearMonth_ValidMonth_NoError(t *testing.T) {
 
 // --- Dashboard trend months upper bound ---
 
-func TestHandleDashboardTrend_MonthsCappedAt120(t *testing.T) {
+func TestHandleDashboardTrend_MonthsCappedAtMaxTrendMonths(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trend?months=999", nil)
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/dashboard/trend?months=%d", MaxTrendMonths*10), nil)
 	req = withUser(req, user)
 	rec := httptest.NewRecorder()
 
@@ -585,8 +586,11 @@ func TestHandleDashboardTrend_MonthsCappedAt120(t *testing.T) {
 		Trend []map[string]any `json:"trend"`
 	}
 	decodeResponse(t, rec, &resp)
-	if len(resp.Trend) != 120 {
-		t.Errorf("expected 120 trend entries (capped), got %d", len(resp.Trend))
+	// Asserted against the constant, not a literal: MaxTrendMonths is sized so
+	// the Savings tab's window can always reach HISTORICAL_YEAR_START, and it
+	// must be free to grow without a test pinning it to a stale number.
+	if len(resp.Trend) != MaxTrendMonths {
+		t.Errorf("expected %d trend entries (capped), got %d", MaxTrendMonths, len(resp.Trend))
 	}
 }
 

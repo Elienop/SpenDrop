@@ -95,10 +95,19 @@ const MaxExportRows = 50_000
 // fresh endpoint on every page load.
 const MaxSubscriptionsPerUser = 20
 
-// Month-window caps for trend endpoints. 10 years is the upper bound for
-// simple income/expense trend walks; category trends are capped lower
-// because the query fans out per category.
+// Month-window caps for trend endpoints. Both income/expense trends and the
+// dashboard trend resolve their whole window from ONE SumByMonthRange query
+// and then walk it in memory, so the cost is linear in the response size, not
+// in queries. Category trends are capped far lower because that query fans out
+// per category.
+//
+// MaxTrendMonths is 50 years: the Savings tab derives its window from the
+// selected year (web/src/components/reports/utils.ts, MAX_REPORT_MONTHS, which
+// must match this value), and the old 120 was exactly the window needed to
+// reach HISTORICAL_YEAR_START from 2033 — so from 2034 the server would have
+// started silently truncating the oldest selectable years, which is the exact
+// bug the client-side window calculation was added to fix.
 const (
-	MaxTrendMonths         = 120
+	MaxTrendMonths         = 600
 	MaxCategoryTrendMonths = 60
 )

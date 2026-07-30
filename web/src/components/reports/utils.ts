@@ -15,6 +15,21 @@ export const INCEXP_CONFIG = {
 } satisfies ChartConfig;
 
 /**
+ * Upper bound on the report window, mirroring the backend's `MaxTrendMonths`
+ * (internal/api/limits.go). The two MUST stay in step: the server clamps
+ * `?months=` to its own limit, so a larger value here would be silently
+ * truncated server-side and reintroduce the truncation this module exists to
+ * prevent.
+ *
+ * It is deliberately far larger than any window `yearOptions` can ask for.
+ * The previous value, 120, is exactly `(2033 - HISTORICAL_YEAR_START + 1) * 12`
+ * — from 2034 the clamp would have started binding and silently truncating the
+ * oldest offered years again. 600 months is 50 years, which keeps the clamp
+ * inert until 2073 while still bounding a hand-crafted request.
+ */
+export const MAX_REPORT_MONTHS = 600;
+
+/**
  * How many months of income/expense history must be fetched so that the
  * whole of `year` is covered, given the report window always ends at the
  * current month.
@@ -27,9 +42,9 @@ export const INCEXP_CONFIG = {
  * data had been truncated.
  *
  * Floored at 24 to preserve the previous behaviour for the current year, and
- * capped at 120 to match the backend's MaxTrendMonths (values above it are
- * clamped server-side anyway).
+ * capped at MAX_REPORT_MONTHS purely as a sanity bound — the cap must never be
+ * reachable from the year Select, or it becomes the truncation bug again.
  */
 export function monthsToCoverYear(year: number, currentYear: number): number {
-  return Math.min(120, Math.max(24, (currentYear - year + 1) * 12));
+  return Math.min(MAX_REPORT_MONTHS, Math.max(24, (currentYear - year + 1) * 12));
 }
