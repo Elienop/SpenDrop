@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log"
 	"sync"
 	"time"
 
@@ -73,7 +74,17 @@ func ApplyConfig(cfg *config.Config) {
 	rateLimitMax = cfg.RateLimit.MaxAttempts
 	// internal/auth keys its own auth-failure limiter by IP and must make the
 	// same trust decision; it cannot import internal/api, so mirror the flag.
-	auth.SetTrustProxyHeaders(cfg.RateLimit.TrustProxyHeaders, cfg.RateLimit.TrustedProxyHops)
+	//
+	// Validate already parsed these successfully, so an error here can only mean
+	// the Config was mutated after Load. Trust nothing in that case: an empty set
+	// falls back to the socket address, which is the safe direction.
+	trustedCIDRs, err := cfg.ParsedTrustedProxyCIDRs()
+	if err != nil {
+		log.Printf("rate-limit: ignoring unparseable TRUSTED_PROXY_CIDRS (%v); "+
+			"keying the limiter on the socket address", err)
+		trustedCIDRs = nil
+	}
+	auth.SetTrustProxyHeaders(cfg.RateLimit.TrustProxyHeaders, cfg.RateLimit.TrustedProxyHops, trustedCIDRs)
 	rateLimitTickerWindow = cfg.RateLimit.Window
 	sessionTTL = cfg.Session.TTL
 	passwordMinLength = cfg.Password.MinLength

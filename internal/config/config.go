@@ -15,11 +15,41 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// maxTrustedProxyHops bounds the deprecated positional hop count.
+const maxTrustedProxyHops = 8
+
+// ParsedTrustedProxyCIDRs turns TrustedProxyCIDRs into prefixes, accepting both
+// CIDR notation and bare addresses (a bare address becomes a single-host prefix).
+//
+// A bare IP is worth supporting because it is the common case — one proxy on one
+// known address — and demanding "/32" for it invites the operator to write
+// something looser to avoid the syntax.
+func (c *Config) ParsedTrustedProxyCIDRs() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, raw := range c.RateLimit.TrustedProxyCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(raw); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS entry %q is neither a CIDR nor an IP address", raw)
+		}
+		out = append(out, netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()))
+	}
+	return out, nil
+}
 
 // Config holds all runtime configuration for SpenDrop.
 type Config struct {
@@ -97,16 +127,31 @@ type RateLimitConfig struct {
 	// address, so the whole household shares one bucket and a single attacker
 	// locks everyone out.
 	TrustProxyHeaders bool
-	// TrustedProxyHops is how many proxies sit in front of SpenDrop, i.e. how
-	// many entries each request's X-Forwarded-For gains before it arrives.
-	// Only meaningful when TrustProxyHeaders is true. Default 1.
+	// TrustedProxyCIDRs lists the address ranges of the reverse proxies in
+	// front of SpenDrop, as CIDRs or bare IPs ("172.18.0.0/16", "10.1.2.3").
+	// Only meaningful when TrustProxyHeaders is true, and it supersedes
+	// TrustedProxyHops whenever it is non-empty.
 	//
-	// This has to be a count, not a guess. With exactly one appending proxy
-	// the client is the rightmost entry. With two — the README documents a
-	// Cloudflare Tunnel in front of Caddy — the rightmost entry is the outer
-	// edge, which is the SAME address for every visitor, so the whole
-	// household collapses into one rate-limit bucket again. Counting hops from
-	// the right lands on the address the outermost proxy you control observed.
+	// This is the safe way to pick the client out of X-Forwarded-For. The
+	// selection walks the header from the right while entries are in one of
+	// these ranges and takes the first that is not, so it never depends on the
+	// chain being a particular LENGTH — see auth.ClientIPForRateLimit for why a
+	// hop count is bypassable in one direction and a household-wide lockout in
+	// the other.
+	//
+	// The ranges must cover the proxies and nothing else: any host inside them
+	// is allowed to declare who the client is.
+	TrustedProxyCIDRs []string
+	// TrustedProxyHops is the DEPRECATED positional selector: how many entries
+	// each request's X-Forwarded-For gains in transit. Read only when
+	// TrustProxyHeaders is true AND TrustedProxyCIDRs is empty. Default 1.
+	//
+	// Deprecated because a count cannot be verified against reality and is
+	// unsafe in both directions. Set too high, an attacker who prepends an
+	// entry makes the header long enough that the selected index lands on their
+	// own forged value — a fresh rate-limit bucket per request, i.e. no limiter
+	// at all. Set too low, every visitor selects the same outer-edge address and
+	// the household shares one bucket. Prefer TrustedProxyCIDRs.
 	TrustedProxyHops int
 }
 
@@ -346,6 +391,15 @@ func Load() (*Config, error) {
 	if err := parseInt("TRUSTED_PROXY_HOPS", &cfg.RateLimit.TrustedProxyHops); err != nil {
 		return nil, err
 	}
+	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS")); v != "" {
+		var cidrs []string
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				cidrs = append(cidrs, p)
+			}
+		}
+		cfg.RateLimit.TrustedProxyCIDRs = cidrs
+	}
 	if err := parseBool("PUSH_ENABLED", &cfg.Push.Enabled); err != nil {
 		return nil, err
 	}
@@ -414,6 +468,20 @@ func (c *Config) Validate() error {
 	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops < 1 {
 		return fmt.Errorf("TRUSTED_PROXY_HOPS must be >= 1 when TRUST_PROXY_HEADERS is enabled: %d",
 			c.RateLimit.TrustedProxyHops)
+	}
+	// An upper bound catches the transposed-digit typo. A count far past any real
+	// chain is not a subtle misconfiguration, and this knob decides rate-limit
+	// identity, so it should fail at boot rather than at 3am.
+	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops > maxTrustedProxyHops {
+		return fmt.Errorf("TRUSTED_PROXY_HOPS must be <= %d (no real proxy chain is that long; "+
+			"prefer TRUSTED_PROXY_CIDRS, which needs no count): %d",
+			maxTrustedProxyHops, c.RateLimit.TrustedProxyHops)
+	}
+	// Parsed here so a malformed range stops startup. Left unvalidated it would
+	// simply fail to match, which silently downgrades every request to the socket
+	// address — the household-wide shared bucket this setting exists to avoid.
+	if _, err := c.ParsedTrustedProxyCIDRs(); err != nil {
+		return err
 	}
 	if c.RateLimit.MaxAttempts < 1 {
 		return fmt.Errorf("RATE_LIMIT_MAX must be >= 1: %d", c.RateLimit.MaxAttempts)
