@@ -2180,6 +2180,14 @@ func (h *Handler) runUpdateByFilterTags(r *http.Request, tx *sql.Tx, user databa
 		// dedupe (and let a re-import double all of them) until the next boot
 		// re-anchors them. The combined case is real: a patch may carry tags
 		// AND a hash input, and then the identity must go.
+		//
+		// This branch tests PRESENCE of a hash-input key rather than an actual
+		// value change (the store's database.hashInputsMoved predicate) because
+		// its read leg deliberately selects only id, tags and date — widening it
+		// to every hash column just to spot a no-change patch would cost a wider
+		// scan on a statement that can match the entire ledger. Presence is the
+		// conservative side of the same rule: it can clear one extra row, never
+		// keep a stale identity.
 		if patch.Date != nil || patch.Description != nil || patch.CategoryID != nil {
 			setClauses = append(setClauses, "content_hash = NULL")
 		}

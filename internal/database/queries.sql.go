@@ -2059,7 +2059,7 @@ func (q *Queries) UpdateSavedFilter(ctx context.Context, arg UpdateSavedFilterPa
 
 const updateTransaction = `-- name: UpdateTransaction :exec
 UPDATE transactions
-SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 `
 
@@ -2072,21 +2072,40 @@ type UpdateTransactionParams struct {
 	CategoryID          int64          `json:"category_id"`
 	Tags                sql.NullString `json:"tags"`
 	Notes               sql.NullString `json:"notes"`
-	ID                  int64          `json:"id"`
+	// ClearContentHash is DERIVED, not caller-supplied: TransactionStore sets
+	// it from hashInputsMoved(before, params) against the row it loads inside
+	// the same tx. Anything a caller puts here is overwritten. It exists as a
+	// param (rather than two statements) so the clear stays part of the single
+	// atomic UPDATE.
+	ClearContentHash bool  `json:"clear_content_hash"`
+	ID               int64 `json:"id"`
 }
 
 // Phase 3.1b: the legacy REAL columns were dropped in migration 010; only the
 // INTEGER cents columns are written. The caller computes cents from the float
 // amount before invoking.
 //
-// content_hash = NULL is deliberate and load-bearing. This is a full-replace
-// update, so it always rewrites every hash input (date, amount, description,
-// category). Keeping the old hash would leave the row claiming the identity of
-// content it no longer holds: hand-type "Coffee", rename it, then import a
-// genuinely new "Coffee" for that date and the import is rejected as a
-// duplicate of a row that no longer says "Coffee" — the new row never lands
-// and the user is told it was already there. The mirror case (editing a row
-// INTO matching a future import) double-imports.
+// The CONDITIONAL content_hash clear is deliberate and load-bearing in BOTH
+// directions. TransactionStore is the only caller and it sets ClearContentHash
+// from hashInputsMoved(before, params) against the row it has already loaded
+// inside the same tx; no caller sets the flag by hand.
+//
+// Clear when a hash input moved. Keeping the old hash would leave the row
+// claiming the identity of content it no longer holds: hand-type "Coffee",
+// rename it, then import a genuinely new "Coffee" for that date and the import
+// is rejected as a duplicate of a row that no longer says "Coffee" — the new
+// row never lands and the user is told it was already there. The mirror case
+// (editing a row INTO matching a future import) double-imports.
+//
+// Preserve when none moved. This is a full-replace update, so it rewrites
+// every hash COLUMN — but rewriting a column is not changing its value. The
+// inline row editor holds tags and rebuilds the whole payload on every Save,
+// so a tags-only edit (or a no-op Save, or a batch-update tags patch) resends
+// identical hash inputs. Clearing those de-anchors the row from dedupe for
+// nothing and lets a re-import of the file it came from double it —
+// permanently, because BackfillContentHashes runs only at boot and only WHERE
+// content_hash IS NULL, so once the duplicate owns the hash the partial unique
+// index makes the backfill skip the edited row forever.
 //
 // Recomputing the hash here is not an option: the identity is derived from the
 // CATEGORY NAME, which this statement does not have, and a recomputed value
@@ -2106,6 +2125,7 @@ func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionPa
 		arg.CategoryID,
 		arg.Tags,
 		arg.Notes,
+		arg.ClearContentHash,
 		arg.ID,
 	)
 	return err

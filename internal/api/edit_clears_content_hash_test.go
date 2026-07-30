@@ -183,6 +183,282 @@ func TestUpdateTransaction_ClearedHashIsReanchoredByTheBackfill(t *testing.T) {
 	}
 }
 
+// tagsAndNotesOf reads the two non-hash-input columns back so a "preserves the
+// hash" assertion cannot pass vacuously against an edit that never landed.
+func tagsAndNotesOf(t *testing.T, h *Handler, id int64) (tags, notes sql.NullString) {
+	t.Helper()
+	if err := h.db.QueryRow(`SELECT tags, notes FROM transactions WHERE id = ?`, id).
+		Scan(&tags, &notes); err != nil {
+		t.Fatalf("read tags/notes: %v", err)
+	}
+	return tags, notes
+}
+
+// TestUpdateTransaction_NonHashInputEdits_PreserveContentHash is the
+// regression test for the mirror failure of the "clears" policy: clearing the
+// dedupe identity on an edit that did NOT move a hash input.
+//
+// PUT /api/transactions/{id} is a full REPLACE of the columns, but a full
+// replace of the columns is not a change of their values. The inline row
+// editor holds tags and rebuilds the whole payload on every Save, so a
+// tags-only edit — or a literal no-op Save — used to hand UpdateTransaction an
+// identical date/amount/description/category and still NULL the hash. The row
+// silently left import dedupe, and re-importing the very file it came from
+// created a second copy. Permanently: BackfillContentHashes only runs at boot
+// and only WHERE content_hash IS NULL, so once the duplicate owns the hash the
+// partial unique index makes the backfill skip the edited row forever.
+func TestUpdateTransaction_NonHashInputEdits_PreserveContentHash(t *testing.T) {
+	cases := []struct {
+		name  string
+		body  map[string]any
+		check func(t *testing.T, tags, notes sql.NullString)
+	}{
+		{
+			name: "tags only",
+			body: map[string]any{"tags": "health"},
+			check: func(t *testing.T, tags, _ sql.NullString) {
+				if tags.String != "health" {
+					t.Fatalf("tags = %q, want %q — the edit never landed, so the hash assertion proves nothing", tags.String, "health")
+				}
+			},
+		},
+		{
+			name: "notes only",
+			body: map[string]any{"notes": "reimbursed by work"},
+			check: func(t *testing.T, _, notes sql.NullString) {
+				if notes.String != "reimbursed by work" {
+					t.Fatalf("notes = %q, want %q — the edit never landed, so the hash assertion proves nothing", notes.String, "reimbursed by work")
+				}
+			},
+		},
+		{
+			// A no-op Save is the inline editor's "open the row, change
+			// nothing, press Save" path. Nothing about the row moves, so
+			// nothing about its identity may move either.
+			name:  "no-op save",
+			body:  map[string]any{},
+			check: func(t *testing.T, _, _ sql.NullString) {},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupHandler(t)
+			user := seedTestUser(t, h.queries, "editor", RoleMember)
+			cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+			id := seedHashedTransaction(t, h, user.ID, cat.ID, "2026-04-01", "Coffee", 10.0)
+			before := hashOf(t, h, id)
+			if !before.Valid {
+				t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+			}
+
+			// Full-replace payload: every hash input carries the STORED value
+			// forward, exactly like the inline row editor does.
+			body := map[string]any{
+				"date":        "2026-04-01",
+				"amount":      10.0,
+				"description": "Coffee",
+				"category_id": cat.ID,
+			}
+			for k, v := range tc.body {
+				body[k] = v
+			}
+
+			rec := putTransaction(t, h, user, id, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+			}
+
+			tags, notes := tagsAndNotesOf(t, h, id)
+			tc.check(t, tags, notes)
+
+			after := hashOf(t, h, id)
+			if !after.Valid {
+				t.Fatal("the edit dropped the row out of import dedupe even though no hash input moved — a re-import of the same file will now double it, permanently")
+			}
+			if after.String != before.String {
+				t.Errorf("content_hash = %s, want %s (unchanged)", after.String, before.String)
+			}
+		})
+	}
+}
+
+// TestUpdateTransaction_TagsOnlyEdit_StillBlocksADuplicateImport is the
+// end-to-end half of the preserve policy: the hash is only worth keeping
+// because it is what makes a re-import of the same spreadsheet a no-op.
+func TestUpdateTransaction_TagsOnlyEdit_StillBlocksADuplicateImport(t *testing.T) {
+	clearImportStore()
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "editor", RoleMember)
+	food := categoryIDByName(t, h, "Food")
+
+	createBody, _ := json.Marshal(map[string]any{
+		"date":        "2026-01-15",
+		"amount":      42.50,
+		"description": "Coffee",
+		"category_id": food,
+	})
+	createReq := withUser(
+		httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(createBody)), user)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.handleCreateTransaction(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d; body = %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+
+	// Tags-only edit — every hash input is resent unchanged.
+	if rec := putTransaction(t, h, user, created.ID, map[string]any{
+		"date":        "2026-01-15",
+		"amount":      42.50,
+		"description": "Coffee",
+		"category_id": food,
+		"tags":        "work",
+	}); rec.Code != http.StatusOK {
+		t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Coffee", "42.50", "Food"},
+	})
+	uploadReq := withUser(postMultipartFile(t, "/api/import/upload", xlsxData), user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: status = %d; body = %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	if groups, _ := uploadResp["collision_groups"].([]any); len(groups) != 1 {
+		t.Fatalf("preview reported %d collision_groups, want 1 — the tags-only edit de-anchored the row from dedupe",
+			len(groups))
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           uploadResp["import_id"].(string),
+		"default_category_id": food,
+		"category_map":        map[string]float64{"Food": float64(food)},
+	})
+	confirmReq := withUser(
+		httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody)), user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusConflict {
+		t.Fatalf("re-importing the identical file was allowed through: confirm status = %d; body = %s",
+			confirmRec.Code, confirmRec.Body.String())
+	}
+
+	if got := countTransactionsForUser(t, h.db, user.ID); got != 1 {
+		t.Errorf("live rows = %d, want 1 (a tags-only edit must not let the same file import twice)", got)
+	}
+}
+
+// TestUpdateTransaction_HashInputEdits_StillClearContentHash pins the other
+// direction for every one of ComputeContentHash's four inputs. The conditional
+// clear must not become "never clear".
+func TestUpdateTransaction_HashInputEdits_StillClearContentHash(t *testing.T) {
+	cases := []struct {
+		name  string
+		patch func(body map[string]any, otherCategoryID int64)
+	}{
+		{"description", func(b map[string]any, _ int64) { b["description"] = "Starbucks latte" }},
+		{"category", func(b map[string]any, other int64) { b["category_id"] = other }},
+		{"date", func(b map[string]any, _ int64) { b["date"] = "2026-04-02" }},
+		{"amount", func(b map[string]any, _ int64) { b["amount"] = 11.25 }},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupHandler(t)
+			user := seedTestUser(t, h.queries, "editor", RoleMember)
+			cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+			other := seedTestCategory(t, h.queries, "Other-"+t.Name(), "expense")
+			id := seedHashedTransaction(t, h, user.ID, cat.ID, "2026-04-01", "Coffee", 10.0)
+			if !hashOf(t, h, id).Valid {
+				t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+			}
+
+			body := map[string]any{
+				"date":        "2026-04-01",
+				"amount":      10.0,
+				"description": "Coffee",
+				"category_id": cat.ID,
+			}
+			tc.patch(body, other.ID)
+
+			rec := putTransaction(t, h, user, id, body)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+			}
+
+			if hash := hashOf(t, h, id); hash.Valid {
+				t.Errorf("the edited row kept content_hash %q — it now claims the identity of content it no longer holds",
+					hash.String)
+			}
+		})
+	}
+}
+
+// TestBatchUpdate_TagsOnly_PreservesContentHash covers the second live caller
+// of UpdateTransaction. computePatch.ts emits a tags-only patch to
+// POST /api/transactions/batch-update for up to MaxBatchUpdateIDs rows per
+// call, so an unconditional clear here drops a whole selection out of dedupe
+// in one request. The combined case (tags AND a hash input) must still clear.
+func TestBatchUpdate_TagsOnly_PreservesContentHash(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "editor", RoleMember)
+	cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+	id := seedHashedTransaction(t, h, user.ID, cat.ID, "2026-04-01", "Coffee", 10.0)
+	before := hashOf(t, h, id)
+	if !before.Valid {
+		t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+	}
+
+	batchUpdate := func(t *testing.T, body string) {
+		t.Helper()
+		req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions/batch-update",
+			bytes.NewReader([]byte(body))), user)
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.handleBatchUpdateTransactions(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("batch-update: status = %d; body = %s", rec.Code, rec.Body.String())
+		}
+		var resp struct {
+			Updated int64 `json:"updated"`
+		}
+		decodeResponse(t, rec, &resp)
+		if resp.Updated != 1 {
+			t.Fatalf("updated = %d, want 1 — the row was skipped, so the hash assertion proves nothing", resp.Updated)
+		}
+	}
+
+	batchUpdate(t, fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"health"},"tagsMode":"replace"}`, id))
+	if tags, _ := tagsAndNotesOf(t, h, id); tags.String != "health" {
+		t.Fatalf("tags = %q, want %q", tags.String, "health")
+	}
+	after := hashOf(t, h, id)
+	if !after.Valid {
+		t.Fatal("a tags-only batch edit dropped the row out of import dedupe; tags are not part of the identity")
+	}
+	if after.String != before.String {
+		t.Errorf("content_hash = %s, want %s (unchanged)", after.String, before.String)
+	}
+
+	batchUpdate(t, fmt.Sprintf(`{"ids":[%d],"patch":{"tags":"food","description":"Flat white"},"tagsMode":"add"}`, id))
+	if hash := hashOf(t, h, id); hash.Valid {
+		t.Errorf("a description change alongside tags kept content_hash %q", hash.String)
+	}
+}
+
 // seedHashedTransaction seeds a row and anchors a content_hash on it, standing
 // in for an imported row (or, since 13f0deb, any hand-typed one).
 func seedHashedTransaction(t *testing.T, h *Handler, userID, categoryID int64, date, desc string, amount float64) int64 {
