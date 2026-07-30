@@ -9,11 +9,17 @@ import (
 	"time"
 )
 
-// defaultKeepCorrupt bounds the quarantine when a caller leaves it unset.
+// defaultKeepCorrupt bounds the quarantine when a caller passes a NEGATIVE
+// keepCorrupt. Negative is the only "unset" signal, and deliberately so: Go's
+// zero value for an int is 0, which is the exact value an operator sets via
+// BACKUP_KEEP_CORRUPT=0 to mean "retain no quarantined files". Treating 0 as
+// unset silently overrode that request, which is the bug this constant's
+// selection rule now exists to avoid re-introducing.
 const defaultKeepCorrupt = 2
 
 // Prune applies a GFS-style retention policy to dir and returns the names of
-// backups that were kept and removed. The retention policy keeps:
+// backups that were kept, removed, and could not be removed. The retention
+// policy keeps:
 //
 //   - the keepDaily most recent backups, AND
 //   - the newest backup per distinct calendar day, up to keepDaily days, AND
@@ -43,12 +49,19 @@ const defaultKeepCorrupt = 2
 // the same volume as the live database.
 //
 // Prune is pure with respect to now: the caller decides "what time is it"
-// so scheduler tests can drive the function deterministically. The error
-// return covers only directory-read failures; per-file os.Remove failures
-// are counted as removed (they may race with another process) and do not
-// short-circuit the sweep. A companion .sha256 sidecar is removed alongside
-// the backup file; a NotExist error on the sidecar is ignored because a
-// previous crashed backup may have left one without the other.
+// so scheduler tests can drive the function deterministically.
+//
+// The error return covers only directory-read failures. A per-file os.Remove
+// failure does not short-circuit the sweep, but it is NOT counted as removed:
+// the file is still on disk, so reporting it as pruned made an unenforceable
+// retention policy look like a healthy one. Such files are returned in `failed`
+// instead, and pruneAndLog surfaces them to the operator. A NotExist error is
+// the one exception — another process beating us to the unlink reaches the same
+// end state, so it counts as removed.
+//
+// A companion .sha256 sidecar is removed alongside the backup file; a NotExist
+// error on the sidecar is ignored because a previous crashed backup may have
+// left one without the other.
 func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCorrupt int) (kept, removed, failed []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
