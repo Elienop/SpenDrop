@@ -97,6 +97,82 @@ func canonicalProxyAddr(u *url.URL) string {
 	return net.JoinHostPort(u.Hostname(), port)
 }
 
+// Per-address dial bounds for the multi-address walk.
+//
+// The floor exists because dividing the budget by a long address list can produce
+// a timeout too short to complete a legitimate handshake to a healthy host; the
+// ceiling keeps a single address from monopolising a generous budget. Between
+// them, a 30s request budget tries roughly fifteen addresses instead of three.
+const (
+	minPerAddrDialTimeout = 2 * time.Second
+	maxPerAddrDialTimeout = 10 * time.Second
+)
+
+// perAddrDialTimeout divides whatever budget is left among the addresses still
+// untried. Without a deadline on ctx there is nothing to divide, so the ceiling
+// applies.
+func perAddrDialTimeout(ctx context.Context, remainingAddrs int) time.Duration {
+	budget := time.Duration(-1)
+	if deadline, ok := ctx.Deadline(); ok {
+		budget = time.Until(deadline)
+	}
+	return dialTimeoutFor(budget, remainingAddrs)
+}
+
+// dialTimeoutFor is the pure arithmetic, split out so the walk's behaviour over a
+// whole address list can be simulated in a test without waiting in real time.
+// A negative budget means "no deadline known".
+func dialTimeoutFor(budget time.Duration, remainingAddrs int) time.Duration {
+	if remainingAddrs < 1 {
+		remainingAddrs = 1
+	}
+	per := maxPerAddrDialTimeout
+	if budget > 0 {
+		per = budget / time.Duration(remainingAddrs)
+	}
+	if per > maxPerAddrDialTimeout {
+		per = maxPerAddrDialTimeout
+	}
+	if per < minPerAddrDialTimeout {
+		per = minPerAddrDialTimeout
+	}
+	return per
+}
+
+// interleaveByFamily alternates IPv6 and IPv4 answers so one address family
+// cannot consume the whole dial budget.
+//
+// The family the resolver put first is kept first, preserving the RFC 6724
+// preference the host expressed; only the ORDER WITHIN the walk changes, so a
+// working family is always reached by the second attempt.
+func interleaveByFamily(ips []net.IPAddr) []net.IPAddr {
+	var v4, v6 []net.IPAddr
+	for _, ip := range ips {
+		if ip.IP.To4() != nil {
+			v4 = append(v4, ip)
+		} else {
+			v6 = append(v6, ip)
+		}
+	}
+	if len(v4) == 0 || len(v6) == 0 {
+		return ips
+	}
+	first, second := v6, v4
+	if ips[0].IP.To4() != nil {
+		first, second = v4, v6
+	}
+	out := make([]net.IPAddr, 0, len(ips))
+	for i := 0; i < len(first) || i < len(second); i++ {
+		if i < len(first) {
+			out = append(out, first[i])
+		}
+		if i < len(second) {
+			out = append(out, second[i])
+		}
+	}
+	return out
+}
+
 // maxTrackedProxies bounds the recorded proxy set. HTTP_PROXY/HTTPS_PROXY yield
 // one or two entries; only a pathological custom Proxy func returning a fresh
 // address per request could grow it, and that must not become a memory leak.
@@ -183,9 +259,28 @@ func GuardedTransport(base *http.Transport) *http.Transport {
 		// dual-stack box whose IPv6 route is broken, the first address is an
 		// AAAA and dialing only it would fail every push. Every address here
 		// has already passed the guard, so iterating costs nothing in safety.
+		//
+		// Two things make the walk actually reach a working address rather than
+		// merely attempt to. Both matter only when a dial FAILS SLOWLY — a dropped
+		// SYN rather than a refusal — which is the normal signature of a broken
+		// IPv6 route, and is precisely the case this loop exists for:
+		//
+		//   - Addresses are interleaved by family, so the second attempt is always
+		//     the other family. Taking the resolver's order verbatim meant a host
+		//     with several blackholing AAAA records spent the entire budget inside
+		//     one family and never reached the A records at all.
+		//   - Each dial gets a share of the REMAINING budget instead of a fixed
+		//     10s. At a fixed 10s, three slow failures consumed the sender's whole
+		//     30s request timeout, the loop hit its own ctx.Err() check, and the
+		//     remaining addresses — including every working one — were skipped.
+		//     Apple publishes 16.
+		ordered := interleaveByFamily(ips)
 		var firstErr error
-		for _, ip := range ips {
-			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+		for i, ip := range ordered {
+			perAddr := perAddrDialTimeout(ctx, len(ordered)-i)
+			dctx, cancel := context.WithTimeout(ctx, perAddr)
+			conn, err := dialer.DialContext(dctx, network, net.JoinHostPort(ip.IP.String(), port))
+			cancel()
 			if err == nil {
 				return conn, nil
 			}
