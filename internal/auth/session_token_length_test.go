@@ -47,23 +47,53 @@ func TestAuthenticateSession_AcceptsConfiguredTokenLengths(t *testing.T) {
 // TestAuthenticateSession_RejectsAbsurdTokenLengths keeps the relaxed bound
 // honest: it must still reject values that cannot be any legal token, so we
 // never hash unbounded attacker-supplied input.
+//
+// The fixture is the whole point. This test used to send out-of-range tokens
+// that matched no session row, so all of them returned 401 whether or not the
+// length check existed — deleting the bound entirely left it green. Here a real
+// session is created FOR each out-of-range token, so the lookup would succeed if
+// it were reached. 401 can then only mean the request was rejected on length,
+// before the hash and before the query.
 func TestAuthenticateSession_RejectsAbsurdTokenLengths(t *testing.T) {
 	q, _ := setupTestDB(t)
+	user := createTestUser(t, q, "member")
 
-	for _, token := range []string{
-		"",
-		"short",
-		strings.Repeat("a", minSessionTokenHexLen-1),
-		strings.Repeat("a", maxSessionTokenHexLen+1),
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{"one char under the floor", strings.Repeat("a", minSessionTokenHexLen-1)},
+		{"one char over the ceiling", strings.Repeat("a", maxSessionTokenHexLen+1)},
+		{"far over the ceiling", strings.Repeat("a", maxSessionTokenHexLen*10)},
 	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// A session that WOULD authenticate if the length gate let it through.
+			createTestSession(t, q, user.ID, tc.token, time.Now().Add(time.Hour))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/whatever", nil)
+			req.AddCookie(&http.Cookie{Name: "session", Value: tc.token})
+			rec := httptest.NewRecorder()
+
+			RequireAuth(q)(okHandler()).ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Errorf("token of length %d: status = %d, want 401 — an out-of-range token "+
+					"reached the session lookup instead of being rejected on length",
+					len(tc.token), rec.Code)
+			}
+		})
+	}
+
+	// Absent and obviously-malformed cookies must still 401. These cannot
+	// distinguish the length gate from the lookup, and are here only so the
+	// ordinary paths stay covered.
+	for _, token := range []string{"", "short"} {
 		req := httptest.NewRequest(http.MethodGet, "/api/whatever", nil)
 		req.AddCookie(&http.Cookie{Name: "session", Value: token})
 		rec := httptest.NewRecorder()
-
 		RequireAuth(q)(okHandler()).ServeHTTP(rec, req)
-
 		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("token of length %d: status = %d, want 401", len(token), rec.Code)
+			t.Errorf("token %q: status = %d, want 401", token, rec.Code)
 		}
 	}
 }
