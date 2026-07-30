@@ -255,8 +255,27 @@ func ClientIPForRateLimit(r *http.Request) string {
 	if len(cidrs) == 0 {
 		// Deprecated hop-count mode, kept so an existing deployment configured
 		// only with TRUSTED_PROXY_HOPS keeps working rather than silently
-		// reverting to one shared bucket on upgrade.
+		// reverting to one shared bucket on upgrade. It cannot apply the
+		// immediate-peer check below — there are no addresses to check against —
+		// which is one more reason it is deprecated.
 		return clientIPByHopCount(r, xff, hops)
+	}
+
+	// The immediate peer must itself be a trusted proxy before ANY part of the
+	// header is believed.
+	//
+	// Without this the whole scheme is decorative: a client that reaches the
+	// server directly — a LAN peer, a container on the same network, an exposed
+	// port alongside the proxy — simply sends its own X-Forwarded-For, and since
+	// the forged entry is not in a trusted range it is taken as the client on the
+	// first step of the walk. Measured: one direct peer minted a fresh rate-limit
+	// key for every value it chose. TRUST_PROXY_HEADERS asks "is a proxy in
+	// front?", and only the socket address can answer that; the header cannot
+	// vouch for itself. This is the same precondition nginx applies by only
+	// honouring the header from set_real_ip_from peers.
+	peer, ok := parseXFFAddr(extractRemoteIP(r.RemoteAddr))
+	if !ok || !isTrustedProxy(peer, cidrs) {
+		return extractRemoteIP(r.RemoteAddr)
 	}
 
 	// Walk right to left WITHOUT splitting: the header is attacker-controlled, so

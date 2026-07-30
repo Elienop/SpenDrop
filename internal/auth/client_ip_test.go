@@ -165,6 +165,42 @@ func TestClientIPForRateLimit_CIDRModeResistsPrependedEntries(t *testing.T) {
 	}
 }
 
+// TestClientIPForRateLimit_CIDRModeRequiresATrustedPeer is the regression test
+// for X-Forwarded-For being believed from a peer that is not a proxy.
+//
+// Selecting the client by address is not sufficient on its own. A client that
+// reaches the server directly — a LAN host, a sibling container, a port exposed
+// next to the proxy — can send its own header, and because the forged entry is
+// not in a trusted range it wins on the very first step of the walk. Measured
+// before this check: one direct peer minted a fresh rate-limit key for every
+// value it chose, which is the same total bypass the hop count allowed.
+//
+// Only the socket address can establish that a proxy is in front; the header
+// cannot vouch for itself.
+func TestClientIPForRateLimit_CIDRModeRequiresATrustedPeer(t *testing.T) {
+	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16"})
+
+	const direct = "203.0.113.66"
+	keys := map[string]bool{}
+	for _, forged := range []string{"1.1.1.1", "2.2.2.2", "3.3.3.3"} {
+		got := ClientIPForRateLimit(reqWithXFF(forged, direct+":40000"))
+		keys[got] = true
+		if got != direct {
+			t.Errorf("direct peer forged %q: keyed on %q, want the socket address %q",
+				forged, got, direct)
+		}
+	}
+	if len(keys) != 1 {
+		t.Errorf("a non-proxy peer minted %d distinct rate-limit keys; want 1", len(keys))
+	}
+
+	// Control: the SAME header through the real proxy is honoured, so the check
+	// above is a peer restriction and not a blanket refusal to read the header.
+	if got := ClientIPForRateLimit(reqWithXFF("203.0.113.5", "172.18.0.1:5000")); got != "203.0.113.5" {
+		t.Errorf("through a trusted proxy: got %q, want 203.0.113.5", got)
+	}
+}
+
 // TestClientIPForRateLimit_CIDRModeSelectionRules covers the rest of the
 // address-based contract, including the two ways it must fall back.
 func TestClientIPForRateLimit_CIDRModeSelectionRules(t *testing.T) {
