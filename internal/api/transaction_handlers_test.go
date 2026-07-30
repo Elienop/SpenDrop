@@ -3066,8 +3066,12 @@ func registerAndSessionCookie(t *testing.T, h *Handler, username string) *http.C
 	// or low-RATE_LIMIT_MAX test in this package would make it order-dependent
 	// (a 429 instead of a 201, depending on test order). Clear our IP up front
 	// so this test never becomes that flake.
+	//
+	// The key is clientIPForRateLimit's masked network prefix, not the bare
+	// address — deleting under the bare address would silently stop clearing
+	// anything and re-open the flake.
 	rateLimitMu.Lock()
-	delete(registerAttempts, extractIP(req.RemoteAddr))
+	delete(registerAttempts, clientIPForRateLimit(req))
 	rateLimitMu.Unlock()
 	rec := httptest.NewRecorder()
 	h.handleRegister(rec, req)

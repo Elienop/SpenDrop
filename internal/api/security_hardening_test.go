@@ -3,9 +3,11 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
 	"testing"
 	"time"
 
@@ -63,8 +65,14 @@ func TestHandleRegister_ClosedInstanceRejectsCheaplyWithoutLockout(t *testing.T)
 
 	// The bucket must be untouched, or a legitimate user sharing that IP —
 	// which behind a reverse proxy is everyone — is now locked out.
+	//
+	// registerAttempts is keyed by clientIPForRateLimit, which is a masked
+	// network prefix and not the bare address; building the lookup any other
+	// way reads an always-absent key and the assertion below passes vacuously.
+	probe := httptest.NewRequest(http.MethodPost, "/api/auth/register", nil)
+	probe.RemoteAddr = attackerIP
 	rateLimitMu.Lock()
-	attempts := registerAttempts[extractIP(attackerIP)]
+	attempts := registerAttempts[clientIPForRateLimit(probe)]
 	rateLimitMu.Unlock()
 	if attempts != 0 {
 		t.Errorf("closed-registration rejections were counted against the limiter (%d) — "+
@@ -114,14 +122,17 @@ func TestHandleRegister_ClosedInstanceSkipsBcrypt(t *testing.T) {
 }
 
 // TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured covers 15b.
+//
+// The expectations carry a /32 because the key is a masked network prefix, not
+// a bare address — IPv4 masks to the host itself, so selection is unchanged.
 func TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	req.RemoteAddr = "10.0.0.5:5000" // the reverse proxy
 	req.Header.Set("X-Forwarded-For", "198.51.100.7, 203.0.113.4")
 
 	setTrustProxyHeadersForTest(t, false)
-	if got := clientIPForRateLimit(req); got != "10.0.0.5" {
-		t.Errorf("untrusted: got %q, want the socket address 10.0.0.5 — "+
+	if got := clientIPForRateLimit(req); got != "10.0.0.5/32" {
+		t.Errorf("untrusted: got %q, want the socket address 10.0.0.5/32 — "+
 			"trusting a forgeable header would let anyone mint a new bucket per request", got)
 	}
 
@@ -130,15 +141,62 @@ func TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured(t *testing.T) {
 	// behaviour is covered in internal/auth; this asserts the api handler path
 	// actually delegates there.
 	setTrustProxyHeadersForTest(t, true, "10.0.0.0/8")
-	if got := clientIPForRateLimit(req); got != "203.0.113.4" {
-		t.Errorf("trusted proxy peer: got %q, want 203.0.113.4", got)
+	if got := clientIPForRateLimit(req); got != "203.0.113.4/32" {
+		t.Errorf("trusted proxy peer: got %q, want 203.0.113.4/32", got)
 	}
 
 	// With no header at all, fall back to the socket address either way.
 	bare := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	bare.RemoteAddr = "198.51.100.20:9999"
-	if got := clientIPForRateLimit(bare); got != "198.51.100.20" {
-		t.Errorf("no XFF: got %q, want 198.51.100.20", got)
+	if got := clientIPForRateLimit(bare); got != "198.51.100.20/32" {
+		t.Errorf("no XFF: got %q, want 198.51.100.20/32", got)
+	}
+}
+
+// TestClientIPForRateLimit_LoginLimiterCollapsesAnIPv6Prefix is the api-side
+// half of the IPv6 bypass: it pins the WIRING, that handleLogin's bucket is
+// keyed by the masked prefix and not the address.
+//
+// h.loginFailureLimiter is the only throttle on password guessing and every
+// guess costs a bcrypt, so a client rotating through its own routed /64 used to
+// get unlimited attempts and unbounded server CPU.
+func TestClientIPForRateLimit_LoginLimiterCollapsesAnIPv6Prefix(t *testing.T) {
+	h := setupHandler(t)
+	setTrustProxyHeadersForTest(t, false)
+
+	max := getRateLimitMax()
+	for i := 0; i < max; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/auth/login",
+			strings.NewReader(`{"username":"nobody","password":"wrongpassword"}`))
+		req.RemoteAddr = fmt.Sprintf("[2001:db8:1:2::%x]:40000", i+1)
+		rec := httptest.NewRecorder()
+		h.handleLogin(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("attempt %d: got %d, want 401", i, rec.Code)
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/auth/login",
+		strings.NewReader(`{"username":"nobody","password":"wrongpassword"}`))
+	req.RemoteAddr = "[2001:db8:1:2::ffff]:40000"
+	rec := httptest.NewRecorder()
+	h.handleLogin(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("attempt %d from the same /64: got %d, want 429 — every address in a "+
+			"routed /64 mints its own bucket, so the login limiter never engages and "+
+			"password guessing is unthrottled", max+1, rec.Code)
+	}
+
+	// A different /64 must still be its own bucket, or one attacker locks out
+	// unrelated households.
+	other := httptest.NewRequest(http.MethodPost, "/api/auth/login",
+		strings.NewReader(`{"username":"nobody","password":"wrongpassword"}`))
+	other.RemoteAddr = "[2001:db8:9:9::1]:40000"
+	orec := httptest.NewRecorder()
+	h.handleLogin(orec, other)
+	if orec.Code != http.StatusUnauthorized {
+		t.Errorf("an unrelated /64: got %d, want 401 — separate prefixes are sharing a bucket",
+			orec.Code)
 	}
 }
 
