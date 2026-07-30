@@ -17,7 +17,7 @@ func clearConfigEnv(t *testing.T) {
 		"HTTP_WRITE_TIMEOUT", "HTTP_IDLE_TIMEOUT",
 		"SESSION_TTL", "SESSION_CLEANUP_INTERVAL", "SESSION_TOKEN_BYTES",
 		"RATE_LIMIT_MAX", "RATE_LIMIT_WINDOW",
-		"TRUST_PROXY_HEADERS", "TRUSTED_PROXY_HOPS", "TRUSTED_PROXY_CIDRS",
+		"TRUST_PROXY_HEADERS", "TRUSTED_PROXY_CIDRS",
 		"BCRYPT_COST", "PASSWORD_MIN_LENGTH", "PASSWORD_MAX_LENGTH",
 		"MAX_JSON_BYTES", "MAX_UPLOAD_BYTES",
 		"SQLITE_BUSY_TIMEOUT",
@@ -506,4 +506,65 @@ func TestLoad_TrimsWhitespaceInNumericEnv(t *testing.T) {
 	if cfg.Upload.MaxJSONBytes != 2<<20 {
 		t.Errorf("MaxJSONBytes = %d", cfg.Upload.MaxJSONBytes)
 	}
+}
+
+// TestValidate_TrustProxyHeadersRequiresCIDRs pins the boot failure added when
+// hop-count mode was deleted.
+//
+// TRUST_PROXY_HEADERS=true with no CIDRs has no safe reading. Only the socket
+// address can establish that a proxy is in front, so with nothing to compare it
+// against the header cannot be told apart from a forgery — and the old hop-count
+// fallback that used to run in this combination believed it from any direct peer,
+// which was a complete bypass of the login limiter at its DEFAULT setting.
+// Failing at boot is the only outcome that cannot be missed: the alternative,
+// degrading quietly to the socket address, gives the operator a household-wide
+// shared bucket and one log line.
+func TestValidate_TrustProxyHeadersRequiresCIDRs(t *testing.T) {
+	t.Run("enabled with no CIDRs must not boot", func(t *testing.T) {
+		d := Defaults()
+		d.RateLimit.TrustProxyHeaders = true
+		d.RateLimit.TrustedProxyCIDRs = nil
+
+		err := d.Validate()
+		if err == nil {
+			t.Fatal("Validate accepted TRUST_PROXY_HEADERS=true with no TRUSTED_PROXY_CIDRS; " +
+				"the header is then indistinguishable from a forgery and the login limiter " +
+				"is bypassable by any direct peer")
+		}
+		for _, want := range []string{"TRUST_PROXY_HEADERS", "TRUSTED_PROXY_CIDRS"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("error should name %q so the operator knows what to set, got: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("enabled with CIDRs boots", func(t *testing.T) {
+		d := Defaults()
+		d.RateLimit.TrustProxyHeaders = true
+		d.RateLimit.TrustedProxyCIDRs = []string{"172.18.0.0/16"}
+
+		if err := d.Validate(); err != nil {
+			t.Fatalf("the documented proxy deployment was rejected: %v", err)
+		}
+	})
+
+	t.Run("disabled with no CIDRs boots", func(t *testing.T) {
+		// The default, directly-exposed deployment. The guard must be conditional
+		// on TrustProxyHeaders, or it bricks every install that has no proxy.
+		d := Defaults()
+		d.RateLimit.TrustProxyHeaders = false
+		d.RateLimit.TrustedProxyCIDRs = nil
+
+		if err := d.Validate(); err != nil {
+			t.Fatalf("the default no-proxy deployment was rejected: %v", err)
+		}
+	})
+
+	t.Run("Load surfaces it", func(t *testing.T) {
+		clearConfigEnv(t)
+		t.Setenv("TRUST_PROXY_HEADERS", "true")
+		if _, err := Load(); err == nil {
+			t.Fatal("Load accepted TRUST_PROXY_HEADERS=true with no TRUSTED_PROXY_CIDRS")
+		}
+	})
 }

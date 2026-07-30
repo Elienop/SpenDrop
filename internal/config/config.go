@@ -22,9 +22,6 @@ import (
 	"time"
 )
 
-// maxTrustedProxyHops bounds the deprecated positional hop count.
-const maxTrustedProxyHops = 8
-
 // ParsedTrustedProxyCIDRs turns TrustedProxyCIDRs into prefixes, accepting both
 // CIDR notation and bare addresses (a bare address becomes a single-host prefix).
 //
@@ -129,30 +126,20 @@ type RateLimitConfig struct {
 	TrustProxyHeaders bool
 	// TrustedProxyCIDRs lists the address ranges of the reverse proxies in
 	// front of SpenDrop, as CIDRs or bare IPs ("172.18.0.0/16", "10.1.2.3").
-	// Only meaningful when TrustProxyHeaders is true, and it supersedes
-	// TrustedProxyHops whenever it is non-empty.
+	// REQUIRED whenever TrustProxyHeaders is true — Validate rejects the pair
+	// TrustProxyHeaders=true with an empty set, because the header cannot then
+	// be distinguished from a forgery.
 	//
-	// This is the safe way to pick the client out of X-Forwarded-For. The
+	// This is the only safe way to pick the client out of X-Forwarded-For. The
 	// selection walks the header from the right while entries are in one of
 	// these ranges and takes the first that is not, so it never depends on the
-	// chain being a particular LENGTH — see auth.ClientIPForRateLimit for why a
-	// hop count is bypassable in one direction and a household-wide lockout in
-	// the other.
+	// chain being a particular LENGTH — see auth.ClientIPForRateLimit for why
+	// the hop count this replaced was bypassable from any direct peer even in
+	// its default configuration.
 	//
 	// The ranges must cover the proxies and nothing else: any host inside them
 	// is allowed to declare who the client is.
 	TrustedProxyCIDRs []string
-	// TrustedProxyHops is the DEPRECATED positional selector: how many entries
-	// each request's X-Forwarded-For gains in transit. Read only when
-	// TrustProxyHeaders is true AND TrustedProxyCIDRs is empty. Default 1.
-	//
-	// Deprecated because a count cannot be verified against reality and is
-	// unsafe in both directions. Set too high, an attacker who prepends an
-	// entry makes the header long enough that the selected index lands on their
-	// own forged value — a fresh rate-limit bucket per request, i.e. no limiter
-	// at all. Set too low, every visitor selects the same outer-edge address and
-	// the household shares one bucket. Prefer TrustedProxyCIDRs.
-	TrustedProxyHops int
 }
 
 // PasswordConfig holds bcrypt cost and password length policy.
@@ -257,7 +244,6 @@ func Defaults() Config {
 			MaxAttempts:       10,
 			Window:            time.Minute,
 			TrustProxyHeaders: false,
-			TrustedProxyHops:  1,
 		},
 		Password: PasswordConfig{
 			BcryptCost: 12,
@@ -388,9 +374,6 @@ func Load() (*Config, error) {
 	if err := parseBool("TRUST_PROXY_HEADERS", &cfg.RateLimit.TrustProxyHeaders); err != nil {
 		return nil, err
 	}
-	if err := parseInt("TRUSTED_PROXY_HOPS", &cfg.RateLimit.TrustedProxyHops); err != nil {
-		return nil, err
-	}
 	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS")); v != "" {
 		var cidrs []string
 		for _, part := range strings.Split(v, ",") {
@@ -465,17 +448,17 @@ func (c *Config) Validate() error {
 			c.Session.TokenBytes)
 	}
 
-	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops < 1 {
-		return fmt.Errorf("TRUSTED_PROXY_HOPS must be >= 1 when TRUST_PROXY_HEADERS is enabled: %d",
-			c.RateLimit.TrustedProxyHops)
-	}
-	// An upper bound catches the transposed-digit typo. A count far past any real
-	// chain is not a subtle misconfiguration, and this knob decides rate-limit
-	// identity, so it should fail at boot rather than at 3am.
-	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops > maxTrustedProxyHops {
-		return fmt.Errorf("TRUSTED_PROXY_HOPS must be <= %d (no real proxy chain is that long; "+
-			"prefer TRUSTED_PROXY_CIDRS, which needs no count): %d",
-			maxTrustedProxyHops, c.RateLimit.TrustedProxyHops)
+	// Trusting the header without naming who may set it has no safe reading, so
+	// this is a boot failure rather than a warning. Only the socket address can
+	// establish that a proxy is in front; with no ranges to compare it against,
+	// every direct peer — a LAN host, a sibling container, an exposed port —
+	// could otherwise hand over any client address it liked and mint a fresh
+	// rate-limit bucket per request. The login limiter is the only throttle on
+	// password guessing, so silently degrading here is not acceptable.
+	if c.RateLimit.TrustProxyHeaders && len(c.RateLimit.TrustedProxyCIDRs) == 0 {
+		return fmt.Errorf("TRUST_PROXY_HEADERS=true requires TRUSTED_PROXY_CIDRS " +
+			"(the address range your reverse proxy connects from); without it the " +
+			"header cannot be distinguished from a forgery")
 	}
 	// Parsed here so a malformed range stops startup. Left unvalidated it would
 	// simply fail to match, which silently downgrades every request to the socket

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 	"time"
 
@@ -124,12 +125,13 @@ func TestClientIPForRateLimit_TrustsProxyOnlyWhenConfigured(t *testing.T) {
 			"trusting a forgeable header would let anyone mint a new bucket per request", got)
 	}
 
-	setTrustProxyHeadersForTest(t, true)
-	// One trusted hop -> the client is the last entry, the one our own proxy
-	// appended. Hop-count behaviour itself is covered in internal/auth; this
-	// asserts the api handler path actually delegates there.
+	// The peer 10.0.0.5 is named as a trusted proxy, so the header is read and the
+	// walk stops at the rightmost entry that is not itself a proxy. Selection
+	// behaviour is covered in internal/auth; this asserts the api handler path
+	// actually delegates there.
+	setTrustProxyHeadersForTest(t, true, "10.0.0.0/8")
 	if got := clientIPForRateLimit(req); got != "203.0.113.4" {
-		t.Errorf("trusted, 1 hop: got %q, want 203.0.113.4", got)
+		t.Errorf("trusted proxy peer: got %q, want 203.0.113.4", got)
 	}
 
 	// With no header at all, fall back to the socket address either way.
@@ -234,10 +236,20 @@ func resetRegisterAttempts() {
 // internal/auth. api used to keep its own copy; it was removed once the
 // resolution logic was consolidated, because duplicated config state that
 // looks live is exactly how the two implementations drifted apart.
-func setTrustProxyHeadersForTest(t *testing.T, v bool) {
+// cidrs must name the proxy the test's RemoteAddr uses: without it the header is
+// never believed, since only the socket address can establish a proxy is there.
+func setTrustProxyHeadersForTest(t *testing.T, v bool, cidrs ...string) {
 	t.Helper()
-	auth.SetTrustProxyHeaders(v, 1, nil)
-	t.Cleanup(func() { auth.SetTrustProxyHeaders(false, 1, nil) })
+	var parsed []netip.Prefix
+	for _, raw := range cidrs {
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			t.Fatalf("bad fixture CIDR %q: %v", raw, err)
+		}
+		parsed = append(parsed, p.Masked())
+	}
+	auth.SetTrustProxyHeaders(v, parsed)
+	t.Cleanup(func() { auth.SetTrustProxyHeaders(false, nil) })
 }
 
 // TestHandleCreatePushSubscription_RejectsPrivateEndpoint proves the validator
