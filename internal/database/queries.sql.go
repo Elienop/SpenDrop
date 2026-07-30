@@ -110,6 +110,54 @@ func (q *Queries) CountStaleMismatchCheckpoints(ctx context.Context, threshold s
 	return n, err
 }
 
+const clearContentHashForCategory = `-- name: ClearContentHashForCategory :exec
+UPDATE transactions
+SET content_hash = NULL
+WHERE category_id = ? AND content_hash IS NOT NULL AND deleted_at IS NULL
+`
+
+// Drops every live row in a category out of import dedupe. Called ONLY by
+// handleUpdateCategory, inside the same SQL transaction as the rename that
+// triggered it, and ONLY when the new name normalizes differently from the old
+// one (database.CategoryRenameChangesHashes).
+//
+// ComputeContentHash mixes in the category NAME, so renaming a category moves
+// the identity of every transaction in it. Leaving the old digest behind makes
+// each of those rows claim content it no longer holds, in both harm
+// directions: a re-import of the spreadsheet they came from hashes under the
+// new name, matches nothing and silently doubles the whole category; and a
+// genuinely new row that happens to hash to the stale value is rejected as a
+// duplicate of a row that no longer says that. The staleness is permanent
+// without this clear, because BackfillContentHashes only ever processes rows
+// WHERE content_hash IS NULL.
+//
+// Clear, do not recompute. Recomputing inline would have to handle collisions
+// against idx_transactions_content_hash (legitimate same-hash rows exist in
+// real household data), which is exactly what the boot backfill already
+// implements with earliest-id-wins. Clearing makes the rows leave dedupe
+// rather than lie about it, and the next boot re-anchors them under the new
+// name.
+//
+// deleted_at IS NULL is load-bearing, not the usual soft-delete hygiene: the
+// partial unique index and GetTransactionByContentHash both filter tombstoned
+// rows out, so a tombstoned row's hash is inert for dedupe, and the audit trail
+// wants its pre-delete state preserved (SoftDeleteTransaction deliberately
+// leaves content_hash alone for the same reason).
+//
+// content_hash IS NOT NULL keeps the statement from rewriting rows that are
+// already un-anchored.
+//
+// No updated_at bump: like UpdateTransactionContentHash, this is
+// derived-column hygiene, not a user-visible edit, and promoting it into the
+// updated_at stream would make "what changed yesterday" reports lie. For the
+// same reason it does not emit transaction_audit rows and so is an intentional
+// exception to the TransactionStore chokepoint (the ledger values are
+// untouched).
+func (q *Queries) ClearContentHashForCategory(ctx context.Context, categoryID int64) error {
+	_, err := q.db.ExecContext(ctx, clearContentHashForCategory, categoryID)
+	return err
+}
+
 const createCategory = `-- name: CreateCategory :one
 
 INSERT INTO categories (name, type, sort_order)

@@ -1,6 +1,8 @@
 package api
 
 import (
+	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -186,18 +188,63 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.queries.UpdateCategory(r.Context(), database.UpdateCategoryParams{
-		Name: req.Name,
-		Icon: toNullString(req.Icon),
-		ID:   id,
-	})
+	// The rename and the content_hash clear it triggers MUST share one SQL
+	// transaction. If the rename committed and the clear did not, every
+	// transaction in the category would be left holding a digest computed from
+	// the OLD name — the exact permanently-stale state this pairing exists to
+	// prevent, and one the startup backfill cannot heal (it only ever
+	// processes rows WHERE content_hash IS NULL).
+	tx, err := h.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update category")
 		return
 	}
-	rowsAffected, _ := result.RowsAffected()
-	if rowsAffected == 0 {
-		writeError(w, http.StatusNotFound, "category not found")
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+	qtx := h.queries.WithTx(tx)
+
+	// Read the prior row inside the tx: it supplies both the 404 signal and
+	// the OLD name the change detector needs. Reading it outside would race
+	// with a concurrent rename.
+	before, err := qtx.GetCategoryByID(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "category not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to update category")
+		return
+	}
+
+	if _, err := qtx.UpdateCategory(r.Context(), database.UpdateCategoryParams{
+		Name: req.Name,
+		Icon: toNullString(req.Icon),
+		ID:   id,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update category")
+		return
+	}
+
+	// database.ComputeContentHash mixes in the category NAME, so a rename
+	// moves the dedupe identity of every transaction filed under it. Clear
+	// those rows rather than recompute: recomputation would have to resolve
+	// collisions against the partial unique index (legitimate same-hash rows
+	// exist in real household data), which is exactly what the boot backfill
+	// already implements with earliest-id-wins. A cleared row simply leaves
+	// dedupe until the next boot re-anchors it under the new name.
+	//
+	// Gated on an ACTUAL name change, judged with the hash function's own
+	// normalization — this endpoint is a full replace of {name, icon}, so the
+	// settings UI resends the current name on every icon edit, and clearing
+	// there would de-anchor the whole category for nothing.
+	if database.CategoryRenameChangesHashes(before.Name, req.Name) {
+		if err := qtx.ClearContentHashForCategory(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to update category")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to commit category update")
 		return
 	}
 
