@@ -120,11 +120,22 @@ func (h *Handler) handleSetCategoryBudget(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// safeDollarsToCents, not dollarsToCents: the two bounds above are a pair
+	// of comparisons and NaN is false against both, so a non-finite amount
+	// would pass validation and int64(NaN*100) stores int64 minimum. Defence in
+	// depth — no JSON body can produce one today — kept at the conversion so it
+	// survives a future decoder or validator change.
+	amountCents, ok := safeDollarsToCents(req.Amount)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "amount is not a representable money value")
+		return
+	}
+
 	err = h.queries.UpsertCategoryBudget(r.Context(), database.UpsertCategoryBudgetParams{
 		Year:        year,
 		Month:       month,
 		CategoryID:  categoryID,
-		AmountCents: dollarsToCents(req.Amount),
+		AmountCents: amountCents,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to set category budget")

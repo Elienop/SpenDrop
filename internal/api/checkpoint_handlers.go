@@ -311,11 +311,21 @@ func (h *Handler) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request)
 
 	date, _ := time.Parse("2006-01-02", req.Date) // already validated
 
+	// safeDollarsToCents, not dollarsToCents. validateCheckpointRequest already
+	// rejects NaN/Inf and bounds the magnitude, so this is defence in depth —
+	// but it is the conversion, not the validator, that turns an unrepresentable
+	// float into int64 minimum, and the guard belongs where the damage is done.
+	expectedCents, ok := safeDollarsToCents(req.ExpectedAmount)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "expected_amount is not a representable money value")
+		return
+	}
+
 	params := database.CreateCheckpointParams{
 		UserID:              user.ID,
 		ScopeType:           req.ScopeType,
 		Date:                date,
-		ExpectedAmountCents: dollarsToCents(req.ExpectedAmount),
+		ExpectedAmountCents: expectedCents,
 		Note:                toNullString(req.Note),
 	}
 	if req.ScopeType == "category" {

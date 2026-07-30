@@ -154,13 +154,23 @@ func (h *Handler) handleUpdateNotificationSettings(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// safeDollarsToCents, not dollarsToCents. The explicit NaN/Inf/bounds check
+	// above already covers this — the guard sits at the conversion as well so a
+	// future edit to that validator cannot silently reopen the int64-minimum
+	// path, which is where the damage actually happens.
+	thresholdCents, ok := safeDollarsToCents(req.LargeTxnThresholdDollars)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "large_txn_threshold_dollars is not a representable money value")
+		return
+	}
+
 	if err := h.queries.UpdateNotificationSettings(r.Context(), database.UpdateNotificationSettingsParams{
 		OverBudget:             req.OverBudget,
 		TxnAdded:               req.TxnAdded,
 		TxnDeleted:             req.TxnDeleted,
 		TxnEdited:              req.TxnEdited,
 		LargeTxn:               req.LargeTxn,
-		LargeTxnThresholdCents: dollarsToCents(req.LargeTxnThresholdDollars),
+		LargeTxnThresholdCents: thresholdCents,
 		DigestMode:             req.DigestMode,
 		DigestTime:             req.DigestTime,
 		QuietStart:             req.QuietStart,
