@@ -85,6 +85,73 @@ func TestClientIPForRateLimit_WithoutCIDRsIgnoresTheHeader(t *testing.T) {
 	}
 }
 
+// TestClientIPForRateLimit_NormalisesTheSocketFallback is the regression test
+// for the two code paths disagreeing about what one host is called.
+//
+// The header path returns ip.String() from parseXFFAddr, which is unmapped and
+// zone-stripped. The socket fallback returned r.RemoteAddr's host verbatim. So
+// the SAME host got two different rate-limit keys depending on which path
+// produced it — "::ffff:10.0.0.1" from the fallback versus "10.0.0.1" from the
+// header, and "fe80::1%eth0" versus "fe80::1". Two keys means two buckets, which
+// doubles the real attempt allowance and makes the limiter's accounting depend
+// on routing rather than on identity.
+func TestClientIPForRateLimit_NormalisesTheSocketFallback(t *testing.T) {
+	t.Run("untrusted deployment", func(t *testing.T) {
+		withTrustedProxyCIDRs(t, false, nil)
+		cases := map[string]string{
+			"[::ffff:10.0.0.1]:5000": "10.0.0.1",
+			"10.0.0.1:5000":          "10.0.0.1",
+			"[fe80::1%eth0]:5000":    "fe80::1",
+			"[fe80::1]:5000":         "fe80::1",
+			"[2001:db8::1]:5000":     "2001:db8::1",
+		}
+		for remote, want := range cases {
+			if got := ClientIPForRateLimit(reqWithXFF("", remote)); got != want {
+				t.Errorf("RemoteAddr=%q: got %q, want %q", remote, got, want)
+			}
+		}
+	})
+
+	t.Run("untrusted peer falls back normalised", func(t *testing.T) {
+		withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
+		// A direct peer whose header is refused: the fallback is still a key.
+		if got := ClientIPForRateLimit(reqWithXFF("1.1.1.1", "[::ffff:203.0.113.9]:5000")); got != "203.0.113.9" {
+			t.Errorf("got %q, want the normalised socket address 203.0.113.9", got)
+		}
+	})
+
+	t.Run("all-entries-trusted falls back normalised", func(t *testing.T) {
+		withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
+		if got := ClientIPForRateLimit(reqWithXFF("172.18.0.2", "[::ffff:172.18.0.1]:5000")); got != "172.18.0.1" {
+			t.Errorf("got %q, want the normalised socket address 172.18.0.1", got)
+		}
+	})
+
+	// The property the whole fix is for: one host, one key, whichever path ran.
+	t.Run("both paths agree on one host", func(t *testing.T) {
+		withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
+
+		viaHeader := ClientIPForRateLimit(reqWithXFF("::ffff:10.0.0.1", "172.18.0.1:5000"))
+		withTrustedProxyCIDRs(t, false, nil)
+		viaSocket := ClientIPForRateLimit(reqWithXFF("", "[::ffff:10.0.0.1]:5000"))
+
+		if viaHeader != viaSocket {
+			t.Errorf("the same host keys as %q through the header and %q through the socket "+
+				"fallback — it occupies two rate-limit buckets", viaHeader, viaSocket)
+		}
+	})
+
+	// A shape SplitHostPort cannot parse (unix socket, pathological client) must
+	// still yield the raw value rather than an empty key, which would merge every
+	// such client into one bucket.
+	t.Run("unparseable remote addresses are passed through", func(t *testing.T) {
+		withTrustedProxyCIDRs(t, false, nil)
+		if got := ClientIPForRateLimit(reqWithXFF("", "/tmp/spendrop.sock")); got != "/tmp/spendrop.sock" {
+			t.Errorf("got %q, want the raw value passed through", got)
+		}
+	})
+}
+
 // TestClientIPForRateLimit_UntrustedIgnoresHeader pins the default: on a
 // directly exposed server X-Forwarded-For is attacker-controlled, so trusting
 // it would let anyone mint a fresh bucket per request.

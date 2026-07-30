@@ -181,6 +181,27 @@ func parseXFFAddr(s string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
+// socketAddrKey is the rate-limit key for the connection itself: the peer
+// address, normalised the same way header entries are.
+//
+// Normalising matters because the two paths must agree on what one host is
+// called. The header path returns parseXFFAddr's ip.String(), which is unmapped
+// and zone-stripped; returning RemoteAddr verbatim here gave the SAME host a
+// second key — "::ffff:10.0.0.1" against "10.0.0.1", "fe80::1%eth0" against
+// "fe80::1" — and therefore a second bucket, doubling its real attempt allowance
+// depending on which path produced the key.
+//
+// A shape SplitHostPort or netip cannot parse (unix socket, pathological client)
+// falls through to the raw value: an empty key would merge every such client
+// into one bucket.
+func socketAddrKey(r *http.Request) string {
+	raw := extractRemoteIP(r.RemoteAddr)
+	if addr, ok := parseXFFAddr(raw); ok {
+		return addr.String()
+	}
+	return raw
+}
+
 func isTrustedProxy(ip netip.Addr, cidrs []netip.Prefix) bool {
 	for _, p := range cidrs {
 		if p.Contains(ip) {
@@ -249,7 +270,7 @@ func ClientIPForRateLimit(r *http.Request) string {
 	trustProxyHeadersMu.RUnlock()
 
 	if !trusted {
-		return extractRemoteIP(r.RemoteAddr)
+		return socketAddrKey(r)
 	}
 	// Values, not Get. Get returns only the FIRST X-Forwarded-For field line, and
 	// a proxy is free to append a SECOND line rather than extending the client's.
@@ -260,7 +281,7 @@ func ClientIPForRateLimit(r *http.Request) string {
 	// puts the proxy's entry rightmost where the walk begins.
 	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ", ")
 	if xff == "" {
-		return extractRemoteIP(r.RemoteAddr)
+		return socketAddrKey(r)
 	}
 
 	// The immediate peer must itself be a trusted proxy before ANY part of the
@@ -279,7 +300,7 @@ func ClientIPForRateLimit(r *http.Request) string {
 	// honouring the header from set_real_ip_from peers.
 	peer, ok := parseXFFAddr(extractRemoteIP(r.RemoteAddr))
 	if !ok || !isTrustedProxy(peer, cidrs) {
-		return extractRemoteIP(r.RemoteAddr)
+		return socketAddrKey(r)
 	}
 
 	// Walk right to left WITHOUT splitting: the header is attacker-controlled, so
@@ -307,5 +328,5 @@ func ClientIPForRateLimit(r *http.Request) string {
 	}
 	// Every entry was a trusted proxy (or the header was unusable). The socket
 	// address is the only thing left that no client can forge.
-	return extractRemoteIP(r.RemoteAddr)
+	return socketAddrKey(r)
 }
