@@ -247,7 +247,14 @@ func ClientIPForRateLimit(r *http.Request) string {
 	if !trusted {
 		return extractRemoteIP(r.RemoteAddr)
 	}
-	xff := r.Header.Get("X-Forwarded-For")
+	// Values, not Get. Get returns only the FIRST X-Forwarded-For field line, and
+	// a proxy is free to append a SECOND line rather than extending the client's.
+	// Where it does, the attacker's own line is the first one, so Get handed back
+	// a header the proxy had never touched and the walk below started from
+	// attacker-controlled data. RFC 7230 says repeated field lines are equivalent
+	// to one comma-joined value in order, so joining is both correct and what
+	// puts the proxy's entry rightmost where the walk begins.
+	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ", ")
 	if xff == "" {
 		return extractRemoteIP(r.RemoteAddr)
 	}
