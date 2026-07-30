@@ -236,8 +236,8 @@ func resetRegisterAttempts() {
 // looks live is exactly how the two implementations drifted apart.
 func setTrustProxyHeadersForTest(t *testing.T, v bool) {
 	t.Helper()
-	auth.SetTrustProxyHeaders(v, 1)
-	t.Cleanup(func() { auth.SetTrustProxyHeaders(false, 1) })
+	auth.SetTrustProxyHeaders(v, 1, nil)
+	t.Cleanup(func() { auth.SetTrustProxyHeaders(false, 1, nil) })
 }
 
 // TestHandleCreatePushSubscription_RejectsPrivateEndpoint proves the validator
