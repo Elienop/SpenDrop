@@ -412,6 +412,16 @@ services:
       - TZ=UTC
       - COOKIE_SECURE=true
       - TRUST_PROXY=true
+      # Without these two, every request arrives carrying Caddy's address, so the
+      # whole household shares one login rate-limit bucket and a single attacker
+      # locks everyone out. Set TRUSTED_PROXY_CIDRS to the range Caddy connects
+      # from — for this compose file that is the project's bridge network. Find
+      # the exact subnet with:
+      #   docker network inspect <project>_default -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+      # and narrow this value to it. 172.16.0.0/12 covers Docker's default pool
+      # and is fine when this host runs nothing else you would not trust.
+      - TRUST_PROXY_HEADERS=true
+      - TRUSTED_PROXY_CIDRS=172.16.0.0/12
     restart: unless-stopped
 
 volumes:
