@@ -967,6 +967,7 @@ All require an admin session.
 | GET | `/api/reports/recurring` | Detected recurring expenses |
 | POST | `/api/reports/recurring/dismiss` | Dismiss a recurring expense |
 | GET | `/api/reports/tag-breakdown` | Spending breakdown by tag |
+| GET | `/api/settings/report-year-floor` | Oldest year the Reports year picker should offer, derived from the ledger. Returns `{"floor_year":N,"has_transactions":bool,"clamped":bool}`. Household-wide and tombstone-safe. `floor_year` is always ≥ `MinYear` (2000) so the picker can never offer a year the year-param endpoints reject; `clamped` is `true` when live rows exist below that (the importer accepts 1900–2100, so historic statements can predate it). An empty ledger falls back to the current year. |
 
 ### Homepage integration endpoint
 
