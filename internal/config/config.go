@@ -397,8 +397,18 @@ func (c *Config) Validate() error {
 	if c.Session.CleanupInterval <= 0 {
 		return fmt.Errorf("SESSION_CLEANUP_INTERVAL must be > 0: %s", c.Session.CleanupInterval)
 	}
-	if c.Session.TokenBytes < 16 {
-		return fmt.Errorf("SESSION_TOKEN_BYTES must be >= 16 for sufficient entropy: %d", c.Session.TokenBytes)
+	// The floor is entropy; the ceiling is that the token has to survive the
+	// round trip as a cookie. GenerateSessionToken hex-encodes, so the cookie
+	// value is 2x this many characters, and browsers cap a whole cookie at about
+	// 4KB — over that the Set-Cookie is silently DISCARDED, so login appears to
+	// succeed and then every subsequent request is unauthenticated. There is no
+	// error anywhere: the operator sees an unusable install with no clue why.
+	// 128 bytes is 1024 bits, already far past the 256 bits that is standard,
+	// and leaves a wide margin under every proxy header limit.
+	if c.Session.TokenBytes < 16 || c.Session.TokenBytes > 128 {
+		return fmt.Errorf("SESSION_TOKEN_BYTES must be between 16 and 128 "+
+			"(>=16 for entropy, <=128 so the hex-encoded token still fits in a cookie): %d",
+			c.Session.TokenBytes)
 	}
 
 	if c.RateLimit.TrustProxyHeaders && c.RateLimit.TrustedProxyHops < 1 {
