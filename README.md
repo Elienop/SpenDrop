@@ -270,7 +270,7 @@ Most deployments only need the first handful of variables. Everything below is a
 |----------|---------|-------------|
 | `SESSION_TTL` | `720h` (30 days) | Session cookie lifetime |
 | `SESSION_CLEANUP_INTERVAL` | `1h` | How often the background job purges expired sessions |
-| `SESSION_TOKEN_BYTES` | `32` | Bytes of entropy per session token (must be ≥ 16) |
+| `SESSION_TOKEN_BYTES` | `32` | Bytes of entropy per session token (16–128; the token is hex-encoded into the cookie, so larger values stop browsers storing it) |
 | `BCRYPT_COST` | `12` | bcrypt work factor (4-31). Higher is slower but harder to brute force |
 | `PASSWORD_MIN_LENGTH` | `8` | Minimum password length |
 | `PASSWORD_MAX_LENGTH` | `72` | Maximum password length. Must be ≤ 72 (bcrypt's input limit) |
@@ -281,6 +281,8 @@ Most deployments only need the first handful of variables. Everything below is a
 |----------|---------|-------------|
 | `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
 | `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
+| `TRUST_PROXY_HEADERS` | `false` | Derive the rate-limit client IP from `X-Forwarded-For` instead of the socket address. **Set this to `true` if and only if SpenDrop sits behind a reverse proxy you control**, and set `TRUSTED_PROXY_CIDRS` along with it — enabling this without CIDRs is refused at startup, because the header cannot then be told apart from a forgery. Behind a proxy with it `false`, every request carries the proxy's address, so the whole household shares one bucket and a single attacker locks everyone out. Directly exposed with it `true`, the header is attacker-controlled and anyone can mint a fresh bucket per request, bypassing the limiter entirely |
+| `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated address ranges of your reverse proxies, as CIDRs or bare IPs — e.g. `172.18.0.0/16` (a Docker compose network) or `172.18.0.5`. **Required when `TRUST_PROXY_HEADERS=true`.** `X-Forwarded-For` is honoured **only when the connection itself came from one of these ranges**, so anything reaching SpenDrop directly (a LAN host, a sibling container, a port exposed next to the proxy) is keyed on its socket address and cannot forge an identity. The client is then chosen by **address**: the header is walked from the right while entries fall inside these ranges, and the first entry that does not is the client. Anything an attacker prepends sits further left and is never reached, so this is safe no matter how long the real chain is. **The ranges must cover your proxies and nothing else** — any host inside them is trusted to declare who the client is, so derive the range from your own network rather than copying a wide default (see [Caddy Reverse Proxy](#caddy-reverse-proxy)) |
 
 #### Uploads, database, and backups
 
@@ -292,7 +294,8 @@ Most deployments only need the first handful of variables. Everything below is a
 | `BACKUP_ENABLED` | `true` | Enable the in-process scheduled backup loop. Set `false` to disable it entirely; no other `BACKUP_*` variables are validated when disabled |
 | `BACKUP_INTERVAL` | `24h` | How often the scheduler runs a backup. Must be at least `1h` |
 | `BACKUP_DIR` | `backups` | Where backups are written. The Docker image overrides this to `/app/data/backups` so the files land in the mounted volume |
-| `BACKUP_KEEP_DAILY` | `7` | Most-recent daily backups retained |
+| `BACKUP_KEEP_DAILY` | `7` | Distinct calendar days retained, **plus** the most-recent 7 snapshots so a sub-daily `BACKUP_INTERVAL` also keeps intra-day restore points. The calendar half is what makes the recovery window independent of `BACKUP_INTERVAL` |
+| `BACKUP_KEEP_CORRUPT` | `2` | Quarantined `.corrupt` backups retained for forensics. Bounded deliberately: a failed verify writes a full-size copy of the database into `BACKUP_DIR`, which shares a volume with the live database, so an unbounded quarantine ends in ENOSPC. Set `0` to retain none — useful on a tight volume, at the cost of losing the evidence of *why* a backup failed. The effective value is printed in the scheduler's startup log line |
 | `BACKUP_KEEP_WEEKLY` | `4` | Distinct ISO weeks retained |
 | `BACKUP_KEEP_MONTHLY` | `12` | Distinct calendar months retained. The sum of the three `BACKUP_KEEP_*` counts must be ≥ 1 — setting all three to `0` is rejected at startup because the current tick's own backup would be pruned on the same tick |
 
@@ -379,6 +382,16 @@ environment:
 
 [Caddy](https://caddyserver.com) is the simplest way to put SpenDrop behind a real domain with automatic TLS from Let's Encrypt. Point an `A`/`AAAA` record at your server, then:
 
+**First, find the subnet Caddy will reach SpenDrop from.** `TRUSTED_PROXY_CIDRS` decides who is allowed to declare the client's identity to the login rate limiter, so it has to name your proxy and nothing else. Bring the stack up once (`docker compose up -d`) and read the real subnet off the network Compose created:
+
+```bash
+docker network inspect "$(basename "$PWD")_default" \
+  -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+# e.g. 172.19.0.0/16
+```
+
+Put that value in `TRUSTED_PROXY_CIDRS` below, then `docker compose up -d` again. Pinning the network in Compose (a top-level `networks:` block with an explicit `ipam.config.subnet`) keeps the value stable across recreates.
+
 ```yaml
 # docker-compose.yml
 services:
@@ -408,6 +421,17 @@ services:
       - TZ=UTC
       - COOKIE_SECURE=true
       - TRUST_PROXY=true
+      # Without these two, every request arrives carrying Caddy's address, so the
+      # whole household shares one login rate-limit bucket and a single attacker
+      # locks everyone out.
+      #
+      # TRUSTED_PROXY_CIDRS must name the range Caddy connects from AND NOTHING
+      # ELSE — every host inside it is trusted to declare who the client is. For
+      # this compose file that is the project's own bridge network. Look up your
+      # real subnet BEFORE you start (see the note under this file) and put it
+      # here; the value below is a placeholder, not a default that will fit.
+      - TRUST_PROXY_HEADERS=true
+      - TRUSTED_PROXY_CIDRS=172.18.0.0/16  # ← replace with YOUR project's subnet
     restart: unless-stopped
 
 volumes:
@@ -422,6 +446,8 @@ spendrop.example.com {
     reverse_proxy spendrop:8080
 }
 ```
+
+> **Do not fall back to `172.16.0.0/12` unless you have no alternative.** That is Docker's entire default address pool, so it trusts *every* container on the host — any other app you run, including one you did not write, can then declare who the client is: mint an unlimited number of rate-limit buckets to brute-force a password, or pin a household member's bucket at `429` so they cannot log in. On a multi-app NAS (TrueNAS SCALE, Unraid, Synology) that is the normal situation, not an edge case. Use it only as a temporary measure on a host running nothing else you would not trust, and narrow it as soon as you know your real subnet.
 
 Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start. That HTTPS origin is also what enables the installable PWA — home-screen install and offline capture both require a secure context (see [Mobile capture](#mobile-capture-installable-pwa)).
 
@@ -477,7 +503,7 @@ SpenDrop takes a consistent, WAL-aware backup of your database every 24 hours by
 2. `PRAGMA integrity_check` returns `ok`
 3. Row-count parity against the live `transactions` table (tolerates a single in-flight write that landed between the count and the snapshot)
 
-If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups (it ignores `.corrupt` files entirely, leaving them for you to inspect).
+If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups. `.corrupt` files sit outside the GFS buckets but are **not** kept forever: the newest `BACKUP_KEEP_CORRUPT` (default 2) are retained for you to inspect and the rest are swept. Each one is a full-size copy of the database and `BACKUP_DIR` shares a volume with the live database, so an unbounded quarantine would eventually fill the disk and take the database down with it.
 
 Old backups are pruned on a grandfather-father-son schedule: by default, 7 daily, 4 weekly, 12 monthly — roughly 115 MB of backup history for a typical household database.
 
@@ -499,7 +525,7 @@ The subcommand refuses to overwrite an existing file and writes both the `.db` a
 
 #### Tunables
 
-Backup behavior is controlled by six environment variables — `BACKUP_ENABLED`, `BACKUP_INTERVAL`, `BACKUP_DIR`, `BACKUP_KEEP_DAILY`, `BACKUP_KEEP_WEEKLY`, `BACKUP_KEEP_MONTHLY`. All six are documented in the [Uploads, database, and backups](#uploads-database-and-backups) section of the environment variables table. Most deployments never need to change any of them; the common adjustments are `BACKUP_INTERVAL=12h` for twice-daily backups and `BACKUP_ENABLED=false` for throwaway test environments.
+Backup behavior is controlled by seven environment variables — `BACKUP_ENABLED`, `BACKUP_INTERVAL`, `BACKUP_DIR`, `BACKUP_KEEP_DAILY`, `BACKUP_KEEP_WEEKLY`, `BACKUP_KEEP_MONTHLY`, `BACKUP_KEEP_CORRUPT`. All seven are documented in the [Uploads, database, and backups](#uploads-database-and-backups) section of the environment variables table. Most deployments never need to change any of them; the common adjustments are `BACKUP_INTERVAL=12h` for twice-daily backups and `BACKUP_ENABLED=false` for throwaway test environments.
 
 #### Restore drill — do this at least once before you trust the system
 

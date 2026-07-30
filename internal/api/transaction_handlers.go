@@ -722,6 +722,24 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			CategoryID:          req.CategoryID,
 			Tags:                nullStringFromPtr(req.Tags),
 			Notes:               nullStringFromPtr(req.Notes),
+			// Same dedupe identity the single-create path assigns. Omitting it
+			// here stored NULL, so every row added through batch create — which
+			// is what the mobile quick-add and the offline queue drain into —
+			// was invisible to import dedupe, and re-importing a spreadsheet
+			// containing those entries silently duplicated them.
+			//
+			// qtx, not h.queries, and that is load-bearing twice over. It is the
+			// transaction-scoped handle, so the uniqueness probe inside sees rows
+			// created earlier in THIS batch: two identical items in one request
+			// anchor the first and store the second with NULL, rather than
+			// colliding on the partial UNIQUE index and rolling back everything
+			// the user entered. And because the pool is SetMaxOpenConns(1), a read
+			// through the outer handle while this transaction holds the single
+			// connection DEADLOCKS — swapping qtx for h.queries hangs the request
+			// until the client gives up.
+			ContentHash: h.contentHashForManualEntry(
+				r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
+			),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))

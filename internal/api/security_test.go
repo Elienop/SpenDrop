@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -253,6 +254,79 @@ func TestHandleRegister_SecondUser_BlockedByDefault(t *testing.T) {
 	decodeResponse(t, rec2, &resp)
 	if !strings.Contains(resp["error"], "registration is disabled") {
 		t.Errorf("expected 'registration is disabled' error, got %q", resp["error"])
+	}
+}
+
+// TestHandleRegister_ReadFailure_Is503Not403 is the regression test for a
+// transient database error being reported as a policy decision.
+//
+// registrationOpen folded every read error into "closed", so a momentary
+// SQLITE_BUSY answered 403 "registration is disabled". On a fresh install that
+// is actively misleading: there is nothing for the operator to switch back on,
+// because no migration seeds registration_enabled, so the message points at a
+// setting that does not exist while the real cause would have cleared on retry.
+//
+// Both branches still REFUSE to create an account — the security posture is
+// unchanged — so the assertion is on the status and the message, not on whether
+// a user was created. TestHandleRegister_SecondUser_BlockedByDefault is the
+// companion control: an ABSENT setting must stay a plain 403, since that is the
+// ordinary closed state rather than a failure.
+func TestHandleRegister_ReadFailure_Is503Not403(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		breakDB func(t *testing.T, db *sql.DB)
+	}{
+		{
+			name: "settings read fails",
+			breakDB: func(t *testing.T, db *sql.DB) {
+				if _, err := db.Exec(`DROP TABLE app_settings`); err != nil {
+					t.Fatalf("drop app_settings: %v", err)
+				}
+			},
+		},
+		{
+			name: "user list read fails",
+			breakDB: func(t *testing.T, db *sql.DB) {
+				// The register above left a session row pointing at the user;
+				// clear it so the DROP is not an FK violation instead.
+				if _, err := db.Exec(`DELETE FROM sessions`); err != nil {
+					t.Fatalf("clear sessions: %v", err)
+				}
+				if _, err := db.Exec(`DROP TABLE users`); err != nil {
+					t.Fatalf("drop users: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, db := setupTestDB(t)
+			h := NewHandler(q, db)
+
+			// A first user must exist, or the bootstrap shortcut returns early
+			// and never reaches the failing read.
+			rec := httptest.NewRecorder()
+			h.handleRegister(rec, httptest.NewRequest(http.MethodPost, "/api/auth/register",
+				strings.NewReader(`{"username":"alice","password":"longpassword"}`)))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("seed register failed: %d; body: %s", rec.Code, rec.Body.String())
+			}
+
+			tc.breakDB(t, db)
+
+			rec2 := httptest.NewRecorder()
+			h.handleRegister(rec2, httptest.NewRequest(http.MethodPost, "/api/auth/register",
+				strings.NewReader(`{"username":"bob","password":"longpassword"}`)))
+
+			if rec2.Code != http.StatusServiceUnavailable {
+				t.Errorf("got %d, want 503 — a failed read is being reported as a policy "+
+					"decision; body: %s", rec2.Code, rec2.Body.String())
+			}
+			var resp map[string]string
+			decodeResponse(t, rec2, &resp)
+			if strings.Contains(resp["error"], "registration is disabled") {
+				t.Errorf("error says registration is disabled, but nothing disabled it: %q", resp["error"])
+			}
+		})
 	}
 }
 

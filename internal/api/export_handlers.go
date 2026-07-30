@@ -184,6 +184,103 @@ func (h *Handler) drainExportTxnRows(ctx context.Context, query string, args ...
 	return out, nil
 }
 
+// categoryTotalRow is one row of a category-totals query (Summary sheet in the
+// monthly export, Category Totals sheet in the yearly one), drained from the
+// database before any workbook cell is written.
+type categoryTotalRow struct {
+	name    string
+	catType string
+	cents   int64
+}
+
+// drainCategoryTotals runs a category-totals query and fully consumes the
+// cursor before returning.
+//
+// Draining is a correctness requirement, not a style choice. Under the
+// production pool cap of one connection (see exportTxnRow) an open *sql.Rows
+// holds the process's only connection, so ANY query the caller issues next —
+// getBaseCurrency, the transactions query, the category query — waits on a
+// cursor that is only released when the handler returns.
+//
+// The inline loops this replaced were not themselves broken: they ran to
+// exhaustion, and an exhausted *sql.Rows auto-closes. (The export deadlock that
+// did reach production was handleExportTransactions issuing a query with its
+// cursor still open, fixed separately.) What draining buys is that the safety
+// stops being incidental — under the inline shape one `break` or one early
+// `return` added to a loop would have deadlocked the whole server, with nothing
+// in the code or the tests to catch it. Returning a slice moves the release into
+// a deferred Close that no control flow can skip.
+//
+// The row count is bounded by the number of categories, so the memory ceiling
+// is the same one the categories table already imposes.
+func (h *Handler) drainCategoryTotals(ctx context.Context, query string, args ...any) ([]categoryTotalRow, error) {
+	rows, err := h.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query category totals: %w", err)
+	}
+	defer rows.Close()
+
+	var out []categoryTotalRow
+	for rows.Next() {
+		var c categoryTotalRow
+		if err := rows.Scan(&c.name, &c.catType, &c.cents); err != nil {
+			return nil, fmt.Errorf("scan category total: %w", err)
+		}
+		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate category totals: %w", err)
+	}
+	return out, nil
+}
+
+// writeCategoryTotals renders drained category totals onto a sheet starting at
+// startRow. The column layout matches the Category/Type/Total headers written
+// by the monthly and yearly export handlers.
+func writeCategoryTotals(f *excelize.File, sheet string, startRow int, totals []categoryTotalRow) {
+	row := startRow
+	for _, c := range totals {
+		f.SetCellValue(sheet, cellAt(1, row), c.name)
+		f.SetCellValue(sheet, cellAt(2, row), c.catType)
+		f.SetCellValue(sheet, cellAt(3, row), centsToDollars(c.cents))
+		row++
+	}
+}
+
+// exportMonthTotal holds one calendar month's expense and income totals in cents.
+type exportMonthTotal struct {
+	expensesCents, incomeCents int64
+}
+
+// drainMonthlyTotals runs the per-month totals query and fully consumes the
+// cursor before returning, for the same single-connection reason as
+// drainCategoryTotals. Months absent from the result set keep their zero value,
+// which is how the yearly export renders a month with no activity.
+func (h *Handler) drainMonthlyTotals(ctx context.Context, query string, args ...any) ([12]exportMonthTotal, error) {
+	var months [12]exportMonthTotal
+
+	rows, err := h.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return months, fmt.Errorf("query monthly totals: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var monthNum int
+		var expensesCents, incomeCents int64
+		if err := rows.Scan(&monthNum, &expensesCents, &incomeCents); err != nil {
+			return months, fmt.Errorf("scan monthly total: %w", err)
+		}
+		if monthNum >= 1 && monthNum <= 12 {
+			months[monthNum-1] = exportMonthTotal{expensesCents: expensesCents, incomeCents: incomeCents}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return months, fmt.Errorf("iterate monthly totals: %w", err)
+	}
+	return months, nil
+}
+
 // writeExportTxnRows renders drained rows onto a sheet starting at startRow.
 // The column layout matches the headers written by each export handler.
 func writeExportTxnRows(f *excelize.File, sheet string, startRow int, txns []exportTxnRow) {
@@ -332,30 +429,15 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		HAVING total_cents > 0
 		ORDER BY c.type, total_cents DESC`
 
-	summaryRows, err := h.db.QueryContext(ctx, summaryQuery, dateFrom, dateTo)
+	// Drain before touching the workbook, and before getBaseCurrency below:
+	// under the production single-connection pool a still-open summary cursor
+	// makes the next query wait on the handler that issued it.
+	summary, err := h.drainCategoryTotals(ctx, summaryQuery, dateFrom, dateTo)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query category summary")
 		return
 	}
-	defer summaryRows.Close()
-
-	sRow := 2
-	for summaryRows.Next() {
-		var name, catType string
-		var totalCents int64
-		if err := summaryRows.Scan(&name, &catType, &totalCents); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan category summary")
-			return
-		}
-		f.SetCellValue(summarySheet, cellAt(1, sRow), name)
-		f.SetCellValue(summarySheet, cellAt(2, sRow), catType)
-		f.SetCellValue(summarySheet, cellAt(3, sRow), centsToDollars(totalCents))
-		sRow++
-	}
-	if err := summaryRows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to iterate category summary")
-		return
-	}
+	writeCategoryTotals(f, summarySheet, 2, summary)
 
 	// --- Sheet 2: Transactions ---
 	txnSheet := "Transactions"
@@ -436,34 +518,15 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		GROUP BY month_num
 		ORDER BY month_num`
 
-	monthlyRows, err := h.db.QueryContext(ctx, monthlyQuery, dateFrom, dateTo)
+	// Drain before writing any cell and before the category query below: an
+	// open cursor holds the pool's only connection in production, so the
+	// second query would wait on the handler that issued the first.
+	// All 12 months are pre-filled with zero, then overwritten from the result
+	// set. Phase 3.1a: per-month totals stay int64 cents; the conversion to
+	// float dollars happens once at the Excel cell boundary.
+	months, err := h.drainMonthlyTotals(ctx, monthlyQuery, dateFrom, dateTo)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query monthly totals")
-		return
-	}
-	defer monthlyRows.Close()
-
-	// Pre-fill all 12 months with zero, then overwrite from query results.
-	// Phase 3.1a: keep per-month totals as int64 cents; the conversion to
-	// float dollars happens once at the Excel cell boundary.
-	type monthData struct {
-		expensesCents, incomeCents int64
-	}
-	months := make([]monthData, 12)
-
-	for monthlyRows.Next() {
-		var monthNum int
-		var expensesCents, incomeCents int64
-		if err := monthlyRows.Scan(&monthNum, &expensesCents, &incomeCents); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan monthly totals")
-			return
-		}
-		if monthNum >= 1 && monthNum <= 12 {
-			months[monthNum-1] = monthData{expensesCents: expensesCents, incomeCents: incomeCents}
-		}
-	}
-	if err := monthlyRows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to iterate monthly totals")
 		return
 	}
 
@@ -507,30 +570,12 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		HAVING total_cents > 0
 		ORDER BY c.type, total_cents DESC`
 
-	catRows, err := h.db.QueryContext(ctx, catQuery, dateFrom, dateTo)
+	catTotals, err := h.drainCategoryTotals(ctx, catQuery, dateFrom, dateTo)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query category totals")
 		return
 	}
-	defer catRows.Close()
-
-	cRow := 2
-	for catRows.Next() {
-		var name, catType string
-		var totalCents int64
-		if err := catRows.Scan(&name, &catType, &totalCents); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan category totals")
-			return
-		}
-		f.SetCellValue(catSheet, cellAt(1, cRow), name)
-		f.SetCellValue(catSheet, cellAt(2, cRow), catType)
-		f.SetCellValue(catSheet, cellAt(3, cRow), centsToDollars(totalCents))
-		cRow++
-	}
-	if err := catRows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to iterate category totals")
-		return
-	}
+	writeCategoryTotals(f, catSheet, 2, catTotals)
 
 	filename := fmt.Sprintf("spendrop-%04d.xlsx", year)
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

@@ -2,7 +2,10 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/elienop/spendrop/internal/auth"
@@ -48,6 +51,47 @@ func (h *Handler) handleGetVAPIDPublicKey(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]string{"publicKey": getVAPIDPublicKey()})
 }
 
+// validatePushEndpoint rejects subscription endpoints that are obviously not a
+// real push service, so the user gets a 400 instead of a silent delivery
+// failure later.
+//
+// This is a convenience filter, NOT the SSRF control. It cannot be: DNS
+// resolves at connect time and the endpoint is fetched repeatedly for the
+// lifetime of the subscription, so a name that resolves publicly now can
+// resolve to 192.168.1.1 later (DNS rebinding). The real guarantee is enforced
+// at the dial, in push.GuardedTransport, which resolves the host itself,
+// rejects every non-public answer, and connects to the exact address it
+// checked. Redirects are refused there too, so a public host cannot bounce the
+// sender inward.
+//
+// An earlier version of this function checked ONLY net.ParseIP(host), which is
+// the one form an attacker never needs — "https://router.lan/admin" sailed
+// straight through. Keeping the literal-IP check is still worthwhile as a fast,
+// clear rejection; it just is not what makes the system safe.
+func validatePushEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("endpoint is not a valid URL")
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("endpoint must use https")
+	}
+	if u.User != nil {
+		return fmt.Errorf("endpoint must not contain credentials")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("endpoint must include a host")
+	}
+	// Literal address: decide now. push.IsPubliclyRoutable handles the forms a
+	// hand-rolled check misses — IPv4-mapped IPv6 (::ffff:10.0.0.1), CGNAT,
+	// link-local, multicast.
+	if ip := net.ParseIP(host); ip != nil && !push.IsPubliclyRoutable(ip) {
+		return fmt.Errorf("endpoint must not target a private, loopback or link-local address")
+	}
+	return nil
+}
+
 // handleCreatePushSubscription registers (or refreshes) a browser subscription
 // for the authenticated caller. The owner is taken from auth.GetUser — NEVER
 // from the body — so a forged user_id cannot plant a subscription under
@@ -71,6 +115,10 @@ func (h *Handler) handleCreatePushSubscription(w http.ResponseWriter, r *http.Re
 	}
 	if req.Endpoint == "" || req.Keys.P256dh == "" || req.Keys.Auth == "" {
 		writeError(w, http.StatusBadRequest, "endpoint and keys are required")
+		return
+	}
+	if err := validatePushEndpoint(req.Endpoint); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

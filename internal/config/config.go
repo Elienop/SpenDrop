@@ -15,11 +15,38 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// ParsedTrustedProxyCIDRs turns TrustedProxyCIDRs into prefixes, accepting both
+// CIDR notation and bare addresses (a bare address becomes a single-host prefix).
+//
+// A bare IP is worth supporting because it is the common case — one proxy on one
+// known address — and demanding "/32" for it invites the operator to write
+// something looser to avoid the syntax.
+func (c *Config) ParsedTrustedProxyCIDRs() ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, raw := range c.RateLimit.TrustedProxyCIDRs {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(raw); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(raw)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXY_CIDRS entry %q is neither a CIDR nor an IP address", raw)
+		}
+		out = append(out, netip.PrefixFrom(addr.Unmap(), addr.Unmap().BitLen()))
+	}
+	return out, nil
+}
 
 // Config holds all runtime configuration for SpenDrop.
 type Config struct {
@@ -85,6 +112,34 @@ type RateLimitConfig struct {
 	MaxAttempts int
 	// Window is how often the attempt counters are reset.
 	Window time.Duration
+	// TrustProxyHeaders makes the rate limiter derive the client IP from
+	// X-Forwarded-For instead of the socket address.
+	//
+	// Default false, and that default is load-bearing: X-Forwarded-For is
+	// attacker-controlled on a directly-exposed server, so trusting it there
+	// would let anyone forge a fresh identity per request and bypass the
+	// limiter entirely. Enable it ONLY when SpenDrop sits behind a reverse
+	// proxy you control (the documented deployment). Behind such a proxy the
+	// opposite failure occurs with it off: every request carries the proxy's
+	// address, so the whole household shares one bucket and a single attacker
+	// locks everyone out.
+	TrustProxyHeaders bool
+	// TrustedProxyCIDRs lists the address ranges of the reverse proxies in
+	// front of SpenDrop, as CIDRs or bare IPs ("172.18.0.0/16", "10.1.2.3").
+	// REQUIRED whenever TrustProxyHeaders is true — Validate rejects the pair
+	// TrustProxyHeaders=true with an empty set, because the header cannot then
+	// be distinguished from a forgery.
+	//
+	// This is the only safe way to pick the client out of X-Forwarded-For. The
+	// selection walks the header from the right while entries are in one of
+	// these ranges and takes the first that is not, so it never depends on the
+	// chain being a particular LENGTH — see auth.ClientIPForRateLimit for why
+	// the hop count this replaced was bypassable from any direct peer even in
+	// its default configuration.
+	//
+	// The ranges must cover the proxies and nothing else: any host inside them
+	// is allowed to declare who the client is.
+	TrustedProxyCIDRs []string
 }
 
 // PasswordConfig holds bcrypt cost and password length policy.
@@ -131,6 +186,12 @@ type BackupConfig struct {
 	// and would blow past the retention policy's granularity.
 	// Env: BACKUP_INTERVAL. Default: 24h.
 	Interval time.Duration
+	// KeepCorrupt is how many quarantined `.corrupt` backups to retain for
+	// forensics. Bounded because the quarantine is otherwise outside every
+	// retention mechanism, and a sustained verify failure writes one
+	// full-size database copy per tick onto the live database's volume.
+	// Env: BACKUP_KEEP_CORRUPT. Default: 2.
+	KeepCorrupt int
 	// KeepDaily is the number of most-recent daily backups to retain.
 	// Env: BACKUP_KEEP_DAILY. Default: 7.
 	KeepDaily int
@@ -180,8 +241,9 @@ func Defaults() Config {
 			TokenBytes:      32,
 		},
 		RateLimit: RateLimitConfig{
-			MaxAttempts: 10,
-			Window:      time.Minute,
+			MaxAttempts:       10,
+			Window:            time.Minute,
+			TrustProxyHeaders: false,
 		},
 		Password: PasswordConfig{
 			BcryptCost: 12,
@@ -201,6 +263,7 @@ func Defaults() Config {
 			Enabled:     true,
 			Dir:         "backups",
 			Interval:    24 * time.Hour,
+			KeepCorrupt: 2,
 			KeepDaily:   7,
 			KeepWeekly:  4,
 			KeepMonthly: 12,
@@ -294,6 +357,9 @@ func Load() (*Config, error) {
 	if err := parseDuration("BACKUP_INTERVAL", &cfg.Backup.Interval); err != nil {
 		return nil, err
 	}
+	if err := parseInt("BACKUP_KEEP_CORRUPT", &cfg.Backup.KeepCorrupt); err != nil {
+		return nil, err
+	}
 	if err := parseInt("BACKUP_KEEP_DAILY", &cfg.Backup.KeepDaily); err != nil {
 		return nil, err
 	}
@@ -305,6 +371,18 @@ func Load() (*Config, error) {
 	}
 
 	// Push
+	if err := parseBool("TRUST_PROXY_HEADERS", &cfg.RateLimit.TrustProxyHeaders); err != nil {
+		return nil, err
+	}
+	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXY_CIDRS")); v != "" {
+		var cidrs []string
+		for _, part := range strings.Split(v, ",") {
+			if p := strings.TrimSpace(part); p != "" {
+				cidrs = append(cidrs, p)
+			}
+		}
+		cfg.RateLimit.TrustedProxyCIDRs = cidrs
+	}
 	if err := parseBool("PUSH_ENABLED", &cfg.Push.Enabled); err != nil {
 		return nil, err
 	}
@@ -356,10 +434,38 @@ func (c *Config) Validate() error {
 	if c.Session.CleanupInterval <= 0 {
 		return fmt.Errorf("SESSION_CLEANUP_INTERVAL must be > 0: %s", c.Session.CleanupInterval)
 	}
-	if c.Session.TokenBytes < 16 {
-		return fmt.Errorf("SESSION_TOKEN_BYTES must be >= 16 for sufficient entropy: %d", c.Session.TokenBytes)
+	// The floor is entropy; the ceiling is that the token has to survive the
+	// round trip as a cookie. GenerateSessionToken hex-encodes, so the cookie
+	// value is 2x this many characters, and browsers cap a whole cookie at about
+	// 4KB — over that the Set-Cookie is silently DISCARDED, so login appears to
+	// succeed and then every subsequent request is unauthenticated. There is no
+	// error anywhere: the operator sees an unusable install with no clue why.
+	// 128 bytes is 1024 bits, already far past the 256 bits that is standard,
+	// and leaves a wide margin under every proxy header limit.
+	if c.Session.TokenBytes < 16 || c.Session.TokenBytes > 128 {
+		return fmt.Errorf("SESSION_TOKEN_BYTES must be between 16 and 128 "+
+			"(>=16 for entropy, <=128 so the hex-encoded token still fits in a cookie): %d",
+			c.Session.TokenBytes)
 	}
 
+	// Trusting the header without naming who may set it has no safe reading, so
+	// this is a boot failure rather than a warning. Only the socket address can
+	// establish that a proxy is in front; with no ranges to compare it against,
+	// every direct peer — a LAN host, a sibling container, an exposed port —
+	// could otherwise hand over any client address it liked and mint a fresh
+	// rate-limit bucket per request. The login limiter is the only throttle on
+	// password guessing, so silently degrading here is not acceptable.
+	if c.RateLimit.TrustProxyHeaders && len(c.RateLimit.TrustedProxyCIDRs) == 0 {
+		return fmt.Errorf("TRUST_PROXY_HEADERS=true requires TRUSTED_PROXY_CIDRS " +
+			"(the address range your reverse proxy connects from); without it the " +
+			"header cannot be distinguished from a forgery")
+	}
+	// Parsed here so a malformed range stops startup. Left unvalidated it would
+	// simply fail to match, which silently downgrades every request to the socket
+	// address — the household-wide shared bucket this setting exists to avoid.
+	if _, err := c.ParsedTrustedProxyCIDRs(); err != nil {
+		return err
+	}
 	if c.RateLimit.MaxAttempts < 1 {
 		return fmt.Errorf("RATE_LIMIT_MAX must be >= 1: %d", c.RateLimit.MaxAttempts)
 	}
@@ -409,6 +515,9 @@ func (c *Config) Validate() error {
 		}
 		if c.Backup.Interval < time.Hour {
 			return fmt.Errorf("BACKUP_INTERVAL must be >= 1h: %s", c.Backup.Interval)
+		}
+		if c.Backup.KeepCorrupt < 0 {
+			return fmt.Errorf("BACKUP_KEEP_CORRUPT must be >= 0: %d", c.Backup.KeepCorrupt)
 		}
 		if c.Backup.KeepDaily < 0 || c.Backup.KeepWeekly < 0 || c.Backup.KeepMonthly < 0 {
 			return fmt.Errorf("BACKUP_KEEP_* must be >= 0 (daily=%d weekly=%d monthly=%d)",

@@ -326,6 +326,9 @@ func TestHandlePushTest_PrunesDeadSubscriptionOn410(t *testing.T) {
 	h := NewHandler(q, db)
 
 	// Stand up a mock push service that always 410s, and point the sender at it.
+	// The sender's SSRF dial guard refuses non-public addresses, so relax it
+	// for the duration of this test — the mock necessarily lives on 127.0.0.1.
+	defer push.AllowNonPublicDialForTesting()()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusGone)
 	}))

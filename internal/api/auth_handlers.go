@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -21,6 +22,17 @@ func extractIP(remoteAddr string) string {
 		return remoteAddr
 	}
 	return host
+}
+
+// clientIPForRateLimit delegates to the shared implementation in internal/auth.
+//
+// It used to be a second copy of that logic. The copy drifted from its own doc
+// comment inside one commit — the comment still claimed "rightmost" after the
+// behaviour became hop-counted — which is exactly the failure mode duplicated
+// security logic produces. api already imports auth, so there is no reason for
+// two.
+func clientIPForRateLimit(r *http.Request) string {
+	return auth.ClientIPForRateLimit(r)
 }
 
 // userResponse is the JSON representation of a user, excluding password_hash.
@@ -80,10 +92,47 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, userI
 	return nil
 }
 
+// registrationOpen reports whether a new account may be created right now.
+//
+// This duplicates the authoritative check performed inside handleRegister's
+// transaction. The duplicate is deliberate: the in-transaction version is the
+// TOCTOU-safe one, but it runs AFTER bcrypt, and bcrypt is intentionally
+// expensive. Without a pre-flight, an unauthenticated caller could force a
+// full password hash per request against a closed instance — the rejection
+// costs the attacker nothing and the server a deliberate CPU burn.
+//
+// A read error is returned rather than folded into "closed". Both outcomes
+// still refuse to create an account, so the security posture is unchanged, but
+// they are not the same event: "disabled" is a decision an admin made, while a
+// failed read is the server being briefly unable to answer. Reporting the second
+// as the first told an operator on a fresh install that registration was turned
+// off — with nothing to turn back on, because the setting is never seeded — when
+// the truth was a transient SQLITE_BUSY that a retry would clear.
+func (h *Handler) registrationOpen(r *http.Request) (bool, error) {
+	users, err := h.queries.ListUsers(r.Context())
+	if err != nil {
+		return false, fmt.Errorf("list users: %w", err)
+	}
+	if len(users) == 0 {
+		// Bootstrap: the very first account is always allowed.
+		return true, nil
+	}
+	setting, err := h.queries.GetSetting(r.Context(), SettingRegistrationEnabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No migration seeds registration_enabled, so an absent row is the
+		// ordinary closed state and emphatically not a failure.
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", SettingRegistrationEnabled, err)
+	}
+	return setting.Value == "true", nil
+}
+
 // handleRegister creates a new user account. The first registered user is
 // assigned the "admin" role; subsequent users get "member".
 func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
-	clientIP := extractIP(r.RemoteAddr)
+	clientIP := clientIPForRateLimit(r)
 	rateLimitMu.Lock()
 	attempts := registerAttempts[clientIP]
 	rateLimitMu.Unlock()
@@ -128,6 +177,29 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Password) > maxLen {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
+		return
+	}
+
+	// Gate BEFORE hashing. bcrypt is deliberately expensive, so hashing first
+	// and checking afterwards let an unauthenticated caller burn a full hash
+	// per request against an instance that has registration closed. Moving the
+	// check ahead of the hash is the entire fix: the rejection is now cheap.
+	//
+	// Deliberately NOT counted against the rate limiter. An earlier version of
+	// this fix did count it, which introduced a worse bug than the one it
+	// closed: registration_enabled is never seeded by a migration, so "closed"
+	// is the normal steady state, and the bucket is keyed by client IP — which
+	// behind the documented reverse proxy is the SAME IP for everyone. Ten
+	// requests from anyone on the internet then 429'd registration for the
+	// entire household. A cheap rejection needs no throttle.
+	open, err := h.registrationOpen(r)
+	if err != nil {
+		// Still refuses to register, but says so honestly and retryably.
+		writeError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
+		return
+	}
+	if !open {
+		writeError(w, http.StatusForbidden, "registration is disabled")
 		return
 	}
 
@@ -241,7 +313,7 @@ func startRateLimitReset() {
 
 // handleLogin authenticates a user by username and password.
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
-	clientIP := extractIP(r.RemoteAddr)
+	clientIP := clientIPForRateLimit(r)
 	if h.loginFailureLimiter.Exhausted(clientIP) {
 		w.Header().Set("Retry-After", h.loginFailureLimiter.RetryAfter(clientIP))
 		writeError(w, http.StatusTooManyRequests, "too many login attempts, try again later")

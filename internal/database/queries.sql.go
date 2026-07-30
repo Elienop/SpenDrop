@@ -2938,6 +2938,14 @@ func (q *Queries) DeletePushSubscriptionByEndpoint(ctx context.Context, endpoint
 	return err
 }
 
+const deletePushSubscriptionsByUser = `-- name: DeletePushSubscriptionsByUser :execresult
+DELETE FROM push_subscriptions WHERE user_id = ?
+`
+
+func (q *Queries) DeletePushSubscriptionsByUser(ctx context.Context, userID int64) (sql.Result, error) {
+	return q.db.ExecContext(ctx, deletePushSubscriptionsByUser, userID)
+}
+
 const deletePushSubscriptionByEndpointAndUser = `-- name: DeletePushSubscriptionByEndpointAndUser :exec
 DELETE FROM push_subscriptions WHERE endpoint = ? AND user_id = ?
 `

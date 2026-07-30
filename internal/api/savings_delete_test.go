@@ -58,25 +58,40 @@ func TestHandleDeleteSavingsGoal_RemovesTheRow(t *testing.T) {
 	}
 }
 
+// setSavingsGoalReq drives the real PUT handler, which is the only way to
+// exercise what the route actually does with a target of zero.
+func setSavingsGoalReq(t *testing.T, h *Handler, user database.User, year int64, dollars string) *httptest.ResponseRecorder {
+	t.Helper()
+	y := strconv.FormatInt(year, 10)
+	req := withUserAndURLParam(
+		httptest.NewRequest(http.MethodPut, "/api/savings-goals/"+y,
+			strings.NewReader(`{"target_amount":`+dollars+`}`)),
+		user, "year", y,
+	)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleSetSavingsGoal(rec, req)
+	return rec
+}
+
 // TestHandleSetSavingsGoal_ZeroTargetIsNotADelete pins the semantics the new
 // route buys us: zero is a legitimate "no target this year" value and must
 // persist, rather than being overloaded to mean removal.
 //
-// It must drive handleSetSavingsGoal, not seed the row directly. An earlier
-// version of this test seeded via UpsertSavingsGoal and read back with sqlc,
-// which made it a database round-trip test wearing a handler's name — turning
-// handleSetSavingsGoal into a DELETE on a zero target left it passing.
+// This previously seeded a zero row with UpsertSavingsGoal and asserted the row
+// was still there, never calling handleSetSavingsGoal at all — so it proved only
+// that SQLite can store a 0, and the semantic it is named for was untested. It
+// now PUTs zero over an existing non-zero goal, which is the sequence a user
+// performs and the one that would regress if zero were ever treated as removal.
 func TestHandleSetSavingsGoal_ZeroTargetIsNotADelete(t *testing.T) {
 	h := setupHandler(t)
 	admin := seedTestUser(t, h.queries, "admin", "admin")
 
-	req := withUserAndURLParam(
-		httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026",
-			strings.NewReader(`{"target_amount":0}`)),
-		admin, "year", "2026",
-	)
-	rec := httptest.NewRecorder()
-	h.handleSetSavingsGoal(rec, req)
+	// Start from a real target, so a delete-on-zero regression has something to
+	// destroy. Seeding zero directly could not tell the two behaviours apart.
+	seedSavingsGoal(t, h, 2026, 500000)
+
+	rec := setSavingsGoalReq(t, h, admin, 2026, "0")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
@@ -95,7 +110,23 @@ func TestHandleSetSavingsGoal_ZeroTargetIsNotADelete(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("PUT {target_amount: 0} removed the row; zero is a real value, not a delete")
+		t.Error("PUT target_amount=0 removed the row — zero is a legitimate target, " +
+			"not a request to delete; DELETE /savings-goals/{year} is the removal route")
+	}
+
+	// The PUT deliberately answers with a status envelope rather than the row —
+	// clients refetch via the invalidate it publishes — so there is no money
+	// field here to check, and equally no *_cents to leak. The row assertion
+	// above is the real one.
+	var body map[string]any
+	decodeResponse(t, rec, &body)
+	if body["status"] != "updated" {
+		t.Errorf("body = %v, want status=updated", body)
+	}
+	for k := range body {
+		if strings.HasSuffix(k, "_cents") {
+			t.Errorf("response leaked %q; the wire contract for money is dollars", k)
+		}
 	}
 }
 
