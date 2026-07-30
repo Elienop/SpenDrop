@@ -90,7 +90,7 @@ UPDATE categories SET is_active = ? WHERE id = ?;
 DELETE FROM categories WHERE id = ?;
 
 -- name: ClearContentHashForCategory :exec
--- Drops every live row in a category out of import dedupe. Called ONLY by
+-- Drops every row in a category out of import dedupe. Called ONLY by
 -- handleUpdateCategory, inside the same SQL transaction as the rename that
 -- triggered it, and ONLY when the new name normalizes differently from the old
 -- one (database.CategoryRenameChangesHashes).
@@ -112,11 +112,35 @@ DELETE FROM categories WHERE id = ?;
 -- rather than lie about it, and the next boot re-anchors them under the new
 -- name.
 --
--- deleted_at IS NULL is load-bearing, not the usual soft-delete hygiene: the
--- partial unique index and GetTransactionByContentHash both filter tombstoned
--- rows out, so a tombstoned row's hash is inert for dedupe, and the audit trail
--- wants its pre-delete state preserved (SoftDeleteTransaction deliberately
--- leaves content_hash alone for the same reason).
+-- Tombstoned rows are cleared TOO — deliberately no deleted_at filter. The
+-- partial unique index and GetTransactionByContentHash both skip tombstoned
+-- rows, so a trashed row's digest is DORMANT, not inert: it is out of dedupe
+-- only while the row stays in the trash, and RestoreTransaction flips
+-- deleted_at back to NULL without touching content_hash, so a restore RE-ARMS
+-- whatever digest the row was holding. Three endpoints do exactly that
+-- (transactions/{id}/restore, restore-batch, restore-all) and no purge worker
+-- bounds the window. Skipping tombstoned rows here therefore only defers the
+-- staleness: the row re-enters the live set claiming an identity computed from
+-- a category name that no longer exists, and the same harm as above follows
+-- (a re-import of its own spreadsheet misses and doubles it, silently — 200,
+-- no collision group). BackfillContentHashes cannot heal it, so the damage is
+-- permanent once restored.
+--
+-- Clearing tombstoned rows is safe in both directions:
+--   * It cannot collide. The statement writes NULL, and the partial unique
+--     index only covers content_hash IS NOT NULL.
+--   * The next boot re-anchors them. ListTransactionsForHashBackfill carries
+--     no deleted_at filter, by design, precisely so tombstoned rows get a
+--     current hash.
+-- It also does not disturb the audit trail: the delete/restore/update audits
+-- marshal GetTransactionByIDRow, which carries no content_hash field, so no
+-- before_json snapshot contains this column. (The insert audit's after_json
+-- does — that is immutable history and is not rewritten by this statement.)
+--
+-- The one thing this statement must NOT do is resurrect a trashed row: it is
+-- an unqualified UPDATE ... WHERE category_id = ?, so deleted_at stays out of
+-- the SET list. Dropping a derived digest is hygiene; un-trashing a row is a
+-- ledger change.
 --
 -- content_hash IS NOT NULL keeps the statement from rewriting rows that are
 -- already un-anchored.
@@ -128,7 +152,7 @@ DELETE FROM categories WHERE id = ?;
 -- to the TransactionStore chokepoint (the ledger values are untouched).
 UPDATE transactions
 SET content_hash = NULL
-WHERE category_id = ? AND content_hash IS NOT NULL AND deleted_at IS NULL;
+WHERE category_id = ? AND content_hash IS NOT NULL;
 
 -- Currencies
 

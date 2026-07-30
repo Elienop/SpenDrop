@@ -297,43 +297,155 @@ func TestUpdateCategory_RejectedRename_LeavesContentHashesIntact(t *testing.T) {
 	}
 }
 
-// TestUpdateCategory_Rename_LeavesTombstonedRowsAlone pins the soft-delete
-// boundary. A tombstoned row is outside the partial unique index
-// (idx_transactions_content_hash filters deleted_at IS NULL), so its hash is
-// inert for dedupe; the audit trail wants its pre-delete state preserved, and
-// the clear must not touch deleted_at either.
-func TestUpdateCategory_Rename_LeavesTombstonedRowsAlone(t *testing.T) {
+// soleTransactionIDOf returns the id of the user's only transaction row
+// (tombstoned or not). It exists so a test can reach the row an import created
+// without depending on the list handler's soft-delete filter.
+func soleTransactionIDOf(t *testing.T, h *Handler, userID int64) int64 {
+	t.Helper()
+	var id int64
+	if err := h.db.QueryRow(
+		`SELECT id FROM transactions WHERE user_id = ?`, userID,
+	).Scan(&id); err != nil {
+		t.Fatalf("read sole transaction id: %v", err)
+	}
+	return id
+}
+
+// deletedAtOf reads a row's tombstone column directly, bypassing every
+// soft-delete filter in the query layer.
+func deletedAtOf(t *testing.T, h *Handler, id int64) sql.NullTime {
+	t.Helper()
+	var deletedAt sql.NullTime
+	if err := h.db.QueryRow(
+		`SELECT deleted_at FROM transactions WHERE id = ?`, id,
+	).Scan(&deletedAt); err != nil {
+		t.Fatalf("read deleted_at: %v", err)
+	}
+	return deletedAt
+}
+
+// TestUpdateCategory_Rename_ThenRestoreFromTrash_ThenReimport_DetectsDuplicates
+// is the soft-delete half of the stale-identity harm case, and the reason the
+// clear may NOT stop at live rows.
+//
+// A tombstoned row's content_hash is DORMANT, not inert. It sits outside the
+// partial unique index and outside GetTransactionByContentHash only for as
+// long as the row stays in the trash — and the app ships three endpoints that
+// take it back out (POST /transactions/{id}/restore, restore-batch,
+// restore-all; router.go). RestoreTransaction flips deleted_at back to NULL
+// and never touches content_hash, so a restore RE-ARMS whatever digest the row
+// was holding.
+//
+// Skipping tombstoned rows during a rename therefore let a row re-enter the
+// live set, the unique index and the dedupe lookup carrying a digest computed
+// from a category name that no longer exists — permanently, because
+// BackfillContentHashes only ever processes rows WHERE content_hash IS NULL and
+// there is no purge worker to bound the window. Re-importing the very sheet the
+// row came from then hashed under the NEW name, matched nothing, and inserted a
+// second live copy: HTTP 200, imported=1, no collision group, no warning.
+//
+// After the fix the clear reaches the tombstoned row too, the next boot
+// re-anchors it under the new name, and the re-import is recognised as a
+// duplicate — the same 409 UNRESOLVED_COLLISIONS shape the never-trashed case
+// gets in TestUpdateCategory_Rename_ThenReimport_DetectsDuplicates.
+func TestUpdateCategory_Rename_ThenRestoreFromTrash_ThenReimport_DetectsDuplicates(t *testing.T) {
+	clearImportStore()
 	h := setupHandler(t)
 	admin := seedTestUser(t, h.queries, "admin", RoleAdmin)
-	cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+	foodID := categoryIDByName(t, h, "Food")
 
-	live := seedHashedTransaction(t, h, admin.ID, cat.ID, "2026-04-01", "Coffee", 10.0)
-	tombstoned := seedHashedTransaction(t, h, admin.ID, cat.ID, "2026-04-02", "Bagel", 4.0)
-	if err := h.queries.SoftDeleteTransaction(context.Background(), tombstoned); err != nil {
-		t.Fatalf("soft delete: %v", err)
+	sheet := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Coffee", "42.50", "Food"},
+	})
+
+	first := uploadAndConfirmImport(t, h, admin, sheet)
+	if n := int(first["imported"].(float64)); n != 1 {
+		t.Fatalf("first import: imported = %d, want 1; body = %v", n, first)
 	}
-	buried := hashOf(t, h, tombstoned)
-	if !buried.Valid {
-		t.Fatal("precondition failed: the tombstoned row must still hold its content_hash")
+	id := soleTransactionIDOf(t, h, admin.ID)
+
+	// Trash the row through the endpoint the Trash page drives.
+	delRec := httptest.NewRecorder()
+	h.handleDeleteTransaction(delRec, withUserAndURLParam(
+		httptest.NewRequest(http.MethodDelete, "/api/transactions/x", nil),
+		admin, "id", strconv.FormatInt(id, 10)))
+	if delRec.Code != http.StatusOK {
+		t.Fatalf("delete: status = %d; body = %s", delRec.Code, delRec.Body.String())
+	}
+	if !deletedAtOf(t, h, id).Valid {
+		t.Fatal("precondition failed: the row must be tombstoned before the rename")
 	}
 
-	rec := putCategory(t, h, admin, cat.ID, map[string]any{"name": "Groceries-" + t.Name()})
-	if rec.Code != http.StatusOK {
+	// Rename the category while the row sits in the trash.
+	newName := "Groceries-" + t.Name()
+	if rec := putCategory(t, h, admin, foodID, map[string]any{"name": newName}); rec.Code != http.StatusOK {
 		t.Fatalf("rename: status = %d; body = %s", rec.Code, rec.Body.String())
 	}
 
-	if hash := hashOf(t, h, live); hash.Valid {
-		t.Errorf("live row kept content_hash %q after the rename", hash.String)
+	// The clear is an unqualified UPDATE ... WHERE category_id = ?, so it must
+	// leave the tombstone itself alone: dropping content_hash out of dedupe is
+	// derived-column hygiene, resurrecting a trashed row is a ledger change.
+	if !deletedAtOf(t, h, id).Valid {
+		t.Fatal("the rename resurrected a tombstoned transaction")
 	}
-	if hash := hashOf(t, h, tombstoned); !hash.Valid || hash.String != buried.String {
-		t.Errorf("tombstoned row's content_hash changed: before %v, after %v", buried, hash)
+	if hash := hashOf(t, h, id); hash.Valid {
+		t.Errorf("tombstoned row kept content_hash %q across the rename — a restore re-arms that stale digest",
+			hash.String)
 	}
 
-	var deletedAt sql.NullTime
-	if err := h.db.QueryRow(`SELECT deleted_at FROM transactions WHERE id = ?`, tombstoned).Scan(&deletedAt); err != nil {
-		t.Fatalf("read deleted_at: %v", err)
+	// Restore it: the row re-enters the live set, the partial unique index and
+	// GetTransactionByContentHash.
+	restoreRec := httptest.NewRecorder()
+	h.handleRestoreTransaction(restoreRec, withUserAndURLParam(
+		httptest.NewRequest(http.MethodPost, "/api/transactions/x/restore", nil),
+		admin, "id", strconv.FormatInt(id, 10)))
+	if restoreRec.Code != http.StatusOK {
+		t.Fatalf("restore: status = %d; body = %s", restoreRec.Code, restoreRec.Body.String())
 	}
-	if !deletedAt.Valid {
-		t.Error("the rename resurrected a tombstoned transaction")
+	if deletedAtOf(t, h, id).Valid {
+		t.Fatal("precondition failed: the restore did not clear the tombstone")
+	}
+
+	// The next boot re-anchors the cleared row under the new name.
+	if err := database.BackfillContentHashes(t.Context(), h.db); err != nil {
+		t.Fatalf("backfill: %v", err)
+	}
+
+	// Re-import the ORIGINAL spreadsheet. Its Category cell still says "Food",
+	// so the user maps that label onto the (now renamed) category.
+	uploadReq := withUser(postMultipartFile(t, "/api/import/upload", sheet), admin)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("second upload: status = %d; body = %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           uploadResp["import_id"].(string),
+		"default_category_id": foodID,
+		"category_map":        map[string]float64{"Food": float64(foodID)},
+	})
+	confirmReq := withUser(
+		httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody)), admin)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusConflict {
+		t.Errorf("re-import of the original sheet: status = %d, want 409 UNRESOLVED_COLLISIONS; body = %s",
+			confirmRec.Code, confirmRec.Body.String())
+	} else {
+		var confirmErr map[string]any
+		decodeResponse(t, confirmRec, &confirmErr)
+		if code, _ := confirmErr["code"].(string); code != "UNRESOLVED_COLLISIONS" {
+			t.Errorf("code = %v, want UNRESOLVED_COLLISIONS", confirmErr["code"])
+		}
+	}
+
+	if got := countTransactionsForUser(t, h.db, admin.ID); got != 1 {
+		t.Errorf("live rows = %d, want 1 — a row restored from the trash across a rename let a re-import of the same sheet duplicate the ledger", got)
 	}
 }
