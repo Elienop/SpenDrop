@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/elienop/spendrop/internal/auth"
 	"github.com/elienop/spendrop/internal/database"
 )
 
@@ -242,22 +244,56 @@ func TestHandleReportYearFloor_NoAuth_Returns401(t *testing.T) {
 }
 
 // TestReportYearFloorRoute_IsRegisteredAndRequiresAuth drives the REAL router,
-// not the handler in isolation. The handler-level 401 test above passes even
-// if the route was never wired up; this one fails with 404 in that case, and
-// fails with 200 if the route were registered outside the authenticated group.
+// not the handler in isolation.
+//
+// Two halves, and both are needed. The authenticated half is what proves the
+// route is wired up at all: an anonymous request cannot, because the /api
+// group's auth middleware runs before chi's NotFound handler, so an
+// unregistered path 401s exactly like a registered one. The anonymous half
+// then proves the route sits INSIDE that group rather than beside it.
 func TestReportYearFloorRoute_IsRegisteredAndRequiresAuth(t *testing.T) {
 	q, db := setupTestDB(t)
 	router := NewRouter(q, db, nil)
 
-	req := httptest.NewRequest(http.MethodGet, "/api/settings/report-year-floor", nil)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	if rec.Code == http.StatusNotFound {
-		t.Fatalf("GET /api/settings/report-year-floor returned 404 — the route is not registered")
+	// --- registered: an authenticated caller gets the real payload ---
+	user := seedTestUser(t, q, "alice", "member")
+	token, err := auth.GenerateSessionToken()
+	if err != nil {
+		t.Fatalf("generate session token: %v", err)
 	}
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401 for an anonymous caller, got %d; body: %s", rec.Code, rec.Body.String())
+	// Sessions are stored hashed; persist the hash, send the plaintext cookie.
+	if err := q.CreateSession(context.Background(), database.CreateSessionParams{
+		Token:     auth.HashSessionToken(token),
+		UserID:    user.ID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+
+	authed := httptest.NewRequest(http.MethodGet, "/api/settings/report-year-floor", nil)
+	authed.AddCookie(&http.Cookie{Name: "session", Value: token})
+	authedRec := httptest.NewRecorder()
+	router.ServeHTTP(authedRec, authed)
+
+	if authedRec.Code != http.StatusOK {
+		t.Fatalf("authenticated GET /api/settings/report-year-floor: got %d, want 200 "+
+			"(a 404 here means the route is not registered); body: %s",
+			authedRec.Code, authedRec.Body.String())
+	}
+	// Assert the payload, not just the status: a route accidentally pointed at
+	// some other handler would also 200.
+	if _, ok := decodeFloor(t, authedRec)["floor_year"]; !ok {
+		t.Error("authenticated response has no `floor_year` key — the route is pointed at the wrong handler")
+	}
+
+	// --- guarded: an anonymous caller is refused ---
+	anon := httptest.NewRequest(http.MethodGet, "/api/settings/report-year-floor", nil)
+	anonRec := httptest.NewRecorder()
+	router.ServeHTTP(anonRec, anon)
+
+	if anonRec.Code != http.StatusUnauthorized {
+		t.Errorf("anonymous GET: got %d, want 401 — the route must sit inside the authenticated group; body: %s",
+			anonRec.Code, anonRec.Body.String())
 	}
 }
 
