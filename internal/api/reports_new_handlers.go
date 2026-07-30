@@ -57,13 +57,13 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback: default_budget setting - stored as a user-entered string, so
-	// parse once as float and immediately convert to cents.
-	var defaultBudgetCents int64
+	// parse once and immediately convert to cents. A value the application
+	// cannot represent leaves the fallback at 0.
+	var fallbackBudgetCents int64
 	setting, err := h.queries.GetSetting(ctx, SettingDefaultBudget)
 	if err == nil {
-		parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
-		if parseErr == nil {
-			defaultBudgetCents = dollarsToCents(parsed)
+		if cents, ok := defaultBudgetCents(setting.Value); ok {
+			fallbackBudgetCents = cents
 		}
 	}
 
@@ -89,7 +89,7 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 	for m := 1; m <= 12; m++ {
 		budgetCents, ok := budgetMap[m]
 		if !ok {
-			budgetCents = defaultBudgetCents
+			budgetCents = fallbackBudgetCents
 		}
 		data[m-1] = budgetVsActualEntry{
 			Month:  m,
@@ -168,9 +168,8 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 	} else if errors.Is(err, sql.ErrNoRows) {
 		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
-			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
-			if parseErr == nil {
-				budgetCents = dollarsToCents(parsed)
+			if cents, ok := defaultBudgetCents(setting.Value); ok {
+				budgetCents = cents
 			}
 		}
 	} else {
