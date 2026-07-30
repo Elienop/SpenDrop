@@ -157,6 +157,33 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	now := s.now()
 	dst := filepath.Join(s.Dir, FormatFilename(now))
 
+	// ONE tick must reach Status() as ONE observation.
+	//
+	// Both of the deferred calls below feed the same snapshot, and they are
+	// registered so that LIFO runs retention FIRST and the publish LAST. The
+	// publish then takes statusMu exactly once, with the tick's outcome and
+	// the post-prune directory scan already in hand.
+	//
+	// This used to be two independent statusMu sections — the outcome from one
+	// defer, the directory scan from another — and a Status() read landing
+	// between them saw a tick that had run, had succeeded, and reported zero
+	// restore points. /healthz/data maps precisely that triple to 503, so a
+	// scrape in the gap invented a "nothing to restore" alarm against a volume
+	// holding a full retention set. Only the first tick after a start can show
+	// it, which is exactly when a container is being health-checked.
+	//
+	// Swapping the two was NOT the fix: that moves the window rather than
+	// closing it, and lets a reader pair fresh counts with the PREVIOUS tick's
+	// outcome — briefly HIDING a failure instead of briefly inventing one.
+	//
+	// Default to error: the value only becomes success or verify_failed where
+	// the code below can prove it, so a path added later that returns without
+	// saying anything is reported as a failure rather than silently inheriting
+	// the previous tick's success.
+	outcome := OutcomeError
+	var obs dirObservation
+	defer func() { s.recordTick(now, outcome, obs) }()
+
 	// Retention runs on EVERY exit path, including the early ones.
 	//
 	// This was previously deferred only after Snapshot succeeded, which made
@@ -166,20 +193,7 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	// Snapshot also covers a failure in step 1 — reclaiming space must not
 	// depend on the source database being readable this tick. Prune tolerates
 	// a missing directory, so this is harmless before the first backup.
-	defer s.pruneAndLog(now, logger)
-
-	// Stamp the outcome on EVERY exit path, deferred so no future early
-	// return can forget. It is registered AFTER pruneAndLog and therefore
-	// runs BEFORE it — which is the order Status's consumers want: the
-	// directory scan is the last thing to touch the snapshot, so what they
-	// read is always the post-prune view of the same tick.
-	//
-	// Default to error: the value only becomes success or verify_failed where
-	// the code below can prove it, so a path added later that returns without
-	// saying anything is reported as a failure rather than silently inheriting
-	// the previous tick's success.
-	outcome := OutcomeError
-	defer func() { s.recordOutcome(now, outcome) }()
+	defer func() { obs = s.pruneAndReport(now, logger) }()
 
 	// Step 1: measure the live transaction count. This is the
 	// verification baseline — the number Verify will compare against.
@@ -275,36 +289,39 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	outcome = OutcomeSuccess
 }
 
-// pruneAndLog runs Prune and reports the outcome. Split out so runOnce can
-// defer it regardless of whether the post-Snapshot path ends in verify
-// failure, sidecar failure, or success — the retention policy is orthogonal
-// to the fate of the current tick's file.
-func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
+// pruneAndReport runs Prune and returns what the tick learned about BACKUP_DIR.
+// Split out so runOnce can defer it regardless of whether the post-Snapshot
+// path ends in verify failure, sidecar failure, or success — the retention
+// policy is orthogonal to the fate of the current tick's file.
+//
+// It deliberately does NOT touch the health snapshot: the caller folds this
+// return value and the tick's outcome into a single recordTick, so one tick
+// reaches Status() as one observation. See runOnce's deferred publish.
+func (s *Scheduler) pruneAndReport(now time.Time, logger *log.Logger) dirObservation {
 	kept, removed, failed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	if err != nil {
 		// Now that prune also runs when Snapshot fails, a not-yet-created
-		// backup directory is an ordinary state rather than a fault. Record
-		// the zero state rather than returning silently: "the directory does
-		// not exist" and "the directory holds no restore point" are the same
-		// fact to anyone asking whether a restore is possible, and staying
-		// quiet here would leave the health endpoint reporting the last
-		// observation from before the volume disappeared.
+		// backup directory is an ordinary state rather than a fault. Report
+		// the zero state as OBSERVED rather than returning silently: "the
+		// directory does not exist" and "the directory holds no restore point"
+		// are the same fact to anyone asking whether a restore is possible,
+		// and staying quiet here would leave the health endpoint reporting the
+		// last observation from before the volume disappeared.
 		if errors.Is(err, fs.ErrNotExist) {
-			s.recordDirState(dirScan{}, 0)
-			return
+			return dirObservation{observed: true}
 		}
 		logger.Printf("backup: prune error in %s: %v", s.Dir, err)
-		// Deliberately no recordDirState: the directory could not be read, so
-		// we know nothing new. Overwriting the previous observation with zeros
-		// would manufacture a "no backups on disk" alarm out of a transient
-		// read failure. LastOutcome still carries the tick's fate.
-		return
+		// Deliberately NOT observed: the directory could not be read, so we
+		// know nothing new about its contents. Reporting zeros here would
+		// manufacture a "no backups on disk" alarm out of a read failure.
+		return dirObservation{}
 	}
 
 	// Post-prune directory scan. Runs after Prune so the counts describe what
 	// is actually on the volume now, not what was there before retention.
+	var obs dirObservation
 	if scan, scanErr := scanBackupDir(s.Dir); scanErr == nil {
-		s.recordDirState(scan, len(failed))
+		obs = dirObservation{observed: true, scan: scan, pruneFailed: len(failed)}
 	} else {
 		logger.Printf("backup: could not scan %s for health reporting: %v", s.Dir, scanErr)
 	}
@@ -333,8 +350,8 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 	// different acts, and only the first one was opted into knowingly. Say so,
 	// loudly, rather than leaving the discovery for a restore attempt.
 	//
-	// This cannot become routine noise: pruneAndLog is deferred from runOnce, so
-	// on any successful tick the file just written is in kept. A missing
+	// This cannot become routine noise: pruneAndReport is deferred from runOnce,
+	// so on any successful tick the file just written is in kept. A missing
 	// directory returns above, which keeps a fresh install quiet until the first
 	// snapshot has actually been attempted.
 	if len(kept) == 0 && len(failed) == 0 {
@@ -345,6 +362,8 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 			"investigate why verification is failing.",
 			s.Dir, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	}
+
+	return obs
 }
 
 // renameCorrupt renames a failed-verification backup to "*.corrupt" so an

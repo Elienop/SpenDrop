@@ -353,7 +353,7 @@ func TestSchedulerStatus_VanishedBackupDirectoryDropsTheCountToZero(t *testing.T
 
 // TestSchedulerStatus_UnreadableBackupDirectoryKeepsTheLastObservation is the
 // deliberate asymmetry to the test above, and the reason the two error branches
-// in pruneAndLog are not "simplified" into one.
+// in pruneAndReport are not "simplified" into one.
 //
 // A directory that cannot be READ tells us nothing new about its contents. If
 // that zeroed the snapshot the way a VANISHED directory does, a transient
@@ -429,7 +429,7 @@ func TestSchedulerStatus_CountsSurvivingQuarantinedFiles(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(nil),
 	}
-	s.pruneAndLog(now, newSilentLogger(nil))
+	s.recordTick(now, OutcomeSuccess, s.pruneAndReport(now, newSilentLogger(nil)))
 
 	st := s.Status()
 	if st.QuarantinedCount != 2 {
@@ -466,7 +466,7 @@ func TestSchedulerStatus_ReportsPruneRemovalFailures(t *testing.T) {
 		Now:    func() time.Time { return now },
 		Logger: newSilentLogger(nil),
 	}
-	s.pruneAndLog(now, newSilentLogger(nil))
+	s.recordTick(now, OutcomeSuccess, s.pruneAndReport(now, newSilentLogger(nil)))
 
 	st := s.Status()
 	if st.PruneFailedCount != 4 {
