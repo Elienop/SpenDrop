@@ -243,6 +243,44 @@ func TestUpdateCategory_CaseOnlyRename_PreservesContentHashes(t *testing.T) {
 	}
 }
 
+// TestUpdateCategory_RejectedRename_LeavesContentHashesIntact pins the other
+// half of the atomicity requirement: the clear must not survive a rename that
+// never committed.
+//
+// categories.name is UNIQUE, so renaming onto another category's name is a
+// real, reachable rejection. An implementation that clears the hashes on its
+// own connection — or clears first and renames second — leaves every row in
+// the category un-anchored from import dedupe while the category still carries
+// its original name, so a re-import of the file those rows came from doubles
+// all of them. Sharing one transaction makes the rollback undo both.
+func TestUpdateCategory_RejectedRename_LeavesContentHashesIntact(t *testing.T) {
+	h := setupHandler(t)
+	admin := seedTestUser(t, h.queries, "admin", RoleAdmin)
+	alpha := seedTestCategory(t, h.queries, "Alpha-"+t.Name(), "expense")
+	beta := seedTestCategory(t, h.queries, "Beta-"+t.Name(), "expense")
+	id := seedHashedTransaction(t, h, admin.ID, alpha.ID, "2026-04-01", "Coffee", 10.0)
+
+	before := hashOf(t, h, id)
+	if !before.Valid {
+		t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+	}
+
+	// Rename Alpha onto Beta's name: UNIQUE constraint failed, nothing commits.
+	rec := putCategory(t, h, admin, alpha.ID, map[string]any{"name": beta.Name})
+	if rec.Code == http.StatusOK {
+		t.Fatalf("precondition failed: renaming onto a taken name must be rejected; got 200")
+	}
+	if got := categoryNameOf(t, h, alpha.ID); got != alpha.Name {
+		t.Fatalf("category name = %q, want %q — the rejected rename leaked through", got, alpha.Name)
+	}
+
+	after := hashOf(t, h, id)
+	if !after.Valid || after.String != before.String {
+		t.Errorf("a rejected rename still cleared content_hash (before %v, after %v) — the clear did not share the rename's transaction",
+			before, after)
+	}
+}
+
 // TestUpdateCategory_Rename_LeavesTombstonedRowsAlone pins the soft-delete
 // boundary. A tombstoned row is outside the partial unique index
 // (idx_transactions_content_hash filters deleted_at IS NULL), so its hash is
