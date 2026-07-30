@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/elienop/spendrop/internal/backup"
 	"github.com/elienop/spendrop/internal/database"
 	"github.com/elienop/spendrop/internal/push"
 	"github.com/elienop/spendrop/internal/ratelimit"
@@ -85,6 +86,19 @@ type Handler struct {
 	integrityMu              sync.RWMutex
 	lastIntegrityCheckAt     time.Time
 	lastIntegrityCheckResult string
+
+	// backupStatus reads the scheduled-backup subsystem's health snapshot
+	// for /healthz/data. nil => this binary never installed a source, and
+	// the health payload omits the `backups` block entirely rather than
+	// asserting anything about it.
+	//
+	// A func rather than a *backup.Scheduler so the health tests can drive
+	// every failure state without a filesystem, and so the api package
+	// depends on backup only for its Status type. Set once at startup via
+	// SetBackupStatusSource, like SetPushSender; the function itself is
+	// backup.Scheduler.Status, which takes its own mutex, so calling it
+	// concurrently with the scheduler goroutine is safe.
+	backupStatus func() backup.Status
 }
 
 // NewHandler creates a new Handler with the given dependencies.
@@ -186,6 +200,17 @@ func (h *Handler) SetPushSender(s *push.Sender) {
 // before the HTTP server binds.
 func (h *Handler) SetEventBroker(b *sse.Hub) {
 	h.broker = b
+}
+
+// SetBackupStatusSource installs the reader for the scheduled-backup
+// subsystem's health snapshot. Called once from cmd/spendrop/main.go with
+// scheduler.Status, UNCONDITIONALLY — including when backups are disabled, so
+// that a scrape can tell "the operator turned backups off" apart from "this
+// binary does not report on backups at all". Mirrors SetPushSender: a single
+// post-construction seam, no mutex, set during single-threaded startup before
+// the HTTP server binds.
+func (h *Handler) SetBackupStatusSource(fn func() backup.Status) {
+	h.backupStatus = fn
 }
 
 // publishInvalidate fans out a coarse SSE invalidation hint for the given

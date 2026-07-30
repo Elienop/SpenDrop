@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/elienop/spendrop/internal/backup"
 	"github.com/elienop/spendrop/internal/database"
 )
 
@@ -98,6 +99,79 @@ type healthzDataResponse struct {
 	// the re-verify sweep), not when a user has merely asserted a
 	// number that no longer matches the live SUM.
 	Checkpoints healthzCheckpointCounts `json:"checkpoints"`
+
+	// Backups reports the scheduled-backup subsystem. A POINTER with
+	// omitempty, unlike Checkpoints: an absent block means this binary
+	// never installed a status source, which is a truthful "we do not
+	// know" rather than the lie that `enabled: false` would tell. main.go
+	// wires the source unconditionally — including when backups are
+	// switched off, in which case the block is present with
+	// enabled=false — so a production scrape always sees it and an alert
+	// rule can safely key off the nested fields.
+	Backups *healthzBackupStatus `json:"backups,omitempty"`
+}
+
+// healthzBackupStatus is the nested shape inside healthzDataResponse for the
+// scheduled-backup subsystem. Derived from backup.Status; see backupHealth for
+// the mapping and for which of these signals flip the endpoint to 503.
+//
+// Every field here is served UNAUTHENTICATED, so the block carries only
+// counts, timestamps, a duration and a fixed enum. Deliberately absent:
+// BACKUP_DIR, DB_PATH, any filename, and the verify error text — the last
+// because it embeds the backup's path and its byte size.
+type healthzBackupStatus struct {
+	// Enabled mirrors BACKUP_ENABLED. When false, none of the fields below
+	// carry a health signal: the operator turned the subsystem off and an
+	// empty backup directory is the expected result, not a fault.
+	Enabled bool `json:"enabled"`
+
+	// LastRunAt is when the most recent tick finished, successful or not.
+	// Absent means no tick has completed — the state during the first
+	// seconds after boot, and permanently when backups are disabled.
+	LastRunAt *time.Time `json:"last_run_at,omitempty"`
+
+	// LastOutcome is "success", "verify_failed", "error", or "" for
+	// never-ran. verify_failed and error are kept apart because they call
+	// for different responses: a snapshot being written and rejected is a
+	// different incident from no snapshot being written at all.
+	LastOutcome string `json:"last_outcome"`
+
+	// TrustedCount is the number of restore points on disk: backups whose
+	// filename parses AND which have a .sha256 sidecar. Zero while enabled
+	// is the loudest state this subsystem has and flips the endpoint to 503.
+	TrustedCount int `json:"trusted_count"`
+
+	// QuarantinedCount is the number of surviving *.corrupt files.
+	// Informational — see backupHealth.
+	QuarantinedCount int `json:"quarantined_count"`
+
+	// PruneFailedCount is the number of files the last retention sweep
+	// could not remove. Non-zero means retention is not being enforced and
+	// the volume will grow. Informational — see backupHealth.
+	PruneFailedCount int `json:"prune_failed_count"`
+
+	// NewestBackupAt is the timestamp of the newest trusted backup, taken
+	// from its filename rather than its mtime so it survives an NTP step.
+	// Absent when there is no trusted backup at all.
+	NewestBackupAt *time.Time `json:"newest_backup_at,omitempty"`
+
+	// NewestBackupAgeSeconds is that timestamp's age measured against the
+	// SERVER's clock. It duplicates information in NewestBackupAt on
+	// purpose: an alert rule that subtracts the timestamp from the
+	// scraper's own clock silently mismeasures whenever the two hosts
+	// disagree, and "the backup is three days stale" is exactly the alert
+	// nobody wants firing spuriously.
+	//
+	// A POINTER, not a plain int64 with omitempty: an age of zero is a
+	// backup taken this second, which must not be encoded the same way as
+	// no backup at all.
+	NewestBackupAgeSeconds *int64 `json:"newest_backup_age_seconds,omitempty"`
+
+	// IntervalSeconds is the configured BACKUP_INTERVAL. Emitted so a
+	// consumer can express staleness as a multiple of the cadence the
+	// operator actually chose; the endpoint deliberately does not pick a
+	// staleness threshold of its own (see backupHealth).
+	IntervalSeconds int64 `json:"interval_seconds"`
 }
 
 // healthzCheckpointCounts is the nested shape inside healthzDataResponse
@@ -258,12 +332,97 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 		degraded = true
 	}
 
+	// Scheduled-backup subsystem. Read from the scheduler's own in-memory
+	// snapshot, which it refreshes once per tick — the handler does NOT
+	// stat the backup directory, so this block costs a mutex acquisition
+	// and stays safe to poll. Nothing here re-derives retention; the
+	// counts come from the same directory walk previousBackupSize uses
+	// and from Prune's own return values.
+	if h.backupStatus != nil {
+		block, backupDegraded := backupHealth(h.backupStatus(), h.clock.Now())
+		resp.Backups = &block
+		if backupDegraded {
+			degraded = true
+		}
+	}
+
 	status := http.StatusOK
 	if degraded {
 		resp.Status = "degraded"
 		status = http.StatusServiceUnavailable
 	}
 	writeJSON(w, status, resp)
+}
+
+// backupHealth maps a backup.Status onto the wire block and decides whether it
+// should degrade the endpoint. Pure, so the unhealthy/informational split is
+// testable without a filesystem.
+//
+// UNHEALTHY (503):
+//
+//   - No trusted backup on disk while backups are enabled. A restore is
+//     impossible right now. This is the single loudest thing the subsystem
+//     can say and it is reachable in practice: BACKUP_KEEP_CORRUPT=0 plus a
+//     sustained verify failure sweeps the directory empty.
+//   - The last tick did not end in success. Either the snapshot is failing
+//     (nothing new is being captured) or it is being written and rejected
+//     (what is being captured is not trustworthy). Both mean the newest
+//     restore point is frozen at whatever survives, and both are actionable
+//     immediately.
+//
+// INFORMATIONAL (reported, does not degrade):
+//
+//   - Quarantined *.corrupt files. They are forensic evidence and they
+//     OUTLIVE the failure that produced them by design — KeepCorrupt retains
+//     the newest samples deliberately — so degrading on them would hold the
+//     endpoint at 503 long after backups recovered, which trains an operator
+//     to ignore it. The failure itself already surfaces via LastOutcome.
+//   - Prune removal failures. Retention not being enforced means the volume
+//     grows without bound, which is a real problem, but every existing backup
+//     is intact and a restore still works. It is a capacity warning, not a
+//     data-protection outage.
+//   - A stale-but-present backup. There is no correct universal threshold:
+//     BACKUP_INTERVAL is operator-configured and the README recommends tuning
+//     it, so any constant baked in here is wrong for someone in both
+//     directions. The block emits the age and the configured interval and
+//     lets the alert rule choose the multiple.
+//
+// NEVER DEGRADES: a disabled scheduler (the operator opted out, and
+// BACKUP_ENABLED=false is documented as a supported kill-switch), and a
+// scheduler that has not completed its first tick (the HTTP server binds
+// before the startup fire finishes, so degrading here would flap 503 on every
+// container restart).
+func backupHealth(st backup.Status, now time.Time) (healthzBackupStatus, bool) {
+	block := healthzBackupStatus{
+		Enabled:          st.Enabled,
+		LastOutcome:      string(st.LastOutcome),
+		TrustedCount:     st.TrustedCount,
+		QuarantinedCount: st.QuarantinedCount,
+		PruneFailedCount: st.PruneFailedCount,
+		IntervalSeconds:  int64(st.Interval / time.Second),
+	}
+	if !st.LastRunAt.IsZero() {
+		t := st.LastRunAt.UTC()
+		block.LastRunAt = &t
+	}
+	if !st.NewestBackupAt.IsZero() {
+		t := st.NewestBackupAt.UTC()
+		block.NewestBackupAt = &t
+		// Clamped at zero. A negative age can only come from a clock moving
+		// backwards, and most alert expressions ("age > N") would read it as
+		// healthy anyway while a human reads it as nonsense; the timestamp
+		// beside it preserves the raw fact for anyone diagnosing skew.
+		age := int64(now.Sub(st.NewestBackupAt) / time.Second)
+		if age < 0 {
+			age = 0
+		}
+		block.NewestBackupAgeSeconds = &age
+	}
+
+	if !st.Enabled || st.LastRunAt.IsZero() {
+		return block, false
+	}
+	return block, st.LastOutcome != backup.OutcomeSuccess || st.TrustedCount == 0
 }
 
 // latestSchemaVersion returns the most recently applied migration's
