@@ -52,6 +52,7 @@ import {
 } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useReportYearFloor } from '@/hooks/useReportYearFloor';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { cn } from '@/lib/utils';
 import type { ExpenseVelocityData } from '@/api/types';
@@ -113,7 +114,12 @@ export function SpendingTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
-  const years = yearOptions();
+  // Ledger-derived floor, so an imported 2019 statement is selectable.
+  // `Math.min` with the current selection keeps `year` in the list if a
+  // refetch ever narrows the floor past it — otherwise the Select would hold
+  // a value with no matching item and render a blank trigger.
+  const { floorYear } = useReportYearFloor();
+  const years = yearOptions(Math.min(floorYear, year));
 
   // Category breakdown bar chart data
   const breakdownTotal = useMemo(
