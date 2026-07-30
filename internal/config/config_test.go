@@ -155,6 +155,10 @@ func TestValidate_RejectsOutOfRangeValues(t *testing.T) {
 			c.Password.MaxLength = 20
 		}, "PASSWORD_MIN_LENGTH"},
 		{"token bytes too few", func(c *Config) { c.Session.TokenBytes = 8 }, "SESSION_TOKEN_BYTES"},
+		// The ceiling matters as much as the floor: past ~2KB the hex-encoded
+		// token makes the cookie too large for browsers to store, so the
+		// Set-Cookie is dropped and every login silently fails to stick.
+		{"token bytes too many", func(c *Config) { c.Session.TokenBytes = 4096 }, "SESSION_TOKEN_BYTES"},
 		{"rate limit zero", func(c *Config) { c.RateLimit.MaxAttempts = 0 }, "RATE_LIMIT_MAX"},
 		{"rate window zero", func(c *Config) { c.RateLimit.Window = 0 }, "RATE_LIMIT_WINDOW"},
 		{"json bytes zero", func(c *Config) { c.Upload.MaxJSONBytes = 0 }, "MAX_JSON_BYTES"},

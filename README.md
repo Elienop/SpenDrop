@@ -270,7 +270,7 @@ Most deployments only need the first handful of variables. Everything below is a
 |----------|---------|-------------|
 | `SESSION_TTL` | `720h` (30 days) | Session cookie lifetime |
 | `SESSION_CLEANUP_INTERVAL` | `1h` | How often the background job purges expired sessions |
-| `SESSION_TOKEN_BYTES` | `32` | Bytes of entropy per session token (must be ≥ 16) |
+| `SESSION_TOKEN_BYTES` | `32` | Bytes of entropy per session token (16–128; the token is hex-encoded into the cookie, so larger values stop browsers storing it) |
 | `BCRYPT_COST` | `12` | bcrypt work factor (4-31). Higher is slower but harder to brute force |
 | `PASSWORD_MIN_LENGTH` | `8` | Minimum password length |
 | `PASSWORD_MAX_LENGTH` | `72` | Maximum password length. Must be ≤ 72 (bcrypt's input limit) |
