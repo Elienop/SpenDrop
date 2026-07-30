@@ -52,6 +52,11 @@ func TestHandleExportTransactions_DoesNotDeadlockOnSingleConnection(t *testing.T
 // TestHandleExportTransactions_ReleasesConnectionBeforeWorkbookBuild asserts
 // the cursor is not held across workbook assembly: once the handler returns,
 // the single connection must be back in the pool and immediately usable.
+//
+// Time-boxed for the same reason as its monthly and yearly counterparts: the
+// regression it guards makes the handler block forever, so a synchronous call
+// would take the whole internal/api binary down with a `panic: test timed out`
+// instead of failing here.
 func TestHandleExportTransactions_ReleasesConnectionBeforeWorkbookBuild(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "exporter2", "admin")
@@ -60,17 +65,30 @@ func TestHandleExportTransactions_ReleasesConnectionBeforeWorkbookBuild(t *testi
 
 	req := withUser(httptest.NewRequest(http.MethodGet, "/api/export/transactions", nil), user)
 	rec := httptest.NewRecorder()
-	h.handleExportTransactions(rec, req)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handleExportTransactions(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleExportTransactions never returned: it issued a second query " +
+			"while holding the pool's only connection")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
+	// Fatal, not Error: the follow-up query below blocks forever on a leaked
+	// connection, so a leak must stop the test here.
 	if inUse := h.db.Stats().InUse; inUse != 0 {
-		t.Errorf("connections still checked out after handler returned: %d", inUse)
+		t.Fatalf("connections still checked out after handler returned: %d", inUse)
 	}
 
-	// The connection must be immediately reusable — this blocks if the export
-	// leaked it.
+	// The connection must be immediately reusable.
 	var n int
 	if err := h.db.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&n); err != nil {
 		t.Fatalf("follow-up query failed: %v", err)
