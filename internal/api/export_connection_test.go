@@ -211,9 +211,17 @@ func TestHandleExportYearly_DoesNotDeadlockOnSingleConnection(t *testing.T) {
 	}
 }
 
-// TestHandleExportMonthly_ReleasesConnectionBeforeWorkbookBuild asserts no
-// cursor survives the handler: the single connection must be back in the pool
-// and immediately usable once it returns.
+// TestHandleExportMonthly_ReleasesConnectionBeforeWorkbookBuild pins the
+// after-return half of the same forward guard: no cursor may survive the
+// handler, so the single connection must be back in the pool and immediately
+// usable once it returns.
+//
+// The handler runs in a goroutine against a timeout, matching the pair above,
+// because under a regression it may never return at all: an early exit in the
+// Summary loop strands the cursor and getBaseCurrency then blocks forever. A
+// synchronous call would hang the whole internal/api binary to a hard
+// `panic: test timed out`, aborting every test ordered after this one instead of
+// failing this one.
 func TestHandleExportMonthly_ReleasesConnectionBeforeWorkbookBuild(t *testing.T) {
 	h := setupHandler(t)
 	user := seedMultiSheetExportData(t, h, "monthly-exporter2")
@@ -222,19 +230,36 @@ func TestHandleExportMonthly_ReleasesConnectionBeforeWorkbookBuild(t *testing.T)
 		httptest.NewRequest(http.MethodGet, "/api/export/monthly/2026/7", nil),
 		user, map[string]string{"year": "2026", "month": "7"})
 	rec := httptest.NewRecorder()
-	h.handleExportMonthly(rec, req)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handleExportMonthly(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleExportMonthly never returned: a cursor left open by an early " +
+			"exit holds the pool's only connection while a later query waits for one")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
+	// Fatal, not Error: assertConnectionUsable below issues a real query, which
+	// blocks forever on a leaked connection. Stopping here keeps a leak a clean
+	// failure rather than a test-binary timeout.
 	if inUse := h.db.Stats().InUse; inUse != 0 {
-		t.Errorf("connections still checked out after handler returned: %d", inUse)
+		t.Fatalf("connections still checked out after handler returned: %d", inUse)
 	}
 	assertConnectionUsable(t, h, 3)
 }
 
 // TestHandleExportYearly_ReleasesConnectionBeforeWorkbookBuild is the same
-// assertion for the yearly export.
+// assertion for the yearly export, time-boxed for the same reason: an early
+// exit in the Monthly Totals loop strands the cursor and the Category Totals
+// query then blocks forever inside the handler.
 func TestHandleExportYearly_ReleasesConnectionBeforeWorkbookBuild(t *testing.T) {
 	h := setupHandler(t)
 	user := seedMultiSheetExportData(t, h, "yearly-exporter2")
@@ -243,13 +268,26 @@ func TestHandleExportYearly_ReleasesConnectionBeforeWorkbookBuild(t *testing.T) 
 		httptest.NewRequest(http.MethodGet, "/api/export/yearly/2026", nil),
 		user, map[string]string{"year": "2026"})
 	rec := httptest.NewRecorder()
-	h.handleExportYearly(rec, req)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.handleExportYearly(rec, req)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("handleExportYearly never returned: a cursor left open by an early " +
+			"exit holds the pool's only connection while a later query waits for one")
+	}
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
 	}
+	// Fatal, not Error: see the monthly test above.
 	if inUse := h.db.Stats().InUse; inUse != 0 {
-		t.Errorf("connections still checked out after handler returned: %d", inUse)
+		t.Fatalf("connections still checked out after handler returned: %d", inUse)
 	}
 	assertConnectionUsable(t, h, 3)
 }
