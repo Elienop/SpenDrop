@@ -545,3 +545,28 @@ export interface NotificationSettings {
   quiet_tz: string;
   quiet_allow_over_budget: boolean;
 }
+
+// ---------- Reports year picker ----------
+
+/**
+ * Wire contract of `GET /api/settings/report-year-floor` — the oldest year the
+ * Reports year pickers may offer, derived from the ledger rather than a
+ * hard-coded constant (see `internal/api/settings_handlers.go`).
+ *
+ * The three states the two booleans distinguish:
+ *   has_transactions=false                → empty ledger; `floor_year` is the
+ *                                           server's current-year fallback
+ *   has_transactions=true, clamped=false  → `floor_year` is real ledger data
+ *   has_transactions=true, clamped=true   → live rows exist below MIN_YEAR;
+ *                                           they stay inside date-range
+ *                                           aggregates but no year picker can
+ *                                           select their year
+ *
+ * `floor_year` is bounded by the SERVER's clock, so consumers must still apply
+ * `Math.min(floor_year, <browser current year>)` — `useReportYearFloor` does.
+ */
+export interface ReportYearFloorResponse {
+  floor_year: number;
+  has_transactions: boolean;
+  clamped: boolean;
+}
