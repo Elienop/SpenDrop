@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -60,9 +61,25 @@ func TestHandleDeleteSavingsGoal_RemovesTheRow(t *testing.T) {
 // TestHandleSetSavingsGoal_ZeroTargetIsNotADelete pins the semantics the new
 // route buys us: zero is a legitimate "no target this year" value and must
 // persist, rather than being overloaded to mean removal.
+//
+// It must drive handleSetSavingsGoal, not seed the row directly. An earlier
+// version of this test seeded via UpsertSavingsGoal and read back with sqlc,
+// which made it a database round-trip test wearing a handler's name — turning
+// handleSetSavingsGoal into a DELETE on a zero target left it passing.
 func TestHandleSetSavingsGoal_ZeroTargetIsNotADelete(t *testing.T) {
 	h := setupHandler(t)
-	seedSavingsGoal(t, h, 2026, 0)
+	admin := seedTestUser(t, h.queries, "admin", "admin")
+
+	req := withUserAndURLParam(
+		httptest.NewRequest(http.MethodPut, "/api/savings-goals/2026",
+			strings.NewReader(`{"target_amount":0}`)),
+		admin, "year", "2026",
+	)
+	rec := httptest.NewRecorder()
+	h.handleSetSavingsGoal(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
 
 	goals, err := h.queries.ListSavingsGoals(t.Context())
 	if err != nil {
@@ -78,7 +95,7 @@ func TestHandleSetSavingsGoal_ZeroTargetIsNotADelete(t *testing.T) {
 		}
 	}
 	if !found {
-		t.Error("a zero-target goal should persist as a real row")
+		t.Error("PUT {target_amount: 0} removed the row; zero is a real value, not a delete")
 	}
 }
 
