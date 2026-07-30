@@ -22,12 +22,19 @@ export const INCEXP_CONFIG = {
  * prevent.
  *
  * It is deliberately far larger than any window `yearOptions` can ask for.
- * The previous value, 120, is exactly `(2033 - HISTORICAL_YEAR_START + 1) * 12`
- * — from 2034 the clamp would have started binding and silently truncating the
- * oldest offered years again. 600 months is 50 years, which keeps the clamp
- * inert until 2073 while still bounding a hand-crafted request.
+ * Both previous values were literals sized against a hard-coded year floor and
+ * both were already scheduled to start truncating: 120 is exactly
+ * `(2033 - 2024 + 1) * 12`, so it would have bound from 2034; 600 binds from
+ * 2050 now that the floor is derived from the ledger and can reach `MIN_YEAR`.
+ *
+ * The backend derives its `MaxTrendMonths` as `(MaxYear - MinYear + 1) * 12`
+ * — the widest window the picker can ever legitimately ask for, given
+ * `/api/settings/report-year-floor` clamps the floor to `MinYear`. This is
+ * that same number, `(MAX_YEAR - MIN_YEAR + 1) * 12`, and it is pinned to the
+ * Go constant by TestMaxTrendMonths_MatchesFrontendMaxReportMonths, which
+ * regex-reads the literal below — so keep it a literal, not an expression.
  */
-export const MAX_REPORT_MONTHS = 600;
+export const MAX_REPORT_MONTHS = 1212;
 
 /**
  * How many months of income/expense history must be fetched so that the
