@@ -9,6 +9,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
+
+	"golang.org/x/net/idna"
 )
 
 // IsPubliclyRoutable reports whether ip is an address a push service could
@@ -143,7 +146,14 @@ func GuardedRoundTripper(base *http.Transport) http.RoundTripper {
 }
 
 // canonicalProxyAddr renders a proxy URL as the "host:port" the transport will
-// actually dial, applying the same scheme defaults net/http uses.
+// actually dial, applying the same scheme defaults and the same IDN conversion
+// net/http uses.
+//
+// This has to mirror net/http's canonicalAddr exactly, because its output is the
+// KEY the dial guard looks the exemption up by. Any divergence means the key
+// never matches, the operator's own proxy is treated as an ordinary target, and
+// — being on the LAN — it is refused as non-public: a silent, total push outage
+// caused by the control rather than the threat.
 func canonicalProxyAddr(u *url.URL) string {
 	port := u.Port()
 	if port == "" {
@@ -156,7 +166,32 @@ func canonicalProxyAddr(u *url.URL) string {
 			port = "80"
 		}
 	}
-	return net.JoinHostPort(u.Hostname(), port)
+	return net.JoinHostPort(idnaASCIIHost(u.Hostname()), port)
+}
+
+// idnaASCIIHost is net/http's idnaASCII: convert an internationalised hostname to
+// its punycode form, since that is what the transport dials.
+//
+// The all-ASCII shortcut is copied deliberately and is NOT an optimisation —
+// idna.Lookup.ToASCII is not the identity on ASCII input, so calling it
+// unconditionally would introduce the very mismatch this function exists to
+// avoid. It lowercases ("P.LAN" -> "p.lan") where net/http dials the host
+// verbatim, and it rejects perfectly dialable hosts outright: an IPv6 literal
+// arrives here unbracketed from url.Hostname ("fd00::1") and fails with
+// "disallowed rune U+003A", as does an underscore in a container hostname.
+//
+// On error the original host is kept, matching net/http, which ignores the error
+// and dials what it was given.
+func idnaASCIIHost(host string) string {
+	for i := 0; i < len(host); i++ {
+		if host[i] >= utf8.RuneSelf {
+			if ascii, err := idna.Lookup.ToASCII(host); err == nil {
+				return ascii
+			}
+			return host
+		}
+	}
+	return host
 }
 
 // Per-address dial bounds for the multi-address walk.

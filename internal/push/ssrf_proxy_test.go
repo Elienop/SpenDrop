@@ -126,3 +126,67 @@ func TestCanonicalProxyAddr(t *testing.T) {
 		}
 	}
 }
+
+// TestCanonicalProxyAddr_IDN is the regression test for an internationalised
+// proxy hostname re-triggering the total push outage.
+//
+// net/http's canonicalAddr runs the hostname through idna.Lookup.ToASCII before
+// dialling, so HTTP_PROXY=http://präxy.lan:3128 is dialled as
+// "xn--prxy-moa.lan:3128". Recording the unconverted "präxy.lan:3128" means the
+// exemption key never matches the address handed to DialContext, the proxy is
+// treated as an ordinary target, and — being on the LAN — it is refused as
+// non-public. That is exactly the silent, total push outage the proxy exemption
+// was added to fix, reachable again by nothing worse than an accented hostname.
+func TestCanonicalProxyAddr_IDN(t *testing.T) {
+	cases := map[string]string{
+		"http://präxy.lan:3128": "xn--prxy-moa.lan:3128",
+		"http://präxy.lan":      "xn--prxy-moa.lan:80",
+		"https://präxy.lan":     "xn--prxy-moa.lan:443",
+		"socks5://präxy.lan":    "xn--prxy-moa.lan:1080",
+		"http://пример.тест":    "xn--e1afmkfd.xn--e1aybc:80",
+		// Already-punycode input must pass through unchanged, not be re-encoded.
+		"http://xn--prxy-moa.lan:3128": "xn--prxy-moa.lan:3128",
+	}
+	for raw, want := range cases {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := canonicalProxyAddr(u); got != want {
+			t.Errorf("canonicalProxyAddr(%q) = %q, want %q — the recorded exemption key "+
+				"will not match the address net/http actually dials", raw, got, want)
+		}
+	}
+}
+
+// TestCanonicalProxyAddr_LeavesASCIIHostsVerbatim pins the ASCII shortcut, which
+// is load-bearing rather than an optimisation.
+//
+// net/http only calls idna.Lookup.ToASCII when the host is NOT all-ASCII. Calling
+// it unconditionally would be a plausible-looking fix that introduces the very
+// mismatch it is meant to remove, because ToASCII is not the identity on ASCII:
+//
+//   - "P.LAN" is lowercased to "p.lan", while net/http dials "P.LAN" verbatim.
+//   - "p_x.lan" and the IPv6 literal "fd00::1" are REJECTED outright
+//     ("disallowed rune"), so an error-swallowing version silently does nothing
+//     while a returns-error version breaks every IPv6 proxy.
+//
+// Each case here therefore fails under the naive implementation.
+func TestCanonicalProxyAddr_LeavesASCIIHostsVerbatim(t *testing.T) {
+	cases := map[string]string{
+		"http://P.LAN:3128":    "P.LAN:3128",
+		"http://Proxy.Lan":     "Proxy.Lan:80",
+		"http://p_x.lan:3128":  "p_x.lan:3128",
+		"http://[fd00::1]:311": "[fd00::1]:311",
+	}
+	for raw, want := range cases {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %q: %v", raw, err)
+		}
+		if got := canonicalProxyAddr(u); got != want {
+			t.Errorf("canonicalProxyAddr(%q) = %q, want %q — an ASCII host must be "+
+				"recorded exactly as net/http dials it", raw, got, want)
+		}
+	}
+}
