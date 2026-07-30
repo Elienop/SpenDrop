@@ -294,6 +294,120 @@ func TestSchedulerStatus_SidecarlessBackupIsNotTrusted(t *testing.T) {
 	}
 }
 
+// TestSchedulerStatus_VanishedBackupDirectoryDropsTheCountToZero covers the
+// branch where the backup directory does not exist AFTER it previously did —
+// an unmounted volume, a bind mount that lost its host path, an operator
+// clearing the wrong directory.
+//
+// Prune reports that as fs.ErrNotExist, which the scheduler treats as an
+// ordinary state rather than a fault (a fresh install has not created the
+// directory either). The trap is treating it as "no news": the snapshot would
+// keep reporting the restore points counted before the volume disappeared, so
+// the health endpoint would answer "14 backups on disk" for a directory that
+// is gone. "Does not exist" is a definite fact about the directory, unlike an
+// unreadable one, so recording zero is honest here — and it is why the sibling
+// non-NotExist error branch deliberately does NOT record.
+//
+// Seeding a real backup first is what makes this non-vacuous: without it the
+// assertion below is satisfied by the struct's own zero value.
+func TestSchedulerStatus_VanishedBackupDirectoryDropsTheCountToZero(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	dir := filepath.Join(tmp, "backups")
+
+	ts := time.Date(2026, 4, 12, 1, 0, 0, 0, time.UTC)
+	seedTrustedBackup(t, dir, ts)
+
+	now := time.Date(2026, 4, 13, 3, 0, 0, 0, time.UTC)
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 30, KeepWeekly: 4, KeepMonthly: 12, KeepCorrupt: 2,
+		DBPath: src, BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { return now },
+		Logger: newSilentLogger(nil),
+	}
+	s.runOnce(context.Background(), newSilentLogger(nil))
+	if got := s.Status().TrustedCount; got != 1 {
+		t.Fatalf("TrustedCount = %d after the seeding tick, want 1; the fixture never "+
+			"reaches the state this test is about", got)
+	}
+
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove backup dir: %v", err)
+	}
+	s.runOnce(context.Background(), newSilentLogger(nil))
+
+	st := s.Status()
+	if st.TrustedCount != 0 {
+		t.Errorf("TrustedCount = %d, want 0 — the backup directory is gone and the "+
+			"snapshot is still reporting restore points that no longer exist", st.TrustedCount)
+	}
+	if !st.NewestBackupAt.IsZero() {
+		t.Errorf("NewestBackupAt = %v, want zero", st.NewestBackupAt)
+	}
+}
+
+// TestSchedulerStatus_UnreadableBackupDirectoryKeepsTheLastObservation is the
+// deliberate asymmetry to the test above, and the reason the two error branches
+// in pruneAndLog are not "simplified" into one.
+//
+// A directory that cannot be READ tells us nothing new about its contents. If
+// that zeroed the snapshot the way a VANISHED directory does, a transient
+// permission or I/O fault would manufacture a "no backups on disk" 503 out of a
+// directory whose backups are all still sitting there. The tick's fate is
+// already reported through LastOutcome; the counts stay at the last thing we
+// actually observed.
+func TestSchedulerStatus_UnreadableBackupDirectoryKeepsTheLastObservation(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: directory permissions do not prevent reads")
+	}
+	t.Parallel()
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	if err := os.Mkdir(src, 0o755); err != nil {
+		t.Fatalf("mkdir src: %v", err)
+	}
+	dir := filepath.Join(tmp, "backups")
+
+	ts := time.Date(2026, 4, 12, 1, 0, 0, 0, time.UTC)
+	seedTrustedBackup(t, dir, ts)
+
+	now := time.Date(2026, 4, 13, 3, 0, 0, 0, time.UTC)
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 30, KeepWeekly: 4, KeepMonthly: 12, KeepCorrupt: 2,
+		DBPath: src, BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { return now },
+		Logger: newSilentLogger(nil),
+	}
+	s.runOnce(context.Background(), newSilentLogger(nil))
+	if got := s.Status().TrustedCount; got != 1 {
+		t.Fatalf("TrustedCount = %d after the seeding tick, want 1", got)
+	}
+
+	// Write+execute but not read: ReadDir fails with EACCES, which is NOT
+	// fs.ErrNotExist.
+	if err := os.Chmod(dir, 0o300); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	s.runOnce(context.Background(), newSilentLogger(nil))
+
+	st := s.Status()
+	if st.TrustedCount != 1 {
+		t.Errorf("TrustedCount = %d, want 1 — an unreadable directory tells us nothing "+
+			"about its contents, and zeroing the count here turns a transient fault into "+
+			"a spurious 'no backups on disk' alarm", st.TrustedCount)
+	}
+	if !st.NewestBackupAt.Equal(ts) {
+		t.Errorf("NewestBackupAt = %v, want %v", st.NewestBackupAt, ts)
+	}
+}
+
 // TestSchedulerStatus_CountsSurvivingQuarantinedFiles reports the quarantine
 // AFTER retention has run, so the number matches what is actually on the
 // volume rather than what was produced.
