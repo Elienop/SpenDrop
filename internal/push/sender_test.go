@@ -81,9 +81,7 @@ const (
 // guard. Scoped per-test so the guard is on by default everywhere else.
 func allowLoopbackDial(t *testing.T) {
 	t.Helper()
-	prev := allowNonPublicDial
-	allowNonPublicDial = true
-	t.Cleanup(func() { allowNonPublicDial = prev })
+	t.Cleanup(AllowNonPublicDialForTesting())
 }
 
 func newTestSender(t *testing.T, client *http.Client) *Sender {
