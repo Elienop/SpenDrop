@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
+	"sync"
 	"time"
 )
 
@@ -78,10 +80,79 @@ func AllowNonPublicDialForTesting() func() {
 	return func() { allowNonPublicDial = prev }
 }
 
+// canonicalProxyAddr renders a proxy URL as the "host:port" the transport will
+// actually dial, applying the same scheme defaults net/http uses.
+func canonicalProxyAddr(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		switch u.Scheme {
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(u.Hostname(), port)
+}
+
+// maxTrackedProxies bounds the recorded proxy set. HTTP_PROXY/HTTPS_PROXY yield
+// one or two entries; only a pathological custom Proxy func returning a fresh
+// address per request could grow it, and that must not become a memory leak.
+const maxTrackedProxies = 64
+
 func GuardedTransport(base *http.Transport) *http.Transport {
 	t := base.Clone()
+
+	// An operator-configured egress proxy is a TRUSTED dial target, and on a
+	// self-hosted box it is very often on the LAN.
+	//
+	// When a proxy is in play the transport dials the PROXY, not the push
+	// endpoint — so a guard that only looks at the address being dialled sees
+	// "192.168.1.50" and refuses it, killing every push with
+	// `proxyconnect tcp: refusing to connect to non-public address`. That is a
+	// silent, total outage caused by the security control rather than the
+	// threat, and no test using a direct connection can see it.
+	//
+	// The distinction that matters is WHO CHOSE the address. The SSRF threat is
+	// an endpoint chosen by whoever created the subscription; a proxy is chosen
+	// by whoever runs the server, exactly like BACKUP_DIR. So the proxy the
+	// transport selects is recorded here and exempted at the dial.
+	//
+	// Note the consequence: while a proxy is configured, this server never
+	// connects to endpoints itself, so reachability policy belongs to the proxy.
+	// The subscribe-time endpoint validation in the API layer remains the guard
+	// on that path, and redirects are still refused.
+	var proxyMu sync.RWMutex
+	proxyAddrs := make(map[string]bool, 2)
+	if inner := t.Proxy; inner != nil {
+		t.Proxy = func(r *http.Request) (*url.URL, error) {
+			u, err := inner(r)
+			if err != nil || u == nil {
+				return u, err
+			}
+			// Ordering is guaranteed: net/http resolves the proxy for a request
+			// before dialling for that request, so the address is always
+			// recorded by the time DialContext is asked about it.
+			proxyMu.Lock()
+			if len(proxyAddrs) < maxTrackedProxies {
+				proxyAddrs[canonicalProxyAddr(u)] = true
+			}
+			proxyMu.Unlock()
+			return u, nil
+		}
+	}
+
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		proxyMu.RLock()
+		isProxy := proxyAddrs[addr]
+		proxyMu.RUnlock()
+		if isProxy {
+			return dialer.DialContext(ctx, network, addr)
+		}
+
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
 			return nil, fmt.Errorf("push: malformed address %q", addr)
