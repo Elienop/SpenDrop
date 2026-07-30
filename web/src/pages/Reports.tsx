@@ -17,13 +17,23 @@ export function Reports() {
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Reports</h1>
 
-      {/* `clamped` is the only signal that some imported data is unreachable
-          here: import accepts dates back to 1900, but the year pickers bottom
-          out at MIN_YEAR because every year-param endpoint rejects anything
-          older. Those amounts still count in each date-range aggregate, so
-          nothing is broken and nothing is missing — this is informational, not
-          a warning, which is why it uses the default Alert variant and the
-          polite `status` role rather than an assertive `alert`.
+      {/* `clamped` is the only signal that some data is unreachable here.
+          Transaction dates have no lower bound on create, and import accepts
+          back to 1900, but the year pickers bottom out at MIN_YEAR because
+          every year-param endpoint rejects anything older.
+
+          Do NOT soften this to "the amounts still count". They do not, and an
+          earlier version of this notice said they did. Measured against a
+          real 1984 row: /reports/income-expenses at the 24- and 324-month
+          windows the UI actually requests, /reports/budget-vs-actual?year=,
+          and the dashboard summary ALL exclude it. The only response that
+          contains it is income-expenses at months=1212, which no control ever
+          asks for. The row is in the ledger and listed under Transactions —
+          it is absent from every report total the user can see.
+
+          Still informational rather than a warning (default variant, polite
+          `status` role): nothing is broken, and the fix is a product decision
+          about MIN_YEAR, not something the user can act on beyond knowing.
 
           Rendered once for the whole page: the floor is a property of the
           household ledger, not of any one tab. It costs nothing for the
@@ -33,9 +43,9 @@ export function Reports() {
         <Alert role="status">
           <Info className="size-4" />
           <AlertDescription>
-            Some transactions are dated before {MIN_YEAR}. Their amounts are
-            still included in every total, but those years cannot be selected
-            here.
+            Some transactions are dated before {MIN_YEAR}. They are in your
+            ledger and listed under Transactions, but they are not included in
+            these reports and their years cannot be selected here.
           </AlertDescription>
         </Alert>
       )}

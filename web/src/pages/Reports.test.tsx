@@ -90,12 +90,12 @@ describe('Reports', () => {
     });
   });
 
-  // `clamped` is the ONLY signal that some imported data is unreachable in
-  // Reports: rows dated before MIN_YEAR still land in every date-range
-  // aggregate, but no year picker can select their year. Leaving it unrendered
-  // would be a smaller version of the exact defect this feature fixes, so it
-  // gets a quiet informational note — shown once for the whole page, because
-  // it is a property of the ledger and not of any one tab.
+  // `clamped` is the ONLY signal that some data is unreachable in Reports:
+  // rows dated before MIN_YEAR are in the ledger but no year picker can select
+  // their year, AND they are absent from every report aggregate the UI asks
+  // for. Leaving it unrendered would be a smaller version of the exact defect
+  // this feature fixes, so it gets a quiet informational note — shown once for
+  // the whole page, because it is a property of the ledger, not of any one tab.
   describe('pre-MIN_YEAR ledger rows', () => {
     it('says so when the server reports the floor was clamped', () => {
       useReportYearFloor.mockReturnValue({ ...floorResult, clamped: true });
@@ -104,6 +104,23 @@ describe('Reports', () => {
       const note = screen.getByRole('status');
       expect(note).toHaveTextContent(/before 2000/i);
       expect(note).toHaveTextContent(/cannot be selected/i);
+    });
+
+    // Regression guard. The first version of this notice claimed the amounts
+    // were "still included in every total". Measured against a real 1984 row,
+    // that was false: income-expenses at the 24- and 324-month windows the UI
+    // requests, budget-vs-actual?year=, and the dashboard summary all exclude
+    // it — only months=1212 contains it, and nothing requests that. Reassuring
+    // the user their old amounts still count, when they do not, is worse than
+    // saying nothing at all.
+    it('does not claim the excluded amounts still count toward totals', () => {
+      useReportYearFloor.mockReturnValue({ ...floorResult, clamped: true });
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).not.toHaveTextContent(/included in every total/i);
+      expect(note).not.toHaveTextContent(/still (count|included)/i);
+      expect(note).toHaveTextContent(/not included in these reports/i);
     });
 
     it('stays silent for the ordinary household', () => {
