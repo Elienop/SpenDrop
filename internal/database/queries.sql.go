@@ -583,6 +583,29 @@ func (q *Queries) GetCurrency(ctx context.Context, code string) (Currency, error
 	return i, err
 }
 
+const getOldestTransactionYear = `-- name: GetOldestTransactionYear :one
+SELECT CAST(MIN(CAST(strftime('%Y', t.date) AS INTEGER)) AS INTEGER) AS oldest_year
+FROM transactions t
+WHERE t.deleted_at IS NULL
+`
+
+// GetOldestTransactionYear returns the calendar year of the oldest LIVE transaction in the
+// ledger, household-wide. Drives the Reports year picker's floor.
+//
+// The result is nullable and INVALID means "the ledger has no live rows at
+// all" - MIN() over zero rows is NULL. That is a real state (a fresh install,
+// or every row in the trash), not an error, so the caller decides the
+// fallback rather than this returning a misleading 0.
+//
+// deleted_at IS NULL keeps tombstoned rows from widening the picker to a year
+// the user would find empty (soft-delete discipline).
+func (q *Queries) GetOldestTransactionYear(ctx context.Context) (sql.NullInt64, error) {
+	row := q.db.QueryRowContext(ctx, getOldestTransactionYear)
+	var oldest_year sql.NullInt64
+	err := row.Scan(&oldest_year)
+	return oldest_year, err
+}
+
 const getSavingsGoal = `-- name: GetSavingsGoal :one
 
 SELECT id, year, updated_at, target_amount_cents FROM savings_goals WHERE year = ?
