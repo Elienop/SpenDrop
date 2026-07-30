@@ -705,31 +705,36 @@ func TestHandleDashboardTrend_NegativeMonthsClamped(t *testing.T) {
 // pin the contract itself rather than restating the current number, because
 // the number is expected to grow and the *relationship* is what must hold.
 
-// historicalYearStart mirrors HISTORICAL_YEAR_START in web/src/lib/dates.ts —
-// the oldest year the Savings year Select offers. It is duplicated here (not
-// imported, obviously) so the Go side can state what window the UI needs.
-const historicalYearStart = 2024
-
 // TestMaxTrendMonths_ReachesOldestSelectableYear is the Go half of
 // web/src/components/reports/savingsWindow.test.ts: whichever year the UI
 // offers, the window must still reach January of it, and the server must not
-// clamp that window away. The pinned "current year" list is the same one the
-// frontend test iterates, so the two halves fail at the same horizon instead
-// of the backend silently binding first.
+// clamp that window away.
+//
+// This used to compare against a Go-local `historicalYearStart = 2024` that
+// mirrored HISTORICAL_YEAR_START in web/src/lib/dates.ts — exactly the
+// cross-boundary drift its sibling test was written to prevent. The floor is
+// no longer a TypeScript constant: GET /api/settings/report-year-floor derives
+// it from the ledger and clamps it to MinYear, so MinYear is the real
+// worst-case oldest selectable year and is already defined right here in Go.
 func TestMaxTrendMonths_ReachesOldestSelectableYear(t *testing.T) {
-	// The frontend test pins these clocks; time.Now() is added so the list
-	// going stale cannot make the assertion vacuous.
-	currentYears := []int{2026, 2033, 2034, 2040, 2060, time.Now().Year()}
+	// The frontend test pins the first five clocks; time.Now() is added so the
+	// list going stale cannot make the assertion vacuous, and MaxYear is added
+	// because it is the last year this application models at all — past it,
+	// every year-param endpoint 400s, so nothing wider can ever be asked for.
+	currentYears := []int{2026, 2033, 2034, 2040, 2060, time.Now().Year(), MaxYear}
 
 	for _, currentYear := range currentYears {
 		// Worst case: the window ends at the current month, so reaching
 		// January of the oldest offered year takes every month from that
-		// January through December of the current year.
-		minRequired := (currentYear - historicalYearStart + 1) * 12
+		// January through December of the current year. The oldest year the
+		// picker can offer is MinYear — handleReportYearFloor clamps there so
+		// it can never offer a year the year-param endpoints reject.
+		minRequired := (currentYear - MinYear + 1) * 12
 		if MaxTrendMonths < minRequired {
-			t.Errorf("MaxTrendMonths=%d is too small for a %d clock: the Savings tab can select %d, "+
-				"which needs a %d-month window to reach January — the server would clamp and truncate it",
-				MaxTrendMonths, currentYear, historicalYearStart, minRequired)
+			t.Errorf("MaxTrendMonths=%d is too small for a %d clock: the report year floor "+
+				"bottoms out at MinYear=%d, which needs a %d-month window to reach January — "+
+				"the server would clamp and truncate it",
+				MaxTrendMonths, currentYear, MinYear, minRequired)
 		}
 	}
 }

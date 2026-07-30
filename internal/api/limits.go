@@ -101,13 +101,21 @@ const MaxSubscriptionsPerUser = 20
 // in queries. Category trends are capped far lower because that query fans out
 // per category.
 //
-// MaxTrendMonths is 50 years: the Savings tab derives its window from the
-// selected year (web/src/components/reports/utils.ts, MAX_REPORT_MONTHS, which
-// must match this value), and the old 120 was exactly the window needed to
-// reach HISTORICAL_YEAR_START from 2033 — so from 2034 the server would have
-// started silently truncating the oldest selectable years, which is the exact
-// bug the client-side window calculation was added to fix.
+// MaxTrendMonths is DERIVED, not chosen. The Savings tab sizes its window from
+// the year the user picked (web/src/components/reports/utils.ts,
+// MAX_REPORT_MONTHS, which must match this value), and the year picker's floor
+// now comes from the ledger via GET /api/settings/report-year-floor. That
+// handler clamps the floor to MinYear, so the widest window the UI can ever
+// legitimately ask for is January of MinYear through December of MaxYear —
+// past MaxYear every year-param endpoint 400s, so nothing wider is reachable.
+//
+// Two earlier values were literals sized against the then-hard-coded frontend
+// floor of 2024, and each one was already scheduled to start silently
+// truncating the oldest selectable years: 120 would have bound from 2034, and
+// 600 binds from 2050 once the floor can reach MinYear. Deriving the constant
+// removes that whole class of expiry — the only way to shrink this window now
+// is to narrow MinYear/MaxYear, which is exactly when it should shrink.
 const (
-	MaxTrendMonths         = 600
+	MaxTrendMonths         = (MaxYear - MinYear + 1) * 12
 	MaxCategoryTrendMonths = 60
 )
