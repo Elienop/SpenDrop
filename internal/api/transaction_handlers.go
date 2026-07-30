@@ -67,7 +67,15 @@ type transactionRequest struct {
 	OriginalCurrency string   `json:"original_currency"`
 	Description      string   `json:"description"`
 	CategoryID       int64    `json:"category_id"`
-	Tags             string   `json:"tags"`
+	// Tags is a pointer for exactly the same reason as Notes below: PUT is a
+	// full replace, so a plain string made an absent key indistinguishable
+	// from "" and silently wiped the stored tags. The web inline editor always
+	// sends tags, but the API-token surface is exposed and its clients build
+	// payloads field-by-field.
+	//
+	// nil           -> leave the stored tags unchanged (update) / no tags (create)
+	// pointer to "" -> explicitly clear the tags
+	Tags *string `json:"tags"`
 	// Notes is a pointer so an ABSENT key is distinguishable from an empty
 	// one. PUT /transactions/{id} is a full replace, and clients that build
 	// their payload field-by-field (the inline row editor, the API-token
@@ -380,8 +388,8 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
-		Tags:                toNullString(req.Tags),
-		Notes:               notesFromPtr(req.Notes),
+		Tags:                nullStringFromPtr(req.Tags),
+		Notes:               nullStringFromPtr(req.Notes),
 		// Manual entries used to store NULL here, so import dedupe could not
 		// see them and re-imported them as duplicates.
 		ContentHash: h.contentHashForManualEntry(
@@ -522,11 +530,11 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
-		Tags:                toNullString(req.Tags),
-		// PUT is a full replace, so an absent notes key must carry the
-		// stored value forward rather than clearing it. `existing` was
-		// already loaded above for the tombstone/ownership checks.
-		Notes: notesForUpdate(req.Notes, existing.Notes),
+		// PUT is a full replace, so an absent tags or notes key must carry the
+		// stored value forward rather than clearing it. `existing` was already
+		// loaded above for the tombstone/ownership checks.
+		Tags:  nullStringForUpdate(req.Tags, existing.Tags),
+		Notes: nullStringForUpdate(req.Notes, existing.Notes),
 		ID:    id,
 	})
 	if err != nil {
@@ -712,8 +720,8 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			OriginalCurrency:    origCur,
 			Description:         req.Description,
 			CategoryID:          req.CategoryID,
-			Tags:                toNullString(req.Tags),
-			Notes:               notesFromPtr(req.Notes),
+			Tags:                nullStringFromPtr(req.Tags),
+			Notes:               nullStringFromPtr(req.Notes),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -834,7 +842,7 @@ func validateTransactionRequest(req transactionRequest) error {
 	if len(req.Description) > MaxDescriptionLength {
 		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
-	if _, err := validateTagsField(req.Tags); err != nil {
+	if _, err := validateTagsField(optionalStringValue(req.Tags)); err != nil {
 		return err
 	}
 	if req.Notes != nil && len(*req.Notes) > MaxNotesLength {
@@ -2273,24 +2281,36 @@ func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Que
 	return sql.NullString{String: hash, Valid: true}
 }
 
-// notesFromPtr converts an optional notes field to its stored form. A nil
-// pointer (key absent from the JSON body) means "no note" on a create path;
+// nullStringFromPtr converts an optional wire field to its stored form on a
+// CREATE path. A nil pointer (key absent from the JSON body) means "no value";
 // update paths must not call this and should keep the existing value instead.
-func notesFromPtr(p *string) sql.NullString {
+// Shared by notes and tags — both are optional free-text columns whose absent
+// and empty cases must stay distinguishable.
+func nullStringFromPtr(p *string) sql.NullString {
 	if p == nil {
 		return sql.NullString{}
 	}
 	return toNullString(*p)
 }
 
-// notesForUpdate resolves the notes column for a full-replace update: an
-// absent key (nil) keeps whatever is already stored, an explicit value
+// nullStringForUpdate resolves an optional column for a full-replace update:
+// an absent key (nil) keeps whatever is already stored, an explicit value
 // (including "") overwrites it.
-func notesForUpdate(p *string, existing sql.NullString) sql.NullString {
+func nullStringForUpdate(p *string, existing sql.NullString) sql.NullString {
 	if p == nil {
 		return existing
 	}
 	return toNullString(*p)
+}
+
+// optionalStringValue reads an optional wire field for validation, treating an
+// absent key as the empty string. Only for validators — never for deciding
+// what to store, where absent and "" must stay distinguishable.
+func optionalStringValue(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Request) {

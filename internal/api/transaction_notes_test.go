@@ -144,3 +144,108 @@ func TestHandleUpdateTransaction_ExplicitNotesOverwrites(t *testing.T) {
 		t.Errorf("notes = %q, want %q", after.Notes.String, "new note")
 	}
 }
+
+// TestHandleUpdateTransaction_OmittedTagsArePreserved is the same defect that
+// was fixed for notes, still live on tags.
+//
+// The web inline editor always sends a tags key, so this is not reachable from
+// the UI — but the fix for notes was justified as covering "every client,
+// including the API-token surface", and that surface is exposed. A PUT that
+// omits tags decoded "" through a plain string field and silently wiped them.
+func TestHandleUpdateTransaction_OmittedTagsArePreserved(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "tagowner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Health")
+	txn := seedTransactionWithNote(t, h, user.ID, catID, "keep me")
+
+	if !txn.Tags.Valid || txn.Tags.String != "health" {
+		t.Fatalf("fixture is wrong: seeded tags = %q (valid=%v)", txn.Tags.String, txn.Tags.Valid)
+	}
+
+	// No tags key — the shape an API-token client that has no tag editor sends.
+	rec := putTransaction(t, h, user, txn.ID, map[string]any{
+		"date":        "2026-07-02",
+		"amount":      20.0,
+		"description": "Pharmacy",
+		"category_id": catID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	after, err := h.queries.GetTransactionByID(t.Context(), txn.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !after.Tags.Valid || after.Tags.String != "health" {
+		t.Errorf("tags were destroyed by an unrelated edit: valid=%v value=%q",
+			after.Tags.Valid, after.Tags.String)
+	}
+	// The edit itself must still have applied.
+	if after.Description != "Pharmacy" {
+		t.Errorf("edit did not apply: description = %q", after.Description)
+	}
+}
+
+// TestHandleUpdateTransaction_ExplicitEmptyTagsClears is the over-correction
+// guard. Without it, "always keep the stored value" would pass the test above
+// while making tags impossible to clear.
+func TestHandleUpdateTransaction_ExplicitEmptyTagsClears(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "tagowner2", "member")
+	catID := seedExpenseCategory(t, h.queries, "Health")
+	txn := seedTransactionWithNote(t, h, user.ID, catID, "keep me")
+
+	rec := putTransaction(t, h, user, txn.ID, map[string]any{
+		"date":        "2026-07-01",
+		"amount":      15.0,
+		"description": "Pharmacy",
+		"category_id": catID,
+		"tags":        "",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+
+	after, err := h.queries.GetTransactionByID(t.Context(), txn.ID)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if after.Tags.Valid && after.Tags.String != "" {
+		t.Errorf("explicit empty tags did not clear them: %q", after.Tags.String)
+	}
+}
+
+// TestHandleCreateTransaction_OmittedTagsMeansNone pins the create side: on a
+// create there is nothing to preserve, so an absent key must still mean "no
+// tags" rather than tripping over the new pointer.
+func TestHandleCreateTransaction_OmittedTagsMeansNone(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "tagowner3", "member")
+	catID := seedExpenseCategory(t, h.queries, "Health")
+
+	body, _ := json.Marshal(map[string]any{
+		"date":        "2026-07-01",
+		"amount":      15.0,
+		"description": "Pharmacy",
+		"category_id": catID,
+	})
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(body)), user)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleCreateTransaction(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201; body = %s", rec.Code, rec.Body.String())
+	}
+
+	var created struct {
+		ID   int64  `json:"id"`
+		Tags string `json:"tags"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if created.Tags != "" {
+		t.Errorf("tags = %q, want empty", created.Tags)
+	}
+}
