@@ -296,7 +296,7 @@ Most deployments only need the first handful of variables. Everything below is a
 | `BACKUP_INTERVAL` | `24h` | How often the scheduler runs a backup. Must be at least `1h` |
 | `BACKUP_DIR` | `backups` | Where backups are written. The Docker image overrides this to `/app/data/backups` so the files land in the mounted volume |
 | `BACKUP_KEEP_DAILY` | `7` | Distinct calendar days retained, **plus** the most-recent 7 snapshots so a sub-daily `BACKUP_INTERVAL` also keeps intra-day restore points. The calendar half is what makes the recovery window independent of `BACKUP_INTERVAL` |
-| `BACKUP_KEEP_CORRUPT` | `2` | Quarantined `.corrupt` backups retained for forensics. Bounded deliberately: a failed verify writes a full-size copy of the database into `BACKUP_DIR`, which shares a volume with the live database, so an unbounded quarantine ends in ENOSPC |
+| `BACKUP_KEEP_CORRUPT` | `2` | Quarantined `.corrupt` backups retained for forensics. Bounded deliberately: a failed verify writes a full-size copy of the database into `BACKUP_DIR`, which shares a volume with the live database, so an unbounded quarantine ends in ENOSPC. Set `0` to retain none — useful on a tight volume, at the cost of losing the evidence of *why* a backup failed. The effective value is printed in the scheduler's startup log line |
 | `BACKUP_KEEP_WEEKLY` | `4` | Distinct ISO weeks retained |
 | `BACKUP_KEEP_MONTHLY` | `12` | Distinct calendar months retained. The sum of the three `BACKUP_KEEP_*` counts must be ≥ 1 — setting all three to `0` is rejected at startup because the current tick's own backup would be pruned on the same tick |
 

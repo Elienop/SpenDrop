@@ -53,7 +53,7 @@ func TestPrune_DailyWindowIsIntervalIndependent(t *testing.T) {
 				if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
 					t.Fatalf("write %s: %v", name, err)
 				}
-				if _, _, err := Prune(dir, now, keepDaily, keepWeekly, keepMonthly, 2); err != nil {
+				if _, _, _, err := Prune(dir, now, keepDaily, keepWeekly, keepMonthly, 2); err != nil {
 					t.Fatalf("prune: %v", err)
 				}
 			}
@@ -132,7 +132,7 @@ func TestPrune_BoundsCorruptQuarantine(t *testing.T) {
 		}
 	}
 
-	if _, _, err := Prune(dir, now, 7, 4, 12, 2); err != nil {
+	if _, _, _, err := Prune(dir, now, 7, 4, 12, 2); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 

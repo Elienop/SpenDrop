@@ -49,10 +49,10 @@ const defaultKeepCorrupt = 2
 // short-circuit the sweep. A companion .sha256 sidecar is removed alongside
 // the backup file; a NotExist error on the sidecar is ignored because a
 // previous crashed backup may have left one without the other.
-func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCorrupt int) (kept, removed []string, err error) {
+func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCorrupt int) (kept, removed, failed []string, err error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, fmt.Errorf("read backup directory: %w", err)
+		return nil, nil, nil, fmt.Errorf("read backup directory: %w", err)
 	}
 
 	type candidate struct {
@@ -157,13 +157,18 @@ func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCo
 	// delete the rest. Evidence needs one or two samples, not every sample
 	// forever.
 	//
-	// A non-positive keepCorrupt falls back to the default rather than meaning
-	// "keep none". In a backup subsystem the zero value of a struct field must
-	// not silently destroy the only evidence of why backups are failing, and
-	// every caller that genuinely wants a bound sets one (config defaults to
-	// 2). The bound is what matters here; the exact number is not worth a
-	// footgun.
-	if keepCorrupt <= 0 {
+	// Only a NEGATIVE keepCorrupt falls back to the default. Zero used to as
+	// well, which silently overrode an operator who had asked for none: config
+	// validation accepts BACKUP_KEEP_CORRUPT=0 and the README documents the
+	// knob, so setting it to 0 on a tight volume — exactly the audience for a
+	// quarantine bound — still left two full-size copies of the database with
+	// nothing anywhere reporting the override.
+	//
+	// The zero-value-footgun this guarded against cannot occur through the only
+	// production caller: config.Defaults sets 2 and Load overrides it solely
+	// when the env var is present, so a Scheduler built from config never
+	// carries an accidental 0.
+	if keepCorrupt < 0 {
 		keepCorrupt = defaultKeepCorrupt
 	}
 	sort.Slice(corrupts, func(i, j int) bool { return corrupts[i].ts.After(corrupts[j].ts) })
@@ -174,6 +179,12 @@ func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCo
 		}
 		path := filepath.Join(dir, c.name)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			// Recorded, not swallowed. The quarantine bound exists for the case
+			// where the volume is in trouble, and that is precisely when unlink
+			// fails — a read-only remount after an I/O error, a share holding
+			// the file open. Dropping the error left the bound inoperative with
+			// no line in the log at all.
+			failed = append(failed, c.name)
 			continue
 		}
 		_ = os.Remove(path + ".sha256")
@@ -194,8 +205,11 @@ func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCo
 		// backup is still on disk and the scheduler log would otherwise
 		// claim it had been pruned. Leave it for the next tick: Prune
 		// is idempotent, so a failed remove here becomes the next
-		// iteration's target with no special handling needed.
+		// iteration's target with no special handling needed. It is still
+		// RECORDED, so a directory that never shrinks is visible in the log
+		// rather than looking like a retention policy that keeps everything.
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			failed = append(failed, c.name)
 			continue
 		}
 		// Sidecar cleanup is best-effort. It may legitimately not
@@ -209,5 +223,5 @@ func Prune(dir string, now time.Time, keepDaily, keepWeekly, keepMonthly, keepCo
 		removed = append(removed, c.name)
 	}
 
-	return kept, removed, nil
+	return kept, removed, failed, nil
 }

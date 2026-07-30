@@ -40,7 +40,7 @@ func TestPrune_KeepsNewestDaily(t *testing.T) {
 		names = append(names, writeBackupAt(t, dir, ts, false))
 	}
 
-	kept, removed, err := Prune(dir, now, 3, 0, 0, 2)
+	kept, removed, _, err := Prune(dir, now, 3, 0, 0, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestPrune_RemovesSidecarCompanion(t *testing.T) {
 		names = append(names, writeBackupAt(t, dir, ts, true))
 	}
 
-	_, removed, err := Prune(dir, now, 2, 0, 0, 2)
+	_, removed, _, err := Prune(dir, now, 2, 0, 0, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestPrune_SidecarMissingOK(t *testing.T) {
 		writeBackupAt(t, dir, ts, false)
 	}
 
-	_, removed, err := Prune(dir, now, 2, 0, 0, 2)
+	_, removed, _, err := Prune(dir, now, 2, 0, 0, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestPrune_IgnoresUnrelatedFiles(t *testing.T) {
 		writeBackupAt(t, dir, ts, true)
 	}
 
-	if _, _, err := Prune(dir, now, 1, 0, 0, 2); err != nil {
+	if _, _, _, err := Prune(dir, now, 1, 0, 0, 2); err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestPrune_40DaySimulation(t *testing.T) {
 		names = append(names, writeBackupAt(t, dir, ts, true))
 	}
 
-	kept, removed, err := Prune(dir, now, 7, 4, 12, 2)
+	kept, removed, _, err := Prune(dir, now, 7, 4, 12, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestPrune_OverlappingBuckets(t *testing.T) {
 	now := time.Date(2026, 4, 13, 3, 0, 0, 0, time.UTC)
 	name := writeBackupAt(t, dir, now, true)
 
-	kept, removed, err := Prune(dir, now, 7, 4, 12, 2)
+	kept, removed, _, err := Prune(dir, now, 7, 4, 12, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestPrune_OverlappingBuckets(t *testing.T) {
 func TestPrune_EmptyDir(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	kept, removed, err := Prune(dir, time.Now(), 7, 4, 12, 2)
+	kept, removed, _, err := Prune(dir, time.Now(), 7, 4, 12, 2)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -281,7 +281,7 @@ func TestPrune_EmptyDir(t *testing.T) {
 // TestPrune_MissingDir returns an error.
 func TestPrune_MissingDir(t *testing.T) {
 	t.Parallel()
-	if _, _, err := Prune(filepath.Join(t.TempDir(), "does-not-exist"), time.Now(), 1, 0, 0, 2); err == nil {
+	if _, _, _, err := Prune(filepath.Join(t.TempDir(), "does-not-exist"), time.Now(), 1, 0, 0, 2); err == nil {
 		t.Fatal("Prune on missing dir: want error, got nil")
 	}
 }
