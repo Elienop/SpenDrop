@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -240,5 +241,86 @@ func assertConnectionUsable(t *testing.T, h *Handler, wantRows int) {
 	}
 	if n != wantRows {
 		t.Errorf("transactions count = %d, want %d", n, wantRows)
+	}
+}
+
+// TestDrainHelpers_ReleaseConnectionBeforeReturning pins the drain-helper SHAPE,
+// which none of the handler-level tests above can.
+//
+// An inline `for rows.Next()` loop run to exhaustion is observationally
+// identical to a drain helper from outside the handler: the cursor auto-closes
+// either way. Every test above therefore passes verbatim against the
+// pre-refactor inline loops — folding the helpers back into the handlers would
+// leave the rest of this file green.
+//
+// This test names drainCategoryTotals, drainMonthlyTotals and drainExportTxnRows
+// directly, so that revert has to delete a symbol this package references and
+// internal/api stops compiling. It also asserts the property the helpers exist
+// for: once one returns, the pool's single connection is free.
+func TestDrainHelpers_ReleaseConnectionBeforeReturning(t *testing.T) {
+	h := setupHandler(t)
+	seedMultiSheetExportData(t, h, "drain-helper-user")
+	ctx := context.Background()
+
+	totals, err := h.drainCategoryTotals(ctx, `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
+		FROM categories c
+		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL
+		GROUP BY c.id
+		HAVING total_cents > 0`)
+	if err != nil {
+		t.Fatalf("drainCategoryTotals: %v", err)
+	}
+	if len(totals) != 2 {
+		t.Errorf("category totals = %d rows, want 2 (one expense, one income)", len(totals))
+	}
+	assertConnectionFree(t, h, "drainCategoryTotals")
+
+	months, err := h.drainMonthlyTotals(ctx, `SELECT CAST(strftime('%m', t.date) AS INTEGER) AS month_num,
+		COALESCE(SUM(CASE WHEN c.type = 'expense' THEN t.amount_cents ELSE 0 END), 0) AS expenses_cents,
+		COALESCE(SUM(CASE WHEN c.type = 'income' THEN t.amount_cents ELSE 0 END), 0) AS income_cents
+		FROM transactions t
+		JOIN categories c ON t.category_id = c.id
+		WHERE t.deleted_at IS NULL
+		GROUP BY month_num
+		ORDER BY month_num`)
+	if err != nil {
+		t.Fatalf("drainMonthlyTotals: %v", err)
+	}
+	if got := months[6]; got.expensesCents != 1234 || got.incomeCents != 500000 {
+		t.Errorf("July totals = %+v, want {expensesCents:1234 incomeCents:500000}", got)
+	}
+	if got := months[7]; got.expensesCents != 4321 {
+		t.Errorf("August expenses = %d, want 4321", got.expensesCents)
+	}
+	assertConnectionFree(t, h, "drainMonthlyTotals")
+
+	txns, err := h.drainExportTxnRows(ctx, `SELECT t.date, t.description, c.name, c.type, t.amount_cents,
+		t.original_amount_cents, t.original_currency, t.tags, t.notes
+		FROM transactions t
+		JOIN categories c ON t.category_id = c.id
+		WHERE t.deleted_at IS NULL
+		ORDER BY t.date DESC, t.id DESC LIMIT ?`, MaxExportRows)
+	if err != nil {
+		t.Fatalf("drainExportTxnRows: %v", err)
+	}
+	if len(txns) != 3 {
+		t.Errorf("transaction rows = %d, want 3", len(txns))
+	}
+	assertConnectionFree(t, h, "drainExportTxnRows")
+}
+
+// assertConnectionFree checks the pool's only connection is back before issuing
+// a real follow-up query on it. The Stats check is fatal and comes first on
+// purpose: the query below blocks forever on a leaked connection, so letting it
+// run after a known leak would turn a clean failure into a test-binary timeout.
+func assertConnectionFree(t *testing.T, h *Handler, after string) {
+	t.Helper()
+	if inUse := h.db.Stats().InUse; inUse != 0 {
+		t.Fatalf("%s returned with %d connection(s) still checked out: the cursor "+
+			"was not drained", after, inUse)
+	}
+	var n int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&n); err != nil {
+		t.Fatalf("follow-up query after %s failed: %v", after, err)
 	}
 }
