@@ -513,6 +513,30 @@ Every successful backup emits a single log line you can grep for in `docker logs
 backup ok: spendrop-2026-04-13T0300Z.db (4.8 MB, 9842 rows, sha256 a1b2c3d4e5f6…) in 87ms
 ```
 
+#### Monitoring backups without reading the log
+
+Every condition above also reaches [`GET /healthz/data`](#api-reference) under a `backups` block, so you do not have to grep container logs to find out that backups stopped working:
+
+```json
+"backups": {
+  "enabled": true,
+  "last_run_at": "2026-04-13T03:00:00Z",
+  "last_outcome": "success",
+  "trusted_count": 14,
+  "quarantined_count": 0,
+  "prune_failed_count": 0,
+  "newest_backup_at": "2026-04-13T03:00:00Z",
+  "newest_backup_age_seconds": 3600,
+  "interval_seconds": 86400
+}
+```
+
+`last_outcome` is `success`, `verify_failed` (a snapshot was written and rejected), `error` (no snapshot was produced), or `""` (no tick has completed yet). `trusted_count` counts restore points — backups that have a `.sha256` sidecar — so a quarantined or sidecar-less file never inflates it. The values are read from the scheduler's in-memory snapshot, refreshed once per tick, so scraping this endpoint does not touch `BACKUP_DIR`.
+
+**Two of these flip the endpoint to 503:** `trusted_count == 0` while `enabled` is true (there is nothing to restore from), and `last_outcome` being anything other than `success` (nothing new is being captured). A disabled scheduler and one that has not completed its first tick never degrade — otherwise `BACKUP_ENABLED=false` would be unusable and every container restart would flap.
+
+**The rest are reported, not alerted on.** `quarantined_count` outlives the failure that produced it by design (`BACKUP_KEEP_CORRUPT` retains the newest samples on purpose), so degrading on it would hold the endpoint at 503 long after backups recovered — `last_outcome` already carries the live failure. `prune_failed_count > 0` means retention is not being enforced and the volume will grow, but every existing backup is intact. And staleness has no correct universal threshold, so the block emits `newest_backup_age_seconds` alongside `interval_seconds` and leaves the judgement to your alert rule — `newest_backup_age_seconds > 3 * interval_seconds` is a reasonable starting point.
+
 > **Do not** use `docker cp spendrop:/app/data/spendrop.db` on a running container. SQLite in WAL mode keeps uncommitted writes in `spendrop.db-wal` and `spendrop.db-shm`. A naive copy of just `spendrop.db` can be silently inconsistent or lose recent transactions on restore. Use the scheduled backup or the `spendrop backup` subcommand below instead.
 
 #### Take an immediate backup
@@ -877,7 +901,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
-| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, and the cached result of the daily full `PRAGMA integrity_check`. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, or version string that is safe to expose on a self-hosted LAN. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
 | GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 
 ### Users (admin only)
