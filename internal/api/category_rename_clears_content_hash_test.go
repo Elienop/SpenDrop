@@ -243,6 +243,22 @@ func TestUpdateCategory_CaseOnlyRename_PreservesContentHashes(t *testing.T) {
 	}
 }
 
+// TestUpdateCategory_UnknownID_Returns404 pins the not-found contract across
+// the change of mechanism. Before the content_hash clear landed, "no such
+// category" was inferred from UpdateCategory's RowsAffected() == 0; the clear
+// needs the row's PRIOR name, so the handler now reads it up front and the 404
+// comes from that read's sql.ErrNoRows instead. Same status, different source
+// — and nothing else in the suite covers it.
+func TestUpdateCategory_UnknownID_Returns404(t *testing.T) {
+	h := setupHandler(t)
+	admin := seedTestUser(t, h.queries, "admin", RoleAdmin)
+
+	rec := putCategory(t, h, admin, 999999, map[string]any{"name": "Ghost"})
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404; body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 // TestUpdateCategory_RejectedRename_LeavesContentHashesIntact pins the other
 // half of the atomicity requirement: the clear must not survive a rename that
 // never committed.
