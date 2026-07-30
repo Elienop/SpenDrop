@@ -133,9 +133,9 @@ type RateLimitConfig struct {
 	// This is the only safe way to pick the client out of X-Forwarded-For. The
 	// selection walks the header from the right while entries are in one of
 	// these ranges and takes the first that is not, so it never depends on the
-	// chain being a particular LENGTH — see auth.ClientIPForRateLimit for why
-	// the hop count this replaced was bypassable from any direct peer even in
-	// its default configuration.
+	// chain being a particular LENGTH — see auth.ClientIP for why the hop count
+	// this replaced was bypassable from any direct peer even in its default
+	// configuration.
 	//
 	// The ranges must cover the proxies and nothing else: any host inside them
 	// is allowed to declare who the client is.
