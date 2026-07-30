@@ -168,8 +168,26 @@ WHERE t.id = ?;
 -- Phase 3.1b: the legacy REAL columns were dropped in migration 010; only the
 -- INTEGER cents columns are written. The caller computes cents from the float
 -- amount before invoking.
+--
+-- content_hash = NULL is deliberate and load-bearing. This is a full-replace
+-- update, so it always rewrites every hash input (date, amount, description,
+-- category). Keeping the old hash would leave the row claiming the identity of
+-- content it no longer holds: hand-type "Coffee", rename it, then import a
+-- genuinely new "Coffee" for that date and the import is rejected as a
+-- duplicate of a row that no longer says "Coffee" — the new row never lands
+-- and the user is told it was already there. The mirror case (editing a row
+-- INTO matching a future import) double-imports.
+--
+-- Recomputing the hash here is not an option: the identity is derived from the
+-- CATEGORY NAME, which this statement does not have, and a recomputed value
+-- could collide with a live row and abort the update. Clearing makes the row
+-- leave dedupe rather than lie about it; the Phase 3.4 startup backfill
+-- re-anchors it to its current content on the next boot.
+--
+-- This was harmless before 13f0deb, when only imported rows carried a hash.
+-- That commit gave every hand-typed row one, and those are the rows users edit.
 UPDATE transactions
-SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
 -- name: SoftDeleteTransaction :exec

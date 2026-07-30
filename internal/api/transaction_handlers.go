@@ -1046,14 +1046,21 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	// those are "no longer in the live set" and reviving them via an
 	// incidental bulk rename would silently restore deleted data. If an
 	// operator wants to rename tombstoned rows, they restore first.
+	//
+	// content_hash = NULL for the same reason UpdateTransaction clears it:
+	// description is a dedupe-identity input, so every renamed row would
+	// otherwise keep claiming the identity of the description it no longer
+	// has — and a later import of that original content would be rejected as
+	// a duplicate of a row that no longer matches it. The startup backfill
+	// re-anchors the renamed rows to their current content on the next boot.
 	if user.Role == RoleAdmin {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
+			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%",
 		)
 	} else {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
+			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%", user.ID,
 		)
 	}
@@ -2003,6 +2010,11 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		setClauses = append(setClauses, "category_id = ?")
 		args = append(args, *patch.CategoryID)
 	}
+	// This branch only runs for tags-free patches, and buildUpdatePatch
+	// rejects an empty patch, so at least one dedupe-identity input (date,
+	// description, category) always changes here. Clear the stale identity —
+	// see the note on the UpdateTransaction query for what keeping it costs.
+	setClauses = append(setClauses, "content_hash = NULL")
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 
 	whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())
@@ -2152,6 +2164,16 @@ func (h *Handler) runUpdateByFilterTags(r *http.Request, tx *sql.Tx, user databa
 		if patch.CategoryID != nil {
 			setClauses = append(setClauses, "category_id = ?")
 			setArgs = append(setArgs, *patch.CategoryID)
+		}
+		// Clear the dedupe identity only when the patch actually moves one of
+		// its inputs. Tags are NOT part of ComputeContentHash, and this branch
+		// always carries tags — a bulk tagging pass can match the entire
+		// ledger, so clearing unconditionally would drop every row out of
+		// dedupe (and let a re-import double all of them) until the next boot
+		// re-anchors them. The combined case is real: a patch may carry tags
+		// AND a hash input, and then the identity must go.
+		if patch.Date != nil || patch.Description != nil || patch.CategoryID != nil {
+			setClauses = append(setClauses, "content_hash = NULL")
 		}
 		setClauses = append(setClauses, "tags = ?", "updated_at = CURRENT_TIMESTAMP")
 		setArgs = append(setArgs, merged, m.id)

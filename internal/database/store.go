@@ -214,9 +214,15 @@ func (s *TransactionStore) UpdateTx(
 	// them — bulk amount edits would require currency conversion and cents
 	// recomputation that the patch shape does not carry. The legacy REAL
 	// amount / original_amount columns were dropped in migration 010 (Phase
-	// 3.1b), so only the cents columns flow through. content_hash is
-	// intentionally NOT rewritten here (UpdateTransaction itself does not
-	// touch it — Phase 3.4 contract).
+	// 3.1b), so only the cents columns flow through.
+	//
+	// content_hash is CLEARED by UpdateTransaction itself, not carried
+	// through this struct. A patch can move date, description or category_id
+	// — all hash inputs — so an edited row must leave dedupe rather than keep
+	// claiming the identity of content it no longer holds, which would make a
+	// later import of that content skip a genuinely new row. See the long note
+	// on the UpdateTransaction query. The startup backfill re-anchors the row
+	// to its current content on the next boot.
 	params := UpdateTransactionParams{
 		ID:                  id,
 		Date:                before.Date,
