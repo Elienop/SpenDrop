@@ -1,27 +1,19 @@
 package auth
 
 import (
-	"bytes"
-	"log"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
 	"testing"
-	"time"
 )
 
-// withTrustedProxies configures deprecated hop-count mode (no CIDRs).
-func withTrustedProxies(t *testing.T, trusted bool, hops int) {
-	t.Helper()
-	withTrustedProxyCIDRs(t, trusted, hops, nil)
-}
-
-// withTrustedProxyCIDRs configures the address-set mode that supersedes hops.
-func withTrustedProxyCIDRs(t *testing.T, trusted bool, hops int, cidrs []string) {
+// withTrustedProxyCIDRs configures address-set selection, the only mode there is.
+func withTrustedProxyCIDRs(t *testing.T, trusted bool, cidrs []string) {
 	t.Helper()
 	trustProxyHeadersMu.RLock()
-	prevTrust, prevHops, prevCIDRs := trustProxyHeaders, trustedProxyHops, trustedProxyCIDRs
+	prevTrust, prevCIDRs := trustProxyHeaders, trustedProxyCIDRs
 	trustProxyHeadersMu.RUnlock()
 
 	var parsed []netip.Prefix
@@ -36,8 +28,8 @@ func withTrustedProxyCIDRs(t *testing.T, trusted bool, hops int, cidrs []string)
 		}
 		parsed = append(parsed, p.Masked())
 	}
-	SetTrustProxyHeaders(trusted, hops, parsed)
-	t.Cleanup(func() { SetTrustProxyHeaders(prevTrust, prevHops, prevCIDRs) })
+	SetTrustProxyHeaders(trusted, parsed)
+	t.Cleanup(func() { SetTrustProxyHeaders(prevTrust, prevCIDRs) })
 }
 
 func reqWithXFF(xff, remoteAddr string) *http.Request {
@@ -49,33 +41,47 @@ func reqWithXFF(xff, remoteAddr string) *http.Request {
 	return r
 }
 
-// TestClientIPForRateLimit_HopCount is the regression test for hard-coding
-// "rightmost".
+// TestClientIPForRateLimit_WithoutCIDRsIgnoresTheHeader is THE regression test
+// for the deleted hop-count mode.
 //
-// Each appending proxy adds the address it saw, so the client sits
-// hops-from-the-right. With two hops — the README documents a Cloudflare
-// Tunnel in front of Caddy — the rightmost entry is the outer edge, the SAME
-// address for every visitor, which collapses the household into one bucket.
-func TestClientIPForRateLimit_HopCount(t *testing.T) {
-	const header = "198.51.100.7, 203.0.113.4, 192.0.2.9"
+// With TRUST_PROXY_HEADERS=true and no CIDRs configured, selection used to fall
+// into clientIPByHopCount, which had NO immediate-peer check — the CIDR path's
+// own comment says that without one "the whole scheme is decorative". At the
+// DEFAULT hops=1 that made every direct peer a full bypass of the login limiter,
+// with no misconfiguration required: a LAN host, a sibling container or an
+// exposed port simply sent its own X-Forwarded-For and the rightmost entry was
+// taken as the client. Measured before the deletion: 25 requests from one source
+// produced 25 distinct rate-limit keys.
+//
+// The same primitive aimed at someone else's address pinned a victim's bucket at
+// 429, and because Exhausted short-circuits before the password check the victim
+// could never reset it.
+//
+// Without CIDRs there is nothing that can establish a proxy is in front, so the
+// only safe answer is the socket address. Config now refuses to boot in this
+// combination; this pins the behaviour if it is ever reached anyway.
+func TestClientIPForRateLimit_WithoutCIDRsIgnoresTheHeader(t *testing.T) {
+	withTrustedProxyCIDRs(t, true, nil)
 
-	cases := []struct {
-		hops int
-		want string
-		why  string
-	}{
-		{1, "192.0.2.9", "single proxy: the client is the last entry"},
-		{2, "203.0.113.4", "two hops: the last entry is the outer edge, not the client"},
-		{3, "198.51.100.7", "three hops walks back to the original client"},
-		// More hops than entries means upstream is not appending as configured;
-		// falling back to the socket address is the safe reading.
-		{4, "10.0.0.5", "more hops than entries falls back to the socket address"},
-	}
-	for _, tc := range cases {
-		withTrustedProxies(t, true, tc.hops)
-		if got := ClientIPForRateLimit(reqWithXFF(header, "10.0.0.5:5000")); got != tc.want {
-			t.Errorf("hops=%d: got %q, want %q (%s)", tc.hops, got, tc.want, tc.why)
+	const direct = "203.0.113.66"
+	keys := map[string]bool{}
+	for i := 0; i < 25; i++ {
+		forged := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+		got := ClientIPForRateLimit(reqWithXFF(forged, direct+":40000"))
+		keys[got] = true
+		if got != direct {
+			t.Errorf("forged %q: keyed on %q, want the socket address %q", forged, got, direct)
 		}
+	}
+	if len(keys) != 1 {
+		t.Errorf("one source minted %d distinct rate-limit keys; want 1 — the login "+
+			"limiter is bypassable, and it is the only throttle on password guessing", len(keys))
+	}
+
+	// A padded header must not help either: that is what defeated the old
+	// mismatch warning, which fired on honest traffic and never on the attack.
+	if got := ClientIPForRateLimit(reqWithXFF("1.1.1.1, 2.2.2.2, 3.3.3.3", direct+":40000")); got != direct {
+		t.Errorf("padded header: keyed on %q, want the socket address %q", got, direct)
 	}
 }
 
@@ -83,7 +89,7 @@ func TestClientIPForRateLimit_HopCount(t *testing.T) {
 // directly exposed server X-Forwarded-For is attacker-controlled, so trusting
 // it would let anyone mint a fresh bucket per request.
 func TestClientIPForRateLimit_UntrustedIgnoresHeader(t *testing.T) {
-	withTrustedProxies(t, false, 1)
+	withTrustedProxyCIDRs(t, false, nil)
 	got := ClientIPForRateLimit(reqWithXFF("1.2.3.4", "10.0.0.5:5000"))
 	if got != "10.0.0.5" {
 		t.Errorf("got %q, want the socket address 10.0.0.5", got)
@@ -92,12 +98,21 @@ func TestClientIPForRateLimit_UntrustedIgnoresHeader(t *testing.T) {
 
 // TestClientIPForRateLimit_RejectsNonAddressEntry guards against a garbage or
 // injected entry becoming a rate-limit key of its own.
+//
+// The peer is inside the trusted range so the header IS read — otherwise every
+// case would fall back for the trivial reason that no proxy is configured, and
+// the test would pass without exercising entry parsing at all.
 func TestClientIPForRateLimit_RejectsNonAddressEntry(t *testing.T) {
-	withTrustedProxies(t, true, 1)
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 	for _, xff := range []string{"not-an-ip", "  ", "evil.example.com"} {
-		if got := ClientIPForRateLimit(reqWithXFF(xff, "10.0.0.5:5000")); got != "10.0.0.5" {
+		if got := ClientIPForRateLimit(reqWithXFF(xff, "172.18.0.1:5000")); got != "172.18.0.1" {
 			t.Errorf("xff=%q: got %q, want the socket-address fallback", xff, got)
 		}
+	}
+	// Control: a well-formed entry from the same peer IS taken, proving the
+	// fallbacks above are caused by the garbage and not by the configuration.
+	if got := ClientIPForRateLimit(reqWithXFF("203.0.113.5", "172.18.0.1:5000")); got != "203.0.113.5" {
+		t.Errorf("well-formed entry: got %q, want 203.0.113.5", got)
 	}
 }
 
@@ -112,7 +127,8 @@ func TestClientIPForRateLimit_RejectsNonAddressEntry(t *testing.T) {
 // IP grants an attacker nothing, since "1.2.3.4:99" and "1.2.3.4" were equally
 // forgeable to begin with.
 func TestClientIPForRateLimit_NormalisesAddressForms(t *testing.T) {
-	withTrustedProxies(t, true, 1)
+	// The peer must be a trusted proxy for the header to be read at all.
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 	cases := map[string]string{
 		"1.2.3.4:99":       "1.2.3.4",
 		"1.2.3.4":          "1.2.3.4",
@@ -123,7 +139,7 @@ func TestClientIPForRateLimit_NormalisesAddressForms(t *testing.T) {
 		"::ffff:1.2.3.4": "1.2.3.4",
 	}
 	for xff, want := range cases {
-		if got := ClientIPForRateLimit(reqWithXFF(xff, "10.0.0.5:5000")); got != want {
+		if got := ClientIPForRateLimit(reqWithXFF(xff, "172.18.0.1:5000")); got != want {
 			t.Errorf("xff=%q: got %q, want %q", xff, got, want)
 		}
 	}
@@ -146,9 +162,8 @@ func TestClientIPForRateLimit_NormalisesAddressForms(t *testing.T) {
 // entry from the right that is not a known proxy, and prepended junk sits further
 // left where it is never reached.
 func TestClientIPForRateLimit_CIDRModeResistsPrependedEntries(t *testing.T) {
-	// One appending proxy on the Docker network. hops is left at a WRONG value on
-	// purpose: with CIDRs configured it must be ignored entirely.
-	withTrustedProxyCIDRs(t, true, 2, []string{"172.18.0.0/16"})
+	// One appending proxy on the Docker network.
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 
 	const attacker = "198.51.100.7"
 	keys := map[string]bool{}
@@ -178,7 +193,7 @@ func TestClientIPForRateLimit_CIDRModeResistsPrependedEntries(t *testing.T) {
 // Only the socket address can establish that a proxy is in front; the header
 // cannot vouch for itself.
 func TestClientIPForRateLimit_CIDRModeRequiresATrustedPeer(t *testing.T) {
-	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16"})
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 
 	const direct = "203.0.113.66"
 	keys := map[string]bool{}
@@ -204,7 +219,7 @@ func TestClientIPForRateLimit_CIDRModeRequiresATrustedPeer(t *testing.T) {
 // TestClientIPForRateLimit_CIDRModeSelectionRules covers the rest of the
 // address-based contract, including the two ways it must fall back.
 func TestClientIPForRateLimit_CIDRModeSelectionRules(t *testing.T) {
-	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16", "10.9.9.9"})
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16", "10.9.9.9"})
 
 	cases := []struct {
 		name, xff, remote, want string
@@ -237,7 +252,7 @@ func TestClientIPForRateLimit_CIDRModeSelectionRules(t *testing.T) {
 // TestClientIPForRateLimit_CIDRModeBoundsTheWalk pins the allocation bound. The
 // header is entirely attacker-controlled, so an unbounded scan is free work.
 func TestClientIPForRateLimit_CIDRModeBoundsTheWalk(t *testing.T) {
-	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16"})
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 
 	// Far more trusted-looking entries than the bound, so the walk cannot reach
 	// the leftmost forged value even though every entry parses as trusted.
@@ -255,43 +270,6 @@ func TestClientIPForRateLimit_CIDRModeBoundsTheWalk(t *testing.T) {
 	}
 }
 
-// TestClientIPForRateLimit_WarnsOnShortHeader covers the misconfiguration
-// detector.
-//
-// An overcounted hop value is silent and permanent: honest clients send no
-// X-Forwarded-For, so every request falls back and the whole household shares
-// one bucket, while an attacker who prepends an entry lands on their own
-// forged value and gets unlimited buckets. Because honest traffic ALWAYS
-// produces a short header under an overcount, this warning fires on the first
-// real request and is the cheapest possible detector.
-func TestClientIPForRateLimit_WarnsOnShortHeader(t *testing.T) {
-	withTrustedProxies(t, true, 3)
-
-	// Defeat the throttle so the assertion does not depend on test ordering.
-	proxyWarnMu.Lock()
-	proxyWarnLast = time.Time{}
-	proxyWarnMu.Unlock()
-
-	var buf bytes.Buffer
-	prev := log.Writer()
-	log.SetOutput(&buf)
-	log.SetFlags(0)
-	t.Cleanup(func() { log.SetOutput(prev) })
-
-	ClientIPForRateLimit(reqWithXFF("203.0.113.4", "10.0.0.5:5000"))
-
-	if !strings.Contains(buf.String(), "TRUSTED_PROXY_HOPS=3") {
-		t.Errorf("no misconfiguration warning logged; the overcount is silent: %q", buf.String())
-	}
-
-	// And it must be throttled, or it is one line per request forever.
-	buf.Reset()
-	ClientIPForRateLimit(reqWithXFF("203.0.113.4", "10.0.0.5:5000"))
-	if buf.Len() != 0 {
-		t.Errorf("warning was not throttled: %q", buf.String())
-	}
-}
-
 // TestClientIPForRateLimit_JoinsRepeatedHeaderLines is the regression test for
 // reading only the first X-Forwarded-For field line.
 //
@@ -301,7 +279,7 @@ func TestClientIPForRateLimit_WarnsOnShortHeader(t *testing.T) {
 // RFC 7230 makes repeated field lines equivalent to one comma-joined value in
 // order, which puts the proxy's entry rightmost — where the walk starts.
 func TestClientIPForRateLimit_JoinsRepeatedHeaderLines(t *testing.T) {
-	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16"})
+	withTrustedProxyCIDRs(t, true, []string{"172.18.0.0/16"})
 
 	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
 	r.RemoteAddr = "172.18.0.1:5000"

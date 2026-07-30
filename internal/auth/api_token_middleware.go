@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"database/sql"
-	"log"
 	"net"
 	"net/http"
 	"net/netip"
@@ -136,7 +135,6 @@ func extractRemoteIP(remoteAddr string) string {
 var (
 	trustProxyHeadersMu sync.RWMutex
 	trustProxyHeaders   bool
-	trustedProxyHops    = 1
 	trustedProxyCIDRs   []netip.Prefix
 )
 
@@ -144,16 +142,14 @@ var (
 // this package. Called from api.ApplyConfig; the two packages cannot share state
 // directly because internal/auth must not import internal/api.
 //
-// cidrs is the preferred input. hops is the deprecated fallback, used only when
-// cidrs is empty — see ClientIPForRateLimit for why counting is unsafe.
-func SetTrustProxyHeaders(v bool, hops int, cidrs []netip.Prefix) {
+// cidrs is the only input, because naming the proxies by ADDRESS is the only way
+// to establish that a proxy is in front at all. An empty set with v true means
+// the header cannot be believed from anyone, so every request keys on its socket
+// address; config.Validate refuses that combination at boot.
+func SetTrustProxyHeaders(v bool, cidrs []netip.Prefix) {
 	trustProxyHeadersMu.Lock()
 	defer trustProxyHeadersMu.Unlock()
 	trustProxyHeaders = v
-	if hops < 1 {
-		hops = 1
-	}
-	trustedProxyHops = hops
 	trustedProxyCIDRs = cidrs
 }
 
@@ -215,24 +211,33 @@ func isTrustedProxy(ip netip.Addr, cidrs []netip.Prefix) bool {
 // address the innermost trusted proxy actually saw — and anything an attacker
 // prepended sits further left, where the scan never reaches.
 //
-// This replaced a hop COUNT, which was unsafe in both directions and only
-// appeared to work. Counting N from the right is correct exactly when N matches
-// the real chain, and nothing enforces that:
+// A CIDR set is REQUIRED for any of that to happen. Trusting the header without
+// one has no safe reading: nothing but the socket address can establish that a
+// proxy is in front, so with no CIDRs every request keys on its socket address
+// and config.Validate refuses the combination at boot rather than letting it
+// degrade quietly.
 //
-//   - Overcounted, it was a COMPLETE bypass of the limiter. An attacker who
-//     prepends one entry makes the header long enough that len(parts)-hops lands
-//     on their own forged value, so every request gets a fresh bucket key.
-//     Measured with hops=2 against one appending proxy: 5 requests from a single
-//     address produced 5 distinct keys, and the same attacker could aim at the
-//     bucket honest traffic falls back to and lock out the household.
+// This replaced a hop COUNT, deleted outright rather than deprecated because it
+// was bypassable in its DEFAULT configuration and protected no released
+// deployment — the knob was introduced and removed inside one unreleased branch.
+// Counting N from the right is correct exactly when N matches the real chain, and
+// nothing enforces that:
+//
+//   - It had no immediate-peer check at all, so at the default hops=1 any direct
+//     peer — a LAN host, a sibling container, an exposed port — simply sent its
+//     own X-Forwarded-For and was believed. Measured: 25 requests from one source
+//     produced 25 distinct rate-limit keys, with nothing misconfigured.
+//   - Overcounted, the same total bypass via a prepended entry: len(parts)-hops
+//     lands on the attacker's own forged value.
 //   - Undercounted, every visitor selected the same outer-edge address, silently
 //     collapsing the household into one bucket.
 //
-// Neither failure is detectable from inside the request, which is why the
-// previous attempt to fix this — warning when the header was shorter than the
-// count — could not work: the warning fired on honest traffic while the attack
-// path padded the header and never tripped it. An address set has no count to
-// get wrong.
+// Either way an attacker could also aim at a victim's address and pin their
+// bucket at 429 permanently, since Exhausted short-circuits before the password
+// check. None of it is detectable from inside the request, which is why the
+// warning that shipped with it could not work: it fired on honest traffic while
+// the attack path padded the header and never tripped it. An address set has no
+// count to get wrong.
 //
 // The CIDRs must name the proxies and nothing more. Trusting a range wide enough
 // to contain untrusted hosts lets those hosts be skipped over, reaching whatever
@@ -240,7 +245,6 @@ func isTrustedProxy(ip netip.Addr, cidrs []netip.Prefix) bool {
 func ClientIPForRateLimit(r *http.Request) string {
 	trustProxyHeadersMu.RLock()
 	trusted := trustProxyHeaders
-	hops := trustedProxyHops
 	cidrs := trustedProxyCIDRs
 	trustProxyHeadersMu.RUnlock()
 
@@ -259,17 +263,10 @@ func ClientIPForRateLimit(r *http.Request) string {
 		return extractRemoteIP(r.RemoteAddr)
 	}
 
-	if len(cidrs) == 0 {
-		// Deprecated hop-count mode, kept so an existing deployment configured
-		// only with TRUSTED_PROXY_HOPS keeps working rather than silently
-		// reverting to one shared bucket on upgrade. It cannot apply the
-		// immediate-peer check below — there are no addresses to check against —
-		// which is one more reason it is deprecated.
-		return clientIPByHopCount(r, xff, hops)
-	}
-
 	// The immediate peer must itself be a trusted proxy before ANY part of the
-	// header is believed.
+	// header is believed. With no CIDRs configured nothing can be trusted, so the
+	// check below fails closed onto the socket address — which is why there is no
+	// separate empty-set branch here.
 	//
 	// Without this the whole scheme is decorative: a client that reaches the
 	// server directly — a LAN peer, a container on the same network, an exposed
@@ -311,69 +308,4 @@ func ClientIPForRateLimit(r *http.Request) string {
 	// Every entry was a trusted proxy (or the header was unusable). The socket
 	// address is the only thing left that no client can forge.
 	return extractRemoteIP(r.RemoteAddr)
-}
-
-// clientIPByHopCount is the deprecated positional selection. Retained only for
-// deployments that set TRUSTED_PROXY_HOPS and no CIDRs; see ClientIPForRateLimit
-// for why it cannot be made safe.
-func clientIPByHopCount(r *http.Request, xff string, hops int) string {
-	warnHopModeDeprecated()
-	parts := strings.Split(xff, ",")
-	idx := len(parts) - hops
-	if idx < 0 {
-		// A header shorter than the count proves the count is too high, which is
-		// the bypass condition. Honest clients send no X-Forwarded-For, so this
-		// fires on the first ordinary request.
-		warnProxyHopMismatch(hops, len(parts))
-	} else if idx < len(parts) {
-		if ip, ok := parseXFFAddr(parts[idx]); ok {
-			return ip.String()
-		}
-	}
-	return extractRemoteIP(r.RemoteAddr)
-}
-
-// proxyHopWarnInterval throttles the misconfiguration warning. The condition is
-// evaluated per request and is permanent once tripped, so an unthrottled log
-// line would be one per request forever.
-const proxyHopWarnInterval = 10 * time.Minute
-
-var (
-	proxyWarnMu   sync.Mutex
-	proxyWarnLast time.Time
-)
-
-func warnProxyHopMismatch(hops, got int) {
-	proxyWarnMu.Lock()
-	defer proxyWarnMu.Unlock()
-	if !proxyWarnLast.IsZero() && time.Since(proxyWarnLast) < proxyHopWarnInterval {
-		return
-	}
-	proxyWarnLast = time.Now()
-	log.Printf("SECURITY: TRUSTED_PROXY_HOPS=%d but X-Forwarded-For carried %d entries. "+
-		"The count is too high, which means an attacker who prepends an entry can select "+
-		"their own value and get a fresh rate-limit bucket per request, bypassing the login "+
-		"limiter entirely. Set TRUSTED_PROXY_CIDRS to your proxy's address range instead — "+
-		"it needs no count.", hops, got)
-}
-
-var (
-	hopDeprecationWarnMu   sync.Mutex
-	hopDeprecationWarnDone bool
-)
-
-// warnHopModeDeprecated fires once per process. Hop-count mode is reachable only
-// by explicit configuration, so one line at first use is enough to tell an
-// operator they are on the unsafe path without adding per-request log volume.
-func warnHopModeDeprecated() {
-	hopDeprecationWarnMu.Lock()
-	defer hopDeprecationWarnMu.Unlock()
-	if hopDeprecationWarnDone {
-		return
-	}
-	hopDeprecationWarnDone = true
-	log.Printf("rate-limit: TRUSTED_PROXY_HOPS is deprecated and cannot be made safe — " +
-		"if the count is ever higher than the real proxy chain, the login rate limiter is " +
-		"bypassable. Set TRUSTED_PROXY_CIDRS to the address range of your reverse proxy " +
-		"(e.g. your Docker network) to select the client by address instead of by position.")
 }
