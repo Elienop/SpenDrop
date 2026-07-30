@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net/http"
@@ -60,16 +61,26 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 	// exact-integer semantics of the cents column. Comparing against the
 	// legacy REAL column could drop edge-case rows where a float roundtrip
 	// shifted the stored value by one ULP from the user's input.
+	// safeDollarsToCents, not dollarsToCents: ParseFloat happily accepts
+	// "1e308", "NaN" and "Inf", all of which convert to int64 minimum. That
+	// turned `amount_cents >= ?` into a match-everything predicate and
+	// `amount_cents <= ?` into a match-nothing one — the filter silently
+	// inverted instead of erroring. An unrepresentable bound is now skipped,
+	// exactly as an unparseable one already was.
 	if v := q.Get("amount_min"); v != "" {
 		if min, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount_cents >= ?")
-			args = append(args, dollarsToCents(min))
+			if cents, ok := safeDollarsToCents(min); ok {
+				conditions = append(conditions, "t.amount_cents >= ?")
+				args = append(args, cents)
+			}
 		}
 	}
 	if v := q.Get("amount_max"); v != "" {
 		if max, err := strconv.ParseFloat(v, 64); err == nil {
-			conditions = append(conditions, "t.amount_cents <= ?")
-			args = append(args, dollarsToCents(max))
+			if cents, ok := safeDollarsToCents(max); ok {
+				conditions = append(conditions, "t.amount_cents <= ?")
+				args = append(args, cents)
+			}
 		}
 	}
 
@@ -125,6 +136,80 @@ func appendLiveTransactionsFilter(whereClause string) string {
 
 // handleExportTransactions exports filtered transactions as an Excel (.xlsx)
 // file. It accepts the same query parameters as handleListTransactions.
+// exportTxnRow is one transactions row drained from the database and held in
+// memory until the workbook is assembled.
+//
+// Production pins the connection pool to a single connection
+// (SetMaxOpenConns(1) in cmd/spendrop/db.go — load-bearing, not tuning), so an
+// open *sql.Rows holds the process's ONLY connection. Building the workbook
+// while the cursor is open therefore blocks every other request for the
+// duration, and any query issued during the build can never acquire a
+// connection at all: it waits on a cursor that only returns after the handler
+// does. Draining first bounds the hold to the read itself.
+//
+// The slice is bounded by MaxExportRows, so the memory ceiling is fixed.
+type exportTxnRow struct {
+	date         time.Time
+	desc         string
+	catName      string
+	catType      string
+	amountCents  int64
+	origAmtCents sql.NullInt64
+	origCur      sql.NullString
+	tags         sql.NullString
+	notes        sql.NullString
+}
+
+// drainExportTxnRows runs the transactions export query and fully consumes the
+// cursor before returning, releasing the connection back to the pool.
+func (h *Handler) drainExportTxnRows(ctx context.Context, query string, args ...any) ([]exportTxnRow, error) {
+	rows, err := h.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []exportTxnRow
+	for rows.Next() {
+		var t exportTxnRow
+		if err := rows.Scan(&t.date, &t.desc, &t.catName, &t.catType, &t.amountCents,
+			&t.origAmtCents, &t.origCur, &t.tags, &t.notes); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// writeExportTxnRows renders drained rows onto a sheet starting at startRow.
+// The column layout matches the headers written by each export handler.
+func writeExportTxnRows(f *excelize.File, sheet string, startRow int, txns []exportTxnRow) {
+	row := startRow
+	for _, t := range txns {
+		f.SetCellValue(sheet, cellAt(1, row), t.date.Format("2006-01-02"))
+		f.SetCellValue(sheet, cellAt(2, row), t.desc)
+		f.SetCellValue(sheet, cellAt(3, row), t.catName)
+		f.SetCellValue(sheet, cellAt(4, row), t.catType)
+		f.SetCellValue(sheet, cellAt(5, row), centsToDollars(t.amountCents))
+		if t.origAmtCents.Valid {
+			f.SetCellValue(sheet, cellAt(6, row), centsToDollars(t.origAmtCents.Int64))
+		}
+		if t.origCur.Valid {
+			f.SetCellValue(sheet, cellAt(7, row), t.origCur.String)
+		}
+		if t.tags.Valid {
+			f.SetCellValue(sheet, cellAt(8, row), t.tags.String)
+		}
+		if t.notes.Valid {
+			f.SetCellValue(sheet, cellAt(9, row), t.notes.String)
+		}
+		row++
+	}
+}
+
 func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Request) {
 	if _, ok := auth.GetUser(r); !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -149,12 +234,19 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 		JOIN categories c ON t.category_id = c.id` + liveClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
 	args = append(args, MaxExportRows)
 
-	rows, err := h.db.QueryContext(r.Context(), query, args...)
+	// Resolve the base currency BEFORE opening the cursor. getBaseCurrency
+	// issues its own query, and under the production pool cap of one
+	// connection that query can never be served while the cursor below holds
+	// the only connection — the handler would block on itself indefinitely
+	// and, because it holds the sole connection, take every other request
+	// with it. Keep this call above drainExportTxnRows.
+	baseCurrency := h.getBaseCurrency(r.Context())
+
+	txns, err := h.drainExportTxnRows(r.Context(), query, args...)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query transactions")
 		return
 	}
-	defer rows.Close()
 
 	f := excelize.NewFile()
 	defer f.Close()
@@ -162,54 +254,13 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	sheet := "Transactions"
 	f.SetSheetName("Sheet1", sheet)
 
-	baseCurrency := h.getBaseCurrency(r.Context())
 	headers := []string{"Date", "Description", "Category", "Type", fmt.Sprintf("Amount (%s)", baseCurrency), "Original Amount", "Original Currency", "Tags", "Notes"}
 	for i, h := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue(sheet, cell, h)
 	}
 
-	row := 2
-	for rows.Next() {
-		var (
-			date         time.Time
-			desc         string
-			catName      string
-			catType      string
-			amountCents  int64
-			origAmtCents sql.NullInt64
-			origCur      sql.NullString
-			tags         sql.NullString
-			notes        sql.NullString
-		)
-		if err := rows.Scan(&date, &desc, &catName, &catType, &amountCents, &origAmtCents, &origCur, &tags, &notes); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
-			return
-		}
-
-		f.SetCellValue(sheet, cellAt(1, row), date.Format("2006-01-02"))
-		f.SetCellValue(sheet, cellAt(2, row), desc)
-		f.SetCellValue(sheet, cellAt(3, row), catName)
-		f.SetCellValue(sheet, cellAt(4, row), catType)
-		f.SetCellValue(sheet, cellAt(5, row), centsToDollars(amountCents))
-		if origAmtCents.Valid {
-			f.SetCellValue(sheet, cellAt(6, row), centsToDollars(origAmtCents.Int64))
-		}
-		if origCur.Valid {
-			f.SetCellValue(sheet, cellAt(7, row), origCur.String)
-		}
-		if tags.Valid {
-			f.SetCellValue(sheet, cellAt(8, row), tags.String)
-		}
-		if notes.Valid {
-			f.SetCellValue(sheet, cellAt(9, row), notes.String)
-		}
-		row++
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to iterate transactions")
-		return
-	}
+	writeExportTxnRows(f, sheet, 2, txns)
 
 	filename := fmt.Sprintf("spendrop-transactions-%s.xlsx", time.Now().Format("2006-01-02"))
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -324,53 +375,12 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		WHERE t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		ORDER BY t.date DESC, t.id DESC LIMIT ?`
 
-	txnRows, err := h.db.QueryContext(ctx, txnQuery, dateFrom, dateTo, MaxExportRows)
+	txns, err := h.drainExportTxnRows(ctx, txnQuery, dateFrom, dateTo, MaxExportRows)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query transactions")
 		return
 	}
-	defer txnRows.Close()
-
-	tRow := 2
-	for txnRows.Next() {
-		var (
-			date         time.Time
-			desc         string
-			catName      string
-			catType      string
-			amountCents  int64
-			origAmtCents sql.NullInt64
-			origCur      sql.NullString
-			tags         sql.NullString
-			notes        sql.NullString
-		)
-		if err := txnRows.Scan(&date, &desc, &catName, &catType, &amountCents, &origAmtCents, &origCur, &tags, &notes); err != nil {
-			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
-			return
-		}
-		f.SetCellValue(txnSheet, cellAt(1, tRow), date.Format("2006-01-02"))
-		f.SetCellValue(txnSheet, cellAt(2, tRow), desc)
-		f.SetCellValue(txnSheet, cellAt(3, tRow), catName)
-		f.SetCellValue(txnSheet, cellAt(4, tRow), catType)
-		f.SetCellValue(txnSheet, cellAt(5, tRow), centsToDollars(amountCents))
-		if origAmtCents.Valid {
-			f.SetCellValue(txnSheet, cellAt(6, tRow), centsToDollars(origAmtCents.Int64))
-		}
-		if origCur.Valid {
-			f.SetCellValue(txnSheet, cellAt(7, tRow), origCur.String)
-		}
-		if tags.Valid {
-			f.SetCellValue(txnSheet, cellAt(8, tRow), tags.String)
-		}
-		if notes.Valid {
-			f.SetCellValue(txnSheet, cellAt(9, tRow), notes.String)
-		}
-		tRow++
-	}
-	if err := txnRows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to iterate transactions")
-		return
-	}
+	writeExportTxnRows(f, txnSheet, 2, txns)
 
 	filename := fmt.Sprintf("spendrop-%04d-%02d.xlsx", year, month)
 	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

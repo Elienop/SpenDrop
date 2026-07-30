@@ -30,10 +30,28 @@ func setupTestDB(t *testing.T) (*database.Queries, *sql.DB) {
 	t.Helper()
 	dir := t.TempDir()
 	dbPath := filepath.Join(dir, "test.db")
-	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
+	// The DSN and the pool cap must mirror production exactly, or whole
+	// classes of bug become structurally invisible to this suite:
+	//
+	//   - _foreign_keys=on: Config.SQLiteDSN (internal/config/config.go)
+	//     emits it and ForeignKeys defaults to true, so ON DELETE CASCADE
+	//     fires in production. With FKs off here, a handler that lets a
+	//     cascade destroy rows passes every test and destroys data live.
+	//
+	//   - SetMaxOpenConns(1): openDB (cmd/spendrop/db.go) pins the
+	//     production pool to a single connection and calls it load-bearing.
+	//     Under an unbounded test pool, a handler that issues a second
+	//     query while a *sql.Rows is still open simply borrows another
+	//     connection and passes; in production it waits forever for the
+	//     one connection only that cursor can release.
+	//
+	// Migrations run on the pinned handle in production too (main.go), so
+	// capping the pool here is matching production, not constraining it.
+	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=on")
 	if err != nil {
 		t.Fatalf("open test db: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	if err := database.RunMigrations(db, database.MigrationOptions{
 		DBPath:      dbPath,

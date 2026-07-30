@@ -832,7 +832,7 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
 | POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/missing IDs skipped, plus non-owned IDs for members (admins may patch any household row). Capped at 500 IDs. |
 | POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Scoped to the caller's own rows for members, household-wide for admins, so there is no skipped count. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
-| PUT | `/api/transactions/{id}` | Update a transaction |
+| PUT | `/api/transactions/{id}` | Update a transaction. Full replace, with two exceptions: `notes` and `tags` are optional — **omit the key to leave the stored value unchanged**, or send `""` to clear it. Every other field is overwritten by what you send. Any update that moves a dedupe-identity input (`date`, `amount`, `description`, `category_id`) clears the row's `content_hash`; it is re-anchored to the row's current content by the startup backfill. |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
 #### Trash view (admin only)
@@ -862,7 +862,7 @@ All require an admin session.
 | GET | `/api/users` | List household users |
 | POST | `/api/users` | Create a user |
 | PUT | `/api/users/{id}` | Update a user's display name or role |
-| DELETE | `/api/users/{id}` | Delete a user (cascades their sessions and tokens) |
+| DELETE | `/api/users/{id}` | Delete a user. Returns **409** if the user still has transactions (live *or* in the trash) or any balance checkpoints — both columns are `ON DELETE CASCADE`, so deleting the row would permanently destroy their ledger and their reconciliation anchors with no tombstone, audit row, or restore path; reassign or purge them first. A successful delete still cascades their **sessions**, **API tokens**, **saved filters** and **push subscriptions**, and NULLs `transaction_audit.actor_user_id` for every row they authored — no history is destroyed, but edits they made to other members' rows lose their attribution. |
 | POST | `/api/users/{id}/reset-password` | Reset another user's password. Body `{"new_password"}`. No current-password check (admin authority); revokes that user's tokens and deletes their sessions. Admins cannot reset their *own* password here — they use `/api/auth/password`. |
 
 ### Categories
@@ -884,7 +884,8 @@ All require an admin session.
 | PUT | `/api/category-budgets/{year}/{month}/{categoryId}` | Set a category's monthly limit (admin; expense categories only; amount > 0) |
 | DELETE | `/api/category-budgets/{year}/{month}/{categoryId}` | Clear a category's monthly limit (admin) |
 | GET | `/api/savings-goals` | Get savings goals |
-| PUT | `/api/savings-goals/{year}` | Set yearly savings goal |
+| PUT | `/api/savings-goals/{year}` | Set yearly savings goal. A `target_amount` of `0` is a real "no target this year" value, not a removal |
+| DELETE | `/api/savings-goals/{year}` | Remove a yearly savings goal. 404 if no goal exists for that year. Admin only |
 
 ### Dashboard & Reports
 | Method | Endpoint | Description |

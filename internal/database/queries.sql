@@ -117,6 +117,9 @@ ON CONFLICT(code) DO UPDATE SET
 --   * ListDeletedTransactions / CountDeletedTransactions: the trash view
 --     specifically wants tombstoned rows.
 --   * CountAllTransactions: the live/deleted split used by operator tools.
+--   * CountTransactionsByUser: handleDeleteUser's guard must see tombstoned
+--     rows too — they are recoverable ledger history that ON DELETE CASCADE
+--     would destroy just as permanently as a live row.
 -- When adding a new transactions read, place it in queries.sql (not raw
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 --
@@ -165,8 +168,39 @@ WHERE t.id = ?;
 -- Phase 3.1b: the legacy REAL columns were dropped in migration 010; only the
 -- INTEGER cents columns are written. The caller computes cents from the float
 -- amount before invoking.
+--
+-- The CONDITIONAL content_hash clear is deliberate and load-bearing in BOTH
+-- directions. TransactionStore is the only caller and it sets ClearContentHash
+-- from database.hashInputsMoved(before, params) against the row it has already
+-- loaded inside the same tx; no caller sets the flag by hand.
+--
+-- Clear when a hash input moved. Keeping the old hash would leave the row
+-- claiming the identity of content it no longer holds: hand-type "Coffee",
+-- rename it, then import a genuinely new "Coffee" for that date and the import
+-- is rejected as a duplicate of a row that no longer says "Coffee" — the new
+-- row never lands and the user is told it was already there. The mirror case
+-- (editing a row INTO matching a future import) double-imports.
+--
+-- Preserve when none moved. This is a full-replace update, so it rewrites
+-- every hash COLUMN — but rewriting a column is not changing its value. The
+-- inline row editor holds tags and rebuilds the whole payload on every Save,
+-- so a tags-only edit (or a no-op Save, or a batch-update tags patch) resends
+-- identical hash inputs. Clearing those de-anchors the row from dedupe for
+-- nothing and lets a re-import of the file it came from double it —
+-- permanently, because BackfillContentHashes runs only at boot and only WHERE
+-- content_hash IS NULL, so once the duplicate owns the hash the partial unique
+-- index makes the backfill skip the edited row forever.
+--
+-- Recomputing the hash here is not an option: the identity is derived from the
+-- CATEGORY NAME, which this statement does not have, and a recomputed value
+-- could collide with a live row and abort the update. Clearing makes the row
+-- leave dedupe rather than lie about it; the Phase 3.4 startup backfill
+-- re-anchors it to its current content on the next boot.
+--
+-- This was harmless before 13f0deb, when only imported rows carried a hash.
+-- That commit gave every hand-typed row one, and those are the rows users edit.
 UPDATE transactions
-SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
 -- name: SoftDeleteTransaction :exec
@@ -228,6 +262,13 @@ SELECT
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS live,
     CAST(COALESCE(SUM(CASE WHEN deleted_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS INTEGER) AS deleted
 FROM transactions;
+
+-- name: CountTransactionsByUser :one
+-- Deliberately counts tombstoned rows as well (see the exemption note in this
+-- section's header). transactions.user_id carries ON DELETE CASCADE, so
+-- deleting a user silently destroys every row they created; handleDeleteUser
+-- calls this first and refuses with 409 when the count is non-zero.
+SELECT COUNT(*) FROM transactions WHERE user_id = ?;
 
 -- name: GetTransactionByContentHash :one
 -- Phase 3.4 import-idempotency lookup. Returns the live row whose content
@@ -331,6 +372,11 @@ VALUES (?, ?)
 ON CONFLICT(year) DO UPDATE SET
     target_amount_cents = excluded.target_amount_cents,
     updated_at = CURRENT_TIMESTAMP;
+
+-- name: DeleteSavingsGoal :execresult
+-- :execresult so the handler can distinguish "removed" from "no such year"
+-- and return 404 rather than a misleading 200.
+DELETE FROM savings_goals WHERE year = ?;
 
 -- name: ListSavingsGoals :many
 SELECT * FROM savings_goals ORDER BY year DESC;
@@ -643,6 +689,14 @@ SELECT * FROM balance_checkpoints
 WHERE last_verified_at IS NULL
    OR last_verified_at < CAST(sqlc.arg(threshold) AS TEXT)
 ORDER BY id ASC;
+
+-- name: CountCheckpointsByUser :one
+-- balance_checkpoints.user_id carries ON DELETE CASCADE (migration 007), so
+-- deleting a user silently destroys every reconciliation anchor they entered.
+-- Checkpoints have no tombstone and no Trash, so the loss is unrecoverable.
+-- handleDeleteUser calls this alongside CountTransactionsByUser and refuses
+-- with 409 when either count is non-zero.
+SELECT COUNT(*) FROM balance_checkpoints WHERE user_id = ?;
 
 -- name: CountCheckpointsByStatus :one
 -- One-row, three-column count used by /healthz/data. NULL status is

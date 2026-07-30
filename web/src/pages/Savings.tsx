@@ -156,9 +156,9 @@ function SavingsSection() {
 
   async function handleDelete(goal: SavingsGoal) {
     try {
-      await api.put(`savings-goals/${goal.year}`, {
-        target_amount: 0,
-      });
+      // DELETE, not PUT {target_amount: 0} — the latter upserted a zero-target
+      // row that survived the "removed" toast and kept rendering as a $0 goal.
+      await api.del(`savings-goals/${goal.year}`);
       toast.success('Savings goal removed');
       refreshGoals();
     } catch (err) {

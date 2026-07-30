@@ -316,6 +316,66 @@ describe('TransactionEntryRow', () => {
   // Phase D: Escape resets
   // -----------------------------------------------------------------
 
+  it('Cmd/Ctrl+Enter from the amount field clears the amount for the next entry', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    const amount = screen.getByLabelText(/amount/i) as HTMLInputElement;
+    await user.clear(amount);
+    await user.type(amount, '25');
+    await user.type(screen.getByLabelText(/description/i), 'Coffee');
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+
+    // Submit from the amount field itself, so it never loses focus.
+    // AmountCurrencyInput deliberately ignores incoming `value` while
+    // focused, so the post-save reset to 0 was swallowed and "25" stayed in
+    // the DOM — ready to concatenate into the next transaction's amount.
+    amount.focus();
+    await user.keyboard('{Control>}{Enter}{/Control}');
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    await waitFor(() => {
+      expect(amount.value).not.toBe('25');
+    });
+  });
+
+  it('Escape inside the category picker dismisses the picker without wiping the row', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    const amount = screen.getByLabelText(/amount/i) as HTMLInputElement;
+    const description = screen.getByLabelText(
+      /description/i,
+    ) as HTMLInputElement;
+
+    await user.clear(amount);
+    await user.type(amount, '42');
+    await user.type(description, 'Half-typed entry');
+
+    // Open the category picker, then press Escape to dismiss it. Radix
+    // portals the popover content, but React still replays the synthetic
+    // keydown up the React tree to the form's handler — which used to treat
+    // it as "cancel the row" and destroy everything typed so far.
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.keyboard('{Escape}');
+
+    expect(amount.value).toBe('42');
+    expect(description.value).toBe('Half-typed entry');
+  });
+
   it('Escape resets every field to its default value', async () => {
     const user = userEvent.setup();
     render(

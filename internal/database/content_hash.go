@@ -60,12 +60,51 @@ import (
 func ComputeContentHash(date time.Time, amountCents int64, description, categoryName string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s|%d|%s|%s",
-		date.UTC().Format("2006-01-02"),
+		normalizeHashDate(date),
 		amountCents,
-		strings.ToLower(strings.TrimSpace(description)),
-		strings.ToLower(strings.TrimSpace(categoryName)),
+		normalizeHashText(description),
+		normalizeHashText(categoryName),
 	)
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// normalizeHashDate and normalizeHashText are the two field normalizations
+// ComputeContentHash applies. They are factored out so hashInputsMoved can
+// answer "would ComputeContentHash produce a different digest?" using the
+// SAME normalization rather than a hand-copied approximation that drifts the
+// first time either rule changes.
+func normalizeHashDate(d time.Time) string { return d.UTC().Format("2006-01-02") }
+
+func normalizeHashText(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// hashInputsMoved reports whether a full-replace UpdateTransaction actually
+// CHANGES one of ComputeContentHash's inputs, and is the sole source of
+// UpdateTransactionParams.ClearContentHash.
+//
+// UpdateTransaction rewrites every column on every call, but rewriting a
+// column is not changing its value: a tags-only edit, a notes-only edit and a
+// literal no-op Save all resend identical date / amount / description /
+// category. Clearing the identity for those de-anchors the row from import
+// dedupe for nothing, and a re-import of the file the row came from then
+// creates a second copy — permanently, because BackfillContentHashes runs only
+// at boot and only WHERE content_hash IS NULL, so once the duplicate owns the
+// hash the partial unique index makes the backfill skip the edited row forever.
+//
+// The category is compared by id, not by name: the hash mixes in the category
+// NAME, but a rename must NOT retroactively change a row's identity (see the
+// note on ComputeContentHash), so id is the correct proxy for "this row now
+// belongs to different content".
+func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+	switch {
+	case before.CategoryID != after.CategoryID:
+		return true
+	case before.AmountCents != after.AmountCents:
+		return true
+	case normalizeHashDate(before.Date) != normalizeHashDate(after.Date):
+		return true
+	default:
+		return normalizeHashText(before.Description) != normalizeHashText(after.Description)
+	}
 }
 
 // backfillPageSize is the number of rows BackfillContentHashes pulls

@@ -6,8 +6,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 )
@@ -566,12 +570,13 @@ func TestParseYearMonth_ValidMonth_NoError(t *testing.T) {
 
 // --- Dashboard trend months upper bound ---
 
-func TestHandleDashboardTrend_MonthsCappedAt120(t *testing.T) {
+func TestHandleDashboardTrend_MonthsCappedAtMaxTrendMonths(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 
-	req := httptest.NewRequest(http.MethodGet, "/api/dashboard/trend?months=999", nil)
+	req := httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/api/dashboard/trend?months=%d", MaxTrendMonths*10), nil)
 	req = withUser(req, user)
 	rec := httptest.NewRecorder()
 
@@ -585,8 +590,11 @@ func TestHandleDashboardTrend_MonthsCappedAt120(t *testing.T) {
 		Trend []map[string]any `json:"trend"`
 	}
 	decodeResponse(t, rec, &resp)
-	if len(resp.Trend) != 120 {
-		t.Errorf("expected 120 trend entries (capped), got %d", len(resp.Trend))
+	// Asserted against the constant, not a literal: MaxTrendMonths is sized so
+	// the Savings tab's window can always reach HISTORICAL_YEAR_START, and it
+	// must be free to grow without a test pinning it to a stale number.
+	if len(resp.Trend) != MaxTrendMonths {
+		t.Errorf("expected %d trend entries (capped), got %d", MaxTrendMonths, len(resp.Trend))
 	}
 }
 
@@ -611,6 +619,135 @@ func TestHandleDashboardTrend_NegativeMonthsClamped(t *testing.T) {
 	decodeResponse(t, rec, &resp)
 	if len(resp.Trend) != 1 {
 		t.Errorf("expected 1 trend entry (clamped from -5), got %d", len(resp.Trend))
+	}
+}
+
+// --- MaxTrendMonths cross-boundary contract ---
+//
+// MaxTrendMonths is not a free parameter: the Reports → Savings tab derives
+// its `?months=` from the year the user picked and the server clamps anything
+// larger to MaxTrendMonths, so a cap that is too small silently truncates the
+// oldest selectable years with nothing on screen to say so. The tests below
+// pin the contract itself rather than restating the current number, because
+// the number is expected to grow and the *relationship* is what must hold.
+
+// historicalYearStart mirrors HISTORICAL_YEAR_START in web/src/lib/dates.ts —
+// the oldest year the Savings year Select offers. It is duplicated here (not
+// imported, obviously) so the Go side can state what window the UI needs.
+const historicalYearStart = 2024
+
+// TestMaxTrendMonths_ReachesOldestSelectableYear is the Go half of
+// web/src/components/reports/savingsWindow.test.ts: whichever year the UI
+// offers, the window must still reach January of it, and the server must not
+// clamp that window away. The pinned "current year" list is the same one the
+// frontend test iterates, so the two halves fail at the same horizon instead
+// of the backend silently binding first.
+func TestMaxTrendMonths_ReachesOldestSelectableYear(t *testing.T) {
+	// The frontend test pins these clocks; time.Now() is added so the list
+	// going stale cannot make the assertion vacuous.
+	currentYears := []int{2026, 2033, 2034, 2040, 2060, time.Now().Year()}
+
+	for _, currentYear := range currentYears {
+		// Worst case: the window ends at the current month, so reaching
+		// January of the oldest offered year takes every month from that
+		// January through December of the current year.
+		minRequired := (currentYear - historicalYearStart + 1) * 12
+		if MaxTrendMonths < minRequired {
+			t.Errorf("MaxTrendMonths=%d is too small for a %d clock: the Savings tab can select %d, "+
+				"which needs a %d-month window to reach January — the server would clamp and truncate it",
+				MaxTrendMonths, currentYear, historicalYearStart, minRequired)
+		}
+	}
+}
+
+// TestMaxTrendMonths_MatchesFrontendMaxReportMonths pins the claim both
+// comments make — internal/api/limits.go and web/src/components/reports/
+// utils.ts each say the two constants MUST stay in step — in the only place
+// it can actually be checked. Drift either way is a silent bug: a larger
+// client value is truncated server-side, a larger server value means the UI
+// never asks for the window it is allowed to have.
+func TestMaxTrendMonths_MatchesFrontendMaxReportMonths(t *testing.T) {
+	const relPath = "../../web/src/components/reports/utils.ts"
+
+	src, err := os.ReadFile(relPath)
+	if err != nil {
+		t.Fatalf("read %s: %v (if the file moved, repoint this test — the constants must stay in step)", relPath, err)
+	}
+
+	m := regexp.MustCompile(`MAX_REPORT_MONTHS\s*=\s*(\d+)`).FindSubmatch(src)
+	if m == nil {
+		t.Fatalf("no `MAX_REPORT_MONTHS = <number>` found in %s (if it was renamed, repoint this test)", relPath)
+	}
+	frontend, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("parse MAX_REPORT_MONTHS %q: %v", m[1], err)
+	}
+
+	if frontend != MaxTrendMonths {
+		t.Errorf("MAX_REPORT_MONTHS=%d in %s but MaxTrendMonths=%d in internal/api/limits.go; "+
+			"they must match or one side silently truncates the report window",
+			frontend, relPath, MaxTrendMonths)
+	}
+}
+
+// TestHandleReportIncomeExpenses_ServesTheFullCappedWindow drives the endpoint
+// the Savings tab actually calls, end to end, at the widest window the server
+// admits. Without it the whole range above 12 months was untested: a handler
+// that capped `months` at 12 — which would break the Savings tab today, not in
+// some future year — left the suite green.
+func TestHandleReportIncomeExpenses_ServesTheFullCappedWindow(t *testing.T) {
+	anchor := time.Date(2026, 4, 13, 12, 0, 0, 0, time.UTC)
+
+	// Earliest bucket, computed with plain month arithmetic rather than
+	// AddDate so the expectation does not mirror the handler's own walk.
+	idx := anchor.Year()*12 + int(anchor.Month()) - 1 - (MaxTrendMonths - 1)
+	wantFirstYear, wantFirstMonth := idx/12, idx%12+1
+
+	tests := []struct {
+		name   string
+		months int
+	}{
+		{"at the cap", MaxTrendMonths},
+		{"above the cap is clamped, not truncated further", MaxTrendMonths * 10},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			q, db := setupTestDB(t)
+			h := NewHandlerWithClock(q, db, fixedClock{t: anchor})
+			user := seedTestUser(t, q, "alice", "member")
+
+			req := httptest.NewRequest(http.MethodGet,
+				fmt.Sprintf("/api/reports/income-expenses?months=%d", tc.months), nil)
+			req = withUser(req, user)
+			rec := httptest.NewRecorder()
+
+			h.handleReportIncomeExpenses(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+			}
+
+			var resp struct {
+				Data []struct {
+					Year  int `json:"year"`
+					Month int `json:"month"`
+				} `json:"data"`
+			}
+			decodeResponse(t, rec, &resp)
+
+			if len(resp.Data) != MaxTrendMonths {
+				t.Fatalf("got %d buckets for months=%d, want %d (the server must serve the whole window it advertises)",
+					len(resp.Data), tc.months, MaxTrendMonths)
+			}
+			if first := resp.Data[0]; first.Year != wantFirstYear || first.Month != wantFirstMonth {
+				t.Errorf("earliest bucket = %d-%02d, want %d-%02d", first.Year, first.Month, wantFirstYear, wantFirstMonth)
+			}
+			if last := resp.Data[len(resp.Data)-1]; last.Year != anchor.Year() || last.Month != int(anchor.Month()) {
+				t.Errorf("latest bucket = %d-%02d, want %d-%02d (the window must end at the current month)",
+					last.Year, last.Month, anchor.Year(), int(anchor.Month()))
+			}
+		})
 	}
 }
 
@@ -879,7 +1016,7 @@ func TestValidateTransactionRequest_TagsTooLong_ReturnsError(t *testing.T) {
 		Amount:      50.0,
 		Description: "Test",
 		CategoryID:  1,
-		Tags:        strings.Repeat("x", 501),
+		Tags:        ptr(strings.Repeat("x", 501)),
 	}
 	err := validateTransactionRequest(req)
 	if err == nil {
@@ -893,7 +1030,7 @@ func TestValidateTransactionRequest_NotesTooLong_ReturnsError(t *testing.T) {
 		Amount:      50.0,
 		Description: "Test",
 		CategoryID:  1,
-		Notes:       strings.Repeat("x", 2001),
+		Notes:       ptr(strings.Repeat("x", 2001)),
 	}
 	err := validateTransactionRequest(req)
 	if err == nil {
@@ -907,8 +1044,8 @@ func TestValidateTransactionRequest_ValidLengths_NoError(t *testing.T) {
 		Amount:      50.0,
 		Description: strings.Repeat("x", 500),
 		CategoryID:  1,
-		Tags:        strings.Repeat("x", 500),
-		Notes:       strings.Repeat("x", 2000),
+		Tags:        ptr(strings.Repeat("x", 500)),
+		Notes:       ptr(strings.Repeat("x", 2000)),
 	}
 	err := validateTransactionRequest(req)
 	if err != nil {

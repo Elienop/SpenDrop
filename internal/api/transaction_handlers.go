@@ -67,8 +67,26 @@ type transactionRequest struct {
 	OriginalCurrency string   `json:"original_currency"`
 	Description      string   `json:"description"`
 	CategoryID       int64    `json:"category_id"`
-	Tags             string   `json:"tags"`
-	Notes            string   `json:"notes"`
+	// Tags is a pointer for exactly the same reason as Notes below: PUT is a
+	// full replace, so a plain string made an absent key indistinguishable
+	// from "" and silently wiped the stored tags. The web inline editor always
+	// sends tags, but the API-token surface is exposed and its clients build
+	// payloads field-by-field.
+	//
+	// nil           -> leave the stored tags unchanged (update) / no tags (create)
+	// pointer to "" -> explicitly clear the tags
+	Tags *string `json:"tags"`
+	// Notes is a pointer so an ABSENT key is distinguishable from an empty
+	// one. PUT /transactions/{id} is a full replace, and clients that build
+	// their payload field-by-field (the inline row editor, the API-token
+	// surface) legitimately omit notes because they have no notes editor. A
+	// plain string decoded "" for those callers and silently NULLed a note
+	// the user had imported — invisible loss, recoverable only from
+	// transaction_audit.before_json.
+	//
+	// nil          -> leave the stored note unchanged (update) / no note (create)
+	// pointer to "" -> explicitly clear the note
+	Notes *string `json:"notes"`
 }
 
 // transactionResponse is the JSON output for a single transaction including
@@ -143,9 +161,12 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	origCur := sql.NullString{}
 
 	if req.OriginalCurrency == "" {
-		// No foreign currency — use amount directly
-		if req.Amount <= 0 {
-			return 0, origAmt, origCur, fmt.Errorf("amount must be positive")
+		// No foreign currency — use amount directly.
+		// `<= 0` alone lets 1e308 and NaN through (NaN compares false against
+		// everything), and both convert to int64 minimum downstream — a
+		// hugely NEGATIVE stored amount from a positive-looking request.
+		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
+			return 0, origAmt, origCur, err
 		}
 		return req.Amount, origAmt, origCur, nil
 	}
@@ -157,8 +178,8 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 
 	if currency.IsBase {
 		// It's the base currency — use amount directly, no conversion needed
-		if req.Amount <= 0 {
-			return 0, origAmt, origCur, fmt.Errorf("amount must be positive")
+		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
+			return 0, origAmt, origCur, err
 		}
 		return req.Amount, origAmt, origCur, nil
 	}
@@ -166,6 +187,9 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	// Foreign currency: must have original_amount
 	if req.OriginalAmount == nil || *req.OriginalAmount <= 0 {
 		return 0, origAmt, origCur, fmt.Errorf("original_amount is required for non-base currency")
+	}
+	if err := validateMoneyAmount(*req.OriginalAmount, "original_amount"); err != nil {
+		return 0, origAmt, origCur, err
 	}
 
 	if currency.RateToBase == 0 {
@@ -179,6 +203,13 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	// stored cents. Kept deliberately to avoid churning a money path for zero
 	// behavior change; see audit item h-resolvecurrency-double-round.
 	converted = math.Round(converted*100) / 100
+
+	// The division can carry an in-range original_amount out of range: a small
+	// rate_to_base multiplies it up. Bound the converted value too, or
+	// dollarsToCents launders it into int64 minimum at the storage edge.
+	if err := validateMoneyAmount(converted, "converted amount"); err != nil {
+		return 0, origAmt, origCur, err
+	}
 
 	origAmt = sql.NullFloat64{Float64: *req.OriginalAmount, Valid: true}
 	origCur = sql.NullString{String: req.OriginalCurrency, Valid: true}
@@ -348,17 +379,39 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	txn, err := h.txnStore.Create(r.Context(), user.ID, database.CreateTransactionParams{
+	amountCents := dollarsToCents(amount)
+	params := database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
-		AmountCents:         dollarsToCents(amount),
+		AmountCents:         amountCents,
 		OriginalAmountCents: nullableDollarsToCents(origAmt),
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
-		Tags:                toNullString(req.Tags),
-		Notes:               toNullString(req.Notes),
-	})
+		Tags:                nullStringFromPtr(req.Tags),
+		Notes:               nullStringFromPtr(req.Notes),
+		// Manual entries used to store NULL here, so import dedupe could not
+		// see them and re-imported them as duplicates.
+		ContentHash: h.contentHashForManualEntry(
+			r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID),
+	}
+	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
+	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
+	// on h.queries and hands its connection back to the pool before Create
+	// opens its own transaction, so SetMaxOpenConns(1) does not fuse probe and
+	// insert into one unit. Two concurrent identical creates therefore both
+	// see "hash free", and the loser hits idx_transactions_content_hash. That
+	// is the same legitimate-duplicate situation the pre-check handles, so
+	// recover exactly as it would have: drop the hash and retry once, leaving
+	// the winner as the canonical anchor (earliest-id-wins). The check stays
+	// as the cheap common path; this is the correctness guarantee.
+	//
+	// IsContentHashUniqueViolation is scoped to that one index by design —
+	// a users.username or categories.name violation must still surface.
+	if err != nil && database.IsContentHashUniqueViolation(err) {
+		params.ContentHash = sql.NullString{}
+		txn, err = h.txnStore.Create(r.Context(), user.ID, params)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
 		return
@@ -477,9 +530,12 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		OriginalCurrency:    origCur,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
-		Tags:                toNullString(req.Tags),
-		Notes:               toNullString(req.Notes),
-		ID:                  id,
+		// PUT is a full replace, so an absent tags or notes key must carry the
+		// stored value forward rather than clearing it. `existing` was already
+		// loaded above for the tombstone/ownership checks.
+		Tags:  nullStringForUpdate(req.Tags, existing.Tags),
+		Notes: nullStringForUpdate(req.Notes, existing.Notes),
+		ID:    id,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update transaction")
@@ -664,8 +720,8 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			OriginalCurrency:    origCur,
 			Description:         req.Description,
 			CategoryID:          req.CategoryID,
-			Tags:                toNullString(req.Tags),
-			Notes:               toNullString(req.Notes),
+			Tags:                nullStringFromPtr(req.Tags),
+			Notes:               nullStringFromPtr(req.Notes),
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -786,10 +842,10 @@ func validateTransactionRequest(req transactionRequest) error {
 	if len(req.Description) > MaxDescriptionLength {
 		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
-	if _, err := validateTagsField(req.Tags); err != nil {
+	if _, err := validateTagsField(optionalStringValue(req.Tags)); err != nil {
 		return err
 	}
-	if len(req.Notes) > MaxNotesLength {
+	if req.Notes != nil && len(*req.Notes) > MaxNotesLength {
 		return fmt.Errorf("notes must be %d characters or less", MaxNotesLength)
 	}
 	if _, err := validateCategoryID(req.CategoryID); err != nil {
@@ -998,14 +1054,21 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 	// those are "no longer in the live set" and reviving them via an
 	// incidental bulk rename would silently restore deleted data. If an
 	// operator wants to rename tombstoned rows, they restore first.
+	//
+	// content_hash = NULL for the same reason UpdateTransaction clears it:
+	// description is a dedupe-identity input, so every renamed row would
+	// otherwise keep claiming the identity of the description it no longer
+	// has — and a later import of that original content would be rejected as
+	// a duplicate of a row that no longer matches it. The startup backfill
+	// re-anchors the renamed rows to their current content on the next boot.
 	if user.Role == RoleAdmin {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
+			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%",
 		)
 	} else {
 		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
+			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
 			req.NewDescription, "%"+escaped+"%", user.ID,
 		)
 	}
@@ -1955,6 +2018,11 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		setClauses = append(setClauses, "category_id = ?")
 		args = append(args, *patch.CategoryID)
 	}
+	// This branch only runs for tags-free patches, and buildUpdatePatch
+	// rejects an empty patch, so at least one dedupe-identity input (date,
+	// description, category) always changes here. Clear the stale identity —
+	// see the note on the UpdateTransaction query for what keeping it costs.
+	setClauses = append(setClauses, "content_hash = NULL")
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 
 	whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())
@@ -2105,6 +2173,24 @@ func (h *Handler) runUpdateByFilterTags(r *http.Request, tx *sql.Tx, user databa
 			setClauses = append(setClauses, "category_id = ?")
 			setArgs = append(setArgs, *patch.CategoryID)
 		}
+		// Clear the dedupe identity only when the patch actually moves one of
+		// its inputs. Tags are NOT part of ComputeContentHash, and this branch
+		// always carries tags — a bulk tagging pass can match the entire
+		// ledger, so clearing unconditionally would drop every row out of
+		// dedupe (and let a re-import double all of them) until the next boot
+		// re-anchors them. The combined case is real: a patch may carry tags
+		// AND a hash input, and then the identity must go.
+		//
+		// This branch tests PRESENCE of a hash-input key rather than an actual
+		// value change (the store's database.hashInputsMoved predicate) because
+		// its read leg deliberately selects only id, tags and date — widening it
+		// to every hash column just to spot a no-change patch would cost a wider
+		// scan on a statement that can match the entire ledger. Presence is the
+		// conservative side of the same rule: it can clear one extra row, never
+		// keep a stale identity.
+		if patch.Date != nil || patch.Description != nil || patch.CategoryID != nil {
+			setClauses = append(setClauses, "content_hash = NULL")
+		}
 		setClauses = append(setClauses, "tags = ?", "updated_at = CURRENT_TIMESTAMP")
 		setArgs = append(setArgs, merged, m.id)
 
@@ -2144,6 +2230,95 @@ func toNullString(s string) sql.NullString {
 		return sql.NullString{}
 	}
 	return sql.NullString{String: s, Valid: true}
+}
+
+// validateMoneyAmount rejects the float values that cannot survive conversion
+// to int64 cents: NaN, +/-Inf, and anything beyond MaxTransactionAmount. A
+// bare `<= 0` check is NOT sufficient — NaN compares false against every
+// operator, and 1e308 is comfortably positive right up until int64 conversion
+// turns it into -9223372036854775808.
+func validateMoneyAmount(d float64, field string) error {
+	if math.IsNaN(d) || math.IsInf(d, 0) {
+		return fmt.Errorf("%s must be a finite number", field)
+	}
+	if d <= 0 {
+		return fmt.Errorf("%s must be positive", field)
+	}
+	if d > MaxTransactionAmount {
+		return fmt.Errorf("%s exceeds the maximum allowed value", field)
+	}
+	return nil
+}
+
+// contentHashForManualEntry computes the dedupe identity for a hand-entered
+// transaction, or returns NULL when that identity is already taken.
+//
+// This probe is advisory, NOT a guarantee: it runs on a pooled connection that
+// is released before the caller's INSERT opens its own transaction, so a
+// concurrent create can claim the identity in between. handleCreateTransaction
+// therefore catches IsContentHashUniqueViolation and retries with a NULL hash;
+// any new caller must do the same.
+//
+// Manual rows previously stored content_hash = NULL unconditionally, so import
+// dedupe could not see them: importing a spreadsheet containing a transaction
+// the user had already typed in created a second copy.
+//
+// Collisions must NOT be an error here. Real household data contains
+// legitimate duplicates — two identical coffees on the same day, a recurring
+// subscription entered twice on purpose — and the partial UNIQUE index
+// idx_transactions_content_hash would reject the second one. This follows the
+// same earliest-id-wins rule the migration-008 backfill uses: the first row to
+// claim a hash keeps it as the canonical anchor, later identical rows are
+// stored with NULL and remain fully intact in the ledger. The consequence,
+// deliberately accepted: a later import of that content dedupes against the
+// canonical row only.
+func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Queries, date time.Time, amountCents int64, description string, categoryID int64) sql.NullString {
+	cat, err := q.GetCategoryByID(ctx, categoryID)
+	if err != nil {
+		// Category already validated upstream; if it vanished underneath us,
+		// fall back to the previous behaviour rather than failing the write.
+		return sql.NullString{}
+	}
+	hash := database.ComputeContentHash(date, amountCents, description, cat.Name)
+	if _, err := q.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true}); err == nil {
+		// Identity already anchored by an earlier row.
+		return sql.NullString{}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return sql.NullString{}
+	}
+	return sql.NullString{String: hash, Valid: true}
+}
+
+// nullStringFromPtr converts an optional wire field to its stored form on a
+// CREATE path. A nil pointer (key absent from the JSON body) means "no value";
+// update paths must not call this and should keep the existing value instead.
+// Shared by notes and tags — both are optional free-text columns whose absent
+// and empty cases must stay distinguishable.
+func nullStringFromPtr(p *string) sql.NullString {
+	if p == nil {
+		return sql.NullString{}
+	}
+	return toNullString(*p)
+}
+
+// nullStringForUpdate resolves an optional column for a full-replace update:
+// an absent key (nil) keeps whatever is already stored, an explicit value
+// (including "") overwrites it.
+func nullStringForUpdate(p *string, existing sql.NullString) sql.NullString {
+	if p == nil {
+		return existing
+	}
+	return toNullString(*p)
+}
+
+// optionalStringValue reads an optional wire field for validation, treating an
+// absent key as the empty string. Only for validators — never for deciding
+// what to store, where absent and "" must stay distinguishable.
+func optionalStringValue(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
 }
 
 func (h *Handler) handleTransactionSuggestions(w http.ResponseWriter, r *http.Request) {

@@ -185,8 +185,8 @@ describe('Savings page', () => {
     expect(screen.getByLabelText(/delete 2026 goal/i)).toBeInTheDocument();
   });
 
-  test('Delete in the confirm dialog PUTs target_amount: 0', async () => {
-    mockedApi.put.mockResolvedValue({});
+  test('Delete in the confirm dialog issues a real DELETE, not a zero-target upsert', async () => {
+    mockedApi.del.mockResolvedValue({});
     mockedApi.get.mockImplementation((path: string) => {
       if (path === 'savings-goals')
         return Promise.resolve([
@@ -212,11 +212,11 @@ describe('Savings page', () => {
     await user.click(destructive as HTMLElement);
 
     await waitFor(() => {
-      expect(mockedApi.put).toHaveBeenCalledWith(
-        'savings-goals/2026',
-        { target_amount: 0 },
-      );
+      expect(mockedApi.del).toHaveBeenCalledWith('savings-goals/2026');
     });
+    // A zero-target PUT would leave the row in place, still rendering as a
+    // $0 goal card after the "removed" toast.
+    expect(mockedApi.put).not.toHaveBeenCalled();
   });
 
   test('Add Goal with blank target shows a validation error and skips PUT', async () => {

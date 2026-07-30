@@ -58,6 +58,51 @@ func (h *Handler) handleGetSavingsGoals(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleDeleteSavingsGoal removes a savings goal for a given year. Admin only.
+//
+// Removal used to be expressed as PUT {target_amount: 0}, which upserted a
+// zero-target row that persisted and rendered as a $0 goal card while the UI
+// reported "Savings goal removed". Deleting the row is what the user asked
+// for, and it keeps 0 available as a legitimate "no target this year" value.
+func (h *Handler) handleDeleteSavingsGoal(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if user.Role != RoleAdmin {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	yearStr := chi.URLParam(r, "year")
+	year, err := strconv.ParseInt(yearStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid year")
+		return
+	}
+	if year < MinYear || year > MaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+		return
+	}
+
+	result, err := h.queries.DeleteSavingsGoal(r.Context(), year)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete savings goal")
+		return
+	}
+	if rows, _ := result.RowsAffected(); rows == 0 {
+		writeError(w, http.StatusNotFound, "savings goal not found")
+		return
+	}
+
+	// Live-updates: mirrors handleSetSavingsGoal so the savings panel and the
+	// reports savings tab drop the goal without a manual refresh.
+	h.publishInvalidate("savings", "reports")
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // handleSetSavingsGoal upserts a savings goal for a given year. Admin only.
 func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.GetUser(r)

@@ -38,6 +38,7 @@ import { useWebPush } from '@/hooks/useWebPush';
 import { useNotificationPrefs } from '@/hooks/useNotificationPrefs';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { cn, selectAllOnFocus } from '@/lib/utils';
@@ -283,8 +284,8 @@ function AccountSection() {
                 <FormItem>
                   <FormLabel>Current password</FormLabel>
                   <FormControl>
-                    <Input
-                      type="password"
+                    <PasswordInput
+                      toggleLabel="current password"
                       autoComplete="current-password"
                       {...field}
                     />
@@ -300,8 +301,8 @@ function AccountSection() {
                 <FormItem>
                   <FormLabel>New password</FormLabel>
                   <FormControl>
-                    <Input
-                      type="password"
+                    <PasswordInput
+                      toggleLabel="new password"
                       autoComplete="new-password"
                       {...field}
                     />
@@ -317,8 +318,8 @@ function AccountSection() {
                 <FormItem>
                   <FormLabel>Confirm new password</FormLabel>
                   <FormControl>
-                    <Input
-                      type="password"
+                    <PasswordInput
+                      toggleLabel="confirm new password"
                       autoComplete="new-password"
                       {...field}
                     />
@@ -770,7 +771,11 @@ function UsersSection() {
                     <FormItem>
                       <FormLabel>Password</FormLabel>
                       <FormControl>
-                        <Input type="password" {...field} />
+                        <PasswordInput
+                          toggleLabel="password"
+                          autoComplete="new-password"
+                          {...field}
+                        />
                       </FormControl>
                       <FormMessage />
                     </FormItem>
@@ -929,8 +934,8 @@ function UsersSection() {
                   <FormItem>
                     <FormLabel>New password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
+                      <PasswordInput
+                        toggleLabel="new password"
                         autoComplete="new-password"
                         {...field}
                       />
@@ -946,8 +951,8 @@ function UsersSection() {
                   <FormItem>
                     <FormLabel>Confirm new password</FormLabel>
                     <FormControl>
-                      <Input
-                        type="password"
+                      <PasswordInput
+                        toggleLabel="confirm new password"
                         autoComplete="new-password"
                         {...field}
                       />

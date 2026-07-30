@@ -136,12 +136,18 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // reads are issued against the tx so they see a consistent view even under
 // concurrent writers; pulling the before row outside the tx would race with
 // other mutators.
+//
+// p.ClearContentHash is DERIVED here, not accepted from the caller: the store
+// is the only place that holds both the pre-edit row and the post-edit params
+// inside one tx, so deciding "did a hash input actually move?" anywhere else
+// would either race the read or duplicate the predicate. See hashInputsMoved.
 func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTransactionParams) error {
 	return s.withTx(ctx, func(qtx *Queries) error {
 		before, err := qtx.GetTransactionByID(ctx, p.ID)
 		if err != nil {
 			return fmt.Errorf("load before: %w", err)
 		}
+		p.ClearContentHash = hashInputsMoved(before, p)
 		if err := qtx.UpdateTransaction(ctx, p); err != nil {
 			return fmt.Errorf("update transaction: %w", err)
 		}
@@ -214,9 +220,18 @@ func (s *TransactionStore) UpdateTx(
 	// them — bulk amount edits would require currency conversion and cents
 	// recomputation that the patch shape does not carry. The legacy REAL
 	// amount / original_amount columns were dropped in migration 010 (Phase
-	// 3.1b), so only the cents columns flow through. content_hash is
-	// intentionally NOT rewritten here (UpdateTransaction itself does not
-	// touch it — Phase 3.4 contract).
+	// 3.1b), so only the cents columns flow through.
+	//
+	// content_hash is cleared CONDITIONALLY, via the ClearContentHash flag set
+	// below once the merge is complete. A patch can move date, description or
+	// category_id — all hash inputs — and then the edited row must leave dedupe
+	// rather than keep claiming the identity of content it no longer holds,
+	// which would make a later import of that content skip a genuinely new row.
+	// But a patch can equally carry only tags (the common batch-update shape,
+	// up to MaxBatchUpdateIDs rows at a time), and clearing THOSE would drop a
+	// whole selection out of dedupe and let a re-import double all of it. See
+	// the long note on the UpdateTransaction query. The startup backfill
+	// re-anchors a genuinely cleared row on the next boot.
 	params := UpdateTransactionParams{
 		ID:                  id,
 		Date:                before.Date,
@@ -249,6 +264,13 @@ func (s *TransactionStore) UpdateTx(
 		// matching the column's nullable contract.
 		params.Tags = sql.NullString{String: *patch.Tags, Valid: *patch.Tags != ""}
 	}
+
+	// Derived from the merged params vs the tx-scoped `before` row — the same
+	// single predicate Update uses, so the single-PUT and batch-update paths
+	// cannot drift apart. Comparing VALUES rather than testing which patch keys
+	// are present also means a patch that resets a field to what it already
+	// held keeps the row anchored.
+	params.ClearContentHash = hashInputsMoved(before, params)
 
 	if err := qtx.UpdateTransaction(ctx, params); err != nil {
 		return before, after, fmt.Errorf("update transaction: %w", err)

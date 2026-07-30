@@ -44,7 +44,7 @@ describe('Login', () => {
   test('renders username and password inputs', () => {
     renderLogin();
     expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    expect(screen.getByLabelText('Password')).toBeInTheDocument();
   });
 
   test('renders submit button', () => {
@@ -67,9 +67,29 @@ describe('Login', () => {
     renderLogin();
 
     await user.type(screen.getByLabelText(/username/i), 'alice');
-    await user.type(screen.getByLabelText(/password/i), 'secret');
+    await user.type(screen.getByLabelText('Password'), 'secret');
     await user.click(screen.getByRole('button', { name: /log\s*in/i }));
 
+    expect(mockLogin).toHaveBeenCalledWith('alice', 'secret');
+  });
+
+  test('password field is masked by default and reveals on toggle, and the revealed value still submits intact', async () => {
+    mockLogin.mockResolvedValueOnce(undefined);
+    const user = userEvent.setup();
+    renderLogin();
+
+    const password = screen.getByLabelText('Password');
+    expect(password).toHaveAttribute('type', 'password');
+
+    await user.type(screen.getByLabelText(/username/i), 'alice');
+    await user.type(password, 'secret');
+    await user.click(screen.getByRole('button', { name: 'Show password' }));
+    expect(password).toHaveAttribute('type', 'text');
+
+    await user.click(screen.getByRole('button', { name: /log\s*in/i }));
+
+    // Guards against a call site that forgets to forward {...field}: the
+    // exact typed string must still reach the auth hook.
     expect(mockLogin).toHaveBeenCalledWith('alice', 'secret');
   });
 
@@ -79,7 +99,7 @@ describe('Login', () => {
     renderLogin();
 
     await user.type(screen.getByLabelText(/username/i), 'alice');
-    await user.type(screen.getByLabelText(/password/i), 'wrong');
+    await user.type(screen.getByLabelText('Password'), 'wrong');
     await user.click(screen.getByRole('button', { name: /log\s*in/i }));
 
     await waitFor(() => {
@@ -96,7 +116,7 @@ describe('Login', () => {
     renderLogin();
 
     await user.type(screen.getByLabelText(/username/i), 'alice');
-    await user.type(screen.getByLabelText(/password/i), 'secret');
+    await user.type(screen.getByLabelText('Password'), 'secret');
     await user.click(screen.getByRole('button', { name: /log/i }));
 
     await waitFor(() => {

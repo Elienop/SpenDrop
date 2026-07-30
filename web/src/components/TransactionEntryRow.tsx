@@ -179,6 +179,13 @@ export function TransactionEntryRow({
     // React commit — onFocus sets focusedRef=true before the useEffect
     // runs, which makes the useEffect skip the sync and strand the
     // pre-reset rawInput in the DOM.
+    // Blur first. The deferred focus() alone only helps when focus was
+    // elsewhere; submitting with Cmd/Ctrl+Enter FROM the amount field leaves
+    // it focused throughout, and AmountCurrencyInput deliberately ignores
+    // incoming `value` while focused — so the reset to 0 was swallowed and
+    // the old text stayed in the DOM, ready to concatenate into the next
+    // transaction's amount. Blur runs its unconditional re-sync from `value`.
+    amountRef.current?.blur();
     setTimeout(() => amountRef.current?.focus(), 0);
   }, [onDelete, form]);
 
@@ -238,7 +245,14 @@ export function TransactionEntryRow({
       // React commit — onFocus sets focusedRef=true before the useEffect
       // runs, which makes the useEffect skip the sync and strand the
       // pre-submit rawInput (e.g. "25") in the DOM.
-      setTimeout(() => amountRef.current?.focus(), 0);
+      // Blur first. The deferred focus() alone only helps when focus was
+    // elsewhere; submitting with Cmd/Ctrl+Enter FROM the amount field leaves
+    // it focused throughout, and AmountCurrencyInput deliberately ignores
+    // incoming `value` while focused — so the reset to 0 was swallowed and
+    // the old text stayed in the DOM, ready to concatenate into the next
+    // transaction's amount. Blur runs its unconditional re-sync from `value`.
+    amountRef.current?.blur();
+    setTimeout(() => amountRef.current?.focus(), 0);
     },
     [onSubmit, form, undoLastSave, baseCode, rateFor],
   );
@@ -268,6 +282,28 @@ export function TransactionEntryRow({
       return;
     }
     if (e.key === 'Escape') {
+      // Radix renders PopoverContent/SelectContent through a portal, so it
+      // sits outside this form in the DOM — but it is still a React child,
+      // and React replays synthetic events along the React tree. An Escape
+      // meant to dismiss the Category or Currency picker therefore arrived
+      // here and wiped the entire half-typed row before the picker ever saw
+      // it.
+      //
+      // Detect the picker directly instead of testing containment against
+      // formRef: that ref can hold a stale detached <form> (see the Cmd/Ctrl+Z
+      // guard below, which has the same weakness), so a containment test
+      // silently rejects every Escape including the legitimate ones. Radix
+      // parks focus inside its popper wrapper while a picker is open, which
+      // is precisely the case we must not treat as "cancel the row".
+      const active = document.activeElement;
+      if (
+        active instanceof Element &&
+        active.closest(
+          '[data-radix-popper-content-wrapper],[role="listbox"],[role="dialog"]',
+        )
+      ) {
+        return;
+      }
       e.preventDefault();
       form.reset();
       onClose?.();
