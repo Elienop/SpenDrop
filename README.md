@@ -920,7 +920,7 @@ All require an admin session.
 |--------|----------|-------------|
 | GET | `/api/categories` | List all categories |
 | POST | `/api/categories` | Create a category |
-| PUT | `/api/categories/{id}` | Update a category |
+| PUT | `/api/categories/{id}` | Update a category. Full replace of `name` and `icon`. Because the dedupe identity of a transaction is derived from its category **name**, a rename clears the `content_hash` of every live transaction in that category — in the same SQL transaction as the rename — so they leave import dedupe rather than claiming an identity computed from the old name. They are re-anchored under the new name by the startup backfill. An edit that leaves the name unchanged (an icon-only edit, or a case/whitespace-only rename that normalizes identically) clears nothing. |
 | PATCH | `/api/categories/{id}` | Partially update (e.g., deactivate) |
 | DELETE | `/api/categories/{id}` | Delete a category |
 | POST | `/api/categories/reorder` | Reorder categories |
