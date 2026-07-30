@@ -84,11 +84,18 @@ func TestHandleExportTransactions_ReleasesConnectionBeforeWorkbookBuild(t *testi
 // over two months of 2026, so every cursor the monthly and yearly exports open
 // returns MORE THAN ONE row.
 //
-// The row count matters. These tests exist to catch a cursor that is left open
-// across a later query, and the classic way that gets introduced is a `break`
-// or an early `return` in the scan loop. On a single-row result set the loop
-// exits at the same point either way, so the undrained state is unreachable and
-// the test would pass against the very bug it is written for.
+// The row count matters, though not for the reason 054d1ee's message gave. A
+// single row already catches an UNCONDITIONAL `break` or `return`: the loop
+// still exits with the cursor unexhausted, so the connection stays held. What
+// multi-row data buys is the position-dependent variants — an early exit that
+// only fires from the second row onwards (`if row > 1 { break }`, a filter that
+// skips the first row, a scan error the first row cannot trigger) is
+// unreachable on a single-row result set and would leave these tests green.
+//
+// The invariant to preserve when editing this fixture is therefore "every
+// cursor the monthly and yearly exports open returns at least two rows". Zero
+// rows is the case that asserts nothing at all: an empty cursor exhausts
+// immediately, so no early exit inside the loop body is reachable.
 func seedMultiSheetExportData(t *testing.T, h *Handler, username string) database.User {
 	t.Helper()
 	user := seedTestUser(t, h.queries, username, "admin")
@@ -104,20 +111,33 @@ func seedMultiSheetExportData(t *testing.T, h *Handler, username string) databas
 	return user
 }
 
-// TestHandleExportMonthly_DoesNotDeadlockOnSingleConnection pins the monthly
-// export against the same single-connection deadlock the transactions export
-// already guards.
+// TestHandleExportMonthly_DoesNotDeadlockOnSingleConnection is a forward guard
+// on a currently-unviolated invariant, not a regression test for a bug that
+// shipped: no early exit may leave a report cursor open across a later query.
 //
-// handleExportMonthly calls getBaseCurrency after the Summary scan loop but
-// before the deferred summaryRows.Close() can fire. That only ever worked
-// because a loop run to exhaustion auto-closes its *sql.Rows — nothing pinned
-// it, so adding one `break` to the loop made getBaseCurrency wait forever on a
-// connection only the handler itself could release, taking every other request
-// in the process down with it.
+// Be precise about what was and was not broken here. handleExportMonthly calls
+// getBaseCurrency after the Summary read, and before the drain-helper refactor
+// that read was an inline scan loop. That loop always ran to exhaustion — there
+// is no `break` or `continue` anywhere in export_handlers.go — and an exhausted
+// *sql.Rows auto-closes, so no deadlock was ever reachable in this handler. The
+// one export deadlock that did reach production was handleExportTransactions
+// issuing getBaseCurrency with its cursor still open; that is fixed in bfbe6e4
+// and guarded by the pair at the top of this file.
 //
-// The failure mode is a HANG, not an error, so this must assert on a timeout: a
-// plain call that returns 200 proves nothing, because a deadlocked handler
-// never returns to be inspected at all.
+// What the inline shape lacked was any pin on that safety. Under the production
+// pool cap of one connection (SetMaxOpenConns(1), load-bearing) a single `break`
+// added to the loop would leave the cursor holding the process's only
+// connection, and getBaseCurrency would then wait forever on a connection only
+// the blocked handler could release — taking every other request down with it.
+// This test makes that hypothetical failure loud instead of silent.
+//
+// The failure mode it guards is a HANG, not an error, so it must assert on a
+// timeout: a plain call that returns 200 proves nothing, because a deadlocked
+// handler never returns to be inspected at all.
+//
+// This test cannot see the drain-helper shape itself — it passes against the
+// pre-refactor inline loops. TestDrainHelpers_ReleaseConnectionBeforeReturning
+// is what pins that.
 func TestHandleExportMonthly_DoesNotDeadlockOnSingleConnection(t *testing.T) {
 	h := setupHandler(t)
 	user := seedMultiSheetExportData(t, h, "monthly-exporter")
@@ -151,10 +171,13 @@ func TestHandleExportMonthly_DoesNotDeadlockOnSingleConnection(t *testing.T) {
 	}
 }
 
-// TestHandleExportYearly_DoesNotDeadlockOnSingleConnection is the same guard
-// for the yearly export, which opens two cursors in sequence: the Monthly
+// TestHandleExportYearly_DoesNotDeadlockOnSingleConnection is the same forward
+// guard for the yearly export, which opens two cursors in sequence: the Monthly
 // Totals scan is followed by the Category Totals query, so an undrained first
-// cursor deadlocks the second query rather than getBaseCurrency.
+// cursor would deadlock the second query rather than getBaseCurrency.
+//
+// As above, nothing in the pre-refactor code took such an early exit and this
+// handler never deadlocked in production. The test pins that no future one may.
 func TestHandleExportYearly_DoesNotDeadlockOnSingleConnection(t *testing.T) {
 	h := setupHandler(t)
 	user := seedMultiSheetExportData(t, h, "yearly-exporter")
