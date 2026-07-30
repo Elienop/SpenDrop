@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -131,13 +132,24 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// safeDollarsToCents, not dollarsToCents: the two bounds above are a pair
+	// of comparisons and NaN is false against both, so a non-finite amount
+	// would pass validation and int64(NaN*100) stores int64 minimum. Defence in
+	// depth — no JSON body can produce one today — kept at the conversion so it
+	// survives a future decoder or validator change.
+	amountCents, ok := safeDollarsToCents(req.Amount)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "amount is not a representable money value")
+		return
+	}
+
 	// Phase 3.1b: the legacy REAL amount column was dropped in migration 010;
 	// only amount_cents is written. The cents value is derived once from the
 	// client-supplied float at the wire edge.
 	err = h.queries.UpsertBudget(r.Context(), database.UpsertBudgetParams{
 		Year:        year,
 		Month:       month,
-		AmountCents: dollarsToCents(req.Amount),
+		AmountCents: amountCents,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to set budget")
@@ -149,6 +161,38 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 	h.publishInvalidate("budgets", "reports")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// defaultBudgetCents parses the default_budget app_settings value into cents.
+// It reports false when the stored string is not a budget this application can
+// represent, and every caller then falls back to the documented default of 0.
+//
+// app_settings.value is free text. handleDefaultBudget's PUT is its only
+// writer and enforces 0 < amount <= MaxTransactionAmount, but the read side
+// cannot assume the column only ever passed through that gate: a hand-edited
+// database, a restored backup or an older build can all leave something else
+// there. strconv.ParseFloat accepts "NaN", "Inf" and "-Inf", none of which the
+// JSON decoder on the write path can produce, and int64(NaN*100) is undefined
+// in Go — on amd64 it lands on int64 minimum, so the budget surfaced as about
+// -9.2e16 dollars and every figure derived from it followed.
+//
+// Negative values are refused for the same reason the PUT refuses them: a
+// negative budget is not a state this application defines, and letting one
+// through here would make the read side accept what the write side rejects.
+func defaultBudgetCents(value string) (int64, bool) {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return 0, false
+	}
+	cents, ok := safeDollarsToCents(parsed)
+	if !ok || cents < 0 {
+		// Logged, not silent: this is a stored value the operator has to fix,
+		// and the symptom (every budget reading zero) gives them nothing to go
+		// on by itself.
+		log.Printf("default_budget: refusing unrepresentable setting value %q; using 0", value)
+		return 0, false
+	}
+	return cents, true
 }
 
 // handleDefaultBudget handles both GET and PUT for the default budget setting.

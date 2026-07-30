@@ -110,6 +110,79 @@ func (q *Queries) CountStaleMismatchCheckpoints(ctx context.Context, threshold s
 	return n, err
 }
 
+const clearContentHashForCategory = `-- name: ClearContentHashForCategory :exec
+UPDATE transactions
+SET content_hash = NULL
+WHERE category_id = ? AND content_hash IS NOT NULL
+`
+
+// Drops every row in a category out of import dedupe. Called ONLY by
+// handleUpdateCategory, inside the same SQL transaction as the rename that
+// triggered it, and ONLY when the new name normalizes differently from the old
+// one (database.CategoryRenameChangesHashes).
+//
+// ComputeContentHash mixes in the category NAME, so renaming a category moves
+// the identity of every transaction in it. Leaving the old digest behind makes
+// each of those rows claim content it no longer holds, in both harm
+// directions: a re-import of the spreadsheet they came from hashes under the
+// new name, matches nothing and silently doubles the whole category; and a
+// genuinely new row that happens to hash to the stale value is rejected as a
+// duplicate of a row that no longer says that. The staleness is permanent
+// without this clear, because BackfillContentHashes only ever processes rows
+// WHERE content_hash IS NULL.
+//
+// Clear, do not recompute. Recomputing inline would have to handle collisions
+// against idx_transactions_content_hash (legitimate same-hash rows exist in
+// real household data), which is exactly what the boot backfill already
+// implements with earliest-id-wins. Clearing makes the rows leave dedupe
+// rather than lie about it, and the next boot re-anchors them under the new
+// name.
+//
+// Tombstoned rows are cleared TOO — deliberately no deleted_at filter. The
+// partial unique index and GetTransactionByContentHash both skip tombstoned
+// rows, so a trashed row's digest is DORMANT, not inert: it is out of dedupe
+// only while the row stays in the trash, and RestoreTransaction flips
+// deleted_at back to NULL without touching content_hash, so a restore RE-ARMS
+// whatever digest the row was holding. Three endpoints do exactly that
+// (transactions/{id}/restore, restore-batch, restore-all) and no purge worker
+// bounds the window. Skipping tombstoned rows here therefore only defers the
+// staleness: the row re-enters the live set claiming an identity computed from
+// a category name that no longer exists, and the same harm as above follows (a
+// re-import of its own spreadsheet misses and doubles it, silently — 200, no
+// collision group). BackfillContentHashes cannot heal it, so the damage is
+// permanent once restored.
+//
+// Clearing tombstoned rows is safe in both directions:
+//   - It cannot collide. The statement writes NULL, and the partial unique
+//     index only covers content_hash IS NOT NULL.
+//   - The next boot re-anchors them. ListTransactionsForHashBackfill carries
+//     no deleted_at filter, by design, precisely so tombstoned rows get a
+//     current hash.
+//
+// It also does not disturb the audit trail: the delete/restore/update audits
+// marshal GetTransactionByIDRow, which carries no content_hash field, so no
+// before_json snapshot contains this column. (The insert audit's after_json
+// does — that is immutable history and is not rewritten by this statement.)
+//
+// The one thing this statement must NOT do is resurrect a trashed row: it is
+// an unqualified UPDATE ... WHERE category_id = ?, so deleted_at stays out of
+// the SET list. Dropping a derived digest is hygiene; un-trashing a row is a
+// ledger change.
+//
+// content_hash IS NOT NULL keeps the statement from rewriting rows that are
+// already un-anchored.
+//
+// No updated_at bump: like UpdateTransactionContentHash, this is
+// derived-column hygiene, not a user-visible edit, and promoting it into the
+// updated_at stream would make "what changed yesterday" reports lie. For the
+// same reason it does not emit transaction_audit rows and so is an intentional
+// exception to the TransactionStore chokepoint (the ledger values are
+// untouched).
+func (q *Queries) ClearContentHashForCategory(ctx context.Context, categoryID int64) error {
+	_, err := q.db.ExecContext(ctx, clearContentHashForCategory, categoryID)
+	return err
+}
+
 const createCategory = `-- name: CreateCategory :one
 
 INSERT INTO categories (name, type, sort_order)

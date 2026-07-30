@@ -279,7 +279,7 @@ Most deployments only need the first handful of variables. Everything below is a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
+| `RATE_LIMIT_MAX` | `10` | Attempts allowed per client per window before login/register return 429. A "client" is the address for IPv4 (`/32`) and the **`/64` prefix** for IPv6 — ISPs delegate a routed `/64` to each customer, so keying on the full IPv6 address would let one host mint a fresh bucket per request and bypass the limiter entirely. Two different IPv6 `/64`s are still counted separately |
 | `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
 | `TRUST_PROXY_HEADERS` | `false` | Derive the rate-limit client IP from `X-Forwarded-For` instead of the socket address. **Set this to `true` if and only if SpenDrop sits behind a reverse proxy you control**, and set `TRUSTED_PROXY_CIDRS` along with it — enabling this without CIDRs is refused at startup, because the header cannot then be told apart from a forgery. Behind a proxy with it `false`, every request carries the proxy's address, so the whole household shares one bucket and a single attacker locks everyone out. Directly exposed with it `true`, the header is attacker-controlled and anyone can mint a fresh bucket per request, bypassing the limiter entirely |
 | `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated address ranges of your reverse proxies, as CIDRs or bare IPs — e.g. `172.18.0.0/16` (a Docker compose network) or `172.18.0.5`. **Required when `TRUST_PROXY_HEADERS=true`.** `X-Forwarded-For` is honoured **only when the connection itself came from one of these ranges**, so anything reaching SpenDrop directly (a LAN host, a sibling container, a port exposed next to the proxy) is keyed on its socket address and cannot forge an identity. The client is then chosen by **address**: the header is walked from the right while entries fall inside these ranges, and the first entry that does not is the client. Anything an attacker prepends sits further left and is never reached, so this is safe no matter how long the real chain is. **The ranges must cover your proxies and nothing else** — any host inside them is trusted to declare who the client is, so derive the range from your own network rather than copying a wide default (see [Caddy Reverse Proxy](#caddy-reverse-proxy)) |
@@ -512,6 +512,44 @@ Every successful backup emits a single log line you can grep for in `docker logs
 ```
 backup ok: spendrop-2026-04-13T0300Z.db (4.8 MB, 9842 rows, sha256 a1b2c3d4e5f6…) in 87ms
 ```
+
+#### Monitoring backups without reading the log
+
+Every condition above also reaches [`GET /healthz/data`](#api-reference) under a `backups` block, so you do not have to grep container logs to find out that backups stopped working:
+
+```json
+"backups": {
+  "enabled": true,
+  "last_run_at": "2026-04-13T03:00:00Z",
+  "last_outcome": "success",
+  "trusted_count": 14,
+  "quarantined_count": 0,
+  "prune_failed_count": 0,
+  "newest_backup_at": "2026-04-13T03:00:00Z",
+  "newest_backup_age_seconds": 3600,
+  "interval_seconds": 86400
+}
+```
+
+`last_outcome` is `success`, `verify_failed` (a snapshot was written and rejected), `error` (no snapshot was produced), or `""` (no tick has completed yet). `trusted_count` counts restore points — backups that have a `.sha256` sidecar — so a quarantined or sidecar-less file never inflates it. The values are read from the scheduler's in-memory snapshot, refreshed once per tick, so scraping this endpoint does not touch `BACKUP_DIR`.
+
+**`trusted_count`, `quarantined_count` and `prune_failed_count` are absent until SpenDrop has actually read `BACKUP_DIR`.** All three come from the same directory scan, and an absent field means "unknown", which is not the same as `0`. If instead the directory could not be read, the block adds `"dir_unreadable": true`:
+
+```json
+"backups": {
+  "enabled": true,
+  "last_run_at": "2026-04-13T03:00:00Z",
+  "last_outcome": "success",
+  "dir_unreadable": true,
+  "interval_seconds": 86400
+}
+```
+
+That distinction matters because the two conditions need opposite repairs. "No restore point" means investigate why backups are not being produced; "cannot read the backup directory" means fix the permissions or the mount — the backups may well all be there. A directory that is writable and traversable but not readable is enough to produce it: writing and verifying a backup never needs the read bit, so the scheduler keeps reporting `"last_outcome": "success"` while every directory listing fails.
+
+**These flip the endpoint to 503:** `trusted_count == 0` while `enabled` is true (the directory was read and holds nothing to restore from), `last_outcome` being anything other than `success` (nothing new is being captured), and `dir_unreadable` when no scan has ever succeeded (retention is not running and nothing can confirm a restore is possible). A disabled scheduler and one that has not completed its first tick never degrade — otherwise `BACKUP_ENABLED=false` would be unusable and every container restart would flap.
+
+**The rest are reported, not alerted on.** `quarantined_count` outlives the failure that produced it by design (`BACKUP_KEEP_CORRUPT` retains the newest samples on purpose), so degrading on it would hold the endpoint at 503 long after backups recovered — `last_outcome` already carries the live failure. `prune_failed_count > 0` means retention is not being enforced and the volume will grow, but every existing backup is intact. `dir_unreadable` alongside a `trusted_count` — a read failure after an earlier successful scan — likewise only reports: those counts still describe the volume, and with `BACKUP_INTERVAL` at its 24h default, degrading on one transient error would hold the endpoint at 503 for a day over a directory whose backups are all still present. And staleness has no correct universal threshold, so the block emits `newest_backup_age_seconds` alongside `interval_seconds` and leaves the judgement to your alert rule — `newest_backup_age_seconds > 3 * interval_seconds` is a reasonable starting point.
 
 > **Do not** use `docker cp spendrop:/app/data/spendrop.db` on a running container. SQLite in WAL mode keeps uncommitted writes in `spendrop.db-wal` and `spendrop.db-shm`. A naive copy of just `spendrop.db` can be silently inconsistent or lose recent transactions on restore. Use the scheduled backup or the `spendrop backup` subcommand below instead.
 
@@ -857,7 +895,7 @@ Tokens are also revoked atomically when you change your password — if the pass
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |
 | POST | `/api/transactions/batch-update` | Bulk-edit by ID list — body `{ ids, patch, tagsMode? }`. Per-row audit; tombstoned/missing IDs skipped, plus non-owned IDs for members (admins may patch any household row). Capped at 500 IDs. |
-| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Scoped to the caller's own rows for members, household-wide for admins, so there is no skipped count. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. |
+| POST | `/api/transactions/update-by-filter` | Bulk-edit every transaction matching the current filter (querystring) — body `{ patch, tagsMode? }`. Scoped to the caller's own rows for members, household-wide for admins, so there is no skipped count. Single summary audit row. No-tags patches use one SQL UPDATE; tag patches enumerate-then-write inside one tx. Follows the same dedupe-identity rule as the single-row PUT: a row's `content_hash` is cleared only when the patch actually moves one of its inputs, so a bulk tagging pass leaves import dedupe intact. |
 | PUT | `/api/transactions/{id}` | Update a transaction. Full replace, with two exceptions: `notes` and `tags` are optional — **omit the key to leave the stored value unchanged**, or send `""` to clear it. Every other field is overwritten by what you send. Any update that moves a dedupe-identity input (`date`, `amount`, `description`, `category_id`) clears the row's `content_hash`; it is re-anchored to the row's current content by the startup backfill. |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
@@ -877,7 +915,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
-| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, and the cached result of the daily full `PRAGMA integrity_check`. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, or version string that is safe to expose on a self-hosted LAN. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
 | GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 
 ### Users (admin only)
@@ -896,7 +934,7 @@ All require an admin session.
 |--------|----------|-------------|
 | GET | `/api/categories` | List all categories |
 | POST | `/api/categories` | Create a category |
-| PUT | `/api/categories/{id}` | Update a category |
+| PUT | `/api/categories/{id}` | Update a category. Full replace of `name` and `icon`. Because the dedupe identity of a transaction is derived from its category **name**, a rename clears the `content_hash` of every live transaction in that category — in the same SQL transaction as the rename — so they leave import dedupe rather than claiming an identity computed from the old name. They are re-anchored under the new name by the startup backfill. An edit that leaves the name unchanged (an icon-only edit, or a case/whitespace-only rename that normalizes identically) clears nothing. |
 | PATCH | `/api/categories/{id}` | Partially update (e.g., deactivate) |
 | DELETE | `/api/categories/{id}` | Delete a category |
 | POST | `/api/categories/reorder` | Reorder categories |

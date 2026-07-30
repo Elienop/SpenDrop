@@ -141,12 +141,24 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// safeDollarsToCents, not dollarsToCents. The two bounds above are a pair
+	// of comparisons and NaN is false against both, so a non-finite amount
+	// would pass validation and int64(NaN*100) stores int64 minimum. No JSON
+	// body can produce one today — the decoder rejects the NaN token and
+	// range-errors past float64 — which makes this defence in depth rather
+	// than a live fix, and exactly why it belongs at the conversion.
+	targetCents, ok := safeDollarsToCents(req.TargetAmount)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "target_amount is not a representable money value")
+		return
+	}
+
 	// Phase 3.1b: the legacy REAL target_amount column was dropped in
 	// migration 010; only target_amount_cents is written. The cents value is
 	// derived once from the client-supplied float at the wire edge.
 	err = h.queries.UpsertSavingsGoal(r.Context(), database.UpsertSavingsGoalParams{
 		Year:              year,
-		TargetAmountCents: dollarsToCents(req.TargetAmount),
+		TargetAmountCents: targetCents,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to set savings goal")

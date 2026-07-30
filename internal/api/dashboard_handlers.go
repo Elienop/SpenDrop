@@ -119,12 +119,12 @@ func (h *Handler) handleDashboardSummary(w http.ResponseWriter, r *http.Request)
 	} else if errors.Is(err, sql.ErrNoRows) {
 		setting, settingErr := h.queries.GetSetting(ctx, SettingDefaultBudget)
 		if settingErr == nil {
-			parsed, parseErr := strconv.ParseFloat(setting.Value, 64)
-			if parseErr == nil {
-				budgetCents = dollarsToCents(parsed)
+			if cents, ok := defaultBudgetCents(setting.Value); ok {
+				budgetCents = cents
 			}
 		}
-		// If setting not found either, budget stays 0
+		// If setting not found, or it holds a value this application cannot
+		// represent, budget stays 0.
 	} else {
 		writeError(w, http.StatusInternalServerError, "failed to get budget")
 		return

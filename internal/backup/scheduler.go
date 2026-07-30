@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,9 +21,12 @@ import (
 // preserves the backup package's zero dependency on internal/config.
 //
 // A *Scheduler is configured once, started once, and stopped by cancelling
-// the context passed to RunLoop. Do not mutate any field after RunLoop has
-// been started — the scheduler intentionally holds no mutex, and the -race
-// detector will correctly flag a concurrent mutation as a data race.
+// the context passed to RunLoop. Do not mutate any CONFIGURATION field after
+// RunLoop has been started — those are read without synchronisation, and the
+// -race detector will correctly flag a concurrent mutation as a data race. The
+// one exception is the health snapshot behind statusMu, which exists precisely
+// so a reader outside the goroutine (the /healthz/data handler) can observe
+// progress safely; read it through Status, never by touching the field.
 type Scheduler struct {
 	Enabled     bool
 	Dir         string
@@ -53,6 +57,15 @@ type Scheduler struct {
 	// (a) main.go already uses log.Printf everywhere, and (b) one concrete
 	// type means zero new abstractions to review.
 	Logger *log.Logger
+
+	// statusMu guards status, the health snapshot served by Status(). Written
+	// once or twice per tick by the scheduler goroutine and read by the
+	// /healthz/data handler on every scrape. A plain Mutex rather than an
+	// RWMutex: both critical sections are a handful of field copies, and at
+	// one write per BACKUP_INTERVAL against a scrape every few seconds there
+	// is no reader contention worth optimising for.
+	statusMu sync.Mutex
+	status   Status
 }
 
 // RunLoop runs the scheduler until ctx is cancelled. It returns immediately
@@ -144,6 +157,33 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	now := s.now()
 	dst := filepath.Join(s.Dir, FormatFilename(now))
 
+	// ONE tick must reach Status() as ONE observation.
+	//
+	// Both of the deferred calls below feed the same snapshot, and they are
+	// registered so that LIFO runs retention FIRST and the publish LAST. The
+	// publish then takes statusMu exactly once, with the tick's outcome and
+	// the post-prune directory scan already in hand.
+	//
+	// This used to be two independent statusMu sections — the outcome from one
+	// defer, the directory scan from another — and a Status() read landing
+	// between them saw a tick that had run, had succeeded, and reported zero
+	// restore points. /healthz/data maps precisely that triple to 503, so a
+	// scrape in the gap invented a "nothing to restore" alarm against a volume
+	// holding a full retention set. Only the first tick after a start can show
+	// it, which is exactly when a container is being health-checked.
+	//
+	// Swapping the two was NOT the fix: that moves the window rather than
+	// closing it, and lets a reader pair fresh counts with the PREVIOUS tick's
+	// outcome — briefly HIDING a failure instead of briefly inventing one.
+	//
+	// Default to error: the value only becomes success or verify_failed where
+	// the code below can prove it, so a path added later that returns without
+	// saying anything is reported as a failure rather than silently inheriting
+	// the previous tick's success.
+	outcome := OutcomeError
+	var obs dirObservation
+	defer func() { s.recordTick(now, outcome, obs) }()
+
 	// Retention runs on EVERY exit path, including the early ones.
 	//
 	// This was previously deferred only after Snapshot succeeded, which made
@@ -153,7 +193,7 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	// Snapshot also covers a failure in step 1 — reclaiming space must not
 	// depend on the source database being readable this tick. Prune tolerates
 	// a missing directory, so this is harmless before the first backup.
-	defer s.pruneAndLog(now, logger)
+	defer func() { obs = s.pruneAndReport(now, logger) }()
 
 	// Step 1: measure the live transaction count. This is the
 	// verification baseline — the number Verify will compare against.
@@ -206,6 +246,7 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	}
 	if verifyErr := Verify(dst, params); verifyErr != nil {
 		s.renameCorrupt(dst, verifyErr, logger)
+		outcome = OutcomeVerifyFailed
 		return
 	}
 
@@ -245,22 +286,54 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 	logger.Printf("backup ok: %s (%s, %d rows, sha256 %s) in %s",
 		filepath.Base(dst), sizeDisplay, liveCount, shortenHash(sum),
 		time.Since(started).Round(time.Millisecond))
+	outcome = OutcomeSuccess
 }
 
-// pruneAndLog runs Prune and reports the outcome. Split out so runOnce can
-// defer it regardless of whether the post-Snapshot path ends in verify
-// failure, sidecar failure, or success — the retention policy is orthogonal
-// to the fate of the current tick's file.
-func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
+// pruneAndReport runs Prune and returns what the tick learned about BACKUP_DIR.
+// Split out so runOnce can defer it regardless of whether the post-Snapshot
+// path ends in verify failure, sidecar failure, or success — the retention
+// policy is orthogonal to the fate of the current tick's file.
+//
+// It deliberately does NOT touch the health snapshot: the caller folds this
+// return value and the tick's outcome into a single recordTick, so one tick
+// reaches Status() as one observation. See runOnce's deferred publish.
+func (s *Scheduler) pruneAndReport(now time.Time, logger *log.Logger) dirObservation {
 	kept, removed, failed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	if err != nil {
 		// Now that prune also runs when Snapshot fails, a not-yet-created
-		// backup directory is an ordinary state rather than a fault.
+		// backup directory is an ordinary state rather than a fault. Report
+		// the zero state as OBSERVED rather than returning silently: "the
+		// directory does not exist" and "the directory holds no restore point"
+		// are the same fact to anyone asking whether a restore is possible,
+		// and staying quiet here would leave the health endpoint reporting the
+		// last observation from before the volume disappeared.
 		if errors.Is(err, fs.ErrNotExist) {
-			return
+			return dirObservation{observed: true}
 		}
 		logger.Printf("backup: prune error in %s: %v", s.Dir, err)
-		return
+		// Deliberately NOT observed: the directory could not be read, so we
+		// know nothing new about its contents. Reporting zeros here would
+		// manufacture a "no backups on disk" alarm out of a read failure.
+		//
+		// unreadable carries the fault itself, which is a different fact from
+		// the counts and is the only thing this tick actually established. It
+		// matters on its own: Prune's ReadDir is the call that just failed, so
+		// retention is not running and the quarantine is no longer bounded.
+		return dirObservation{unreadable: true}
+	}
+
+	// Post-prune directory scan. Runs after Prune so the counts describe what
+	// is actually on the volume now, not what was there before retention.
+	//
+	// Prune succeeding and the scan failing is a narrow window, but it is the
+	// same class of fault and gets the same encoding: unknown counts plus an
+	// explicit "could not read the directory".
+	var obs dirObservation
+	if scan, scanErr := scanBackupDir(s.Dir); scanErr == nil {
+		obs = dirObservation{observed: true, scan: scan, pruneFailed: len(failed)}
+	} else {
+		logger.Printf("backup: could not scan %s for health reporting: %v", s.Dir, scanErr)
+		obs = dirObservation{unreadable: true}
 	}
 	if len(removed) > 0 {
 		logger.Printf("backup: pruned %d file(s), %d kept", len(removed), len(kept))
@@ -287,8 +360,8 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 	// different acts, and only the first one was opted into knowingly. Say so,
 	// loudly, rather than leaving the discovery for a restore attempt.
 	//
-	// This cannot become routine noise: pruneAndLog is deferred from runOnce, so
-	// on any successful tick the file just written is in kept. A missing
+	// This cannot become routine noise: pruneAndReport is deferred from runOnce,
+	// so on any successful tick the file just written is in kept. A missing
 	// directory returns above, which keeps a fresh install quiet until the first
 	// snapshot has actually been attempted.
 	if len(kept) == 0 && len(failed) == 0 {
@@ -299,6 +372,8 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 			"investigate why verification is failing.",
 			s.Dir, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	}
+
+	return obs
 }
 
 // renameCorrupt renames a failed-verification backup to "*.corrupt" so an
@@ -399,52 +474,15 @@ func liveDBSize(dbPath string) (int64, error) {
 // "Newest" is determined by the timestamp encoded in the filename, not
 // mtime, to make the function deterministic under wall-clock perturbations
 // (NTP step, container restart, filesystem without mtime precision).
+//
+// The walk itself lives in scanBackupDir, shared with the health snapshot, so
+// there is exactly one definition of "trusted" in the package.
 func previousBackupSize(dir string) (int64, error) {
-	entries, err := os.ReadDir(dir)
+	scan, err := scanBackupDir(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, fmt.Errorf("read backup directory: %w", err)
+		return 0, err
 	}
-
-	// Build a lookup of .sha256 names for O(1) sidecar presence checks.
-	sidecars := make(map[string]bool, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		sidecars[e.Name()] = true
-	}
-
-	var (
-		newestTS   time.Time
-		newestSize int64
-		haveAny    bool
-	)
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
-		}
-		name := e.Name()
-		ts, perr := ParseFilename(name)
-		if perr != nil {
-			continue
-		}
-		if !sidecars[name+".sha256"] {
-			continue
-		}
-		if !haveAny || ts.After(newestTS) {
-			info, err := e.Info()
-			if err != nil {
-				continue
-			}
-			newestTS = ts
-			newestSize = info.Size()
-			haveAny = true
-		}
-	}
-	return newestSize, nil
+	return scan.newestTrustedSize, nil
 }
 
 // formatBytes renders a byte count in the "4.8 MB" style the Phase 1.3

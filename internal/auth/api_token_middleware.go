@@ -32,7 +32,14 @@ func RequireAPIToken(
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ip := ClientIPForRateLimit(r)
+			// Two DIFFERENT values from one request, deliberately. rlKey is
+			// the masked network prefix the limiter buckets on; ip is the
+			// client's actual address, which is what last_used_ip must record
+			// — the token list shows that column so the operator can spot a
+			// token being used from somewhere unexpected, and a /64 prefix
+			// every device in the house shares would answer nothing.
+			rlKey := ClientIPForRateLimit(r)
+			ip := ClientIP(r)
 
 			authz := r.Header.Get("Authorization")
 			if !strings.HasPrefix(authz, "Bearer ") {
@@ -48,8 +55,8 @@ func RequireAPIToken(
 				return
 			}
 
-			if authFailLimiter.Exhausted(ip) {
-				w.Header().Set("Retry-After", authFailLimiter.RetryAfter(ip))
+			if authFailLimiter.Exhausted(rlKey) {
+				w.Header().Set("Retry-After", authFailLimiter.RetryAfter(rlKey))
 				writeRateLimit(w)
 				return
 			}
@@ -61,7 +68,7 @@ func RequireAPIToken(
 			hash := HashAPIToken(plaintext)
 			tok, err := queries.GetAPITokenByHash(r.Context(), hash)
 			if err != nil {
-				authFailLimiter.Consume(ip)
+				authFailLimiter.Consume(rlKey)
 				writeBearerFailure(w)
 				return
 			}
@@ -74,7 +81,7 @@ func RequireAPIToken(
 			// to hold.
 			user, err := queries.GetUserByID(r.Context(), tok.UserID)
 			if err != nil {
-				authFailLimiter.Consume(ip)
+				authFailLimiter.Consume(rlKey)
 				writeBearerFailure(w)
 				return
 			}
@@ -181,7 +188,7 @@ func parseXFFAddr(s string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// socketAddrKey is the rate-limit key for the connection itself: the peer
+// socketAddr is the client address for the connection itself: the peer
 // address, normalised the same way header entries are.
 //
 // Normalising matters because the two paths must agree on what one host is
@@ -194,7 +201,7 @@ func parseXFFAddr(s string) (netip.Addr, bool) {
 // A shape SplitHostPort or netip cannot parse (unix socket, pathological client)
 // falls through to the raw value: an empty key would merge every such client
 // into one bucket.
-func socketAddrKey(r *http.Request) string {
+func socketAddr(r *http.Request) string {
 	raw := extractRemoteIP(r.RemoteAddr)
 	if addr, ok := parseXFFAddr(raw); ok {
 		return addr.String()
@@ -211,7 +218,12 @@ func isTrustedProxy(ip netip.Addr, cidrs []netip.Prefix) bool {
 	return false
 }
 
-// ClientIPForRateLimit resolves the address a rate limiter should key on.
+// ClientIP resolves which address belongs to the client that sent this request.
+//
+// It answers SELECTION only, and returns the address unmasked. Rate limiters
+// must not key on this value directly — ClientIPForRateLimit masks it to a
+// network prefix first. Callers that need the real address (audit rows,
+// api_tokens.last_used_ip) are the ones that want this function.
 //
 // Exported and shared: internal/api keys its login/register limiter on the
 // same value, and the second copy of this logic drifted from its own doc
@@ -263,14 +275,14 @@ func isTrustedProxy(ip netip.Addr, cidrs []netip.Prefix) bool {
 // The CIDRs must name the proxies and nothing more. Trusting a range wide enough
 // to contain untrusted hosts lets those hosts be skipped over, reaching whatever
 // they prepended — the same caveat that applies to nginx's set_real_ip_from.
-func ClientIPForRateLimit(r *http.Request) string {
+func ClientIP(r *http.Request) string {
 	trustProxyHeadersMu.RLock()
 	trusted := trustProxyHeaders
 	cidrs := trustedProxyCIDRs
 	trustProxyHeadersMu.RUnlock()
 
 	if !trusted {
-		return socketAddrKey(r)
+		return socketAddr(r)
 	}
 	// Values, not Get. Get returns only the FIRST X-Forwarded-For field line, and
 	// a proxy is free to append a SECOND line rather than extending the client's.
@@ -281,7 +293,7 @@ func ClientIPForRateLimit(r *http.Request) string {
 	// puts the proxy's entry rightmost where the walk begins.
 	xff := strings.Join(r.Header.Values("X-Forwarded-For"), ", ")
 	if xff == "" {
-		return socketAddrKey(r)
+		return socketAddr(r)
 	}
 
 	// The immediate peer must itself be a trusted proxy before ANY part of the
@@ -300,7 +312,7 @@ func ClientIPForRateLimit(r *http.Request) string {
 	// honouring the header from set_real_ip_from peers.
 	peer, ok := parseXFFAddr(extractRemoteIP(r.RemoteAddr))
 	if !ok || !isTrustedProxy(peer, cidrs) {
-		return socketAddrKey(r)
+		return socketAddr(r)
 	}
 
 	// Walk right to left WITHOUT splitting: the header is attacker-controlled, so
@@ -328,5 +340,71 @@ func ClientIPForRateLimit(r *http.Request) string {
 	}
 	// Every entry was a trusted proxy (or the header was unusable). The socket
 	// address is the only thing left that no client can forge.
-	return socketAddrKey(r)
+	return socketAddr(r)
+}
+
+// rateLimitPrefixV4 and rateLimitPrefixV6 are the widths a rate-limit key is
+// masked to.
+//
+// /64 for IPv6 because that is the unit an ISP delegates: every ordinary
+// residential customer gets a routed /64 (RFC 6177 recommends no less), so one
+// host picks freely among 2^64 source addresses. Keying on the full address
+// therefore handed a single attacker a fresh bucket per request.
+//
+// /32 for IPv4 — the host itself, so nothing about IPv4 changes. A wider IPv4
+// mask was considered and rejected: /24 groups up to 254 unrelated customers,
+// and behind CGNAT a whole ISP pool of households. Since Exhausted
+// short-circuits before the password check, one attacker inside such a block
+// could pin every other household at 429 indefinitely — trading a bypass that
+// IPv4 does not have for a lockout that it would. IPv4 hosts do not come in
+// delegated blocks the way IPv6 hosts do, so there is nothing here to collapse.
+const (
+	rateLimitPrefixV4 = 32
+	rateLimitPrefixV6 = 64
+)
+
+// rateLimitKey collapses one client address to the network prefix a limiter
+// buckets on. Every path that produces a key goes through here, so the same
+// host cannot land in two buckets depending on which path ran.
+//
+// A value netip cannot parse (unix socket, pathological client) passes through
+// verbatim: an empty key would merge every such client into one bucket.
+func rateLimitKey(s string) string {
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return s
+	}
+	// Unmap first. An IPv4-mapped address is an IPv4 host, and masking it as
+	// IPv6 would drop every mapped client into the single bucket ::ffff:0:0/64
+	// while the same host arriving unmapped got its own — two failures at once.
+	//
+	// A zone needs no handling here: netip.PrefixFrom drops it (netip.go,
+	// withoutZone), so "fe80::1%eth0" masks to fe80::/64 like anything else.
+	a = a.Unmap()
+	bits := rateLimitPrefixV6
+	if a.Is4() {
+		bits = rateLimitPrefixV4
+	}
+	p := netip.PrefixFrom(a, bits)
+	if !p.IsValid() {
+		// Unreachable for any address ParseAddr accepted; the only way here is
+		// a prefix constant edited out of range. Failing to the unmasked
+		// address is the safe direction — Masked().String() on an invalid
+		// Prefix returns the literal "invalid Prefix", which would key every
+		// client on earth into one bucket. TestRateLimitKeyPrefixWidths pins
+		// the constants so this stays unreachable.
+		return s
+	}
+	return p.Masked().String()
+}
+
+// ClientIPForRateLimit is the key a rate limiter must bucket on: the address
+// ClientIP resolved, masked to its network prefix by rateLimitKey.
+//
+// Keyed on the full address, the login limiter was bypassable by any IPv6
+// client — see rateLimitPrefixV6. Callers that need the client's REAL address
+// (audit rows, api_tokens.last_used_ip) must call ClientIP instead; this value
+// is a network prefix and answers no forensic question.
+func ClientIPForRateLimit(r *http.Request) string {
+	return rateLimitKey(ClientIP(r))
 }

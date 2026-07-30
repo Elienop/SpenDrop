@@ -213,6 +213,14 @@ func main() {
 	// pragma returned above.
 	h.SetIntegrityResult(startupIntegrityAt, startupIntegrityResult)
 
+	// Surface the backup subsystem on /healthz/data. Wired UNCONDITIONALLY,
+	// including when cfg.Backup.Enabled is false: Status reports Enabled=false
+	// in that case, which lets a scrape distinguish "the operator turned
+	// backups off" from "this build does not report on backups". Every backup
+	// failure mode used to be confined to the container log, where an operator
+	// who does not grep discovers it at restore time.
+	h.SetBackupStatusSource(scheduler.Status)
+
 	// Wire Web Push. Constructed ONLY when cfg.Push.Enabled — when push is
 	// off the Handler's pushSender stays nil and every push handler treats
 	// that as "feature disabled" (public vapid route 404s, subscribe/test

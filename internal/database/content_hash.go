@@ -47,9 +47,24 @@ import (
 //     identical to a human reading the spreadsheet.
 //
 // The function does not touch the database; the caller passes in the
-// category name (resolved from category_id via a join) because the
-// content hash must be stable even if the category is later renamed.
-// A rename should not retroactively change a row's identity.
+// category name (resolved from category_id via a join) so that the import
+// path and the startup backfill can both reach it without a lookup and
+// still agree byte-for-byte.
+//
+// A rename DOES move the identity of every row filed under that category,
+// and that is deliberate. The import path hashes the category's CURRENT
+// name (import_handlers.go resolves the row's category and then reads
+// CatIDToName), so a stored digest computed from the old name would no
+// longer match anything the importer can produce — every row in the
+// renamed category would silently re-import as new. handleUpdateCategory
+// therefore clears content_hash for the affected rows (gated on
+// CategoryRenameChangesHashes) and lets BackfillContentHashes re-anchor
+// them under the new name on the next boot.
+//
+// This paragraph previously claimed the opposite — that the hash "must be
+// stable even if the category is later renamed". That was never true of
+// the import path it describes, and it is the reason the staleness went
+// unnoticed. Do not restore it without changing the importer to match.
 //
 // The date is normalized to UTC before formatting. The current callers
 // (import path, backfill) both store or read UTC midnight already, so
@@ -77,24 +92,43 @@ func normalizeHashDate(d time.Time) string { return d.UTC().Format("2006-01-02")
 
 func normalizeHashText(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// hashInputsMoved reports whether a full-replace UpdateTransaction actually
-// CHANGES one of ComputeContentHash's inputs, and is the sole source of
-// UpdateTransactionParams.ClearContentHash.
+// HashInputs is the minimal set of columns ComputeContentHash actually
+// consumes. It exists so a caller that does NOT hold a full transaction row —
+// the api layer's bulk update-by-filter path enumerates rows with its own
+// hand-written SELECT — can still ask the canonical question through
+// HashInputsMoved instead of reimplementing the comparison.
 //
-// UpdateTransaction rewrites every column on every call, but rewriting a
-// column is not changing its value: a tags-only edit, a notes-only edit and a
-// literal no-op Save all resend identical date / amount / description /
-// category. Clearing the identity for those de-anchors the row from import
-// dedupe for nothing, and a re-import of the file the row came from then
-// creates a second copy — permanently, because BackfillContentHashes runs only
-// at boot and only WHERE content_hash IS NULL, so once the duplicate owns the
-// hash the partial unique index makes the backfill skip the edited row forever.
+// CategoryID rather than the category name: the hash mixes in the NAME, but
+// every caller of HashInputsMoved compares one row against ITSELF across a
+// single edit, and no such edit can rename a category. The name is therefore
+// invariant between before and after, which makes the id an exact proxy for
+// "this row now belongs to different content" — a differing id is the only way
+// the name can differ here, and an identical id guarantees an identical name.
 //
-// The category is compared by id, not by name: the hash mixes in the category
-// NAME, but a rename must NOT retroactively change a row's identity (see the
-// note on ComputeContentHash), so id is the correct proxy for "this row now
-// belongs to different content".
-func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+// A rename genuinely DOES move the identity of every row in the category (see
+// ComputeContentHash). It is out of scope for this predicate and handled on its
+// own path: CategoryRenameChangesHashes gates
+// Queries.ClearContentHashForCategory, which un-anchors the whole category in
+// the same transaction as the rename.
+type HashInputs struct {
+	Date        time.Time
+	AmountCents int64
+	Description string
+	CategoryID  int64
+}
+
+// HashInputsMoved reports whether before and after differ in any input to
+// ComputeContentHash — i.e. whether the digest would change. It is the single
+// predicate behind every "should this write clear content_hash?" decision in
+// the codebase; add a caller, not a second implementation.
+//
+// The comparison runs through ComputeContentHash's OWN normalizers
+// (normalizeHashDate, normalizeHashText) rather than comparing raw values, so
+// a change that the digest would erase — re-casing or re-padding a
+// description, restating a date in a different location — correctly reports
+// "not moved". Any future change to the hash's normalization rules therefore
+// updates this predicate for free, which a hand-copied approximation would not.
+func HashInputsMoved(before, after HashInputs) bool {
 	switch {
 	case before.CategoryID != after.CategoryID:
 		return true
@@ -105,6 +139,52 @@ func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams
 	default:
 		return normalizeHashText(before.Description) != normalizeHashText(after.Description)
 	}
+}
+
+// hashInputsMoved adapts HashInputsMoved to the full-replace UpdateTransaction
+// shape, and is the sole source of UpdateTransactionParams.ClearContentHash.
+//
+// UpdateTransaction rewrites every column on every call, but rewriting a
+// column is not changing its value: a tags-only edit, a notes-only edit and a
+// literal no-op Save all resend identical date / amount / description /
+// category. Clearing the identity for those de-anchors the row from import
+// dedupe for nothing, and a re-import of the file the row came from then
+// creates a second copy — permanently, because BackfillContentHashes runs only
+// at boot and only WHERE content_hash IS NULL, so once the duplicate owns the
+// hash the partial unique index makes the backfill skip the edited row forever.
+func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+	return HashInputsMoved(
+		HashInputs{
+			Date:        before.Date,
+			AmountCents: before.AmountCents,
+			Description: before.Description,
+			CategoryID:  before.CategoryID,
+		},
+		HashInputs{
+			Date:        after.Date,
+			AmountCents: after.AmountCents,
+			Description: after.Description,
+			CategoryID:  after.CategoryID,
+		},
+	)
+}
+
+// CategoryRenameChangesHashes reports whether renaming a category from
+// oldName to newName actually MOVES the ComputeContentHash digest of the
+// transactions filed under it. It is the sole gate on
+// Queries.ClearContentHashForCategory.
+//
+// It exists so the api layer cannot hand-copy the normalization. The hash
+// mixes in lower(trim(category_name)), so "Food" -> "  FOOD  " renders
+// different bytes in categories.name and an IDENTICAL digest: nothing about
+// any row's identity moved, and clearing there would de-anchor the whole
+// category from import dedupe for nothing — letting a re-import of the file
+// those rows came from double all of them until the next boot re-anchors
+// them. Comparing the raw strings would do exactly that. This is the same
+// discipline as hashInputsMoved: decide from the prior VALUE, never from the
+// shape of the statement.
+func CategoryRenameChangesHashes(oldName, newName string) bool {
+	return normalizeHashText(oldName) != normalizeHashText(newName)
 }
 
 // backfillPageSize is the number of rows BackfillContentHashes pulls
