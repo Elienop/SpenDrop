@@ -383,6 +383,77 @@ func TestRequireAPIToken_ValidToken_TouchesLastUsedWithin60sWindow(t *testing.T)
 	}
 }
 
+// TestRequireAPIToken_TouchRecordsTheUnmaskedIPv6Address guards the forensic
+// column against the rate-limit masking.
+//
+// The middleware used to derive ONE value and use it for both the rate-limit
+// bucket and last_used_ip. Once the bucket key became a network prefix, reusing
+// it here would have written "2001:db8:1:2::/64" into the column the token list
+// shows the operator — turning the only per-token "used from somewhere
+// unexpected" signal into a prefix that every device in the house shares.
+func TestRequireAPIToken_TouchRecordsTheUnmaskedIPv6Address(t *testing.T) {
+	q, db, bucket, stop := setupMiddlewareTest(t)
+	defer stop()
+
+	userID, plaintext := seedUserAndLiveToken(t, q, "alice")
+	mw := RequireAPIToken(q, bucket)
+	rec := doBearerRequest(t, mw, terminalHandler(nil), plaintext, "[2001:db8:1:2::7]:1234")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+
+	var lastUsedIP sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT last_used_ip FROM api_tokens WHERE user_id = ?`, userID,
+	).Scan(&lastUsedIP); err != nil {
+		t.Fatalf("query last_used_ip: %v", err)
+	}
+	if !lastUsedIP.Valid || lastUsedIP.String != "2001:db8:1:2::7" {
+		t.Errorf("last_used_ip: want the full address 2001:db8:1:2::7, got %v — the "+
+			"rate-limit key is being persisted and the forensic value is lost", lastUsedIP)
+	}
+}
+
+// TestRequireAPIToken_OneIPv6PrefixSharesTheAuthFailBucket pins the middleware
+// WIRING, not just the key helper: the bucket must be consumed under the masked
+// key. Before the mask, a client rotating through its own /64 got a fresh
+// bucket per request and authFailLimiter never engaged at all.
+func TestRequireAPIToken_OneIPv6PrefixSharesTheAuthFailBucket(t *testing.T) {
+	q, _, bucket, stop := setupMiddlewareTest(t)
+	defer stop()
+
+	// setupMiddlewareTest builds a 30-hit bucket. A well-formed but unknown
+	// token consumes one hit per request (the shape pre-filter passes, the hash
+	// lookup misses), so the 31st request from the same /64 must be refused.
+	unknown, _, _, err := GenerateAPIToken()
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	mw := RequireAPIToken(q, bucket)
+
+	for i := 0; i < 30; i++ {
+		remote := fmt.Sprintf("[2001:db8:1:2::%x]:40000", i+1)
+		rec := doBearerRequest(t, mw, terminalHandler(nil), unknown, remote)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("request %d from %s: got %d, want 401", i, remote, rec.Code)
+		}
+	}
+
+	rec := doBearerRequest(t, mw, terminalHandler(nil), unknown, "[2001:db8:1:2::ff]:40000")
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("31st request from the same /64: got %d, want 429 — every address in "+
+			"the prefix is minting its own bucket, so the limiter never engages", rec.Code)
+	}
+
+	// A different /64 must still be its own bucket, or one attacker locks out
+	// unrelated households.
+	other := doBearerRequest(t, mw, terminalHandler(nil), unknown, "[2001:db8:9:9::1]:40000")
+	if other.Code != http.StatusUnauthorized {
+		t.Errorf("an unrelated /64: got %d, want 401 — separate prefixes are sharing a bucket",
+			other.Code)
+	}
+}
+
 func TestRequireAPIToken_ValidToken_SkipsTouchIfRecentlyUpdated(t *testing.T) {
 	q, db, bucket, stop := setupMiddlewareTest(t)
 	defer stop()
