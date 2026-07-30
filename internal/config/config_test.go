@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -567,4 +568,144 @@ func TestValidate_TrustProxyHeadersRequiresCIDRs(t *testing.T) {
 			t.Fatal("Load accepted TRUST_PROXY_HEADERS=true with no TRUSTED_PROXY_CIDRS")
 		}
 	})
+}
+
+// TestParsedTrustedProxyCIDRs pins the parser that decides which peers may
+// declare who the client is.
+//
+// It had no test at all, and the failure it hides is silent and total: mutating
+// the bare-address branch to netip.PrefixFrom(addr, 0) turns every single
+// address on the internet into a trusted proxy, and the whole config suite stays
+// green. So the widths are asserted explicitly, and a containment check states
+// the security property directly rather than by implication.
+func TestParsedTrustedProxyCIDRs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"bare v4 becomes a single host", []string{"10.1.2.3"}, []string{"10.1.2.3/32"}},
+		{"bare v6 becomes a single host", []string{"fd00::1"}, []string{"fd00::1/128"}},
+		// Masked(): an operator writing a host address with a network width means
+		// the network, and an unmasked prefix would not Contains() its own members.
+		{"prefix is masked to its network", []string{"172.18.4.9/16"}, []string{"172.18.0.0/16"}},
+		// Unmap(): without it this yields a /128 v6 prefix that never matches the
+		// v4 address the walk actually compares against.
+		{"v4-mapped v6 unmaps to a v4 host", []string{"::ffff:10.1.2.3"}, []string{"10.1.2.3/32"}},
+		{"several entries keep their order", []string{"172.18.0.0/16", "10.9.9.9"},
+			[]string{"172.18.0.0/16", "10.9.9.9/32"}},
+		{"surrounding whitespace is trimmed", []string{"  10.1.2.3  "}, []string{"10.1.2.3/32"}},
+		{"empty entries are skipped", []string{"", "   ", "10.1.2.3"}, []string{"10.1.2.3/32"}},
+		{"no entries yields no prefixes", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := Defaults()
+			c.RateLimit.TrustedProxyCIDRs = tc.in
+
+			got, err := c.ParsedTrustedProxyCIDRs()
+			if err != nil {
+				t.Fatalf("ParsedTrustedProxyCIDRs(%q): %v", tc.in, err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d prefixes %v, want %d %v", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if got[i].String() != tc.want[i] {
+					t.Errorf("prefix %d = %q, want %q", i, got[i].String(), tc.want[i])
+				}
+			}
+		})
+	}
+
+	t.Run("a bare address trusts only itself", func(t *testing.T) {
+		// States the security property outright. Under the /0 mutation the parsed
+		// prefix contains every address, so any host on the internet would be
+		// trusted to declare the rate-limit client.
+		c := Defaults()
+		c.RateLimit.TrustedProxyCIDRs = []string{"10.1.2.3"}
+
+		got, err := c.ParsedTrustedProxyCIDRs()
+		if err != nil {
+			t.Fatalf("ParsedTrustedProxyCIDRs: %v", err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("got %d prefixes, want 1", len(got))
+		}
+		if !got[0].Contains(netip.MustParseAddr("10.1.2.3")) {
+			t.Error("the configured proxy is not inside its own prefix")
+		}
+		for _, outsider := range []string{"8.8.8.8", "10.1.2.4", "203.0.113.9", "172.18.0.1"} {
+			if got[0].Contains(netip.MustParseAddr(outsider)) {
+				t.Errorf("%s is trusted as a proxy by the entry \"10.1.2.3\" — the prefix is "+
+					"too wide, so an untrusted host may declare who the client is", outsider)
+			}
+		}
+	})
+
+	t.Run("malformed entries are rejected", func(t *testing.T) {
+		for _, bad := range []string{"nonsense", "10.0.0.0/99", "10.0.0.0/-1", "300.1.2.3", "10.0.0.1/"} {
+			c := Defaults()
+			c.RateLimit.TrustedProxyCIDRs = []string{bad}
+
+			if _, err := c.ParsedTrustedProxyCIDRs(); err == nil {
+				t.Errorf("ParsedTrustedProxyCIDRs(%q) returned no error", bad)
+			} else if !strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS") {
+				t.Errorf("error for %q should name the env var, got: %v", bad, err)
+			}
+		}
+	})
+}
+
+// TestValidate_PropagatesCIDRParseError is the partner to the parser test: the
+// parse must actually stop startup.
+//
+// This is the guard that matters most of the four that had no coverage. Its own
+// comment says an unvalidated typo "silently downgrades every request to the
+// socket address" — a household-wide shared bucket, where one attacker's failed
+// logins lock everyone out, announced by a single log line. Deleting the two
+// lines that return the error leaves the whole config suite green.
+func TestValidate_PropagatesCIDRParseError(t *testing.T) {
+	d := Defaults()
+	d.RateLimit.TrustProxyHeaders = true
+	d.RateLimit.TrustedProxyCIDRs = []string{"172.18.0.0/16", "not-a-cidr"}
+
+	err := d.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted a malformed TRUSTED_PROXY_CIDRS entry; the range will " +
+			"simply fail to match, silently keying the whole household on one shared bucket")
+	}
+	if !strings.Contains(err.Error(), "TRUSTED_PROXY_CIDRS") {
+		t.Errorf("error should name TRUSTED_PROXY_CIDRS, got: %v", err)
+	}
+
+	// Non-vacuousness: the same config with the typo fixed must boot, so the
+	// failure above is caused by the bad entry and not by the surrounding setup.
+	d.RateLimit.TrustedProxyCIDRs = []string{"172.18.0.0/16", "10.9.9.9"}
+	if err := d.Validate(); err != nil {
+		t.Fatalf("a well-formed CIDR list was rejected: %v", err)
+	}
+}
+
+// TestValidate_RejectsNegativeKeepCorrupt pins the last untested guard. A
+// negative retention count is meaningless, and the check for it was itself
+// unasserted — removing it left ./internal/config green.
+func TestValidate_RejectsNegativeKeepCorrupt(t *testing.T) {
+	d := Defaults()
+	d.Backup.Enabled = true
+	d.Backup.KeepCorrupt = -1
+
+	err := d.Validate()
+	if err == nil {
+		t.Fatal("Validate accepted BACKUP_KEEP_CORRUPT=-1")
+	}
+	if !strings.Contains(err.Error(), "BACKUP_KEEP_CORRUPT") {
+		t.Errorf("error should name BACKUP_KEEP_CORRUPT, got: %v", err)
+	}
+
+	// Zero is a legitimate setting: keep no quarantined copies at all.
+	d.Backup.KeepCorrupt = 0
+	if err := d.Validate(); err != nil {
+		t.Fatalf("BACKUP_KEEP_CORRUPT=0 must be allowed: %v", err)
+	}
 }
