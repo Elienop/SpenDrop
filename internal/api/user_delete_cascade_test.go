@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"testing"
+
+	"github.com/elienop/spendrop/internal/database"
 )
 
 // TestHandleDeleteUser_RefusesWhenUserOwnsTransactions is the regression test
@@ -102,6 +104,59 @@ func TestHandleDeleteUser_RefusesWhenUserOwnsOnlyTombstonedTransactions(t *testi
 	}
 	if after.Deleted != before.Deleted {
 		t.Errorf("tombstoned rows destroyed: before=%d after=%d", before.Deleted, after.Deleted)
+	}
+}
+
+// TestHandleDeleteUser_RefusesWhenUserOwnsCheckpoints covers the second
+// CASCADE edge off users: balance_checkpoints.user_id is ON DELETE CASCADE
+// (migration 007) and the guard only counted transactions. A member with zero
+// transactions but a reconciliation checkpoint therefore sailed through and
+// had their bank-statement anchors silently destroyed — checkpoints are
+// hand-entered assertions with no Trash and no restore path.
+func TestHandleDeleteUser_RefusesWhenUserOwnsCheckpoints(t *testing.T) {
+	h := setupHandler(t)
+	admin := seedTestUser(t, h.queries, "admin4", "admin")
+	member := seedTestUser(t, h.queries, "member4", "member")
+
+	if _, err := h.queries.CreateCheckpoint(t.Context(), database.CreateCheckpointParams{
+		UserID:              member.ID,
+		ScopeType:           "total",
+		Date:                mustParseDate(t, "2026-06-30"),
+		ExpectedAmountCents: 123456,
+	}); err != nil {
+		t.Fatalf("seed checkpoint: %v", err)
+	}
+
+	before, err := h.queries.ListCheckpointsByUser(t.Context(), member.ID)
+	if err != nil {
+		t.Fatalf("list before: %v", err)
+	}
+	if len(before) != 1 {
+		t.Fatalf("fixture is wrong: %d checkpoints seeded, want 1", len(before))
+	}
+
+	req := withUserAndURLParam(
+		httptest.NewRequest(http.MethodDelete, "/api/users/"+strconv.FormatInt(member.ID, 10), nil),
+		admin, "id", strconv.FormatInt(member.ID, 10),
+	)
+	rec := httptest.NewRecorder()
+	h.handleDeleteUser(rec, req)
+
+	// Deliberately non-fatal, same reason as the transactions guard above: the
+	// survival assertion is the one that proves the cascade fired.
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409; body = %s", rec.Code, rec.Body.String())
+	}
+
+	after, err := h.queries.ListCheckpointsByUser(t.Context(), member.ID)
+	if err != nil {
+		t.Fatalf("list after: %v", err)
+	}
+	if len(after) != len(before) {
+		t.Errorf("checkpoints destroyed by the cascade: before=%d after=%d", len(before), len(after))
+	}
+	if _, err := h.queries.GetUserByID(t.Context(), member.ID); err != nil {
+		t.Errorf("member was deleted despite the 409: %v", err)
 	}
 }
 

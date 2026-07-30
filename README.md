@@ -862,7 +862,7 @@ All require an admin session.
 | GET | `/api/users` | List household users |
 | POST | `/api/users` | Create a user |
 | PUT | `/api/users/{id}` | Update a user's display name or role |
-| DELETE | `/api/users/{id}` | Delete a user (cascades their sessions and tokens). Returns **409** if the user still has transactions — live or in the trash. `transactions.user_id` is `ON DELETE CASCADE`, so deleting the row would permanently destroy their entire ledger with no tombstone, audit row, or restore path; reassign or purge their transactions first. |
+| DELETE | `/api/users/{id}` | Delete a user. Returns **409** if the user still has transactions (live *or* in the trash) or any balance checkpoints — both columns are `ON DELETE CASCADE`, so deleting the row would permanently destroy their ledger and their reconciliation anchors with no tombstone, audit row, or restore path; reassign or purge them first. A successful delete still cascades their **sessions**, **API tokens**, **saved filters** and **push subscriptions**, and NULLs `transaction_audit.actor_user_id` for every row they authored — no history is destroyed, but edits they made to other members' rows lose their attribution. |
 | POST | `/api/users/{id}/reset-password` | Reset another user's password. Body `{"new_password"}`. No current-password check (admin authority); revokes that user's tokens and deletes their sessions. Admins cannot reset their *own* password here — they use `/api/auth/password`. |
 
 ### Categories

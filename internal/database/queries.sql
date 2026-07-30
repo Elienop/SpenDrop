@@ -677,6 +677,14 @@ WHERE last_verified_at IS NULL
    OR last_verified_at < CAST(sqlc.arg(threshold) AS TEXT)
 ORDER BY id ASC;
 
+-- name: CountCheckpointsByUser :one
+-- balance_checkpoints.user_id carries ON DELETE CASCADE (migration 007), so
+-- deleting a user silently destroys every reconciliation anchor they entered.
+-- Checkpoints have no tombstone and no Trash, so the loss is unrecoverable.
+-- handleDeleteUser calls this alongside CountTransactionsByUser and refuses
+-- with 409 when either count is non-zero.
+SELECT COUNT(*) FROM balance_checkpoints WHERE user_id = ?;
+
 -- name: CountCheckpointsByStatus :one
 -- One-row, three-column count used by /healthz/data. NULL status is
 -- bucketed into pending so the counts always sum to the total row

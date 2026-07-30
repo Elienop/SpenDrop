@@ -242,6 +242,31 @@ func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// balance_checkpoints.user_id is the second ON DELETE CASCADE edge off
+	// users (migrations/007_balance_checkpoints.sql:69). A member with zero
+	// transactions but a reconciliation checkpoint passed the guard above and
+	// had their bank-statement anchors destroyed. Checkpoints are hand-entered
+	// assertions with no tombstone, no Trash and no restore path, so the loss
+	// is total — same 409 shape as the transactions guard.
+	//
+	// Deliberately NOT guarded: transaction_audit.actor_user_id is ON DELETE
+	// SET NULL (migration 009), so deleting a user destroys no history. It
+	// does anonymise it: a member who only ever edited other people's rows can
+	// be deleted, and every audit row they authored loses its actor. That is
+	// accepted — blocking a delete on audit provenance would make members
+	// permanently undeletable — but it is not obvious from the schema, so it
+	// is recorded here and in the README's user-deletion note.
+	checkpointCount, err := h.queries.CountCheckpointsByUser(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to check user checkpoints")
+		return
+	}
+	if checkpointCount > 0 {
+		writeError(w, http.StatusConflict,
+			"cannot delete a user who has balance checkpoints — delete their checkpoints first")
+		return
+	}
+
 	// Clean up sessions before deleting the user
 	_ = h.queries.DeleteSessionsByUserID(r.Context(), id)
 

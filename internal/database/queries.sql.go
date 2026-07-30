@@ -41,6 +41,22 @@ func (q *Queries) CountTransactionsByUser(ctx context.Context, userID int64) (in
 	return count, err
 }
 
+const countCheckpointsByUser = `-- name: CountCheckpointsByUser :one
+SELECT COUNT(*) FROM balance_checkpoints WHERE user_id = ?
+`
+
+// balance_checkpoints.user_id carries ON DELETE CASCADE (migration 007), so
+// deleting a user silently destroys every reconciliation anchor they entered.
+// Checkpoints have no tombstone and no Trash, so the loss is unrecoverable.
+// handleDeleteUser calls this alongside CountTransactionsByUser and refuses
+// with 409 when either count is non-zero.
+func (q *Queries) CountCheckpointsByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countCheckpointsByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const countCheckpointsByStatus = `-- name: CountCheckpointsByStatus :one
 SELECT
     CAST(COALESCE(SUM(CASE WHEN last_verification_status = 'ok' THEN 1 ELSE 0 END), 0) AS INTEGER) AS ok,
