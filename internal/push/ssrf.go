@@ -263,6 +263,14 @@ const maxTrackedProxies = 64
 func GuardedTransport(base *http.Transport) *http.Transport {
 	t := base.Clone()
 
+	// A base transport carrying either of these would bypass DialContext for
+	// https:// entirely, yielding a transport that looks guarded and is not.
+	// Clearing them puts https back on the standard DialContext + TLS path,
+	// which is the guarded one; net/http still derives ServerName from the
+	// request URL, so certificate verification is unaffected.
+	t.DialTLS = nil
+	t.DialTLSContext = nil
+
 	// An operator-configured egress proxy is a TRUSTED dial target, and on a
 	// self-hosted box it is very often on the LAN.
 	//

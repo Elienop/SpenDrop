@@ -291,3 +291,26 @@ func TestClientIPForRateLimit_WarnsOnShortHeader(t *testing.T) {
 		t.Errorf("warning was not throttled: %q", buf.String())
 	}
 }
+
+// TestClientIPForRateLimit_JoinsRepeatedHeaderLines is the regression test for
+// reading only the first X-Forwarded-For field line.
+//
+// r.Header.Get returns the first line only, and a proxy may append a SECOND line
+// instead of extending the client's. Where it does, the attacker's line is the
+// first one, so the selection ran entirely on data the proxy had never touched.
+// RFC 7230 makes repeated field lines equivalent to one comma-joined value in
+// order, which puts the proxy's entry rightmost — where the walk starts.
+func TestClientIPForRateLimit_JoinsRepeatedHeaderLines(t *testing.T) {
+	withTrustedProxyCIDRs(t, true, 1, []string{"172.18.0.0/16"})
+
+	r := httptest.NewRequest(http.MethodPost, "/api/auth/login", nil)
+	r.RemoteAddr = "172.18.0.1:5000"
+	// The attacker's forged line arrives first; the proxy appends its own.
+	r.Header.Add("X-Forwarded-For", "10.0.0.99")
+	r.Header.Add("X-Forwarded-For", "198.51.100.7")
+
+	if got := ClientIPForRateLimit(r); got != "198.51.100.7" {
+		t.Errorf("got %q, want the proxy-observed 198.51.100.7 — only the first "+
+			"X-Forwarded-For line is being read, so the forged one wins", got)
+	}
+}
