@@ -59,6 +59,10 @@ func backupStatusFixture(now time.Time) backup.Status {
 		LastOutcome:    backup.OutcomeSuccess,
 		NewestBackupAt: now.Add(-5 * time.Minute),
 		TrustedCount:   7,
+		// A healthy scheduler has read BACKUP_DIR. Without this the counts
+		// below are UNKNOWN rather than zero and never reach the payload, so
+		// every test in this file would be asserting against an absent field.
+		DirObserved: true,
 	}
 }
 
@@ -97,8 +101,11 @@ func TestHealthzBackups_HealthyRecentBackup_Returns200WithDetail(t *testing.T) {
 	if b.LastOutcome != string(backup.OutcomeSuccess) {
 		t.Errorf("LastOutcome = %q, want %q", b.LastOutcome, backup.OutcomeSuccess)
 	}
-	if b.TrustedCount != 7 {
-		t.Errorf("TrustedCount = %d, want 7", b.TrustedCount)
+	if b.TrustedCount == nil {
+		t.Fatal("TrustedCount is nil for a directory that was scanned")
+	}
+	if *b.TrustedCount != 7 {
+		t.Errorf("TrustedCount = %d, want 7", *b.TrustedCount)
 	}
 	if b.NewestBackupAgeSeconds == nil {
 		t.Fatal("NewestBackupAgeSeconds is nil for a backup that exists")
@@ -177,8 +184,8 @@ func TestHealthzBackups_QuarantinedFiles_ReportedButHealthy(t *testing.T) {
 		t.Fatalf("status = %d, want 200 — quarantined files left over from a failure "+
 			"that has since recovered would pin the endpoint at 503 forever", code)
 	}
-	if resp.Backups.QuarantinedCount != 2 {
-		t.Errorf("QuarantinedCount = %d, want 2", resp.Backups.QuarantinedCount)
+	if resp.Backups.QuarantinedCount == nil || *resp.Backups.QuarantinedCount != 2 {
+		t.Errorf("QuarantinedCount = %v, want 2", resp.Backups.QuarantinedCount)
 	}
 }
 
@@ -194,8 +201,8 @@ func TestHealthzBackups_PruneFailures_ReportedButHealthy(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", code)
 	}
-	if resp.Backups.PruneFailedCount != 4 {
-		t.Errorf("PruneFailedCount = %d, want 4 — retention silently stopped being "+
+	if resp.Backups.PruneFailedCount == nil || *resp.Backups.PruneFailedCount != 4 {
+		t.Errorf("PruneFailedCount = %v, want 4 — retention silently stopped being "+
 			"enforced and this is the only place outside the log that says so",
 			resp.Backups.PruneFailedCount)
 	}
@@ -259,8 +266,10 @@ func TestHealthzBackups_EnabledButNeverRan_StaysHealthy(t *testing.T) {
 	if resp.Backups.LastRunAt != nil {
 		t.Errorf("LastRunAt = %v, want absent", resp.Backups.LastRunAt)
 	}
-	if resp.Backups.TrustedCount != 0 {
-		t.Errorf("TrustedCount = %d, want 0", resp.Backups.TrustedCount)
+	if resp.Backups.TrustedCount != nil {
+		t.Errorf("TrustedCount = %d, want the field ABSENT — no tick has scanned "+
+			"BACKUP_DIR yet, so the count is unknown rather than zero",
+			*resp.Backups.TrustedCount)
 	}
 }
 
@@ -404,8 +413,12 @@ func TestHealthzBackups_EndToEndWithARealScheduler(t *testing.T) {
 	if resp.Backups.LastOutcome != string(backup.OutcomeError) {
 		t.Errorf("LastOutcome = %q, want %q", resp.Backups.LastOutcome, backup.OutcomeError)
 	}
-	if resp.Backups.TrustedCount != 0 {
-		t.Errorf("TrustedCount = %d, want 0", resp.Backups.TrustedCount)
+	if resp.Backups.TrustedCount == nil {
+		t.Fatal("TrustedCount is nil; BACKUP_DIR does not exist, which is a DEFINITE " +
+			"zero rather than an unknown and must still be reported as a count")
+	}
+	if *resp.Backups.TrustedCount != 0 {
+		t.Errorf("TrustedCount = %d, want 0", *resp.Backups.TrustedCount)
 	}
 	if resp.Backups.IntervalSeconds != 86400 {
 		t.Errorf("IntervalSeconds = %d, want 86400", resp.Backups.IntervalSeconds)

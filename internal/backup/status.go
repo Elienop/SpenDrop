@@ -88,6 +88,31 @@ type Status struct {
 	// to remove. Non-zero means retention is not being enforced — the volume
 	// will grow without bound — but the existing backups are unaffected.
 	PruneFailedCount int
+
+	// DirObserved reports whether BACKUP_DIR has been read successfully at
+	// least once in THIS process. It is the validity bit for the four fields
+	// above: false means they are unknown, not zero.
+	//
+	// The distinction is load-bearing because "never observed" and "observed
+	// and empty" used to share one encoding — TrustedCount == 0 — and a
+	// consumer degrades on that value. A directory the process cannot read
+	// therefore reported the same thing as an empty one: no restore point,
+	// against a volume that might be full of them. A restart wipes this back
+	// to false, so the fallback-to-the-previous-observation defence has
+	// nothing to fall back to on the first tick, which is exactly when a
+	// container is being health-checked.
+	DirObserved bool
+
+	// DirUnreadable reports that the MOST RECENT tick could not read
+	// BACKUP_DIR. It is orthogonal to DirObserved: after one good scan the
+	// counts stay valid across a read failure, and this is then the only
+	// signal that the failure happened at all.
+	//
+	// It is a real operational problem in its own right even when the counts
+	// survive it — Prune's ReadDir is the same call, so retention is not
+	// running and the quarantine is no longer bounded on a volume shared with
+	// the live database.
+	DirUnreadable bool
 }
 
 // Status returns a copy of the current snapshot. Safe to call concurrently
@@ -127,6 +152,12 @@ func (s *Scheduler) recordTick(at time.Time, outcome Outcome, obs dirObservation
 	defer s.statusMu.Unlock()
 	s.status.LastRunAt = at
 	s.status.LastOutcome = outcome
+	// Sticky across ticks: it records that this PROCESS has a valid scan to
+	// fall back on, not that the latest tick took one.
+	s.status.DirObserved = s.status.DirObserved || obs.observed
+	// Not sticky: it describes the tick that just ran, and it clears as soon
+	// as one succeeds.
+	s.status.DirUnreadable = obs.unreadable
 	if obs.observed {
 		s.status.NewestBackupAt = obs.scan.newestTrustedAt
 		s.status.TrustedCount = obs.scan.trustedCount
@@ -139,10 +170,14 @@ func (s *Scheduler) recordTick(at time.Time, outcome Outcome, obs dirObservation
 // BACKUP_DIR. It exists so the scan and the tick's outcome can be handed to
 // recordTick together instead of being published independently.
 //
-// observed false means the directory could not be read this tick, so the scan
-// and pruneFailed fields carry nothing and must not be published.
+// The two booleans are not complements. observed false means the scan and
+// pruneFailed fields carry nothing and must not be published. unreadable true
+// says WHY — the directory could not be read — which is a fact about the
+// volume that is worth reporting even on a tick whose counts are unknown, and
+// which distinguishes "cannot read BACKUP_DIR" from "found no restore point".
 type dirObservation struct {
 	observed    bool
+	unreadable  bool
 	scan        dirScan
 	pruneFailed int
 }
