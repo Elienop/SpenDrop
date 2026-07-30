@@ -137,12 +137,24 @@ func TestHandleCreateTransaction_DuplicateEntryIsAcceptedWithNullHash(t *testing
 // Rounds x workers rather than a single burst: the race is probabilistic
 // (~25% at 8-way in manual reproduction), so one round could pass by luck
 // even with the recovery removed.
+//
+// rounds is sized so a mutant SURVIVING is not a realistic outcome. A round
+// escapes with probability (1-p), so the whole test false-passes with
+// (1-p)^rounds — and at rounds=6 that was not small enough. Mutating out the
+// IsContentHashUniqueViolation recovery in handleCreateTransaction, rounds=6
+// still PASSED 4 of 40 runs under GOMAXPROCS=2 (a 10% false green); rounds=24
+// failed 40/40 under the same conditions and 25/25 at default parallelism.
+//
+// `go test -race` (what CI runs) catches the mutant every time, so the exposure
+// is not CI — it is the plain `go test ./...` this project mandates before
+// every commit and for mutation-testing, where an engineer verifying this very
+// code could have taken a misleading green. Do not lower rounds back.
 func TestHandleCreateTransaction_ConcurrentIdenticalCreatesAllSucceed(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "owner", "member")
 	catID := seedExpenseCategory(t, h.queries, "Coffee")
 
-	const rounds = 6
+	const rounds = 24
 	const workers = 8
 
 	for round := 0; round < rounds; round++ {
