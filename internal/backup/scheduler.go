@@ -314,16 +314,26 @@ func (s *Scheduler) pruneAndReport(now time.Time, logger *log.Logger) dirObserva
 		// Deliberately NOT observed: the directory could not be read, so we
 		// know nothing new about its contents. Reporting zeros here would
 		// manufacture a "no backups on disk" alarm out of a read failure.
-		return dirObservation{}
+		//
+		// unreadable carries the fault itself, which is a different fact from
+		// the counts and is the only thing this tick actually established. It
+		// matters on its own: Prune's ReadDir is the call that just failed, so
+		// retention is not running and the quarantine is no longer bounded.
+		return dirObservation{unreadable: true}
 	}
 
 	// Post-prune directory scan. Runs after Prune so the counts describe what
 	// is actually on the volume now, not what was there before retention.
+	//
+	// Prune succeeding and the scan failing is a narrow window, but it is the
+	// same class of fault and gets the same encoding: unknown counts plus an
+	// explicit "could not read the directory".
 	var obs dirObservation
 	if scan, scanErr := scanBackupDir(s.Dir); scanErr == nil {
 		obs = dirObservation{observed: true, scan: scan, pruneFailed: len(failed)}
 	} else {
 		logger.Printf("backup: could not scan %s for health reporting: %v", s.Dir, scanErr)
+		obs = dirObservation{unreadable: true}
 	}
 	if len(removed) > 0 {
 		logger.Printf("backup: pruned %d file(s), %d kept", len(removed), len(kept))

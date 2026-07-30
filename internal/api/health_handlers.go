@@ -139,16 +139,39 @@ type healthzBackupStatus struct {
 	// TrustedCount is the number of restore points on disk: backups whose
 	// filename parses AND which have a .sha256 sidecar. Zero while enabled
 	// is the loudest state this subsystem has and flips the endpoint to 503.
-	TrustedCount int `json:"trusted_count"`
+	//
+	// A POINTER, and ABSENT until the process has successfully read
+	// BACKUP_DIR at least once. "Never observed" and "observed and empty"
+	// used to share the encoding zero, so a directory the process could not
+	// read reported the same thing as an empty one — a 503 saying there is
+	// nothing to restore, beside last_outcome: "success", over a volume full
+	// of backups. An unknown must not be spelled the same way as a fact that
+	// raises an alarm. See DirUnreadable for what is emitted instead.
+	TrustedCount *int `json:"trusted_count,omitempty"`
 
 	// QuarantinedCount is the number of surviving *.corrupt files.
-	// Informational — see backupHealth.
-	QuarantinedCount int `json:"quarantined_count"`
+	// Informational — see backupHealth. Absent under the same rule as
+	// TrustedCount: it comes from the same directory scan.
+	QuarantinedCount *int `json:"quarantined_count,omitempty"`
 
 	// PruneFailedCount is the number of files the last retention sweep
 	// could not remove. Non-zero means retention is not being enforced and
-	// the volume will grow. Informational — see backupHealth.
-	PruneFailedCount int `json:"prune_failed_count"`
+	// the volume will grow. Informational — see backupHealth. Absent under
+	// the same rule as TrustedCount: the sweep that would have produced it
+	// is the call that failed.
+	PruneFailedCount *int `json:"prune_failed_count,omitempty"`
+
+	// DirUnreadable reports that the most recent tick could not read
+	// BACKUP_DIR. Emitted only when true, so its absence means "the
+	// directory was read".
+	//
+	// It is the signal that distinguishes "there is no restore point" from
+	// "I cannot see whether there is a restore point", which are the same
+	// alarm to a scraper watching only the HTTP code but completely
+	// different repairs. It is also a fault in its own right: Prune walks
+	// the directory with the same call, so retention is not running and the
+	// quarantine is unbounded on a volume shared with the live database.
+	DirUnreadable bool `json:"dir_unreadable,omitempty"`
 
 	// NewestBackupAt is the timestamp of the newest trusted backup, taken
 	// from its filename rather than its mtime so it survives an NTP step.
@@ -381,6 +404,12 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 //     grows without bound, which is a real problem, but every existing backup
 //     is intact and a restore still works. It is a capacity warning, not a
 //     data-protection outage.
+//   - An unreadable BACKUP_DIR that FOLLOWS a good scan. The counts from that
+//     scan are still the best description of the volume, and BACKUP_INTERVAL
+//     defaults to 24h — degrading on one transient EIO would pin the endpoint
+//     at 503 for a day over a directory whose backups are all still present.
+//     dir_unreadable reports it, and a persistent fault keeps surfacing
+//     through newest_backup_age_seconds as the last good backup ages out.
 //   - A stale-but-present backup. There is no correct universal threshold:
 //     BACKUP_INTERVAL is operator-configured and the README recommends tuning
 //     it, so any constant baked in here is wrong for someone in both
@@ -388,18 +417,28 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 //     lets the alert rule choose the multiple.
 //
 // NEVER DEGRADES: a disabled scheduler (the operator opted out, and
-// BACKUP_ENABLED=false is documented as a supported kill-switch), and a
-// scheduler that has not completed its first tick (the HTTP server binds
-// before the startup fire finishes, so degrading here would flap 503 on every
-// container restart).
+// BACKUP_ENABLED=false is documented as a supported kill-switch), a scheduler
+// that has not completed its first tick (the HTTP server binds before the
+// startup fire finishes, so degrading here would flap 503 on every container
+// restart), and an unobserved directory with no read failure behind it — an
+// unknown is not a zero, and alarming on one is how an endpoint teaches its
+// operator to ignore it.
 func backupHealth(st backup.Status, now time.Time) (healthzBackupStatus, bool) {
 	block := healthzBackupStatus{
-		Enabled:          st.Enabled,
-		LastOutcome:      string(st.LastOutcome),
-		TrustedCount:     st.TrustedCount,
-		QuarantinedCount: st.QuarantinedCount,
-		PruneFailedCount: st.PruneFailedCount,
-		IntervalSeconds:  int64(st.Interval / time.Second),
+		Enabled:         st.Enabled,
+		LastOutcome:     string(st.LastOutcome),
+		DirUnreadable:   st.DirUnreadable,
+		IntervalSeconds: int64(st.Interval / time.Second),
+	}
+	// The three directory counts are emitted ONLY once a scan has actually
+	// happened. Copied into locals because they are addressed, and taking the
+	// address of a struct field of the by-value st would tie the payload's
+	// lifetime to the snapshot copy.
+	if st.DirObserved {
+		trusted, quarantined, pruneFailed := st.TrustedCount, st.QuarantinedCount, st.PruneFailedCount
+		block.TrustedCount = &trusted
+		block.QuarantinedCount = &quarantined
+		block.PruneFailedCount = &pruneFailed
 	}
 	if !st.LastRunAt.IsZero() {
 		t := st.LastRunAt.UTC()
@@ -422,7 +461,28 @@ func backupHealth(st backup.Status, now time.Time) (healthzBackupStatus, bool) {
 	if !st.Enabled || st.LastRunAt.IsZero() {
 		return block, false
 	}
-	return block, st.LastOutcome != backup.OutcomeSuccess || st.TrustedCount == 0
+
+	degraded := st.LastOutcome != backup.OutcomeSuccess
+	switch {
+	case st.DirObserved:
+		// The count describes something we actually looked at, so an empty
+		// directory is a fact: a restore right now is impossible. A read
+		// failure on TOP of a good scan only reports (see INFORMATIONAL).
+		degraded = degraded || st.TrustedCount == 0
+	case st.DirUnreadable:
+		// Nothing has ever been read, and we know why. This is not a
+		// zero-count alarm — it is "retention is not running and no one can
+		// confirm a restore is possible", which is a permission or mount
+		// fault that does not self-heal. Reporting it at 200 would leave the
+		// documented "alert on the HTTP code" contract silent on a subsystem
+		// that has stopped working, which is the failure Status exists to
+		// prevent. dir_unreadable is what tells the operator which repair to
+		// reach for.
+		degraded = true
+	}
+	// Remaining case — never observed, no read failure — stays on
+	// LastOutcome alone. An unknown of unknown cause is not evidence.
+	return block, degraded
 }
 
 // latestSchemaVersion returns the most recently applied migration's

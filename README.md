@@ -533,9 +533,23 @@ Every condition above also reaches [`GET /healthz/data`](#api-reference) under a
 
 `last_outcome` is `success`, `verify_failed` (a snapshot was written and rejected), `error` (no snapshot was produced), or `""` (no tick has completed yet). `trusted_count` counts restore points — backups that have a `.sha256` sidecar — so a quarantined or sidecar-less file never inflates it. The values are read from the scheduler's in-memory snapshot, refreshed once per tick, so scraping this endpoint does not touch `BACKUP_DIR`.
 
-**Two of these flip the endpoint to 503:** `trusted_count == 0` while `enabled` is true (there is nothing to restore from), and `last_outcome` being anything other than `success` (nothing new is being captured). A disabled scheduler and one that has not completed its first tick never degrade — otherwise `BACKUP_ENABLED=false` would be unusable and every container restart would flap.
+**`trusted_count`, `quarantined_count` and `prune_failed_count` are absent until SpenDrop has actually read `BACKUP_DIR`.** All three come from the same directory scan, and an absent field means "unknown", which is not the same as `0`. If instead the directory could not be read, the block adds `"dir_unreadable": true`:
 
-**The rest are reported, not alerted on.** `quarantined_count` outlives the failure that produced it by design (`BACKUP_KEEP_CORRUPT` retains the newest samples on purpose), so degrading on it would hold the endpoint at 503 long after backups recovered — `last_outcome` already carries the live failure. `prune_failed_count > 0` means retention is not being enforced and the volume will grow, but every existing backup is intact. And staleness has no correct universal threshold, so the block emits `newest_backup_age_seconds` alongside `interval_seconds` and leaves the judgement to your alert rule — `newest_backup_age_seconds > 3 * interval_seconds` is a reasonable starting point.
+```json
+"backups": {
+  "enabled": true,
+  "last_run_at": "2026-04-13T03:00:00Z",
+  "last_outcome": "success",
+  "dir_unreadable": true,
+  "interval_seconds": 86400
+}
+```
+
+That distinction matters because the two conditions need opposite repairs. "No restore point" means investigate why backups are not being produced; "cannot read the backup directory" means fix the permissions or the mount — the backups may well all be there. A directory that is writable and traversable but not readable is enough to produce it: writing and verifying a backup never needs the read bit, so the scheduler keeps reporting `"last_outcome": "success"` while every directory listing fails.
+
+**These flip the endpoint to 503:** `trusted_count == 0` while `enabled` is true (the directory was read and holds nothing to restore from), `last_outcome` being anything other than `success` (nothing new is being captured), and `dir_unreadable` when no scan has ever succeeded (retention is not running and nothing can confirm a restore is possible). A disabled scheduler and one that has not completed its first tick never degrade — otherwise `BACKUP_ENABLED=false` would be unusable and every container restart would flap.
+
+**The rest are reported, not alerted on.** `quarantined_count` outlives the failure that produced it by design (`BACKUP_KEEP_CORRUPT` retains the newest samples on purpose), so degrading on it would hold the endpoint at 503 long after backups recovered — `last_outcome` already carries the live failure. `prune_failed_count > 0` means retention is not being enforced and the volume will grow, but every existing backup is intact. `dir_unreadable` alongside a `trusted_count` — a read failure after an earlier successful scan — likewise only reports: those counts still describe the volume, and with `BACKUP_INTERVAL` at its 24h default, degrading on one transient error would hold the endpoint at 503 for a day over a directory whose backups are all still present. And staleness has no correct universal threshold, so the block emits `newest_backup_age_seconds` alongside `interval_seconds` and leaves the judgement to your alert rule — `newest_backup_age_seconds > 3 * interval_seconds` is a reasonable starting point.
 
 > **Do not** use `docker cp spendrop:/app/data/spendrop.db` on a running container. SQLite in WAL mode keeps uncommitted writes in `spendrop.db-wal` and `spendrop.db-shm`. A naive copy of just `spendrop.db` can be silently inconsistent or lose recent transactions on restore. Use the scheduled backup or the `spendrop backup` subcommand below instead.
 
