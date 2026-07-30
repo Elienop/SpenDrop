@@ -209,6 +209,43 @@ func TestPruneAndLog_LogsRemovalFailures(t *testing.T) {
 	}
 }
 
+// TestPruneAndLog_SilentWhenBackupDirDoesNotExist pins the fs.ErrNotExist
+// branch, which was previously untested.
+//
+// runOnce defers pruneAndLog before Snapshot runs, so on a fresh install — and
+// on every tick where step 1 fails before Snapshot's MkdirAll — Prune is called
+// against a directory that does not exist yet. That is the ordinary state of a
+// new deployment, not a fault, so it must produce no output at all: an operator
+// who sees "prune error: no such file or directory" on first boot reasonably
+// concludes backups are broken.
+//
+// Asserting on a completely empty log rather than just the absence of "prune
+// error" also covers the zero-backups warning, which must not fire here either
+// — a directory that has never held a backup is not the same alarm as one that
+// just had its last copy deleted.
+func TestPruneAndLog_SilentWhenBackupDirDoesNotExist(t *testing.T) {
+	t.Parallel()
+	// t.TempDir() exists; the scheduler points one level below it, at a path
+	// nothing has created.
+	dir := filepath.Join(t.TempDir(), "not-created-yet")
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+
+	logBuf := &syncBuffer{}
+	s := &Scheduler{
+		Enabled: true, Dir: dir, Interval: time.Hour,
+		KeepDaily: 7, KeepWeekly: 4, KeepMonthly: 12, KeepCorrupt: 2,
+		DBPath: filepath.Join(dir, "nonexistent.db"), BusyTimeout: testBusyTimeout,
+		Now:    func() time.Time { return now },
+		Logger: newSilentLogger(logBuf),
+	}
+	s.pruneAndLog(now, newSilentLogger(logBuf))
+
+	if out := logBuf.String(); out != "" {
+		t.Errorf("a not-yet-created backup directory produced operator output, which "+
+			"reads as a broken backup system on first boot; got: %q", out)
+	}
+}
+
 // TestPruneAndLog_WarnsWhenNoBackupsRemain covers the one outcome that
 // honouring BACKUP_KEEP_CORRUPT=0 makes reachable: a prune tick that ends with
 // no copy of the database on disk at all.
