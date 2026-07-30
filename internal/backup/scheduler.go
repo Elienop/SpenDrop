@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -68,8 +69,8 @@ func (s *Scheduler) RunLoop(ctx context.Context) {
 	}
 
 	logger := s.logger()
-	logger.Printf("backup: scheduler starting, interval=%s dir=%s keep=(%d daily, %d weekly, %d monthly)",
-		s.Interval, s.Dir, s.KeepDaily, s.KeepWeekly, s.KeepMonthly)
+	logger.Printf("backup: scheduler starting, interval=%s dir=%s keep=(%d daily, %d weekly, %d monthly, %d quarantined)",
+		s.Interval, s.Dir, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 
 	// Guard the startup fire against an already-cancelled ctx. The window
 	// is tiny but real: if main receives SIGTERM between `go
@@ -251,7 +252,7 @@ func (s *Scheduler) runOnce(ctx context.Context, logger *log.Logger) {
 // failure, sidecar failure, or success — the retention policy is orthogonal
 // to the fate of the current tick's file.
 func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
-	kept, removed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
+	kept, removed, failed, err := Prune(s.Dir, now, s.KeepDaily, s.KeepWeekly, s.KeepMonthly, s.KeepCorrupt)
 	if err != nil {
 		// Now that prune also runs when Snapshot fails, a not-yet-created
 		// backup directory is an ordinary state rather than a fault.
@@ -263,6 +264,14 @@ func (s *Scheduler) pruneAndLog(now time.Time, logger *log.Logger) {
 	}
 	if len(removed) > 0 {
 		logger.Printf("backup: pruned %d file(s), %d kept", len(removed), len(kept))
+	}
+	// Logged whether or not anything was removed. Gating every line on
+	// len(removed) > 0 meant "tried to delete 4, deleted 0" produced silence,
+	// which reads exactly like a healthy directory that needed no pruning.
+	if len(failed) > 0 {
+		logger.Printf("backup: could not remove %d file(s) in %s (retention is not being "+
+			"enforced; check permissions and whether the volume is read-only): %s",
+			len(failed), s.Dir, strings.Join(failed, ", "))
 	}
 }
 
