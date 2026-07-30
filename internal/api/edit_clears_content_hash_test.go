@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -601,5 +602,141 @@ func TestUpdateByFilter_Tags_ClearsContentHashOnlyForHashInputs(t *testing.T) {
 	}
 	if hash := hashOf(t, h, id); hash.Valid {
 		t.Errorf("a description change alongside tags kept content_hash %q", hash.String)
+	}
+}
+
+// TestUpdateByFilter_Tags_ClearsOnlyWhenAHashInputActuallyMoved pins the
+// PRECISION half of runUpdateByFilterTags' identity rule, which its sibling
+// TestUpdateByFilter_Tags_ClearsContentHashOnlyForHashInputs does not reach.
+//
+// That sibling only ever sends a description the row does not already hold, so
+// it passes identically whether the branch tests key PRESENCE in the patch or
+// an actual value change. The distinction matters: a bulk tagging pass that
+// also re-asserts the description the rows already carry (the shape produced by
+// a saved filter replayed against its own output, or a client that resends
+// every field it rendered) moved nothing, and clearing the identity there
+// de-anchors those rows from import dedupe until the next startup backfill
+// re-anchors them.
+//
+// The predicate is database.HashInputsMoved — the same one TransactionStore
+// derives ClearContentHash from — so the single-row and bulk paths cannot
+// drift, and both answer "would ComputeContentHash produce a different
+// digest?" using the hash's own normalizers rather than a hand-rolled
+// comparison. That is why the case-and-padding row below must PRESERVE: the
+// digest lowercases and trims, so "  COFFEE " and "Coffee" are the same
+// identity even though the stored description genuinely changes.
+//
+// Each case gets its own handler because clearing a hash is irreversible
+// within a test — a shared row would let an earlier clear mask a later
+// preserve assertion.
+func TestUpdateByFilter_Tags_ClearsOnlyWhenAHashInputActuallyMoved(t *testing.T) {
+	const (
+		seedDate = "2026-04-01"
+		seedDesc = "Coffee"
+	)
+
+	cases := []struct {
+		name string
+		// patch is rendered with the row's own category id (%[1]d) and an
+		// alternate category id (%[2]d) so the category cases can address both.
+		patch     string
+		wantClear bool
+		why       string
+	}{
+		{
+			name:      "same description",
+			patch:     `{"patch":{"tags":"health","description":"Coffee"},"tagsMode":"add"}`,
+			wantClear: false,
+			why:       "the description sent is the one the row already holds, so the identity did not move",
+		},
+		{
+			name:      "description differing only by case and padding",
+			patch:     `{"patch":{"tags":"health","description":"  COFFEE "},"tagsMode":"add"}`,
+			wantClear: false,
+			why:       "ComputeContentHash lowercases and trims, so the digest is unchanged",
+		},
+		{
+			name:      "same date",
+			patch:     `{"patch":{"tags":"health","date":"2026-04-01"},"tagsMode":"add"}`,
+			wantClear: false,
+			why:       "the date sent is the one the row already holds",
+		},
+		{
+			name:      "same category",
+			patch:     `{"patch":{"tags":"health","category_id":%[1]d},"tagsMode":"add"}`,
+			wantClear: false,
+			why:       "the row is already in that category",
+		},
+		{
+			name:      "different description",
+			patch:     `{"patch":{"tags":"health","description":"Flat white"},"tagsMode":"add"}`,
+			wantClear: true,
+			why:       "the row would otherwise keep claiming the identity of the description it no longer has",
+		},
+		{
+			name:      "different date",
+			patch:     `{"patch":{"tags":"health","date":"2026-05-09"},"tagsMode":"add"}`,
+			wantClear: true,
+			why:       "date is a hash input",
+		},
+		{
+			name:      "different category",
+			patch:     `{"patch":{"tags":"health","category_id":%[2]d},"tagsMode":"add"}`,
+			wantClear: true,
+			why:       "the identity hashes the category name",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupHandler(t)
+			user := seedTestUser(t, h.queries, "alice", RoleMember)
+			cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+			other := seedTestCategory(t, h.queries, "Other-"+t.Name(), "expense")
+			id := seedHashedTransaction(t, h, user.ID, cat.ID, seedDate, seedDesc, 10.0)
+
+			before := hashOf(t, h, id)
+			if !before.Valid {
+				t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+			}
+
+			body := tc.patch
+			if strings.Contains(body, "%[") {
+				body = fmt.Sprintf(body, cat.ID, other.ID)
+			}
+			url := fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", cat.ID)
+			req := withUser(httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body))), user)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.handleUpdateTransactionsByFilter(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update-by-filter: status = %d; body = %s", rec.Code, rec.Body.String())
+			}
+
+			// Anti-vacuity: a filter that matched nothing would satisfy every
+			// "hash preserved" assertion below without exercising the branch.
+			var resp struct {
+				Updated int64 `json:"updated"`
+			}
+			decodeResponse(t, rec, &resp)
+			if resp.Updated != 1 {
+				t.Fatalf("updated = %d, want 1 — the filter did not reach the row, so the hash assertion proves nothing", resp.Updated)
+			}
+			// Anti-vacuity: prove the write actually landed, so a "preserved"
+			// result cannot come from an update that silently did nothing.
+			if tags, _ := tagsAndNotesOf(t, h, id); !strings.Contains(tags.String, "health") {
+				t.Fatalf("tags = %q, want the patch's tag applied — the update did not land", tags.String)
+			}
+
+			after := hashOf(t, h, id)
+			switch {
+			case tc.wantClear && after.Valid:
+				t.Errorf("content_hash kept (%s) but %s", after.String, tc.why)
+			case !tc.wantClear && !after.Valid:
+				t.Errorf("content_hash cleared, dropping the row out of import dedupe, but %s", tc.why)
+			case !tc.wantClear && after.String != before.String:
+				t.Errorf("content_hash = %s, want %s (unchanged)", after.String, before.String)
+			}
+		})
 	}
 }

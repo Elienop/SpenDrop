@@ -77,24 +77,35 @@ func normalizeHashDate(d time.Time) string { return d.UTC().Format("2006-01-02")
 
 func normalizeHashText(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// hashInputsMoved reports whether a full-replace UpdateTransaction actually
-// CHANGES one of ComputeContentHash's inputs, and is the sole source of
-// UpdateTransactionParams.ClearContentHash.
+// HashInputs is the minimal set of columns ComputeContentHash actually
+// consumes. It exists so a caller that does NOT hold a full transaction row —
+// the api layer's bulk update-by-filter path enumerates rows with its own
+// hand-written SELECT — can still ask the canonical question through
+// HashInputsMoved instead of reimplementing the comparison.
 //
-// UpdateTransaction rewrites every column on every call, but rewriting a
-// column is not changing its value: a tags-only edit, a notes-only edit and a
-// literal no-op Save all resend identical date / amount / description /
-// category. Clearing the identity for those de-anchors the row from import
-// dedupe for nothing, and a re-import of the file the row came from then
-// creates a second copy — permanently, because BackfillContentHashes runs only
-// at boot and only WHERE content_hash IS NULL, so once the duplicate owns the
-// hash the partial unique index makes the backfill skip the edited row forever.
+// CategoryID rather than the category name: the hash mixes in the NAME, but a
+// rename must NOT retroactively change a row's identity (see the note on
+// ComputeContentHash), so id is the correct proxy for "this row now belongs to
+// different content".
+type HashInputs struct {
+	Date        time.Time
+	AmountCents int64
+	Description string
+	CategoryID  int64
+}
+
+// HashInputsMoved reports whether before and after differ in any input to
+// ComputeContentHash — i.e. whether the digest would change. It is the single
+// predicate behind every "should this write clear content_hash?" decision in
+// the codebase; add a caller, not a second implementation.
 //
-// The category is compared by id, not by name: the hash mixes in the category
-// NAME, but a rename must NOT retroactively change a row's identity (see the
-// note on ComputeContentHash), so id is the correct proxy for "this row now
-// belongs to different content".
-func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+// The comparison runs through ComputeContentHash's OWN normalizers
+// (normalizeHashDate, normalizeHashText) rather than comparing raw values, so
+// a change that the digest would erase — re-casing or re-padding a
+// description, restating a date in a different location — correctly reports
+// "not moved". Any future change to the hash's normalization rules therefore
+// updates this predicate for free, which a hand-copied approximation would not.
+func HashInputsMoved(before, after HashInputs) bool {
 	switch {
 	case before.CategoryID != after.CategoryID:
 		return true
@@ -105,6 +116,34 @@ func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams
 	default:
 		return normalizeHashText(before.Description) != normalizeHashText(after.Description)
 	}
+}
+
+// hashInputsMoved adapts HashInputsMoved to the full-replace UpdateTransaction
+// shape, and is the sole source of UpdateTransactionParams.ClearContentHash.
+//
+// UpdateTransaction rewrites every column on every call, but rewriting a
+// column is not changing its value: a tags-only edit, a notes-only edit and a
+// literal no-op Save all resend identical date / amount / description /
+// category. Clearing the identity for those de-anchors the row from import
+// dedupe for nothing, and a re-import of the file the row came from then
+// creates a second copy — permanently, because BackfillContentHashes runs only
+// at boot and only WHERE content_hash IS NULL, so once the duplicate owns the
+// hash the partial unique index makes the backfill skip the edited row forever.
+func hashInputsMoved(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+	return HashInputsMoved(
+		HashInputs{
+			Date:        before.Date,
+			AmountCents: before.AmountCents,
+			Description: before.Description,
+			CategoryID:  before.CategoryID,
+		},
+		HashInputs{
+			Date:        after.Date,
+			AmountCents: after.AmountCents,
+			Description: after.Description,
+			CategoryID:  after.CategoryID,
+		},
+	)
 }
 
 // backfillPageSize is the number of rows BackfillContentHashes pulls
