@@ -5,16 +5,13 @@
 // Mirror `MinYear` / `MaxYear` in `internal/api/limits.go`. Keep wide
 // enough for historic spreadsheet imports; keep narrow enough that the
 // year-picker does not need pagination.
+//
+// MIN_YEAR is also the hard floor of the Reports year picker: the
+// server clamps `GET /api/settings/report-year-floor` there so the
+// picker can never offer a year the year-param endpoints reject.
 
 export const MIN_YEAR = 2000;
 export const MAX_YEAR = 2100;
-
-/**
- * Historical cutoff used by year-picker helpers that don't need the
- * full span — e.g. the reports page only wants "recent years the user
- * has data for". Keep this a rolling value rather than hard-coded.
- */
-export const HISTORICAL_YEAR_START = 2024;
 
 // --- Month labels ---
 
@@ -103,9 +100,21 @@ export function formatYYYYMMDD(date: Date): string {
 /**
  * Returns a list of year options `{ value, label }` suitable for a
  * `<Select>`, descending from the current year down to `startYear`.
+ *
+ * `startYear` is REQUIRED and deliberately has no default. It used to
+ * default to a hard-coded `HISTORICAL_YEAR_START = 2024`, which meant a
+ * user could import a 2019 bank statement, have every aggregate include
+ * it, and never be able to select 2019 in any Reports tab. The floor now
+ * comes from the ledger — see `useReportYearFloor`, which is also where
+ * the `min(floor, current year)` guard lives.
+ *
+ * This stays a PURE function: it must not fetch, so `@/lib/dates` keeps
+ * no network dependency. The flip side is that it returns an EMPTY list
+ * for a `startYear` above the current year, so callers must pass a floor
+ * that has already been guarded.
  */
 export function yearOptions(
-  startYear: number = HISTORICAL_YEAR_START,
+  startYear: number,
 ): { value: string; label: string }[] {
   const currentYear = new Date().getFullYear();
   const opts: { value: string; label: string }[] = [];

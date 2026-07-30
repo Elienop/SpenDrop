@@ -34,6 +34,7 @@ import { useYearOverYear, useIncomeExpenses } from '@/hooks/useReports';
 import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useReportYearFloor } from '@/hooks/useReportYearFloor';
 import { cn } from '@/lib/utils';
 import { monthsToCoverYear } from './utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
@@ -152,7 +153,12 @@ export function SavingsTab() {
     };
   }, [yoy.data]);
 
-  const years = yearOptions();
+  // Ledger-derived floor, so an imported 2019 statement is selectable. Both
+  // Selects on this tab drive the same `year`, and `Math.min` keeps it in the
+  // list if a refetch ever narrows the floor past it — otherwise the Select
+  // would hold a value with no matching item and render a blank trigger.
+  const { floorYear } = useReportYearFloor();
+  const years = yearOptions(Math.min(floorYear, year));
 
   return (
     <div className="flex flex-col gap-6">
