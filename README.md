@@ -78,6 +78,8 @@ Four report tabs covering different angles of your finances:
 - **Savings** -- Savings goals and progress tracking
 - **Patterns** -- Expense velocity and spending pattern analysis
 
+Every year picker on this page goes back as far as your data does, not a fixed number of years: the oldest year offered comes from the oldest live transaction in the household (`GET /api/settings/report-year-floor`), so an imported 2019 bank statement is selectable the moment it lands. Import accepts dates back to 1900 but the pickers stop at 2000; if you have rows older than that, Reports says so -- their amounts still count in every total, only their year cannot be picked.
+
 ![Reports Overview](docs/screenshots/03-reports-overview.png)
 ![Reports Spending](docs/screenshots/04-reports-spending.png)
 ![Reports Savings](docs/screenshots/05-reports-savings.png)
