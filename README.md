@@ -281,9 +281,8 @@ Most deployments only need the first handful of variables. Everything below is a
 |----------|---------|-------------|
 | `RATE_LIMIT_MAX` | `10` | Attempts allowed per client IP per window before login/register return 429 |
 | `RATE_LIMIT_WINDOW` | `1m` | How often attempt counters are reset |
-| `TRUST_PROXY_HEADERS` | `false` | Derive the rate-limit client IP from `X-Forwarded-For` instead of the socket address. **Set this to `true` if and only if SpenDrop sits behind a reverse proxy you control**, and set `TRUSTED_PROXY_CIDRS` along with it. Behind a proxy with it `false`, every request carries the proxy's address, so the whole household shares one bucket and a single attacker locks everyone out. Directly exposed with it `true`, the header is attacker-controlled and anyone can mint a fresh bucket per request, bypassing the limiter entirely |
-| `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated address ranges of your reverse proxies, as CIDRs or bare IPs — e.g. `172.18.0.0/16` (a Docker compose network) or `172.18.0.5`. Only read when `TRUST_PROXY_HEADERS=true`. `X-Forwarded-For` is honoured **only when the connection itself came from one of these ranges**, so anything reaching SpenDrop directly (a LAN host, a sibling container, a port exposed next to the proxy) is keyed on its socket address and cannot forge an identity. The client is then chosen by **address**: the header is walked from the right while entries fall inside these ranges, and the first entry that does not is the client. Anything an attacker prepends sits further left and is never reached, so this is safe no matter how long the real chain is. **The ranges must cover your proxies and nothing else** — any host inside them is trusted to declare who the client is |
-| `TRUSTED_PROXY_HOPS` | `1` | **Deprecated — set `TRUSTED_PROXY_CIDRS` instead.** Positional fallback, used only when `TRUSTED_PROXY_CIDRS` is empty: how many entries `X-Forwarded-For` gains in transit. A count cannot be checked against reality and is unsafe both ways. Too high (for example a `2` left behind after removing a Cloudflare Tunnel) and an attacker who prepends one entry lands on their own forged value, getting a fresh bucket per request — the login limiter stops working entirely. Too low and every visitor selects the same outer-edge address, collapsing the household into one bucket. Capped at 8, and using this mode logs a deprecation warning at startup |
+| `TRUST_PROXY_HEADERS` | `false` | Derive the rate-limit client IP from `X-Forwarded-For` instead of the socket address. **Set this to `true` if and only if SpenDrop sits behind a reverse proxy you control**, and set `TRUSTED_PROXY_CIDRS` along with it — enabling this without CIDRs is refused at startup, because the header cannot then be told apart from a forgery. Behind a proxy with it `false`, every request carries the proxy's address, so the whole household shares one bucket and a single attacker locks everyone out. Directly exposed with it `true`, the header is attacker-controlled and anyone can mint a fresh bucket per request, bypassing the limiter entirely |
+| `TRUSTED_PROXY_CIDRS` | *(empty)* | Comma-separated address ranges of your reverse proxies, as CIDRs or bare IPs — e.g. `172.18.0.0/16` (a Docker compose network) or `172.18.0.5`. **Required when `TRUST_PROXY_HEADERS=true`.** `X-Forwarded-For` is honoured **only when the connection itself came from one of these ranges**, so anything reaching SpenDrop directly (a LAN host, a sibling container, a port exposed next to the proxy) is keyed on its socket address and cannot forge an identity. The client is then chosen by **address**: the header is walked from the right while entries fall inside these ranges, and the first entry that does not is the client. Anything an attacker prepends sits further left and is never reached, so this is safe no matter how long the real chain is. **The ranges must cover your proxies and nothing else** — any host inside them is trusted to declare who the client is, so derive the range from your own network rather than copying a wide default (see [Caddy Reverse Proxy](#caddy-reverse-proxy)) |
 
 #### Uploads, database, and backups
 
@@ -383,6 +382,16 @@ environment:
 
 [Caddy](https://caddyserver.com) is the simplest way to put SpenDrop behind a real domain with automatic TLS from Let's Encrypt. Point an `A`/`AAAA` record at your server, then:
 
+**First, find the subnet Caddy will reach SpenDrop from.** `TRUSTED_PROXY_CIDRS` decides who is allowed to declare the client's identity to the login rate limiter, so it has to name your proxy and nothing else. Bring the stack up once (`docker compose up -d`) and read the real subnet off the network Compose created:
+
+```bash
+docker network inspect "$(basename "$PWD")_default" \
+  -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
+# e.g. 172.19.0.0/16
+```
+
+Put that value in `TRUSTED_PROXY_CIDRS` below, then `docker compose up -d` again. Pinning the network in Compose (a top-level `networks:` block with an explicit `ipam.config.subnet`) keeps the value stable across recreates.
+
 ```yaml
 # docker-compose.yml
 services:
@@ -414,14 +423,15 @@ services:
       - TRUST_PROXY=true
       # Without these two, every request arrives carrying Caddy's address, so the
       # whole household shares one login rate-limit bucket and a single attacker
-      # locks everyone out. Set TRUSTED_PROXY_CIDRS to the range Caddy connects
-      # from — for this compose file that is the project's bridge network. Find
-      # the exact subnet with:
-      #   docker network inspect <project>_default -f '{{range .IPAM.Config}}{{.Subnet}}{{end}}'
-      # and narrow this value to it. 172.16.0.0/12 covers Docker's default pool
-      # and is fine when this host runs nothing else you would not trust.
+      # locks everyone out.
+      #
+      # TRUSTED_PROXY_CIDRS must name the range Caddy connects from AND NOTHING
+      # ELSE — every host inside it is trusted to declare who the client is. For
+      # this compose file that is the project's own bridge network. Look up your
+      # real subnet BEFORE you start (see the note under this file) and put it
+      # here; the value below is a placeholder, not a default that will fit.
       - TRUST_PROXY_HEADERS=true
-      - TRUSTED_PROXY_CIDRS=172.16.0.0/12
+      - TRUSTED_PROXY_CIDRS=172.18.0.0/16  # ← replace with YOUR project's subnet
     restart: unless-stopped
 
 volumes:
@@ -436,6 +446,8 @@ spendrop.example.com {
     reverse_proxy spendrop:8080
 }
 ```
+
+> **Do not fall back to `172.16.0.0/12` unless you have no alternative.** That is Docker's entire default address pool, so it trusts *every* container on the host — any other app you run, including one you did not write, can then declare who the client is: mint an unlimited number of rate-limit buckets to brute-force a password, or pin a household member's bucket at `429` so they cannot log in. On a multi-app NAS (TrueNAS SCALE, Unraid, Synology) that is the normal situation, not an edge case. Use it only as a temporary measure on a host running nothing else you would not trust, and narrow it as soon as you know your real subnet.
 
 Caddy automatically provisions and renews a TLS certificate for `spendrop.example.com` on first start. That HTTPS origin is also what enables the installable PWA — home-screen install and offline capture both require a secure context (see [Mobile capture](#mobile-capture-installable-pwa)).
 
