@@ -168,6 +168,9 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Get("/dashboard/categories", h.handleDashboardCategories)
 
 		// Reports
+		// Read-only: the offered years are derived from the ledger, never
+		// configured. Supersedes /settings/report-year-floor.
+		r.Get("/reports/years", h.handleReportYears)
 		r.Get("/reports/year-over-year", h.handleReportYoY)
 		r.Get("/reports/category-trends", h.handleReportCategoryTrends)
 		r.Get("/reports/income-expenses", h.handleReportIncomeExpenses)

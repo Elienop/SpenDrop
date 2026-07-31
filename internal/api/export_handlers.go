@@ -382,7 +382,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 	monthStr := chi.URLParam(r, "month")
 
 	year, err := strconv.Atoi(yearStr)
-	if err != nil || year < MinYear || year > MaxYear {
+	if err != nil || year < MinDataYear || year > MaxDataYear {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
@@ -484,7 +484,7 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 
 	yearStr := chi.URLParam(r, "year")
 	year, err := strconv.Atoi(yearStr)
-	if err != nil || year < MinYear || year > MaxYear {
+	if err != nil || year < MinDataYear || year > MaxDataYear {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}

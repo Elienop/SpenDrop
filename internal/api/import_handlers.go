@@ -1662,11 +1662,19 @@ func parseImportAmount(s string) (int64, error) {
 // years. In practice this is a non-issue for SpenDrop because modern Excel
 // and Google Sheets both write 1900-based workbooks.
 //
-// The [1900, 2100] window is intentionally wider than the year picker's
-// [MinYear, MaxYear] = [2000, 2100] from limits.go. Import needs to
-// accept historic bank statements going back to the 20th century, while
-// the picker only drives budget/savings UI. Tightening import to MinYear
-// would break users loading 1990s statements.
+// This window used to be documented as a DELIBERATE divergence: import
+// accepted [1900, 2100] while the year picker's [MinYear, MaxYear] was
+// [2000, 2100], on the reasoning that import needed historic bank statements
+// while the picker only drove budget/savings UI. That reasoning was wrong —
+// the picker also drives reports, so an imported 1995 row was stored,
+// aggregated, and unreportable. The two are now ONE window:
+// minImportYear/maxImportYear are aliases of MinDataYear/MaxDataYear
+// (limits.go), which every read endpoint and validateDate share.
+//
+// 1900 now serves two independent reasons, and both must hold before it can
+// move: Excel's serial 1 is 1899-12-31, so a floor of 1900 is what rejects
+// misaligned integers as dates; and 1900 is the product's declared oldest
+// supported ledger year.
 func parseImportDate(s string) (time.Time, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1693,14 +1701,17 @@ func parseImportDate(s string) (time.Time, error) {
 }
 
 // minImportYear / maxImportYear bound the household ledger window that
-// parseImportDate accepts. Declared as function-local-ish constants
-// (package-level for the fuzz test to reference) rather than inline
-// literals so every reader sees the same numbers when investigating a
-// "why did my 1990 import row get skipped?" question. See
-// parseImportDate's doc comment for the full rationale.
+// parseImportDate accepts. They are ALIASES of the data window in limits.go,
+// not independent numbers: import and the reports must agree, or an imported
+// row lands in a year no report will display.
+//
+// Kept as named constants rather than folded into the call site for two
+// reasons: FuzzParseImportDate references them by name, and the names read
+// better than the generic ones inside a "why did my 1990 import row get
+// skipped?" investigation. See parseImportDate's doc comment.
 const (
-	minImportYear = 1900
-	maxImportYear = 2100
+	minImportYear = MinDataYear
+	maxImportYear = MaxDataYear
 )
 
 // validateImportYear enforces the household ledger window on a

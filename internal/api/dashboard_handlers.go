@@ -73,8 +73,8 @@ func (h *Handler) parseYearMonth(r *http.Request) (int, int, error) {
 		month = parsed
 	}
 
-	if year < MinYear || year > MaxYear {
-		return 0, 0, fmt.Errorf("year must be between %d and %d", MinYear, MaxYear)
+	if year < MinDataYear || year > MaxDataYear {
+		return 0, 0, fmt.Errorf("year must be between %d and %d", MinDataYear, MaxDataYear)
 	}
 	if month < 1 || month > 12 {
 		return 0, 0, fmt.Errorf("month must be between 1 and 12")
@@ -235,7 +235,7 @@ func (h *Handler) handleDashboardTrend(w http.ResponseWriter, r *http.Request) {
 		if m := r.URL.Query().Get("month"); m != "" {
 			py, errY := strconv.Atoi(y)
 			pm, errM := strconv.Atoi(m)
-			if errY == nil && errM == nil && py >= MinYear && py <= MaxYear && pm >= 1 && pm <= 12 {
+			if errY == nil && errM == nil && py >= MinDataYear && py <= MaxDataYear && pm >= 1 && pm <= 12 {
 				anchor = time.Date(py, time.Month(pm), 1, 0, 0, 0, 0, time.UTC)
 			}
 		}

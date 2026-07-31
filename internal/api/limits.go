@@ -10,13 +10,43 @@ package api
 // the same caps, and changing one without the other is a bug. Centralising
 // them makes that contract explicit.
 
-// Year bounds for budget, savings, dashboard, and export endpoints.
-// Keep narrow enough that the UI's year picker does not need to paginate
-// and wide enough that operators who import historic data from 20-year-old
-// spreadsheets do not hit a wall.
+// Year bounds. There are two windows because there are two jobs, and
+// conflating them is what produced the hole this pair replaces: a single
+// [2000, 2100] constant guarded every year PARAM while nothing at all
+// guarded a transaction DATE, so the app could store rows in years no
+// report would accept.
+//
+// MinDataYear / MaxDataYear bound the window a transaction date may
+// occupy. Everything that reads ledger data by year — reports, dashboard,
+// export, and validateDate on the write side — uses this pair, so every
+// year the ledger can hold is a year the reports can display.
+//
+// PlanningMinYear / PlanningMaxYear bound the year params of budgets and
+// savings goals. Those rows are configuration the household writes forward,
+// not history it imports backward: nothing plans a 1990 budget, and the
+// Budgets page's year Select bottoms out at MIN_YEAR (web/src/lib/dates.ts).
+// Widening them would add a century of empty years to that Select for no
+// gain.
+//
+// NEVER lower MinDataYear below 1000. Two verified hazards live under four
+// digits:
+//
+//   - web/src/components/reports/SpendingHeatmap.tsx (lines 24 and 31)
+//     builds `new Date(Date.UTC(year, 0, 1))`, and JS maps years 0-99 onto
+//     1900-1999 — a year-84 row would silently render as 1984.
+//   - The report handlers build ranges with fmt.Sprintf("%d-01-01", year),
+//     which emits "5-01-01" for year 5 and breaks the lexical string
+//     comparison SumByMonthRange does against the stored dates.
+//
+// 1900 specifically because parseImportDate has accepted [1900, 2100] since
+// it was written (minImportYear / maxImportYear in import_handlers.go, now
+// aliases of these). One product-wide window, not two that disagree.
 const (
-	MinYear = 2000
-	MaxYear = 2100
+	MinDataYear = 1900
+	MaxDataYear = 2100
+
+	PlanningMinYear = 2000
+	PlanningMaxYear = 2100
 )
 
 // Pagination defaults and caps for list endpoints.
@@ -103,19 +133,26 @@ const MaxSubscriptionsPerUser = 20
 //
 // MaxTrendMonths is DERIVED, not chosen. The Savings tab sizes its window from
 // the year the user picked (web/src/components/reports/utils.ts,
-// MAX_REPORT_MONTHS, which must match this value), and the year picker's floor
-// now comes from the ledger via GET /api/settings/report-year-floor. That
-// handler clamps the floor to MinYear, so the widest window the UI can ever
-// legitimately ask for is January of MinYear through December of MaxYear —
-// past MaxYear every year-param endpoint 400s, so nothing wider is reachable.
+// MAX_REPORT_MONTHS, which must match this value) and the year picker is
+// driven by the ledger, so the widest window the UI can legitimately ask for
+// is January of the oldest year the ledger may hold through December of the
+// newest — i.e. the whole DATA window. Past MaxDataYear every year-param
+// endpoint 400s, so nothing wider is reachable.
 //
-// Two earlier values were literals sized against the then-hard-coded frontend
+// There is now ZERO slack: at [1900, 2100] this is exactly the widest
+// reachable window, not a value comfortably above it. It used to be sized
+// against the narrower planning window and could be described as "far larger
+// than any window yearOptions can ask for" — that is no longer true, and any
+// future widening of the data window MUST come here (and to the frontend
+// literal) in the same change or the oldest years start truncating silently.
+//
+// Two earlier values were literals sized against a then-hard-coded frontend
 // floor of 2024, and each one was already scheduled to start silently
 // truncating the oldest selectable years: 120 would have bound from 2034, and
-// 600 binds from 2050 once the floor can reach MinYear. Deriving the constant
-// removes that whole class of expiry — the only way to shrink this window now
-// is to narrow MinYear/MaxYear, which is exactly when it should shrink.
+// 600 from 2050. Deriving the constant removes that whole class of expiry —
+// the only way to shrink this window now is to narrow the data bounds, which
+// is exactly when it should shrink.
 const (
-	MaxTrendMonths         = (MaxYear - MinYear + 1) * 12
+	MaxTrendMonths         = (MaxDataYear - MinDataYear + 1) * 12
 	MaxCategoryTrendMonths = 60
 )

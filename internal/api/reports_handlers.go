@@ -34,7 +34,7 @@ func (h *Handler) handleReportYoY(w http.ResponseWriter, r *http.Request) {
 	year := h.clock.Now().Year()
 	if v := r.URL.Query().Get("year"); v != "" {
 		parsed, err := strconv.Atoi(v)
-		if err != nil || parsed < MinYear || parsed > MaxYear {
+		if err != nil || parsed < MinDataYear || parsed > MaxDataYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
