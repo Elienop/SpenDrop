@@ -91,12 +91,12 @@ describe('Reports', () => {
   });
 
   // `clamped` is the ONLY signal that some data is unreachable in Reports:
-  // rows dated before MIN_YEAR are in the ledger but no year picker can select
+  // rows dated before PLANNING_MIN_YEAR are in the ledger but no year picker can select
   // their year, AND they are absent from every report aggregate the UI asks
   // for. Leaving it unrendered would be a smaller version of the exact defect
   // this feature fixes, so it gets a quiet informational note — shown once for
   // the whole page, because it is a property of the ledger, not of any one tab.
-  describe('pre-MIN_YEAR ledger rows', () => {
+  describe('pre-PLANNING_MIN_YEAR ledger rows', () => {
     it('says so when the server reports the floor was clamped', () => {
       useReportYearFloor.mockReturnValue({ ...floorResult, clamped: true });
       renderReports();

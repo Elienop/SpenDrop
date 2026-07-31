@@ -7,7 +7,7 @@ import { SpendingTab } from '@/components/reports/SpendingTab';
 import { SavingsTab } from '@/components/reports/SavingsTab';
 import { PatternsTab } from '@/components/reports/PatternsTab';
 import { useReportYearFloor } from '@/hooks/useReportYearFloor';
-import { MIN_YEAR } from '@/lib/dates';
+import { PLANNING_MIN_YEAR } from '@/lib/dates';
 
 export function Reports() {
   const [activeTab, setActiveTab] = useState('overview');
@@ -19,7 +19,7 @@ export function Reports() {
 
       {/* `clamped` is the only signal that some data is unreachable here.
           Transaction dates have no lower bound on create, and import accepts
-          back to 1900, but the year pickers bottom out at MIN_YEAR because
+          back to 1900, but the year pickers bottom out at PLANNING_MIN_YEAR because
           every year-param endpoint rejects anything older.
 
           Do NOT soften this to "the amounts still count". They do not, and an
@@ -33,17 +33,17 @@ export function Reports() {
 
           Still informational rather than a warning (default variant, polite
           `status` role): nothing is broken, and the fix is a product decision
-          about MIN_YEAR, not something the user can act on beyond knowing.
+          about PLANNING_MIN_YEAR, not something the user can act on beyond knowing.
 
           Rendered once for the whole page: the floor is a property of the
           household ledger, not of any one tab. It costs nothing for the
-          households that have no pre-MIN_YEAR rows, because it does not
+          households that have no pre-PLANNING_MIN_YEAR rows, because it does not
           render at all. */}
       {clamped && (
         <Alert role="status">
           <Info className="size-4" />
           <AlertDescription>
-            Some transactions are dated before {MIN_YEAR}. They are in your
+            Some transactions are dated before {PLANNING_MIN_YEAR}. They are in your
             ledger and listed under Transactions, but they are not included in
             these reports and their years cannot be selected here.
           </AlertDescription>

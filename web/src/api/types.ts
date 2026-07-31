@@ -557,7 +557,7 @@ export interface NotificationSettings {
  *   has_transactions=false                → empty ledger; `floor_year` is the
  *                                           server's current-year fallback
  *   has_transactions=true, clamped=false  → `floor_year` is real ledger data
- *   has_transactions=true, clamped=true   → live rows exist below MIN_YEAR;
+ *   has_transactions=true, clamped=true   → live rows exist below PLANNING_MIN_YEAR;
  *                                           they stay inside date-range
  *                                           aggregates but no year picker can
  *                                           select their year

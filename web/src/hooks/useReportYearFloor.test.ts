@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import { createElement } from 'react';
 
 import { useReportYearFloor } from './useReportYearFloor';
-import { MIN_YEAR } from '@/lib/dates';
+import { PLANNING_MIN_YEAR } from '@/lib/dates';
 
 // This suite deliberately mocks `fetch`, NOT `@/api/client`.
 //
@@ -116,7 +116,7 @@ describe('useReportYearFloor', () => {
     expect(result.current.floorYear).toBeLessThanOrEqual(CURRENT_YEAR);
   });
 
-  it('holds the floor at MIN_YEAR if a server ever returns something older', async () => {
+  it('holds the floor at PLANNING_MIN_YEAR if a server ever returns something older', async () => {
     // The handler clamps to MinYear itself, so this only fires against an
     // older/rolled-back binary. Offering 1995 would make every year-param
     // request 400 — the picker must not be able to select an unusable year.
@@ -126,17 +126,17 @@ describe('useReportYearFloor', () => {
     const { result } = renderHook(() => useReportYearFloor(), { wrapper });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(result.current.floorYear).toBe(MIN_YEAR);
+    expect(result.current.floorYear).toBe(PLANNING_MIN_YEAR);
   });
 
   it('surfaces clamped so the UI can say the pre-2000 rows are unreachable', async () => {
-    respondWith({ floor_year: MIN_YEAR, has_transactions: true, clamped: true });
+    respondWith({ floor_year: PLANNING_MIN_YEAR, has_transactions: true, clamped: true });
     const { wrapper } = makeHarness();
 
     const { result } = renderHook(() => useReportYearFloor(), { wrapper });
 
     await waitFor(() => expect(result.current.clamped).toBe(true));
-    expect(result.current.floorYear).toBe(MIN_YEAR);
+    expect(result.current.floorYear).toBe(PLANNING_MIN_YEAR);
   });
 
   it('degrades to a usable current-year floor when the request 401s', async () => {

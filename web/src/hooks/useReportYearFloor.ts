@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { api } from '@/api/client';
 import type { ReportYearFloorResponse } from '@/api/types';
-import { MIN_YEAR } from '@/lib/dates';
+import { PLANNING_MIN_YEAR } from '@/lib/dates';
 
 export interface UseReportYearFloorResult {
   /**
@@ -12,7 +12,7 @@ export interface UseReportYearFloorResult {
   /** False when the ledger holds no live rows; `floorYear` is then the
    *  current-year fallback rather than real data. */
   hasTransactions: boolean;
-  /** True when live rows exist below `MIN_YEAR`. Those amounts still land in
+  /** True when live rows exist below `PLANNING_MIN_YEAR`. Those amounts still land in
    *  every date-range aggregate, but their year cannot be selected — the one
    *  signal that some imported data is unreachable in Reports. */
   clamped: boolean;
@@ -56,7 +56,7 @@ export function useReportYearFloor(): UseReportYearFloorResult {
 
   // Two guards, in this order:
   //
-  //  - `Math.max(…, MIN_YEAR)` mirrors the handler's own clamp. It only bites
+  //  - `Math.max(…, PLANNING_MIN_YEAR)` mirrors the handler's own clamp. It only bites
   //    against an older/rolled-back binary, but the cost of missing it is that
   //    the picker offers a year every year-param endpoint then 400s on.
   //  - `Math.min(…, currentYear)` is mandatory. `floor_year` is bounded by the
@@ -64,7 +64,7 @@ export function useReportYearFloor(): UseReportYearFloorResult {
   //    returns a floor above the browser's ceiling, and `yearOptions` counts
   //    DOWN from that ceiling — an empty dropdown.
   const floorYear = Math.min(
-    Math.max(data?.floor_year ?? currentYear, MIN_YEAR),
+    Math.max(data?.floor_year ?? currentYear, PLANNING_MIN_YEAR),
     currentYear,
   );
 
