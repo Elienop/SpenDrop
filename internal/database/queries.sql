@@ -387,6 +387,26 @@ LIMIT ?;
 -- would make "what did I change yesterday" reports lie.
 UPDATE transactions SET content_hash = ? WHERE id = ?;
 
+-- name: GetOldestTransactionYear :one
+-- Drives the Reports year picker's floor (GET /api/settings/report-year-floor).
+-- Household-wide on purpose: the transactions list is visible to every
+-- authenticated user (handleListTransactions), so the year picker must span
+-- every member's rows or one member cannot select the year another member's
+-- imported statement lands in.
+--
+-- deleted_at IS NULL per soft-delete discipline: a tombstoned 2015 row does
+-- not exist from the user's perspective and must not widen the picker to a
+-- year that renders empty.
+--
+-- MIN() over zero rows is NULL, so the result is nullable (sql.NullInt64) and
+-- the caller supplies the empty-ledger fallback. The extraction mirrors the
+-- CAST(strftime('%Y', t.date) AS INTEGER) idiom used by every aggregation in
+-- this file: t.date is stored in the driver's RFC3339 text form, so the year
+-- must be parsed out rather than compared lexically.
+SELECT CAST(MIN(CAST(strftime('%Y', t.date) AS INTEGER)) AS INTEGER) AS oldest_year
+FROM transactions t
+WHERE t.deleted_at IS NULL;
+
 -- Budgets
 
 -- name: GetBudget :one

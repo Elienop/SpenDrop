@@ -1,6 +1,6 @@
 import { describe, test, expect, afterEach, vi } from 'vitest';
 import { monthsToCoverYear } from './utils';
-import { yearOptions } from '@/lib/dates';
+import { MIN_YEAR, yearOptions } from '@/lib/dates';
 
 describe('monthsToCoverYear', () => {
   test('the current year still uses the 24-month floor', () => {
@@ -31,21 +31,25 @@ describe('the window reaches January of every year the UI offers', () => {
   });
 
   // The clamp used to be Math.min(120, ...), which is exactly
-  // (2033 - HISTORICAL_YEAR_START + 1) * 12. From 2034 it starts binding and
-  // silently truncates the oldest offered years again — the same defect the
-  // helper was written to fix, reintroduced by the safety cap. The previous
-  // test pinned the clamp (monthsToCoverYear(1990, 2026) === 120) instead of
-  // flagging it, so it would have gone green through the regression.
+  // (2033 - 2024 + 1) * 12 — sized against the old hard-coded floor. From 2034
+  // it starts binding and silently truncates the oldest offered years again —
+  // the same defect the helper was written to fix, reintroduced by the safety
+  // cap. The previous test pinned the clamp (monthsToCoverYear(1990, 2026) ===
+  // 120) instead of flagging it, so it would have gone green through the
+  // regression.
   //
-  // yearOptions() enumerates exactly what the Savings year Select renders, so
-  // iterating it is the real contract. The clock is pinned per case because
-  // both yearOptions() and the expectation depend on the current year.
+  // The floor is no longer a constant: it comes from the ledger via
+  // `useReportYearFloor`, which clamps it to MIN_YEAR. So MIN_YEAR is the
+  // WIDEST list the Savings year Select can ever render, and iterating
+  // `yearOptions(MIN_YEAR)` is the real worst case — strictly wider than the
+  // 2024-floored list this used to walk. The clock is pinned per case because
+  // both the offered list and the expectation depend on the current year.
   for (const currentYear of [2026, 2033, 2034, 2040, 2060]) {
     test(`current year ${currentYear}`, () => {
       vi.useFakeTimers();
       vi.setSystemTime(new Date(Date.UTC(currentYear, 5, 15)));
 
-      const offered = yearOptions();
+      const offered = yearOptions(MIN_YEAR);
       expect(offered.length).toBeGreaterThan(0);
 
       for (const opt of offered) {

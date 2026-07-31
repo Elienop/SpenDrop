@@ -38,6 +38,7 @@ import { tagChartHeightPx } from './tagChart';
 import { MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useReportYearFloor } from '@/hooks/useReportYearFloor';
 import { cn } from '@/lib/utils';
 
 const TAG_CONFIG = {
@@ -56,7 +57,13 @@ export function PatternsTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
-  const tagYears = yearOptions();
+  // Ledger-derived floor, so an imported 2019 statement is selectable. One
+  // list feeds BOTH Selects on this tab (heatmap `year` and tag `tagYear`), so
+  // `Math.min` folds in both selections — either one falling below the floor
+  // after a refetch would otherwise leave that Select holding a value with no
+  // matching item and render a blank trigger.
+  const { floorYear } = useReportYearFloor();
+  const tagYears = yearOptions(Math.min(floorYear, year, tagYear));
 
   return (
     <div className="flex flex-col gap-6">

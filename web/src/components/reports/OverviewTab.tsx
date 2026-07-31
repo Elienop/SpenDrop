@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useReportYearFloor } from '@/hooks/useReportYearFloor';
 import {
   ChartContainer,
   ChartTooltip,
@@ -94,7 +95,12 @@ export function OverviewTab() {
     [bva.data],
   );
 
-  const years = yearOptions();
+  // The floor comes from the ledger, so an imported 2019 statement is
+  // selectable. `Math.min` with the current selection keeps `bvaYear` in the
+  // list if a refetch ever narrows the floor past it — otherwise the Select
+  // would hold a value with no matching item and render a blank trigger.
+  const { floorYear } = useReportYearFloor();
+  const years = yearOptions(Math.min(floorYear, bvaYear));
 
   return (
     <div className="grid gap-6 md:grid-cols-2">

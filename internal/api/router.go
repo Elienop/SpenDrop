@@ -242,6 +242,8 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)
 		r.Put("/settings/default-budget", h.handleDefaultBudget)
+		// Read-only: the floor is derived from the ledger, never configured.
+		r.Get("/settings/report-year-floor", h.handleReportYearFloor)
 
 		// API tokens (user-scoped; every user manages their own)
 		r.Route("/api-tokens", func(r chi.Router) {
