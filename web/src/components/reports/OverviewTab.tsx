@@ -36,7 +36,7 @@ import {
   formatMonthTick,
   formatMonthLabel,
 } from '@/lib/dates';
-import { INCEXP_CONFIG, monthsToCoverYear } from './utils';
+import { INCEXP_CONFIG, axisTickInterval, monthsToCoverYear } from './utils';
 import { cn } from '@/lib/utils';
 
 const NET_FLOW_CONFIG = {
@@ -225,8 +225,7 @@ export function OverviewTab() {
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={8}
-                  interval="preserveStartEnd"
+                  interval={axisTickInterval(incExpData.length)}
                   angle={-30}
                   textAnchor="end"
                   height={48}
@@ -304,18 +303,15 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
-                {/* `interval={0}` forced one rotated <text> node per bucket.
-                    At 6-24 buckets that is free; at the 516 buckets All time
-                    produces for a 1984 ledger it is the dominant render cost
-                    of this tab. Matches the sibling Income-vs-Expenses
-                    BarChart above, which already thins its ticks. */}
+                {/* Tick thinning is DERIVED, not a fixed strategy — see
+                    axisTickInterval. `preserveStartEnd` dropped June from a
+                    12-month window here while the sibling BarChart kept it. */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={8}
-                  interval="preserveStartEnd"
+                  interval={axisTickInterval(cashFlowData.length)}
                   angle={-30}
                   textAnchor="end"
                   height={48}
