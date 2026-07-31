@@ -28,6 +28,7 @@ vi.mock('@/hooks/useReportYears', () => ({
     currentYear: 2026,
     hasTransactions: true,
     outOfRangeYears: [],
+    futureYears: [],
     loading: false,
   }),
 }));

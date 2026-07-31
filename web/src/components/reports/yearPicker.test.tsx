@@ -18,6 +18,7 @@ const yearsResult = {
   currentYear: CURRENT_YEAR,
   hasTransactions: true,
   outOfRangeYears: [] as number[],
+  futureYears: [] as number[],
   loading: false,
 };
 const useReportYears = vi.fn(() => yearsResult);
