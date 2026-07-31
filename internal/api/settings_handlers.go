@@ -16,16 +16,16 @@ import (
 //	                                     current-year fallback
 //	has_transactions=true,  clamped=false -> FloorYear is real ledger data
 //	has_transactions=true,  clamped=true  -> live rows exist BELOW FloorYear
-//	                                     but below MinYear they are not
+//	                                     but below PlanningMinYear they are not
 //	                                     reportable (see handler comment)
 type reportYearFloorResponse struct {
 	// FloorYear is the oldest year the Reports year picker may offer. It is
-	// always a year the year-param endpoints accept, i.e. >= MinYear.
+	// always a year the year-param endpoints accept, i.e. >= PlanningMinYear.
 	FloorYear int `json:"floor_year"`
 	// HasTransactions is false when the ledger holds no live rows at all.
 	HasTransactions bool `json:"has_transactions"`
 	// Clamped is true when the household has live transactions dated before
-	// MinYear. Those rows are aggregated wherever a date RANGE covers them,
+	// PlanningMinYear. Those rows are aggregated wherever a date RANGE covers them,
 	// but no year picker can select their year.
 	Clamped bool `json:"clamped"`
 }
@@ -46,17 +46,22 @@ type reportYearFloorResponse struct {
 //     to the caller's own rows would hide a year whose amounts are already on
 //     screen in every aggregate.
 //
-//   - Clamped to MinYear. Year-param endpoints validate against
-//     MinYear/MaxYear (internal/api/limits.go). Returning a raw floor of 1995
-//     would make the picker offer 1995, and every request the tab then issued
-//     would 400. Widening MinYear instead would touch budget, savings and
-//     checkpoint validation and is a separate decision. The residual: rows
-//     dated 1900-1999 stay importable and stay inside date-range aggregates,
-//     but their year cannot be selected. `clamped` is reported so the UI can
-//     say so rather than silently dropping them.
+//   - Clamped to PlanningMinYear (2000). This clamp is now PURELY a wire
+//     compatibility constant, not a live constraint. When this endpoint was
+//     written, every year-param endpoint validated against a single
+//     [2000, 2100] window, so returning a raw floor of 1995 would have made
+//     the picker offer 1995 and every request the tab then issued would 400.
+//     The report and dashboard endpoints have since moved to the wider DATA
+//     window [MinDataYear, MaxDataYear] and would accept 1995 fine — but this
+//     response shape is frozen: an installed PWA keeps serving its cached
+//     bundle until the service worker updates, and that bundle reads
+//     `floor_year` under these exact semantics. Changing the number here would
+//     change what an already-shipped client renders. New clients read
+//     GET /api/reports/years instead. `clamped` is still reported so the UI can
+//     say a year is unreachable rather than silently dropping it.
 //
 // Empty ledger falls back to the current year (h.clock.Now()), so the picker
-// offers exactly this year. Falling back to MinYear instead would open a fresh
+// offers exactly this year. Falling back to PlanningMinYear instead would open a fresh
 // install with 27 selectable years that all render empty.
 //
 // The floor is also held at or below the current year. The picker counts DOWN
@@ -88,7 +93,7 @@ func (h *Handler) handleReportYearFloor(w http.ResponseWriter, r *http.Request) 
 		// Reported off the RAW oldest year, before any clamping: the claim is
 		// "the household has live rows the picker cannot reach", and that is
 		// true regardless of what the floor is subsequently pulled up to.
-		clamped = floor < MinYear
+		clamped = floor < PlanningMinYear
 		if floor > currentYear {
 			floor = currentYear
 		}
@@ -97,8 +102,8 @@ func (h *Handler) handleReportYearFloor(w http.ResponseWriter, r *http.Request) 
 	// Applied last so the contract's invariant — floor_year is always a year
 	// the year-param endpoints accept — holds on every path, including the
 	// fallback under a misconfigured server clock.
-	if floor < MinYear {
-		floor = MinYear
+	if floor < PlanningMinYear {
+		floor = PlanningMinYear
 	}
 
 	writeJSON(w, http.StatusOK, reportYearFloorResponse{

@@ -34,7 +34,7 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < MinYear || parsed > MaxYear {
+		if err != nil || parsed < MinDataYear || parsed > MaxDataYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -203,7 +203,7 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < MinYear || parsed > MaxYear {
+		if err != nil || parsed < MinDataYear || parsed > MaxDataYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -242,7 +242,7 @@ func (h *Handler) handleRecurring(w http.ResponseWriter, r *http.Request) {
 	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < MinYear || parsed > MaxYear {
+		if err != nil || parsed < MinDataYear || parsed > MaxDataYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
@@ -307,7 +307,7 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if req.Year < MinYear || req.Year > MaxYear || req.Description == "" {
+	if req.Year < MinDataYear || req.Year > MaxDataYear || req.Description == "" {
 		writeError(w, http.StatusBadRequest, "year and description required")
 		return
 	}
@@ -384,7 +384,7 @@ func (h *Handler) handleTagBreakdown(w http.ResponseWriter, r *http.Request) {
 	year := h.clock.Now().Year()
 	if ys := r.URL.Query().Get("year"); ys != "" {
 		parsed, err := strconv.Atoi(ys)
-		if err != nil || parsed < MinYear || parsed > MaxYear {
+		if err != nil || parsed < MinDataYear || parsed > MaxDataYear {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}

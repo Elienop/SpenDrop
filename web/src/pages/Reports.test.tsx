@@ -110,7 +110,7 @@ describe('Reports', () => {
     // were "still included in every total". Measured against a real 1984 row,
     // that was false: income-expenses at the 24- and 324-month windows the UI
     // requests, budget-vs-actual?year=, and the dashboard summary all exclude
-    // it — only months=1212 contains it, and nothing requests that. Reassuring
+    // it — only months=2412 contains it, and nothing requests that. Reassuring
     // the user their old amounts still count, when they do not, is worse than
     // saying nothing at all.
     it('does not claim the excluded amounts still count toward totals', () => {

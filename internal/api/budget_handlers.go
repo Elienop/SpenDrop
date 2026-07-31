@@ -41,8 +41,8 @@ func (h *Handler) handleGetBudgets(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid year")
 			return
 		}
-		if parsed < MinYear || parsed > MaxYear {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+		if parsed < PlanningMinYear || parsed > PlanningMaxYear {
+			writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 			return
 		}
 		year = parsed
@@ -102,8 +102,8 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
-	if year < MinYear || year > MaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 		return
 	}
 

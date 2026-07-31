@@ -81,8 +81,8 @@ func (h *Handler) handleDeleteSavingsGoal(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
-	if year < MinYear || year > MaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 		return
 	}
 
@@ -121,8 +121,8 @@ func (h *Handler) handleSetSavingsGoal(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return
 	}
-	if year < MinYear || year > MaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 		return
 	}
 

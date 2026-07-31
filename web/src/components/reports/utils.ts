@@ -21,20 +21,24 @@ export const INCEXP_CONFIG = {
  * truncated server-side and reintroduce the truncation this module exists to
  * prevent.
  *
- * It is deliberately far larger than any window `yearOptions` can ask for.
- * Both previous values were literals sized against a hard-coded year floor and
- * both were already scheduled to start truncating: 120 is exactly
- * `(2033 - 2024 + 1) * 12`, so it would have bound from 2034; 600 binds from
- * 2050 now that the floor is derived from the ledger and can reach `MIN_YEAR`.
+ * There is now ZERO slack. The backend derives its `MaxTrendMonths` as
+ * `(MaxDataYear - MinDataYear + 1) * 12` — the span of the window a
+ * transaction DATE may occupy, which is exactly the widest window the picker
+ * can ever legitimately ask for. At `[1900, 2100]` this value is that window,
+ * not a comfortable margin above it, so widening the backend's data bounds
+ * MUST update this number in the same change or the oldest years start
+ * truncating silently again.
  *
- * The backend derives its `MaxTrendMonths` as `(MaxYear - MinYear + 1) * 12`
- * — the widest window the picker can ever legitimately ask for, given
- * `/api/settings/report-year-floor` clamps the floor to `MinYear`. This is
- * that same number, `(MAX_YEAR - MIN_YEAR + 1) * 12`, and it is pinned to the
- * Go constant by TestMaxTrendMonths_MatchesFrontendMaxReportMonths, which
- * regex-reads the literal below — so keep it a literal, not an expression.
+ * Both earlier values were literals sized against a hard-coded year floor and
+ * both were already scheduled to start truncating: 120 is exactly
+ * `(2033 - 2024 + 1) * 12`, so it would have bound from 2034; 600 from 2050;
+ * 1212 was `(2100 - 2000 + 1) * 12`, sized against the narrower planning
+ * window rather than the data window.
+ *
+ * Pinned to the Go constant by TestMaxTrendMonths_MatchesFrontendMaxReportMonths,
+ * which regex-reads the literal below — so keep it a literal, not an expression.
  */
-export const MAX_REPORT_MONTHS = 1212;
+export const MAX_REPORT_MONTHS = 2412;
 
 /**
  * How many months of income/expense history must be fetched so that the

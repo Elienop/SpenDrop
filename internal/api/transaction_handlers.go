@@ -366,7 +366,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := validateTransactionRequest(req); err != nil {
+	if err := validateTransactionRequest(req, noStoredDate); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -510,7 +510,14 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	if err := validateTransactionRequest(req); err != nil {
+	// PUT is a full replace, so the client resends the stored date on every
+	// edit — including on rows dated outside the data window, which existed
+	// long before validateDate had a bound. Passing the stored date here lets
+	// such a row be described, recategorised, retagged or CORRECTED into range,
+	// while still refusing to move it to any other out-of-window date. See
+	// validateDateAllowingStored. `existing` was already loaded above for the
+	// tombstone / ownership checks, so this costs no extra read.
+	if err := validateTransactionRequest(req, existing.Date.Format("2006-01-02")); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -676,7 +683,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 
 	// Validate all items before starting the DB transaction
 	for i, req := range reqs {
-		if err := validateTransactionRequest(req); err != nil {
+		if err := validateTransactionRequest(req, noStoredDate); err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("item %d: %s", i, err.Error()))
 			return
 		}
@@ -791,15 +798,65 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	writeJSON(w, http.StatusCreated, results)
 }
 
-// validateDate parses YYYY-MM-DD and returns the canonical form. Mirrors
-// the date check in validateTransactionRequest but isolated so bulk-edit
-// can call it without forcing all-fields validation.
+// noStoredDate is the storedDate argument for any path that is not replacing
+// an existing row: a create, or a bulk patch where the date is by definition a
+// new value the user just typed. Nothing is grandfathered, so the window is
+// enforced strictly.
+const noStoredDate = ""
+
+// validateDate parses YYYY-MM-DD, bounds the year to the data window and
+// returns the canonical form. Mirrors the date check in
+// validateTransactionRequest but isolated so bulk-edit can call it without
+// forcing all-fields validation.
+//
+// The year bound was absent for the app's whole life — 0001-01-01 and
+// 3021-01-02 both parsed and stored — while every report endpoint rejected
+// years outside its window, so the ledger could hold rows no report would
+// ever display.
 func validateDate(s string) (string, error) {
+	return validateDateAllowingStored(s, noStoredDate)
+}
+
+// validateDateAllowingStored is validateDate with one exception: `storedDate`
+// (the canonical YYYY-MM-DD already on the row being replaced) is accepted
+// even when it falls outside the data window.
+//
+// Why the exception exists. The bound is new; the data is not. Any deployment
+// may already hold rows outside the window, and PUT /api/transactions/{id} is
+// a FULL REPLACE — the client resends the row's own date on every edit. A
+// strict bound would therefore 400 a description-only edit of a legacy 3021
+// row, locking the user out of correcting, recategorising, or even retagging
+// their own data. That trap is a worse failure than the hole it closes.
+//
+// The rule is "the bound applies to the date you are MOVING to":
+//
+//   - a row already outside the window may stay exactly where it is;
+//   - it may always be corrected INTO the window (the escape hatch);
+//   - it may not be moved to a DIFFERENT out-of-window date, so the hole
+//     cannot be kept alive through the update path;
+//   - nothing may be created outside the window at all.
+//
+// Exact-match, not year-match: "this row is legacy so anything goes" would let
+// a 3021 row wander freely above MaxDataYear forever.
+func validateDateAllowingStored(s, storedDate string) (string, error) {
 	t, err := time.Parse("2006-01-02", s)
 	if err != nil {
 		return "", fmt.Errorf("date must be in YYYY-MM-DD format")
 	}
-	return t.Format("2006-01-02"), nil
+	canonical := t.Format("2006-01-02")
+	if y := t.Year(); y < MinDataYear || y > MaxDataYear {
+		if storedDate != "" && canonical == storedDate {
+			return canonical, nil
+		}
+		if storedDate != "" {
+			return "", fmt.Errorf(
+				"date must be between %d-01-01 and %d-12-31 (this row is dated %s, from before that limit existed — "+
+					"keep it unchanged or correct it into range)",
+				MinDataYear, MaxDataYear, storedDate)
+		}
+		return "", fmt.Errorf("date must be between %d-01-01 and %d-12-31", MinDataYear, MaxDataYear)
+	}
+	return canonical, nil
 }
 
 // validateDescription trims, then length-checks the trimmed value against
@@ -844,11 +901,16 @@ func validateTagsField(s string) (string, error) {
 // validateDescription trims before measuring (a bulk-edit semantic) and
 // the single-row endpoint must keep accepting whitespace-only descriptions
 // for legacy compatibility. See spec §5.5b.
-func validateTransactionRequest(req transactionRequest) error {
+//
+// storedDate is the canonical YYYY-MM-DD already on the row this request
+// replaces, or noStoredDate on a create. It is a required argument rather than
+// an optional variant so every new caller has to decide, in review, whether it
+// is replacing a row — see validateDateAllowingStored for what it licenses.
+func validateTransactionRequest(req transactionRequest, storedDate string) error {
 	if req.Date == "" {
 		return fmt.Errorf("date is required")
 	}
-	if _, err := validateDate(req.Date); err != nil {
+	if _, err := validateDateAllowingStored(req.Date, storedDate); err != nil {
 		return err
 	}
 	if req.Description == "" {

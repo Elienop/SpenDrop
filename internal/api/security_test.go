@@ -665,10 +665,11 @@ func TestHandleDashboardTrend_MonthsCappedAtMaxTrendMonths(t *testing.T) {
 	}
 	decodeResponse(t, rec, &resp)
 	// Asserted against the constant, not a literal: MaxTrendMonths is derived
-	// as (MaxYear - MinYear + 1) * 12, so the Savings tab's window can always
-	// reach January of the oldest selectable year — which is MinYear, the floor
-	// GET /api/settings/report-year-floor clamps to. It must be free to move
-	// with those bounds without a test pinning it to a stale number.
+	// as (MaxDataYear - MinDataYear + 1) * 12, so the Savings tab's window can
+	// always reach January of the oldest selectable year — which is
+	// MinDataYear, the oldest year GET /api/reports/years will ever offer. It
+	// must be free to move with those bounds without a test pinning it to a
+	// stale number.
 	if len(resp.Trend) != MaxTrendMonths {
 		t.Errorf("expected %d trend entries (capped), got %d", MaxTrendMonths, len(resp.Trend))
 	}
@@ -715,28 +716,29 @@ func TestHandleDashboardTrend_NegativeMonthsClamped(t *testing.T) {
 // This used to compare against a Go-local `historicalYearStart = 2024` that
 // mirrored HISTORICAL_YEAR_START in web/src/lib/dates.ts — exactly the
 // cross-boundary drift its sibling test was written to prevent. The floor is
-// no longer a TypeScript constant: GET /api/settings/report-year-floor derives
-// it from the ledger and clamps it to MinYear, so MinYear is the real
-// worst-case oldest selectable year and is already defined right here in Go.
+// no longer a TypeScript constant: it is derived from the ledger, and
+// GET /api/reports/years filters what it offers to [MinDataYear, MaxDataYear].
+// MinDataYear is therefore the real worst-case oldest selectable year, and it
+// is already defined right here in Go.
 func TestMaxTrendMonths_ReachesOldestSelectableYear(t *testing.T) {
 	// The frontend test pins the first five clocks; time.Now() is added so the
-	// list going stale cannot make the assertion vacuous, and MaxYear is added
+	// list going stale cannot make the assertion vacuous, and MaxDataYear is added
 	// because it is the last year this application models at all — past it,
 	// every year-param endpoint 400s, so nothing wider can ever be asked for.
-	currentYears := []int{2026, 2033, 2034, 2040, 2060, time.Now().Year(), MaxYear}
+	currentYears := []int{2026, 2033, 2034, 2040, 2060, time.Now().Year(), MaxDataYear}
 
 	for _, currentYear := range currentYears {
 		// Worst case: the window ends at the current month, so reaching
 		// January of the oldest offered year takes every month from that
 		// January through December of the current year. The oldest year the
-		// picker can offer is MinYear — handleReportYearFloor clamps there so
-		// it can never offer a year the year-param endpoints reject.
-		minRequired := (currentYear - MinYear + 1) * 12
+		// picker can offer is MinDataYear — /api/reports/years drops anything
+		// below it, so it can never offer a year the year-param endpoints reject.
+		minRequired := (currentYear - MinDataYear + 1) * 12
 		if MaxTrendMonths < minRequired {
 			t.Errorf("MaxTrendMonths=%d is too small for a %d clock: the report year floor "+
-				"bottoms out at MinYear=%d, which needs a %d-month window to reach January — "+
+				"bottoms out at MinDataYear=%d, which needs a %d-month window to reach January — "+
 				"the server would clamp and truncate it",
-				MaxTrendMonths, currentYear, MinYear, minRequired)
+				MaxTrendMonths, currentYear, MinDataYear, minRequired)
 		}
 	}
 }
@@ -1082,7 +1084,7 @@ func TestValidateTransactionRequest_DescriptionTooLong_ReturnsError(t *testing.T
 		Description: strings.Repeat("x", 501),
 		CategoryID:  1,
 	}
-	err := validateTransactionRequest(req)
+	err := validateTransactionRequest(req, noStoredDate)
 	if err == nil {
 		t.Error("expected error for description > 500 chars")
 	}
@@ -1099,7 +1101,7 @@ func TestValidateTransactionRequest_TagsTooLong_ReturnsError(t *testing.T) {
 		CategoryID:  1,
 		Tags:        ptr(strings.Repeat("x", 501)),
 	}
-	err := validateTransactionRequest(req)
+	err := validateTransactionRequest(req, noStoredDate)
 	if err == nil {
 		t.Error("expected error for tags > 500 chars")
 	}
@@ -1113,7 +1115,7 @@ func TestValidateTransactionRequest_NotesTooLong_ReturnsError(t *testing.T) {
 		CategoryID:  1,
 		Notes:       ptr(strings.Repeat("x", 2001)),
 	}
-	err := validateTransactionRequest(req)
+	err := validateTransactionRequest(req, noStoredDate)
 	if err == nil {
 		t.Error("expected error for notes > 2000 chars")
 	}
@@ -1128,7 +1130,7 @@ func TestValidateTransactionRequest_ValidLengths_NoError(t *testing.T) {
 		Tags:        ptr(strings.Repeat("x", 500)),
 		Notes:       ptr(strings.Repeat("x", 2000)),
 	}
-	err := validateTransactionRequest(req)
+	err := validateTransactionRequest(req, noStoredDate)
 	if err != nil {
 		t.Errorf("expected no error for valid lengths, got %v", err)
 	}

@@ -202,8 +202,8 @@ func parseYearQuery(w http.ResponseWriter, r *http.Request) (int64, bool) {
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return 0, false
 	}
-	if year < MinYear || year > MaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 		return 0, false
 	}
 	return year, true
@@ -236,8 +236,8 @@ func parseCategoryBudgetPath(w http.ResponseWriter, r *http.Request) (year, mont
 		writeError(w, http.StatusBadRequest, "invalid year")
 		return 0, 0, 0, false
 	}
-	if year < MinYear || year > MaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", MinYear, MaxYear))
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
 		return 0, 0, 0, false
 	}
 

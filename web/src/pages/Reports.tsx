@@ -27,7 +27,7 @@ export function Reports() {
           real 1984 row: /reports/income-expenses at the 24- and 324-month
           windows the UI actually requests, /reports/budget-vs-actual?year=,
           and the dashboard summary ALL exclude it. The only response that
-          contains it is income-expenses at months=1212, which no control ever
+          contains it is income-expenses at months=2412, which no control ever
           asks for. The row is in the ledger and listed under Transactions —
           it is absent from every report total the user can see.
 

@@ -116,7 +116,7 @@ func TestHandleReportYearFloor_ReturnsOldestLiveYear(t *testing.T) {
 		t.Error("has_transactions: got false, want true")
 	}
 	if floorBool(t, resp, "clamped") {
-		t.Error("clamped: got true, want false — 2019 is above MinYear")
+		t.Error("clamped: got true, want false — 2019 is above PlanningMinYear")
 	}
 }
 
@@ -158,7 +158,7 @@ func TestHandleReportYearFloor_HidesTombstoned(t *testing.T) {
 }
 
 // TestHandleReportYearFloor_ClampsBelowMinYear pins the clamp. Import accepts
-// 1900-2100 but every year-param endpoint validates against MinYear, so an
+// 1900-2100 but every year-param endpoint validates against PlanningMinYear, so an
 // unclamped 1995 floor would let the picker offer a year that 400s on every
 // request the tab then makes.
 func TestHandleReportYearFloor_ClampsBelowMinYear(t *testing.T) {
@@ -172,11 +172,11 @@ func TestHandleReportYearFloor_ClampsBelowMinYear(t *testing.T) {
 
 	resp := getFloor(t, h, user)
 
-	if got := floorYear(t, resp); got != MinYear {
-		t.Errorf("floor_year: got %d, want MinYear (%d) — an unclamped floor offers years the API rejects", got, MinYear)
+	if got := floorYear(t, resp); got != PlanningMinYear {
+		t.Errorf("floor_year: got %d, want PlanningMinYear (%d) — an unclamped floor offers years the API rejects", got, PlanningMinYear)
 	}
 	if !floorBool(t, resp, "clamped") {
-		t.Error("clamped: got false, want true — live rows exist below MinYear")
+		t.Error("clamped: got false, want true — live rows exist below PlanningMinYear")
 	}
 	if !floorBool(t, resp, "has_transactions") {
 		t.Error("has_transactions: got false, want true")
@@ -184,7 +184,7 @@ func TestHandleReportYearFloor_ClampsBelowMinYear(t *testing.T) {
 }
 
 // TestHandleReportYearFloor_ClampBoundaryIsInclusive pins that a row dated
-// exactly in MinYear is NOT reported as clamped — the clamp must be `<`, not
+// exactly in PlanningMinYear is NOT reported as clamped — the clamp must be `<`, not
 // `<=`, or the frontend shows a "data older than 2000 is not reportable"
 // hint to a user whose oldest row is perfectly reportable.
 func TestHandleReportYearFloor_ClampBoundaryIsInclusive(t *testing.T) {
@@ -197,11 +197,11 @@ func TestHandleReportYearFloor_ClampBoundaryIsInclusive(t *testing.T) {
 
 	resp := getFloor(t, h, user)
 
-	if got := floorYear(t, resp); got != MinYear {
-		t.Errorf("floor_year: got %d, want %d", got, MinYear)
+	if got := floorYear(t, resp); got != PlanningMinYear {
+		t.Errorf("floor_year: got %d, want %d", got, PlanningMinYear)
 	}
 	if floorBool(t, resp, "clamped") {
-		t.Error("clamped: got true, want false — a row dated in MinYear itself is reportable")
+		t.Error("clamped: got true, want false — a row dated in PlanningMinYear itself is reportable")
 	}
 }
 
@@ -223,7 +223,7 @@ func TestHandleReportYearFloor_FutureOnlyLedger_HeldAtCurrentYear(t *testing.T) 
 		t.Errorf("floor_year: got %d, want 2026 — the floor must never exceed the current year", got)
 	}
 	if floorBool(t, resp, "clamped") {
-		t.Error("clamped: got true, want false — `clamped` reports rows below MinYear, not future rows")
+		t.Error("clamped: got true, want false — `clamped` reports rows below PlanningMinYear, not future rows")
 	}
 }
 
