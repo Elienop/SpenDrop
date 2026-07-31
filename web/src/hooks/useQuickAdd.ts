@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 import { api } from '@/api/client';
-import type { CreateTransactionResponse, Transaction } from '@/api/types';
+import type { Transaction } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import { enqueue, removeQueued } from '@/lib/offline-queue';
 import { useAuth } from '@/hooks/useAuth';
@@ -11,17 +11,7 @@ import { useAuth } from '@/hooks/useAuth';
  * queue id, until it syncs).
  */
 export type QuickAddOutcome =
-  | {
-      status: 'saved';
-      transaction: Transaction;
-      /**
-       * Present when the server reports that the row it just created is
-       * identical to one that already existed — which is what a Retry after
-       * an ambiguous failure produces. Absent means "not a duplicate", and is
-       * also what an older server (which does not report this yet) yields.
-       */
-      duplicateOfId?: number;
-    }
+  | { status: 'saved'; transaction: Transaction }
   | { status: 'queued'; queuedId: number };
 
 export interface UseQuickAddResult {
@@ -57,9 +47,10 @@ export interface UseQuickAddResult {
  * `POST /api/transactions` DOES compute a content hash and DOES detect that a
  * new manual entry is identical to an existing row — but it deliberately does
  * not refuse it, because real households enter genuine duplicates (see
- * `contentHashForManualEntry`). So the server cannot be relied on to swallow a
- * double-post; what it can do is SAY that it made one, which is what
- * `duplicateOfId` carries back to the screen.
+ * `contentHashForManualEntry`). It also does not REPORT the collision: the
+ * digest carries no user and no time, so "identical to an existing row" and
+ * "you submitted this twice" are different questions. Dup-safety therefore
+ * lives entirely in the enqueue gate above.
  */
 export function useQuickAdd(): UseQuickAddResult {
   const { user } = useAuth();
@@ -81,15 +72,8 @@ export function useQuickAdd(): UseQuickAddResult {
           const queuedId = await enqueue(userId, input);
           return { status: 'queued', queuedId };
         }
-        const created = await api.post<CreateTransactionResponse>(
-          'transactions',
-          input,
-        );
-        // The one line that wires the server's duplicate report to the UI.
-        const duplicateOfId = created.duplicate_of;
-        return duplicateOfId === undefined
-          ? { status: 'saved', transaction: created }
-          : { status: 'saved', transaction: created, duplicateOfId };
+        const transaction = await api.post<Transaction>('transactions', input);
+        return { status: 'saved', transaction };
       } finally {
         setSaving(false);
       }

@@ -106,22 +106,6 @@ type transactionResponse struct {
 	UpdatedAt        string   `json:"updated_at"`
 	CategoryName     string   `json:"category_name,omitempty"`
 	CategoryType     string   `json:"category_type,omitempty"`
-	// DuplicateOf is set ONLY on a create response, and only when the server
-	// recognised the new row as identical to one that already exists — same
-	// date, amount, description and category. It carries that pre-existing
-	// row's id so the client can say "you already have this one" and offer to
-	// undo, instead of showing a 201 indistinguishable from a brand-new entry.
-	//
-	// This is the wire half of the retry-duplicate problem: the owner types
-	// entries by hand on a phone, a save stalls, he taps Retry, and the expense
-	// lands twice. The server already detected it and said nothing.
-	//
-	// Absent (nil, omitted) means "first of its kind". It is never populated on
-	// list/read responses — those rows have no create-time verdict attached.
-	//
-	// Creating the duplicate still succeeds: two identical coffees on one day
-	// are legitimate, and this field informs rather than blocks.
-	DuplicateOf *int64 `json:"duplicate_of,omitempty"`
 }
 
 // transactionListResponse wraps a paginated list of transactions.
@@ -162,15 +146,6 @@ func toTransactionResponse(t database.Transaction) transactionResponse {
 	}
 	if t.Notes.Valid {
 		resp.Notes = t.Notes.String
-	}
-	return resp
-}
-
-// withDuplicateOf attaches the create-time duplicate verdict to a response.
-// id == 0 means "first of its kind" and leaves the field absent from the JSON.
-func withDuplicateOf(resp transactionResponse, id int64) transactionResponse {
-	if id != 0 {
-		resp.DuplicateOf = &id
 	}
 	return resp
 }
@@ -406,10 +381,8 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 
 	amountCents := dollarsToCents(amount)
 	// Manual entries used to store NULL here, so import dedupe could not see
-	// them and re-imported them as duplicates. identity also carries the id of
-	// any pre-existing row with the same content, which the 201 reports as
-	// duplicate_of.
-	identity := h.contentHashForManualEntry(
+	// them and re-imported them as duplicates.
+	contentHash := h.contentHashForManualEntry(
 		r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID)
 	params := database.CreateTransactionParams{
 		UserID:              user.ID,
@@ -421,7 +394,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		CategoryID:          req.CategoryID,
 		Tags:                nullStringFromPtr(req.Tags),
 		Notes:               nullStringFromPtr(req.Notes),
-		ContentHash:         identity.Hash,
+		ContentHash:         contentHash,
 	}
 	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
 	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
@@ -439,11 +412,6 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	if err != nil && database.IsContentHashUniqueViolation(err) {
 		params.ContentHash = sql.NullString{}
 		txn, err = h.txnStore.Create(r.Context(), user.ID, params)
-		// Losing the race is still a duplicate the user must be told about,
-		// but the probe above saw nothing, so the winner's id has to be
-		// re-read. Best-effort: a failed lookup omits duplicate_of rather
-		// than failing an already-successful create.
-		identity.DuplicateOfID = anchorIDForDigest(r.Context(), h.queries, identity.Digest)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
@@ -469,8 +437,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// dashboard totals, the reports aggregates, and the budget cells.
 	h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 
-	writeJSON(w, http.StatusCreated,
-		withDuplicateOf(toTransactionResponse(txn), identity.DuplicateOfID))
+	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
 }
 
 // handleUpdateTransaction updates an existing transaction by ID.
@@ -770,7 +737,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		// through the outer handle while this transaction holds the single
 		// connection DEADLOCKS — swapping qtx for h.queries hangs the request
 		// until the client gives up.
-		identity := h.contentHashForManualEntry(
+		contentHash := h.contentHashForManualEntry(
 			r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
 		)
 
@@ -784,7 +751,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			CategoryID:          req.CategoryID,
 			Tags:                nullStringFromPtr(req.Tags),
 			Notes:               nullStringFromPtr(req.Notes),
-			ContentHash:         identity.Hash,
+			ContentHash:         contentHash,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -793,13 +760,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 
 		minBatchDate = earliestDate(minBatchDate, txn.Date)
 		cellSet[cellForDate(txn.CategoryID, txn.Date)] = struct{}{}
-		// Per-item duplicate verdict, same contract as single-create: the item
-		// is created either way, and duplicate_of names the row it copies.
-		// There is no UNIQUE-violation recovery to mirror here — the probe runs
-		// on qtx, so it sees every earlier item in this same transaction, and
-		// SetMaxOpenConns(1) means no other writer can claim an identity while
-		// the batch holds the connection.
-		results = append(results, withDuplicateOf(toTransactionResponse(txn), identity.DuplicateOfID))
+		results = append(results, toTransactionResponse(txn))
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2403,25 +2364,8 @@ func validateMoneyAmount(d float64, field string) error {
 	return nil
 }
 
-// manualEntryIdentity is the dedupe verdict for one hand-entered row.
-type manualEntryIdentity struct {
-	// Hash is what to store in transactions.content_hash: the digest when this
-	// row anchors the identity, NULL when an earlier live row already holds it
-	// (earliest-id-wins) or when the digest could not be computed.
-	Hash sql.NullString
-	// Digest is the computed digest regardless of who anchors it, or "" when it
-	// could not be computed. handleCreateTransaction needs it to re-find the
-	// winner after LOSING the insert race, where the advisory probe below saw
-	// nothing and the anchor's id is only knowable from a second read.
-	Digest string
-	// DuplicateOfID is the id of the live row that already holds Digest, or 0
-	// when this row is the first of its kind. It is what the 201 reports as
-	// duplicate_of so the client can tell the user "you already have this one".
-	DuplicateOfID int64
-}
-
 // contentHashForManualEntry computes the dedupe identity for a hand-entered
-// transaction, and reports which existing row already holds that identity.
+// transaction, or returns NULL when that identity is already taken.
 //
 // This probe is advisory, NOT a guarantee: it runs on a pooled connection that
 // is released before the caller's INSERT opens its own transaction, so a
@@ -2443,53 +2387,31 @@ type manualEntryIdentity struct {
 // deliberately accepted: a later import of that content dedupes against the
 // canonical row only.
 //
-// Recognising the duplicate is not the same as hiding it: the row is still
-// created, and the caller reports DuplicateOfID on the wire so the user can
-// decide whether the second copy was a mistake. See duplicate_of on
-// transactionResponse.
-func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Queries, date time.Time, amountCents int64, description string, categoryID int64) manualEntryIdentity {
+// The probe deliberately does NOT report which row holds the identity. It was
+// briefly wired to the wire as duplicate_of, and that was wrong: the digest has
+// no user_id and no time-of-day, and the anchor is whoever inserted first
+// household-wide, so a second member's genuinely separate same-day entry was
+// reported to them as "you already had this one". Scoping the lookup to the
+// actor does not repair it — when one member's row anchors the digest, the
+// other member's real double-post also resolves to that row, so a same-user
+// filter reports nothing and misses the case the feature existed for. Telling a
+// user they submitted something twice needs a client-supplied idempotency key,
+// not a content hash. Do not re-derive a verdict from this function.
+func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Queries, date time.Time, amountCents int64, description string, categoryID int64) sql.NullString {
 	cat, err := q.GetCategoryByID(ctx, categoryID)
 	if err != nil {
 		// Category already validated upstream; if it vanished underneath us,
 		// fall back to the previous behaviour rather than failing the write.
-		return manualEntryIdentity{}
+		return sql.NullString{}
 	}
-	digest := database.ComputeContentHash(date, amountCents, description, cat.Name)
-	existing, err := q.GetTransactionByContentHash(ctx, sql.NullString{String: digest, Valid: true})
-	if err == nil {
+	hash := database.ComputeContentHash(date, amountCents, description, cat.Name)
+	if _, err := q.GetTransactionByContentHash(ctx, sql.NullString{String: hash, Valid: true}); err == nil {
 		// Identity already anchored by an earlier row.
-		return manualEntryIdentity{Digest: digest, DuplicateOfID: existing.ID}
+		return sql.NullString{}
 	} else if !errors.Is(err, sql.ErrNoRows) {
-		// Unknown state: store NULL, the conservative choice, and claim no
-		// duplicate — asserting one we cannot see would be worse than silence.
-		return manualEntryIdentity{Digest: digest}
+		return sql.NullString{}
 	}
-	return manualEntryIdentity{
-		Hash:   sql.NullString{String: digest, Valid: true},
-		Digest: digest,
-	}
-}
-
-// anchorIDForDigest returns the id of the live row already holding `digest`, or
-// 0 when the identity is unclaimed or unreadable.
-//
-// Used by the UNIQUE-violation recovery in handleCreateTransaction: there the
-// advisory probe found the identity free, a concurrent create claimed it first,
-// and the losing row is stored with a NULL hash. Its duplicate_of can only come
-// from re-reading who won.
-//
-// A tombstoned holder deliberately does not count. GetTransactionByContentHash
-// filters deleted_at IS NULL, and from the user's perspective a trashed row
-// does not exist — telling them they "already have" it would be wrong.
-func anchorIDForDigest(ctx context.Context, q *database.Queries, digest string) int64 {
-	if digest == "" {
-		return 0
-	}
-	existing, err := q.GetTransactionByContentHash(ctx, sql.NullString{String: digest, Valid: true})
-	if err != nil {
-		return 0
-	}
-	return existing.ID
+	return sql.NullString{String: hash, Valid: true}
 }
 
 // nullStringFromPtr converts an optional wire field to its stored form on a

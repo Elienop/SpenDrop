@@ -692,12 +692,13 @@ describe('QuickAdd — offline capture', () => {
   });
 });
 
-describe('QuickAdd — the server already had this one', () => {
-  // The Retry action on a failed save re-POSTs a write that may well have
-  // landed. The create endpoint detects that the row it just made is identical
-  // to an existing one, so the screen can say so instead of leaving the owner
-  // with a silent duplicate and no idea which copy to delete.
-  test('says so and offers the same Undo when the create reports a duplicate', async () => {
+describe('QuickAdd — an identical entry is saved without comment', () => {
+  test('ignores a duplicate verdict if a server ever sends one', async () => {
+    // The content hash cannot distinguish a household member's identical
+    // same-day entry from a retry double, so no verdict from it may reach the
+    // toast. If a field like this reappears on the wire, the client must not
+    // read it — the sentence it produced accused the wrong person and put a
+    // one-tap delete next to the accusation.
     apiPost.mockResolvedValueOnce({
       ...savedTransaction({ id: 123 }),
       duplicate_of: 77,
@@ -716,12 +717,15 @@ describe('QuickAdd — the server already had this one', () => {
     await user.click(screen.getByRole('button', { name: /^add$/i }));
 
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
-    expect(toastSuccess.mock.calls[0][0]).toMatch(/already/i);
+    expect(toastSuccess.mock.calls[0][0]).toBe('Transaction saved');
+    expect(toastSuccess.mock.calls[0][0]).not.toMatch(
+      /already|duplicate|copy/i,
+    );
+    // The Undo affordance is unchanged and still targets the new row.
     const [, opts] = toastSuccess.mock.calls[0] as [
       string,
       { action?: { label: string; onClick: () => void } },
     ];
-    // The existing affordance, unchanged: one tap removes the copy just made.
     expect(opts.action?.label).toMatch(/undo/i);
     opts.action?.onClick();
     await waitFor(() =>

@@ -27,26 +27,6 @@ export interface Transaction {
 }
 
 /**
- * The 201 body of `POST /api/transactions`.
- *
- * The create handler already computes a content hash for every manual entry
- * and looks for an existing row with the same identity
- * (`contentHashForManualEntry`). A collision is deliberately not an error —
- * real households do enter two identical coffees on the same day — so the row
- * is still created, and `duplicate_of` is how the server reports that it is
- * a copy of an existing one.
- *
- * Optional because the field is landing in a parallel backend change. Until
- * it does, the value is simply absent and the client behaves exactly as
- * before. If the backend settles on a different field name, this declaration
- * and the single read of it in `useQuickAdd` are the only things to change.
- */
-export interface CreateTransactionResponse extends Transaction {
-  /** Id of the pre-existing row this one duplicates, when it duplicates one. */
-  duplicate_of?: number;
-}
-
-/**
  * A soft-deleted (tombstoned) transaction, as returned by the admin-only
  * Trash view endpoints (`GET /api/transactions/deleted`,
  * `POST /api/transactions/restore-batch`, etc.).

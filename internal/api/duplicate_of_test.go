@@ -1,8 +1,31 @@
 package api
 
+// This file is named for a wire field that no longer exists, deliberately:
+// anyone grepping `duplicate_of` should land on the reason it is gone.
+//
+// A create response briefly carried `duplicate_of`, the id of a pre-existing
+// row with the same content hash, so the client could say "you already have
+// this one". It was wrong for this household. ComputeContentHash covers
+// (date, amountCents, description, categoryName) — no user_id and no
+// time-of-day — and the FIRST row to claim a digest anchors it household-wide.
+// Two people share this ledger and both type by hand, so one member's ordinary
+// lunch was reported to them as a duplicate of the other member's lunch.
+//
+// Scoping the lookup to the acting user does not repair it: when one member's
+// row anchors the digest, the other member's genuine retry-double also resolves
+// to that row, so a same-user filter goes silent exactly when the real bug
+// fires. Answering "did I just submit this twice" needs a client-minted
+// idempotency key, not a content hash.
+//
+// The tests below therefore guard an ABSENCE — no create path may emit a
+// duplicate verdict — plus the identity behaviour that survives and that import
+// dedupe still rests on: each distinct row anchors its own content_hash, and a
+// repeat stores NULL (earliest-id-wins).
+
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,7 +54,7 @@ func createTxnOn(t *testing.T, h *Handler, user database.User, catID int64, date
 
 // decodeObject decodes a 201 body into an untyped map. A typed struct would
 // zero-fill a field the handler never emitted, so it cannot tell "absent" from
-// "present and zero" — the exact distinction duplicate_of is built on.
+// "present and zero" — the exact distinction these tests turn on.
 func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var m map[string]any
@@ -39,20 +62,6 @@ func decodeObject(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("decode body %s: %v", rec.Body.String(), err)
 	}
 	return m
-}
-
-// duplicateOf reads the duplicate_of field, reporting whether it was present.
-func duplicateOf(t *testing.T, m map[string]any) (int64, bool) {
-	t.Helper()
-	raw, ok := m["duplicate_of"]
-	if !ok {
-		return 0, false
-	}
-	n, isNum := raw.(float64)
-	if !isNum {
-		t.Fatalf("duplicate_of = %#v, want a JSON number", raw)
-	}
-	return int64(n), true
 }
 
 func idOf(t *testing.T, m map[string]any) int64 {
@@ -64,19 +73,81 @@ func idOf(t *testing.T, m map[string]any) int64 {
 	return int64(n)
 }
 
-// TestHandleCreateTransaction_DuplicateResponseIdentifiesTheOriginal is the
-// regression test for the silent-double-entry bug.
+// assertNoDuplicateVerdict fails if a create response carries a duplicate
+// verdict. Decoding into a map rather than a typed struct is load-bearing: a
+// typed decode zero-fills a field the handler never emitted and cannot tell
+// "absent" from "present and zero".
+func assertNoDuplicateVerdict(t *testing.T, m map[string]any) {
+	t.Helper()
+	if v, ok := m["duplicate_of"]; ok {
+		t.Errorf("create response carries duplicate_of = %#v; the content hash "+
+			"has no user_id and no time-of-day, so it cannot tell one member's "+
+			"identical entry from the other member's retry double", v)
+	}
+}
+
+// TestHandleCreateTransaction_OtherMembersIdenticalEntryIsNotFlagged is the
+// owner's actual case and the one that must never regress.
 //
-// The owner types every transaction by hand on a phone. When the network stalls
-// mid-save he taps Retry, and the same expense lands twice. The server already
-// recognises the second one — contentHashForManualEntry finds the identity
-// taken and stores NULL rather than colliding — but the 201 it returns is
-// byte-identical to the 201 for a genuinely new row, so no client can tell the
-// user "you already have this one" or offer to undo it.
+// Two people share this ledger and both type by hand. Maya buys lunch, Elie
+// buys the same lunch on the same day for the same price. The digest carries no
+// user, so Maya's row anchors it and Elie's create used to come back saying he
+// already had this one — next to a one-tap Undo that would soft-delete a real
+// expense into a Trash non-admins cannot open.
 //
-// Creating the duplicate must still SUCCEED: two identical coffees on one day
-// are real. This is about telling the user, not blocking them.
-func TestHandleCreateTransaction_DuplicateResponseIdentifiesTheOriginal(t *testing.T) {
+// Non-vacuity: the content_hash assertions at the end are what make this a real
+// negative. They prove an anchor genuinely existed and was genuinely found, so
+// a stray verdict would have had something concrete to report. A test that
+// created one row and checked no verdict appeared would pass against any
+// implementation, including one that never probes at all.
+func TestHandleCreateTransaction_OtherMembersIdenticalEntryIsNotFlagged(t *testing.T) {
+	h := setupHandler(t)
+	maya := seedTestUser(t, h.queries, "maya", "member")
+	elie := seedTestUser(t, h.queries, "elie", "member")
+	catID := seedExpenseCategory(t, h.queries, "Food")
+
+	mayaRec := createTxnOn(t, h, maya, catID, "2026-07-01", "Lunch", 12.50)
+	if mayaRec.Code != http.StatusCreated {
+		t.Fatalf("maya's create: status = %d, body = %s", mayaRec.Code, mayaRec.Body.String())
+	}
+	mayaBody := decodeObject(t, mayaRec)
+	assertNoDuplicateVerdict(t, mayaBody)
+
+	elieRec := createTxnOn(t, h, elie, catID, "2026-07-01", "Lunch", 12.50)
+	if elieRec.Code != http.StatusCreated {
+		t.Fatalf("elie's identical create was rejected: status = %d, body = %s",
+			elieRec.Code, elieRec.Body.String())
+	}
+	elieBody := decodeObject(t, elieRec)
+	assertNoDuplicateVerdict(t, elieBody)
+
+	counts, err := h.queries.CountAllTransactions(t.Context())
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if counts.Live != 2 {
+		t.Fatalf("live rows = %d, want 2 — both members' lunches are real expenses", counts.Live)
+	}
+
+	// The anchor genuinely exists: Maya's row holds the digest and Elie's row
+	// stores NULL (earliest-id-wins). So the probe DID find a pre-existing row
+	// with the same content — and still said nothing on the wire.
+	if hash := hashOf(t, h, idOf(t, mayaBody)); !hash.Valid {
+		t.Error("maya's row should anchor the identity, but its content_hash is NULL — " +
+			"without a live anchor this test could not have detected a stray verdict")
+	}
+	if hash := hashOf(t, h, idOf(t, elieBody)); hash.Valid {
+		t.Errorf("elie's row should carry a NULL content_hash (earliest-id-wins), got %q",
+			hash.String)
+	}
+}
+
+// TestHandleCreateTransaction_IdenticalEntryCarriesNoVerdict is the same-user
+// half. Even when one person enters the same thing twice, the server does not
+// second-guess them: splitting a bill into two equal rows and buying two
+// identical coffees are both ordinary, and the hash cannot tell either from a
+// retry-induced double.
+func TestHandleCreateTransaction_IdenticalEntryCarriesNoVerdict(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "owner", "member")
 	catID := seedExpenseCategory(t, h.queries, "Coffee")
@@ -86,50 +157,54 @@ func TestHandleCreateTransaction_DuplicateResponseIdentifiesTheOriginal(t *testi
 		t.Fatalf("first create: status = %d, body = %s", first.Code, first.Body.String())
 	}
 	firstBody := decodeObject(t, first)
-	if _, present := duplicateOf(t, firstBody); present {
-		t.Error("the first row of its kind reported duplicate_of; nothing preceded it")
-	}
+	assertNoDuplicateVerdict(t, firstBody)
 
 	second := createTxnOn(t, h, user, catID, "2026-07-01", "Flat white", 4.50)
 	if second.Code != http.StatusCreated {
-		t.Fatalf("the duplicate was rejected: status = %d, body = %s",
+		t.Fatalf("the second identical create was rejected: status = %d, body = %s",
 			second.Code, second.Body.String())
 	}
 	secondBody := decodeObject(t, second)
+	assertNoDuplicateVerdict(t, secondBody)
 
-	got, present := duplicateOf(t, secondBody)
-	if !present {
-		t.Fatal("the second identical create reported no duplicate_of — the client " +
-			"cannot tell a retry-induced double from a new expense")
-	}
-	if want := idOf(t, firstBody); got != want {
-		t.Errorf("duplicate_of = %d, want %d (the pre-existing row)", got, want)
-	}
-	if selfID := idOf(t, secondBody); got == selfID {
-		t.Errorf("duplicate_of points at the new row (%d), not the original", selfID)
-	}
-
-	// The deliberate allow-duplicates behaviour is unchanged: both rows live.
 	counts, err := h.queries.CountAllTransactions(t.Context())
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if counts.Live != 2 {
-		t.Fatalf("live rows = %d, want 2 — reporting the duplicate must not block it", counts.Live)
+		t.Fatalf("live rows = %d, want 2 — identical entries are still permitted", counts.Live)
+	}
+
+	// Same non-vacuity guard as the two-member case: the identity really was
+	// taken by the time the second create ran.
+	if hash := hashOf(t, h, idOf(t, firstBody)); !hash.Valid {
+		t.Error("the first row should anchor the identity, but its content_hash is NULL")
+	}
+	if hash := hashOf(t, h, idOf(t, secondBody)); hash.Valid {
+		t.Errorf("the repeat should carry a NULL content_hash, got %q", hash.String)
 	}
 }
 
-// TestHandleCreateTransaction_DistinctRowsNeverReportDuplicateOf is the
-// negative half. An "always emit duplicate_of" implementation would pass the
-// positive test above and make the client shout "you already have this one" at
-// every single entry.
-func TestHandleCreateTransaction_DistinctRowsNeverReportDuplicateOf(t *testing.T) {
+// TestHandleCreateTransaction_DistinctRowsStillStoreTheirOwnHash keeps the
+// coverage that varying any single hash input yields a DISTINCT identity, which
+// is what import dedupe rests on.
+//
+// This replaces the old "distinct rows report no duplicate_of" negative: once
+// no verdict is ever emitted, that assertion is vacuous against every possible
+// implementation. Asserting that each distinct row anchors its own hash is the
+// invariant that still has teeth.
+func TestHandleCreateTransaction_DistinctRowsStillStoreTheirOwnHash(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "owner", "member")
 	catID := seedExpenseCategory(t, h.queries, "Coffee")
 
-	if rec := createTxnOn(t, h, user, catID, "2026-07-01", "Flat white", 4.50); rec.Code != http.StatusCreated {
-		t.Fatalf("seed create: status = %d, body = %s", rec.Code, rec.Body.String())
+	seedRec := createTxnOn(t, h, user, catID, "2026-07-01", "Flat white", 4.50)
+	if seedRec.Code != http.StatusCreated {
+		t.Fatalf("seed create: status = %d, body = %s", seedRec.Code, seedRec.Body.String())
+	}
+	seedHash := hashOf(t, h, idOf(t, decodeObject(t, seedRec)))
+	if !seedHash.Valid {
+		t.Fatal("the seed row stored a NULL content_hash — import dedupe cannot see it")
 	}
 
 	// Each of these differs from the seed in exactly one hash input.
@@ -149,18 +224,27 @@ func TestHandleCreateTransaction_DistinctRowsNeverReportDuplicateOf(t *testing.T
 			if rec.Code != http.StatusCreated {
 				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
 			}
-			if id, present := duplicateOf(t, decodeObject(t, rec)); present {
-				t.Errorf("a genuinely new row reported duplicate_of = %d", id)
+			body := decodeObject(t, rec)
+			assertNoDuplicateVerdict(t, body)
+
+			hash := hashOf(t, h, idOf(t, body))
+			if !hash.Valid {
+				t.Fatal("a genuinely new row stored a NULL content_hash — " +
+					"a later import of this content would duplicate it")
+			}
+			if hash.String == seedHash.String {
+				t.Errorf("content_hash matches the seed row's; %s must produce a "+
+					"distinct identity", tc.name)
 			}
 		})
 	}
 }
 
-// TestHandleBatchCreateTransactions_ReportsDuplicateOfForIdenticalItems covers
-// the other create path. Batch-create runs the same identity probe against its
-// own transaction, so the second of two identical items in one request is
-// already recognised as a duplicate — the wire must say so there too.
-func TestHandleBatchCreateTransactions_ReportsDuplicateOfForIdenticalItems(t *testing.T) {
+// TestHandleBatchCreateTransactions_CarriesNoVerdict covers the other create
+// path. Batch-create runs the same identity probe against its own transaction,
+// so the second of two identical items is recognised there too — and must stay
+// just as silent about it.
+func TestHandleBatchCreateTransactions_CarriesNoVerdict(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "member", "member")
 
@@ -184,102 +268,30 @@ func TestHandleBatchCreateTransactions_ReportsDuplicateOfForIdenticalItems(t *te
 	if len(items) != 3 {
 		t.Fatalf("got %d results, want 3", len(items))
 	}
+	for i, item := range items {
+		t.Run(fmt.Sprintf("item %d", i), func(t *testing.T) {
+			assertNoDuplicateVerdict(t, item)
+		})
+	}
 
-	if _, present := duplicateOf(t, items[0]); present {
-		t.Error("the anchoring item reported duplicate_of")
-	}
-	got, present := duplicateOf(t, items[1])
-	if !present {
-		t.Fatal("the second identical item reported no duplicate_of")
-	}
-	if want := idOf(t, items[0]); got != want {
-		t.Errorf("duplicate_of = %d, want %d (the item that anchored the identity)", got, want)
-	}
-	if _, present := duplicateOf(t, items[2]); present {
-		t.Error("a distinct item in the same batch reported duplicate_of")
-	}
-}
-
-// seedRowWithDigest inserts a row holding `digest` directly, bypassing the
-// handlers, so anchorIDForDigest can be exercised without racing anything.
-func seedRowWithDigest(t *testing.T, h *Handler, userID, catID int64, desc, digest string, tombstoned bool) int64 {
-	t.Helper()
-	deletedAt := "NULL"
-	if tombstoned {
-		deletedAt = "CURRENT_TIMESTAMP"
-	}
-	res, err := h.db.Exec(
-		`INSERT INTO transactions (user_id, date, amount_cents, description, category_id, content_hash, deleted_at)
-		 VALUES (?, '2026-07-01', 450, ?, ?, ?, `+deletedAt+`)`,
-		userID, desc, catID, digest)
+	counts, err := h.queries.CountAllTransactions(t.Context())
 	if err != nil {
-		t.Fatalf("seed row: %v", err)
+		t.Fatalf("count: %v", err)
 	}
-	id, err := res.LastInsertId()
-	if err != nil {
-		t.Fatalf("last insert id: %v", err)
+	if counts.Live != 3 {
+		t.Fatalf("live rows = %d, want 3", counts.Live)
 	}
-	return id
-}
 
-// TestAnchorIDForDigest covers the lookup handleCreateTransaction falls back to
-// when it LOSES the insert race: the advisory probe said the identity was free,
-// a concurrent create claimed it first, and the UNIQUE violation is recovered
-// by dropping the hash. At that point the winner's id is the only thing that
-// can populate duplicate_of, and it has to be re-read.
-//
-// The race itself is not deterministic, so the lookup is tested directly here
-// and its wiring is covered by the concurrency test in manual_content_hash_test.go.
-func TestAnchorIDForDigest(t *testing.T) {
-	t.Run("returns the id of the live row holding the digest", func(t *testing.T) {
-		h := setupHandler(t)
-		user := seedTestUser(t, h.queries, "owner", "member")
-		catID := seedExpenseCategory(t, h.queries, "Coffee")
-		want := seedRowWithDigest(t, h, user.ID, catID, "Flat white", "digest-a", false)
-
-		if got := anchorIDForDigest(t.Context(), h.queries, "digest-a"); got != want {
-			t.Errorf("anchorIDForDigest = %d, want %d", got, want)
-		}
-	})
-
-	t.Run("returns 0 when the digest is unclaimed", func(t *testing.T) {
-		h := setupHandler(t)
-		user := seedTestUser(t, h.queries, "owner", "member")
-		catID := seedExpenseCategory(t, h.queries, "Coffee")
-		seedRowWithDigest(t, h, user.ID, catID, "Flat white", "digest-a", false)
-
-		if got := anchorIDForDigest(t.Context(), h.queries, "digest-b"); got != 0 {
-			t.Errorf("anchorIDForDigest = %d, want 0", got)
-		}
-	})
-
-	t.Run("ignores a tombstoned holder", func(t *testing.T) {
-		h := setupHandler(t)
-		user := seedTestUser(t, h.queries, "owner", "member")
-		catID := seedExpenseCategory(t, h.queries, "Coffee")
-		seedRowWithDigest(t, h, user.ID, catID, "Flat white", "digest-a", true)
-
-		// A trashed row does not exist from the user's perspective, and
-		// GetTransactionByContentHash skips it, so re-adding its content is not
-		// a duplicate of anything the user can see.
-		if got := anchorIDForDigest(t.Context(), h.queries, "digest-a"); got != 0 {
-			t.Errorf("anchorIDForDigest = %d, want 0 — a tombstoned row was reported "+
-				"as the duplicate the user already has", got)
-		}
-	})
-
-	// The partial UNIQUE index is `WHERE content_hash IS NOT NULL`, so an empty
-	// string is a legal stored value even though nothing should ever write one.
-	// Without the empty-digest guard, any row that reached that state would be
-	// reported as the duplicate of every create whose digest failed to compute.
-	t.Run("an empty digest matches nothing", func(t *testing.T) {
-		h := setupHandler(t)
-		user := seedTestUser(t, h.queries, "owner", "member")
-		catID := seedExpenseCategory(t, h.queries, "Coffee")
-		seedRowWithDigest(t, h, user.ID, catID, "Flat white", "", false)
-
-		if got := anchorIDForDigest(t.Context(), h.queries, ""); got != 0 {
-			t.Errorf("anchorIDForDigest = %d, want 0", got)
-		}
-	})
+	// Non-vacuity, same as the single-create tests: the probe really did see
+	// the identity taken by the time item 1 was inserted.
+	if hash := hashOf(t, h, idOf(t, items[0])); !hash.Valid {
+		t.Error("item 0 should anchor the identity, but its content_hash is NULL")
+	}
+	if hash := hashOf(t, h, idOf(t, items[1])); hash.Valid {
+		t.Errorf("item 1 repeats item 0 and should carry a NULL content_hash, got %q",
+			hash.String)
+	}
+	if hash := hashOf(t, h, idOf(t, items[2])); !hash.Valid {
+		t.Error("item 2 is distinct and should anchor its own content_hash")
+	}
 }

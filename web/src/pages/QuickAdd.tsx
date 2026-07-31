@@ -327,18 +327,10 @@ export function QuickAdd() {
     // each undo their own entry — the server row, or the queued row by its
     // queue id if it has not synced yet.
     const undoThis = outcome;
-    // A Retry after an ambiguous failure can re-send a write that already
-    // landed. The server tells us when the row it just created duplicates an
-    // existing one, so say that plainly and let the SAME Undo remove the copy
-    // — rather than leaving two identical rows and no hint which is which.
-    const isDuplicate =
-      undoThis.status === 'saved' && undoThis.duplicateOfId !== undefined;
     toast.success(
       undoThis.status === 'queued'
         ? 'Saved offline — will sync when you’re back online'
-        : isDuplicate
-          ? 'You already had this one — added a second copy'
-          : 'Transaction saved',
+        : 'Transaction saved',
       {
         duration: 4000,
         action: {
