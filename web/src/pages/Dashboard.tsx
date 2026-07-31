@@ -47,7 +47,9 @@ import {
   MONTH_NAMES_FULL,
   formatMonthTick,
   formatMonthLabel,
+  yearOptionsFrom,
 } from '@/lib/dates';
+import { useReportYears } from '@/hooks/useReportYears';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import {
   DASHBOARD_RECENT_TX_LIMIT,
@@ -172,8 +174,22 @@ export function Dashboard() {
     return () => { cancelled = true; };
   }, [selectedYear, selectedMonth, showLatest]);
 
-  const currentYear = now.getFullYear();
-  const yearOptions = Array.from({ length: 5 }, (_, i) => currentYear - i);
+  // Exactly the years the ledger holds — the same source as the Reports
+  // pickers, so the two cannot disagree about which years exist.
+  //
+  // This replaced a rolling five-year window (`currentYear - i`), which was
+  // not merely cosmetic here: `/api/dashboard/summary` is where an old row
+  // first surfaces as a NUMBER, so a household that imported a 1984 statement
+  // could see the total and never select the year that produced it. The trend
+  // request is hardcoded `months=12`, so a wider picker costs nothing on the
+  // wire.
+  //
+  // `selectedYear` is unioned in because it is PERSISTED in localStorage and
+  // can therefore be stale before the first render — restored from a backup,
+  // or simply the year whose last row was just deleted. A Select holding a
+  // value with no matching item renders a blank trigger, silently.
+  const { years: ledgerYears } = useReportYears();
+  const yearOptions = yearOptionsFrom(ledgerYears, selectedYear);
 
   /* ── Derived ── */
 
@@ -347,7 +363,7 @@ export function Dashboard() {
             <SelectContent>
               <SelectGroup>
                 {yearOptions.map((y) => (
-                  <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+                  <SelectItem key={y.value} value={y.value}>{y.label}</SelectItem>
                 ))}
               </SelectGroup>
             </SelectContent>

@@ -102,7 +102,7 @@ import {
 } from '@/components/ui/alert-dialog';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
+import { PLANNING_MIN_YEAR, PLANNING_MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
 import { ROLE_ADMIN, ROLE_MEMBER, isAdmin, type Role } from '@/lib/roles';
 import { destructiveActionClass } from '@/lib/styles';
 
@@ -1910,8 +1910,8 @@ function DataSection() {
                 value={year}
                 onChange={(e) => setYear(Number(e.target.value))}
                 onFocus={selectAllOnFocus}
-                min={MIN_YEAR}
-                max={MAX_YEAR}
+                min={PLANNING_MIN_YEAR}
+                max={PLANNING_MAX_YEAR}
                 className="w-28"
               />
             </div>

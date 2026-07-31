@@ -48,7 +48,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
-import { MIN_YEAR, MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
+import { PLANNING_MIN_YEAR, PLANNING_MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { isAdmin } from '@/lib/roles';
@@ -167,7 +167,7 @@ function DiscardEditsDialog({
 // How far ahead of the current year the budget picker lets users plan.
 // Keep small enough that the dropdown stays scannable but large enough
 // to cover realistic forward budgeting (mortgage amortization, yearly
-// goal tracking). Lower bound is `MIN_YEAR` so historical xlsx imports
+// goal tracking). Lower bound is `PLANNING_MIN_YEAR` so historical xlsx imports
 // that predate the current year still have a landing spot.
 const BUDGET_YEARS_AHEAD = 5;
 
@@ -222,13 +222,13 @@ function MonthlyBudgetsSection({
   // it doesn't trigger a re-render.
   const baselineRef = useRef<Record<number, string>>({});
 
-  // `currentYear + N … MIN_YEAR`, descending. Memoized not for perf
+  // `currentYear + N … PLANNING_MIN_YEAR`, descending. Memoized not for perf
   // (32 items) but to keep `new Date()` out of render — two renders
   // crossing a New Year midnight would otherwise produce different
   // option arrays and reset Radix's Select focus state.
   const yearSelectOptions = useMemo(() => {
     const opts: number[] = [];
-    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= MIN_YEAR; y--) {
+    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= PLANNING_MIN_YEAR; y--) {
       opts.push(y);
     }
     return opts;
@@ -283,7 +283,7 @@ function MonthlyBudgetsSection({
 
   async function handleCopyFromPrev() {
     const prev = year - 1;
-    if (prev < MIN_YEAR) return;
+    if (prev < PLANNING_MIN_YEAR) return;
     try {
       const data = await api.get<Budget[]>(`budgets?year=${prev}`);
       if (data.length === 0) {
@@ -455,7 +455,7 @@ function MonthlyBudgetsSection({
     // here, but `Number('')` is 0 and `Number('custom')` is NaN — either
     // would slip past the `next === year` guard and yield a garbage
     // `setYear` call. Reject anything that isn't a valid in-range year.
-    if (!Number.isInteger(next) || next < MIN_YEAR || next > MAX_YEAR) {
+    if (!Number.isInteger(next) || next < PLANNING_MIN_YEAR || next > PLANNING_MAX_YEAR) {
       return;
     }
     if (next === year) return;
@@ -466,7 +466,7 @@ function MonthlyBudgetsSection({
     setYear(next);
   }
 
-  const copyPrevDisabled = saving || year <= MIN_YEAR;
+  const copyPrevDisabled = saving || year <= PLANNING_MIN_YEAR;
   // `Apply` stays disabled until the text parses as a positive finite
   // number — matches the toast-error branch in `handleApplyBulk` so the
   // user sees the button react before they click.
@@ -725,7 +725,7 @@ function CategoryLimitsSection({
 
   const yearSelectOptions = useMemo(() => {
     const opts: number[] = [];
-    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= MIN_YEAR; y--) {
+    for (let y = initialYear + BUDGET_YEARS_AHEAD; y >= PLANNING_MIN_YEAR; y--) {
       opts.push(y);
     }
     return opts;
@@ -784,7 +784,7 @@ function CategoryLimitsSection({
 
   function handleYearSelect(value: string) {
     const next = Number(value);
-    if (!Number.isInteger(next) || next < MIN_YEAR || next > MAX_YEAR) return;
+    if (!Number.isInteger(next) || next < PLANNING_MIN_YEAR || next > PLANNING_MAX_YEAR) return;
     if (next === year) return;
     if (dirtyCount > 0) {
       setPendingYear(next);

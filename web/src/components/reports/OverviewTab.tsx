@@ -11,7 +11,7 @@ import {
 } from 'recharts';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { useReportYearFloor } from '@/hooks/useReportYearFloor';
+import { useReportYears } from '@/hooks/useReportYears';
 import {
   ChartContainer,
   ChartTooltip,
@@ -32,11 +32,11 @@ import { AlertCircle } from 'lucide-react';
 import { useIncomeExpenses, useBudgetVsActual } from '@/hooks/useReports';
 import {
   MONTH_NAMES_SHORT,
-  yearOptions,
+  yearOptionsFrom,
   formatMonthTick,
   formatMonthLabel,
 } from '@/lib/dates';
-import { INCEXP_CONFIG } from './utils';
+import { INCEXP_CONFIG, axisTickInterval, monthsToCoverYear } from './utils';
 import { cn } from '@/lib/utils';
 
 const NET_FLOW_CONFIG = {
@@ -48,9 +48,44 @@ const BVA_CONFIG = {
   actual: { label: 'Actual', color: 'hsl(var(--primary))' },
 } satisfies ChartConfig;
 
+/**
+ * The Time Period control's value. `'all'` is a DISCRIMINANT, not a month
+ * count, and storing it that way is load-bearing — see `months` below.
+ */
+type Period = '6' | '12' | '24' | 'all';
+
 export function OverviewTab() {
-  const [months, setMonths] = useState(12);
+  const [period, setPeriod] = useState<Period>('12');
   const [bvaYear, setBvaYear] = useState(new Date().getFullYear());
+
+  // Exactly the years the ledger holds, so an imported 1984 statement is
+  // selectable and the empty years between are not offered. `bvaYear` is
+  // unioned in so a refetch that drops it (its last row was just deleted)
+  // cannot leave the Select holding a value with no matching item — that
+  // renders a blank trigger, silently, with no error.
+  const { years: ledgerYears, currentYear } = useReportYears();
+  const years = yearOptionsFrom(ledgerYears, bvaYear);
+
+  // WHY THE SELECT STORES `period` AND NOT THIS NUMBER. `months` changes
+  // identity when the years response lands: on first paint `ledgerYears` is
+  // the current-year fallback, so 'all' resolves to 24, and moments later the
+  // real list makes it 516. A <Select value={String(months)}> would then hold
+  // "24" with no matching <SelectItem> and render a blank trigger, silently.
+  // The discriminant is stable across that refetch; the derived count is not.
+  //
+  // `monthsToCoverYear` is reused rather than open-coded because it floors at
+  // 24 and caps at MAX_REPORT_MONTHS, so no clock skew or empty ledger can
+  // produce 0, a negative, or NaN here — `?months=NaN` fails the backend's
+  // strconv.Atoi and 400s the request.
+  //
+  // All time is bounded by the LEDGER, not by the cap: `years` is filtered to
+  // the data window and held at the current year, so the widest real request
+  // is ~516 buckets for a 1984 household, never the 2412-month worst case.
+  const months =
+    period === 'all'
+      ? monthsToCoverYear(Math.min(...ledgerYears), currentYear)
+      : Number(period);
+
   const incExp = useIncomeExpenses(months);
   const bva = useBudgetVsActual(bvaYear);
   const gradientId = useId();
@@ -95,13 +130,6 @@ export function OverviewTab() {
     [bva.data],
   );
 
-  // The floor comes from the ledger, so an imported 2019 statement is
-  // selectable. `Math.min` with the current selection keeps `bvaYear` in the
-  // list if a refetch ever narrows the floor past it — otherwise the Select
-  // would hold a value with no matching item and render a blank trigger.
-  const { floorYear } = useReportYearFloor();
-  const years = yearOptions(Math.min(floorYear, bvaYear));
-
   return (
     <div className="grid gap-6 md:grid-cols-2">
       {/* Income vs Expenses */}
@@ -117,8 +145,8 @@ export function OverviewTab() {
             <CardDescription className="text-xs">Monthly income and spending comparison</CardDescription>
           </div>
           <Select
-            value={String(months)}
-            onValueChange={(v) => setMonths(Number(v))}
+            value={period}
+            onValueChange={(v) => setPeriod(v as Period)}
           >
             <SelectTrigger aria-label="Time Period" className="h-9 w-[140px]">
               <SelectValue />
@@ -127,6 +155,12 @@ export function OverviewTab() {
               <SelectItem value="6">6 months</SelectItem>
               <SelectItem value="12">12 months</SelectItem>
               <SelectItem value="24">24 months</SelectItem>
+              {/* Shown unconditionally. These charts are driven by the months
+                  control, not by the year picker, so All time is the ONLY
+                  control that can reach an old year here — hiding it until
+                  the ledger looks old enough would make the fix invisible in
+                  precisely the case it exists for. */}
+              <SelectItem value="all">All time</SelectItem>
             </SelectContent>
           </Select>
         </CardHeader>
@@ -191,8 +225,7 @@ export function OverviewTab() {
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  minTickGap={8}
-                  interval="preserveStartEnd"
+                  interval={axisTickInterval(incExpData.length)}
                   angle={-30}
                   textAnchor="end"
                   height={48}
@@ -270,12 +303,15 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
+                {/* Tick thinning is DERIVED, not a fixed strategy — see
+                    axisTickInterval. `preserveStartEnd` dropped June from a
+                    12-month window here while the sibling BarChart kept it. */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  interval={0}
+                  interval={axisTickInterval(cashFlowData.length)}
                   angle={-30}
                   textAnchor="end"
                   height={48}

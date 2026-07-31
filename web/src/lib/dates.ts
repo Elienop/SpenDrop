@@ -1,17 +1,46 @@
 // Calendar primitives: year bounds, month labels, and date format
 // strings. Anything the UI needs to render or parse a date lives here.
 
-// --- Year bounds ---
-// Mirror `MinYear` / `MaxYear` in `internal/api/limits.go`. Keep wide
-// enough for historic spreadsheet imports; keep narrow enough that the
-// year-picker does not need pagination.
+// --- Planning year bounds ---
+// Mirror `PlanningMinYear` / `PlanningMaxYear` in `internal/api/limits.go`.
+// They bound the year PARAM of the planning endpoints — budgets, category
+// budgets, and savings goals — and nothing else.
 //
-// MIN_YEAR is also the hard floor of the Reports year picker: the
-// server clamps `GET /api/settings/report-year-floor` there so the
-// picker can never offer a year the year-param endpoints reject.
+// These are NOT the bounds on ledger data. Go splits the two windows
+// deliberately: `MinDataYear` / `MaxDataYear` ([1900, 2100]) bound what a
+// transaction DATE may be and what every reports / dashboard / export year
+// param accepts, while the planning window is narrower because those rows are
+// configuration the household writes forward, not history it imports backward
+// — nothing plans a 1990 budget, and a century of empty years in the Budgets
+// Select buys nothing.
+//
+// So do not reach for these to bound anything that reads ledger data. The
+// Reports and Dashboard year pickers are driven by the ledger itself, via
+// `GET /api/reports/years` (`useReportYears`) — not by a constant.
+//
+// Renamed from `MIN_YEAR` / `MAX_YEAR` (values unchanged) when the Go
+// constants they used to mirror, `MinYear` / `MaxYear`, were split and
+// deleted. The old names read as a product-wide floor, which is exactly the
+// misreading that put a planning bound on the Reports picker.
 
-export const MIN_YEAR = 2000;
-export const MAX_YEAR = 2100;
+export const PLANNING_MIN_YEAR = 2000;
+export const PLANNING_MAX_YEAR = 2100;
+
+// --- Data year bounds ---
+// Mirror `MinDataYear` / `MaxDataYear` in `internal/api/limits.go`. This is
+// the window a transaction DATE may occupy, and the same window every
+// reports / dashboard / export year param accepts — one bound, so every year
+// the ledger can hold is a year the reports can display.
+//
+// The Reports year picker does NOT count down from `MIN_DATA_YEAR`: it offers
+// only the years the ledger actually has (`useReportYears`). These constants
+// are the OUTER bound on what that response can contain, which is what makes
+// them useful — they name the range a row has to fall outside of to land in
+// `out_of_range_years`, and they size the worst case the report window must
+// still be able to reach.
+
+export const MIN_DATA_YEAR = 1900;
+export const MAX_DATA_YEAR = 2100;
 
 // --- Month labels ---
 
@@ -97,29 +126,66 @@ export function formatYYYYMMDD(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+/** One `<Select>` option: a year rendered as both value and label. */
+export interface YearOption {
+  value: string;
+  label: string;
+}
+
 /**
- * Returns a list of year options `{ value, label }` suitable for a
- * `<Select>`, descending from the current year down to `startYear`.
+ * Returns a CONTIGUOUS list of year options `{ value, label }`, descending
+ * from the current year down to `startYear`.
  *
- * `startYear` is REQUIRED and deliberately has no default. It used to
- * default to a hard-coded `HISTORICAL_YEAR_START = 2024`, which meant a
- * user could import a 2019 bank statement, have every aggregate include
- * it, and never be able to select 2019 in any Reports tab. The floor now
- * comes from the ledger — see `useReportYearFloor`, which is also where
- * the `min(floor, current year)` guard lives.
+ * This is the PLANNING range, and Budgets legitimately wants it: a household
+ * plans a budget for a year it has no transactions in yet, so offering only
+ * years that already hold data would make next year unselectable.
+ *
+ * Reports and Dashboard must NOT use this — they read the ledger, which is
+ * sparse, and a contiguous range there offers dozens of empty years. Use
+ * `yearOptionsFrom` with `useReportYears` instead.
  *
  * This stays a PURE function: it must not fetch, so `@/lib/dates` keeps
  * no network dependency. The flip side is that it returns an EMPTY list
  * for a `startYear` above the current year, so callers must pass a floor
  * that has already been guarded.
  */
-export function yearOptions(
-  startYear: number,
-): { value: string; label: string }[] {
+export function yearOptions(startYear: number): YearOption[] {
   const currentYear = new Date().getFullYear();
-  const opts: { value: string; label: string }[] = [];
+  const opts: YearOption[] = [];
   for (let y = currentYear; y >= startYear; y--) {
     opts.push({ value: String(y), label: String(y) });
   }
   return opts;
+}
+
+/**
+ * Returns a SPARSE list of year options `{ value, label }` — exactly the
+ * `years` given, deduplicated and sorted newest-first, with every `selected`
+ * year unioned in.
+ *
+ * Pair with `useReportYears`, which sources `years` from the ledger via
+ * `GET /api/reports/years`. A ledger is not contiguous: a household with rows
+ * in 1984 and 2026 and nothing between gets two options here, where
+ * `yearOptions(1984)` would have produced forty-three.
+ *
+ * WHY `selected` IS VARIADIC AND WHY IT IS NOT OPTIONAL POLISH. A Radix
+ * `<Select>` holding a `value` with no matching `<SelectItem>` renders a
+ * BLANK TRIGGER — silently, with no error and no console warning. The years
+ * list is refetched (SSE invalidates it on every transaction mutation), so it
+ * can NARROW under a live selection: delete the last 1984 row and 1984 leaves
+ * the response while the Select still holds "1984". Unioning the caller's
+ * current selection is what stops that, and it is the direct replacement for
+ * the `Math.min(floorYear, year)` guard the contiguous version needed.
+ *
+ * Variadic because one list can drive several Selects — PatternsTab feeds both
+ * its heatmap `year` and its tag `tagYear` from a single call, and a
+ * single-selection union would blank whichever one it left out.
+ */
+export function yearOptionsFrom(
+  years: number[],
+  ...selected: number[]
+): YearOption[] {
+  const unique = Array.from(new Set([...years, ...selected]));
+  unique.sort((a, b) => b - a);
+  return unique.map((y) => ({ value: String(y), label: String(y) }));
 }

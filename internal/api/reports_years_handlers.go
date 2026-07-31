@@ -28,15 +28,38 @@ type reportYearsResponse struct {
 	// 3021 still HAS transactions, and the UI needs to distinguish "you have
 	// no data" from "you have data none of it reportable".
 	HasTransactions bool `json:"has_transactions"`
-	// OutOfRangeYears is every year the ledger holds that Years had to drop —
-	// either outside the reportable window or in the future. Newest first,
-	// deduplicated. Empty for the ordinary household.
+	// OutOfRangeYears is every dropped year that falls OUTSIDE
+	// [MinDataYear, MaxDataYear]. Newest first, deduplicated, and `[]` — never
+	// null — for the ordinary household.
+	//
+	// This is the DEFECT bucket: legacy or corrupt rows from before
+	// validateDate was bounded. Every year-param endpoint 400s on these
+	// (measured: budget-vs-actual, dashboard/summary and year-over-year all
+	// return 400 for 1850 and 3021), and no passage of time changes that. The
+	// user may want to go fix them.
 	//
 	// This field is the whole point of returning a structure rather than a
 	// list. Dropping a year silently is the exact bug class this work exists
 	// to kill: a legacy 3021 row would simply cease to appear anywhere in the
 	// UI's view of the ledger while still sitting in the transactions list.
 	OutOfRangeYears []int `json:"out_of_range_years"`
+	// FutureYears is every dropped year that is later than CurrentYear but
+	// still INSIDE [MinDataYear, MaxDataYear]. Newest first, deduplicated, and
+	// `[]` — never null — for the ordinary household.
+	//
+	// This is the FEATURE bucket, and it exists because these two causes used
+	// to share one field. A deliberately planned 2027 bill is a normal
+	// workflow, not a data problem: POST /api/transactions accepts the date
+	// (measured: 201), and every year-param endpoint answers for 2027 with the
+	// row's amount present. Only this handler's own cap keeps 2027 out of the
+	// picker, and that cap lifts by itself on 1 January 2027.
+	//
+	// Split so the UI can say something TRUE and DIFFERENT for each: an
+	// out-of-range year is a limitation the user may want to act on, a future
+	// year is information about the reports' scope. Naming both in one
+	// "these years cannot be selected" sentence told a user their deliberate
+	// plan was corrupt data.
+	FutureYears []int `json:"future_years"`
 }
 
 // handleReportYears reports which years the Reports year pickers should offer,
@@ -62,11 +85,32 @@ type reportYearsResponse struct {
 //     in unconditionally, so a fresh install and a past-only ledger both yield
 //     a non-empty list. An empty dropdown is not a state the UI can render.
 //
-// Everything either filter drops lands in out_of_range_years so the UI can say
-// so. Household-wide, matching handleListTransactions and
-// handleReportYearFloor: the transactions list is visible to every
-// authenticated user, so a per-user picker would hide a year whose amounts are
-// already inside every aggregate on the page.
+// Everything either filter drops is REPORTED back, never dropped silently —
+// but under TWO separate keys, because the two filters have nothing to do with
+// each other:
+//
+//   - out_of_range_years is a DEFECT. The year is outside the window, every
+//     year-param endpoint 400s on it, and only editing the row will change
+//     that. Measured against a live server with sentinel rows at 1850 and
+//     3021: budget-vs-actual, dashboard/summary and year-over-year all 400.
+//
+//   - future_years is a FEATURE in progress. The year is perfectly valid —
+//     POST /api/transactions accepts the date, and every year-param endpoint
+//     answers for it with the row's amounts present (measured: with a 2027
+//     row of $999, budget-vs-actual?year=2027 returns actual=999 in month 3
+//     and dashboard/summary?year=2027 returns savings_ytd=-999). It is
+//     withheld ONLY by this handler's cap, which lifts on its own when the
+//     year arrives.
+//
+// PRECEDENCE: a year that is both — 3021 — belongs to out_of_range_years and
+// appears in NOTHING else. The window violation is the more actionable fact,
+// and the future framing ("this will appear when the year arrives") is a
+// promise that would be false for a year the endpoints will never accept.
+//
+// Household-wide, matching handleListTransactions and handleReportYearFloor:
+// the transactions list is visible to every authenticated user, so a per-user
+// picker would hide a year whose amounts are already inside every aggregate on
+// the page.
 func (h *Handler) handleReportYears(w http.ResponseWriter, r *http.Request) {
 	if _, ok := auth.GetUser(r); !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
@@ -93,7 +137,7 @@ func (h *Handler) handleReportYears(w http.ResponseWriter, r *http.Request) {
 		currentYear = MaxDataYear
 	}
 
-	years, outOfRange := partitionReportYears(ledgerYears, currentYear)
+	years, outOfRange, future := partitionReportYears(ledgerYears, currentYear)
 
 	writeJSON(w, http.StatusOK, reportYearsResponse{
 		Years:       years,
@@ -101,39 +145,57 @@ func (h *Handler) handleReportYears(w http.ResponseWriter, r *http.Request) {
 		// Live rows, not offered years — see the field comment.
 		HasTransactions: len(ledgerYears) > 0,
 		OutOfRangeYears: outOfRange,
+		FutureYears:     future,
 	})
 }
 
-// partitionReportYears splits the ledger's years into the offerable list and
-// the dropped list, unioning in currentYear so the offerable list is never
-// empty. Both are newest-first and free of duplicates.
+// partitionReportYears splits the ledger's years three ways — offerable,
+// out-of-window, and in-window-but-future — unioning in currentYear so the
+// offerable list is never empty. All three are newest-first and free of
+// duplicates, and each ledger year lands in exactly ONE of them.
+//
+// THE ORDER OF THE TWO REJECTION TESTS IS THE PRECEDENCE RULE, not style. The
+// window test runs first, so 3021 — out of window AND in the future — is
+// out-of-range and nothing else. Swapping them would move it to future_years
+// and make the UI promise it becomes reportable in 3021, which it never does:
+// every year-param endpoint 400s outside [MinDataYear, MaxDataYear].
+//
+// All three slices are initialised non-nil so they marshal to `[]` rather than
+// `null`. The consumer reads `.length` off both reject lists, and a `null`
+// there unmounts the Reports page.
 //
 // ledgerYears arrives DESC and DISTINCT from ListTransactionYears, so a single
 // pass preserves ordering without a sort.
 //
-// currentYear can simply LEAD the list rather than being inserted at an
-// ordered position, and that is a consequence of the filters, not a
-// coincidence: any ledger year greater than currentYear is dropped as future,
-// so every year that survives is <= currentYear. Change the future filter and
-// this ordering stops holding.
+// currentYear can simply LEAD the offerable list rather than being inserted at
+// an ordered position, and that is a consequence of the filters, not a
+// coincidence: any ledger year greater than currentYear is diverted to future
+// or out-of-range, so every year that survives is <= currentYear. Change the
+// future filter and this ordering stops holding.
 //
-// Split out from the handler so the ordering and dedup rules are reviewable on
-// their own.
-func partitionReportYears(ledgerYears []int64, currentYear int) (offerable, outOfRange []int) {
+// Split out from the handler so the ordering, dedup and precedence rules are
+// reviewable on their own.
+func partitionReportYears(ledgerYears []int64, currentYear int) (offerable, outOfRange, future []int) {
 	offerable = append(make([]int, 0, len(ledgerYears)+1), currentYear)
 	outOfRange = []int{}
+	future = []int{}
 
 	for _, y64 := range ledgerYears {
 		year := int(y64)
 		if year == currentYear {
 			continue // already leading the list; do not duplicate
 		}
-		if year < MinDataYear || year > MaxDataYear || year > currentYear {
+		// Window first: see the precedence note above.
+		if year < MinDataYear || year > MaxDataYear {
 			outOfRange = append(outOfRange, year)
+			continue
+		}
+		if year > currentYear {
+			future = append(future, year)
 			continue
 		}
 		offerable = append(offerable, year)
 	}
 
-	return offerable, outOfRange
+	return offerable, outOfRange, future
 }

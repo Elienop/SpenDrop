@@ -549,24 +549,71 @@ export interface NotificationSettings {
 // ---------- Reports year picker ----------
 
 /**
- * Wire contract of `GET /api/settings/report-year-floor` — the oldest year the
- * Reports year pickers may offer, derived from the ledger rather than a
- * hard-coded constant (see `internal/api/settings_handlers.go`).
+ * Wire contract of `GET /api/reports/years` — every year the Reports and
+ * Dashboard year pickers may offer, derived from the ledger rather than a
+ * hard-coded constant (see `internal/api/reports_years_handlers.go`).
  *
- * The three states the two booleans distinguish:
- *   has_transactions=false                → empty ledger; `floor_year` is the
- *                                           server's current-year fallback
- *   has_transactions=true, clamped=false  → `floor_year` is real ledger data
- *   has_transactions=true, clamped=true   → live rows exist below MIN_YEAR;
- *                                           they stay inside date-range
- *                                           aggregates but no year picker can
- *                                           select their year
- *
- * `floor_year` is bounded by the SERVER's clock, so consumers must still apply
- * `Math.min(floor_year, <browser current year>)` — `useReportYearFloor` does.
+ * Replaces `GET /api/settings/report-year-floor`, which could only express a
+ * contiguous range from a single floor. A ledger is not contiguous, and a
+ * single integer had nowhere to put the years it had to drop.
  */
-export interface ReportYearFloorResponse {
-  floor_year: number;
+export interface ReportYearsResponse {
+  /**
+   * Every year the picker may offer, newest first. The handler guarantees
+   * each element is inside the data window, that none is greater than
+   * `current_year`, and that `current_year` itself is always present — so the
+   * list is never empty.
+   */
+  years: number[];
+  /**
+   * The SERVER's current year. Sent so the client does not have to trust its
+   * own clock to work out which entry is "this year": `years` is capped by the
+   * server's clock, so a browser that straddles a New Year boundary with it
+   * would otherwise point at a year the list does not contain.
+   */
+  current_year: number;
+  /**
+   * False only when the ledger holds no LIVE rows at all. It tracks ROWS, not
+   * offered years — a household whose only row is dated 3021 still has
+   * transactions, and the UI needs to tell "you have no data" apart from "you
+   * have data, none of it reportable".
+   */
   has_transactions: boolean;
-  clamped: boolean;
+  /**
+   * Every dropped year that is OUTSIDE the data window [1900, 2100]. Newest
+   * first, deduplicated, and EMPTY for the ordinary household.
+   *
+   * The DEFECT bucket: legacy or corrupt rows. Every year-param endpoint 400s
+   * on these (measured against a live server for 1850 and 3021), and no
+   * passage of time changes that.
+   *
+   * Not optional, deliberately. This is the honesty signal: it is the only
+   * thing that tells the user a row exists which no report can reach. Making
+   * it optional would let a consumer skip it with `?.` and reintroduce exactly
+   * the silent-drop bug this endpoint was built to kill.
+   */
+  out_of_range_years: number[];
+  /**
+   * Every dropped year that is later than `current_year` but still INSIDE the
+   * data window. Newest first, deduplicated, and EMPTY for the ordinary
+   * household.
+   *
+   * The FEATURE bucket, and the reason this is a separate key. A planned 2027
+   * bill is normal: `POST /api/transactions` accepts the date, and every
+   * year-param endpoint answers for 2027 with the amount present. Only the
+   * picker's own cap withholds it, and that cap lifts on 1 January 2027.
+   *
+   * Consumers must NOT merge this with `out_of_range_years`. They used to be
+   * one list, and the Reports notice consequently told a user their deliberate
+   * plan was corrupt data. A year that qualifies as both — 3021 — is in
+   * `out_of_range_years` ONLY; the server applies that precedence, so a
+   * consumer can render both without double-naming a year.
+   */
+  future_years: number[];
 }
+
+// `ReportYearFloorResponse` (GET /api/settings/report-year-floor) lived here
+// and is gone: nothing in this app reads that route any more. The ROUTE itself
+// deliberately stays on the server for one more release — a stale PWA bundle
+// keeps calling it until its service worker updates, and 404ing it now would
+// degrade those users to a one-year picker.

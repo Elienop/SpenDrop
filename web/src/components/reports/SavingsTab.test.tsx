@@ -19,14 +19,16 @@ vi.mock('@/hooks/useBaseCurrency', () => ({
   useBaseCurrency: () => 'USD',
 }));
 
-// The year Select's floor now comes from the ledger. Pin it below 2024 so the
-// option this test picks exists; `yearPicker.test.tsx` is what proves the tab
-// actually threads the floor through.
-vi.mock('@/hooks/useReportYearFloor', () => ({
-  useReportYearFloor: () => ({
-    floorYear: 2019,
+// The year Select offers exactly the years the ledger holds. 2024 is included
+// so the option this test picks exists; `yearPicker.test.tsx` is what proves
+// the tab actually threads the ledger years through.
+vi.mock('@/hooks/useReportYears', () => ({
+  useReportYears: () => ({
+    years: [2026, 2024, 2019],
+    currentYear: 2026,
     hasTransactions: true,
-    clamped: false,
+    outOfRangeYears: [],
+    futureYears: [],
     loading: false,
   }),
 }));

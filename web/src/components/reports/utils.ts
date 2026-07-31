@@ -45,14 +45,13 @@ export const MAX_REPORT_MONTHS = 2412;
  * whole of `year` is covered, given the report window always ends at the
  * current month.
  *
- * SavingsTab used a hardcoded 24, but `yearOptions` offers every year down to
- * the ledger-derived floor (`useReportYearFloor`, bottoming out at MIN_YEAR —
- * it was a hard-coded 2024 when this was written). In mid-2026 a 24-month
- * window began in August 2024,
- * so selecting 2024 filtered down to five months and rendered them as the
- * whole year: the cumulative savings curve started mid-year and goal progress
- * was measured against a partial total, with nothing on screen indicating the
- * data had been truncated.
+ * SavingsTab used a hardcoded 24, but the year Select offers every year the
+ * ledger holds (`useReportYears`, bounded below by MIN_DATA_YEAR — it was a
+ * hard-coded 2024 when this was written). In mid-2026 a 24-month window began
+ * in August 2024, so selecting 2024 filtered down to five months and rendered
+ * them as the whole year: the cumulative savings curve started mid-year and
+ * goal progress was measured against a partial total, with nothing on screen
+ * indicating the data had been truncated.
  *
  * Floored at 24 to preserve the previous behaviour for the current year, and
  * capped at MAX_REPORT_MONTHS purely as a sanity bound — the cap must never be
@@ -60,4 +59,40 @@ export const MAX_REPORT_MONTHS = 2412;
  */
 export function monthsToCoverYear(year: number, currentYear: number): number {
   return Math.min(MAX_REPORT_MONTHS, Math.max(24, (currentYear - year + 1) * 12));
+}
+
+/** Upper bound on rendered x-axis tick labels, at any window width. */
+export const MAX_AXIS_TICKS = 24;
+
+/**
+ * Recharts `interval` for an axis over `bucketCount` points: show every
+ * (n+1)th tick so at most MAX_AXIS_TICKS labels render.
+ *
+ * This exists because BOTH fixed strategies are wrong at one end of the range:
+ *
+ *   `interval={0}`             every bucket gets a rotated <text> node. Free at
+ *                              12; the dominant render cost of this tab at the
+ *                              516 buckets an All-time window over a 1984
+ *                              ledger produces.
+ *   `interval="preserveStartEnd"`  Recharts pins the first AND last tick, then
+ *                              thins between them. On a point scale (AreaChart)
+ *                              the last tick sits hard against the right edge,
+ *                              so its neighbour loses the minTickGap contest and
+ *                              vanishes — measured: a 12-month Net Cash Flow
+ *                              chart at 598px rendered 11 ticks, jumping
+ *                              May'26 -> Jul'26. The June data was present and
+ *                              hoverable; only its label was gone, which is the
+ *                              worst version of the bug because nothing looks
+ *                              broken. Its sibling BarChart kept all 12 at the
+ *                              same width, because a band scale pads its edges.
+ *
+ * A derived numeric interval is deterministic: it does not depend on Recharts'
+ * collision heuristic, on the scale type, or on the container width. Every
+ * bucket shows through MAX_AXIS_TICKS, and beyond that the count stays bounded.
+ * `interval={0}` is still what a small chart gets — as a computed result rather
+ * than a hardcoded assumption that stops holding when the window widens.
+ */
+export function axisTickInterval(bucketCount: number, maxTicks = MAX_AXIS_TICKS): number {
+  if (bucketCount <= maxTicks) return 0;
+  return Math.ceil(bucketCount / maxTicks) - 1;
 }

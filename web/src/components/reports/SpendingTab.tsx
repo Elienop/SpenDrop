@@ -46,13 +46,13 @@ import {
 import { getCategoryColorVar } from '@/lib/chart-colors';
 import {
   MONTH_NAMES_FULL,
-  yearOptions,
+  yearOptionsFrom,
   formatMonthTick,
   formatMonthLabel,
 } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { useReportYearFloor } from '@/hooks/useReportYearFloor';
+import { useReportYears } from '@/hooks/useReportYears';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { cn } from '@/lib/utils';
 import type { ExpenseVelocityData } from '@/api/types';
@@ -114,12 +114,12 @@ export function SpendingTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
-  // Ledger-derived floor, so an imported 2019 statement is selectable.
-  // `Math.min` with the current selection keeps `year` in the list if a
-  // refetch ever narrows the floor past it — otherwise the Select would hold
-  // a value with no matching item and render a blank trigger.
-  const { floorYear } = useReportYearFloor();
-  const years = yearOptions(Math.min(floorYear, year));
+  // Exactly the years the ledger holds, so an imported 1984 statement is
+  // selectable and the empty years between are not offered. `year` is unioned
+  // in so a refetch that drops it cannot leave the Select holding a value with
+  // no matching item — that renders a blank trigger, silently, with no error.
+  const { years: ledgerYears } = useReportYears();
+  const years = yearOptionsFrom(ledgerYears, year);
 
   // Category breakdown bar chart data
   const breakdownTotal = useMemo(

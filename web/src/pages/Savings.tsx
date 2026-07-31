@@ -53,13 +53,13 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { MIN_YEAR, MAX_YEAR } from '@/lib/dates';
+import { PLANNING_MIN_YEAR, PLANNING_MAX_YEAR } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { destructiveActionClass } from '@/lib/styles';
 
 const goalSchema = z.object({
-  year: z.number().int().min(MIN_YEAR).max(MAX_YEAR),
+  year: z.number().int().min(PLANNING_MIN_YEAR).max(PLANNING_MAX_YEAR),
   // The backend treats `target_amount: 0` as a delete (there is no
   // separate DELETE route). A user pressing Enter on the default form
   // would silently destroy an existing goal — so reject empty/zero at
@@ -102,13 +102,13 @@ function SavingsSection() {
       // The year input's onChange writes `0` for an empty field (so the
       // form's number type stays consistent), which would otherwise
       // make this memo run `goals.find(g => g.year === 0)` on every
-      // keystroke that produces a sub-MIN_YEAR transient (typing
+      // keystroke that produces a sub-PLANNING_MIN_YEAR transient (typing
       // "2026" passes through 2 → 20 → 202 → 2026). The schema
-      // rejects sub-MIN_YEAR on submit; matching it here keeps the
+      // rejects sub-PLANNING_MIN_YEAR on submit; matching it here keeps the
       // warning consistent.
       typeof watchedYear === 'number' &&
       Number.isFinite(watchedYear) &&
-      watchedYear >= MIN_YEAR
+      watchedYear >= PLANNING_MIN_YEAR
         ? goals.find((g) => g.year === watchedYear)
         : undefined,
     [goals, watchedYear],

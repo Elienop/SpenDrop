@@ -4,22 +4,26 @@ import userEvent from '@testing-library/user-event';
 import type { ReactElement } from 'react';
 import type { YoYResponse } from '@/api/types';
 
-// Every year <Select> on the Reports page counts down from the ledger-derived
-// floor. `monthsToCoverYear` proved that the bug lives at the CALL SITE, not
-// in the helper: it was extracted and unit-tested while SavingsTab still passed
-// a hardcoded 24 and the whole suite stayed green. So this file drives the real
-// tabs and enumerates the real <SelectItem>s rather than unit-testing
-// `yearOptions` in isolation.
+// Every year <Select> on the Reports page offers exactly the years the ledger
+// holds. `monthsToCoverYear` proved that this class of bug lives at the CALL
+// SITE, not in the helper: it was extracted and unit-tested while SavingsTab
+// still passed a hardcoded 24 and the whole suite stayed green. So this file
+// drives the real tabs and enumerates the real <SelectItem>s rather than
+// unit-testing `yearOptionsFrom` in isolation.
 
-const floorResult = {
-  floorYear: 2026,
+const CURRENT_YEAR = 2026;
+
+const yearsResult = {
+  years: [CURRENT_YEAR],
+  currentYear: CURRENT_YEAR,
   hasTransactions: true,
-  clamped: false,
+  outOfRangeYears: [] as number[],
+  futureYears: [] as number[],
   loading: false,
 };
-const useReportYearFloor = vi.fn(() => floorResult);
-vi.mock('@/hooks/useReportYearFloor', () => ({
-  useReportYearFloor: () => useReportYearFloor(),
+const useReportYears = vi.fn(() => yearsResult);
+vi.mock('@/hooks/useReportYears', () => ({
+  useReportYears: () => useReportYears(),
 }));
 
 const reportResult = <T,>(data: T) => ({
@@ -61,12 +65,10 @@ import { SpendingTab } from './SpendingTab';
 import { SavingsTab } from './SavingsTab';
 import { PatternsTab } from './PatternsTab';
 
-const CURRENT_YEAR = 2026;
-
 /**
  * Every year <Select> on the Reports page, by the tab that owns it and the
  * accessible name of its trigger. Each case is driven for real, so a tab that
- * forgets to thread the floor through fails here.
+ * forgets to thread the ledger years through fails here.
  */
 const YEAR_PICKERS: {
   tab: string;
@@ -126,6 +128,21 @@ async function offeredYears(
     .map((el) => picker.optionYear(el.textContent ?? ''));
 }
 
+/** Open the named year Select and click the option for `year`. */
+async function selectYear(
+  user: ReturnType<typeof userEvent.setup>,
+  picker: (typeof YEAR_PICKERS)[number],
+  year: number,
+): Promise<void> {
+  await user.click(screen.getByRole('combobox', { name: picker.label }));
+  const listbox = await screen.findByRole('listbox');
+  await user.click(
+    within(listbox)
+      .getAllByRole('option')
+      .filter((el) => picker.optionYear(el.textContent ?? '') === year)[0],
+  );
+}
+
 function setup() {
   // pointerEventsCheck is off for the same reason Reports.test.tsx turns it
   // off: an open Radix Select sets `pointer-events: none` on <body>, and
@@ -136,13 +153,13 @@ function setup() {
   });
 }
 
-describe('the Reports year pickers follow the ledger-derived floor', () => {
+describe('the Reports year pickers offer exactly the ledger years', () => {
   beforeEach(() => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     // Pinned so "the current year" is deterministic; otherwise every
     // expectation below silently changes meaning each January.
     vi.setSystemTime(new Date(Date.UTC(CURRENT_YEAR, 6, 15)));
-    useReportYearFloor.mockReturnValue(floorResult);
+    useReportYears.mockReturnValue(yearsResult);
   });
 
   afterEach(() => {
@@ -153,28 +170,24 @@ describe('the Reports year pickers follow the ledger-derived floor', () => {
 
   for (const picker of YEAR_PICKERS) {
     describe(picker.tab, () => {
-      test('offers every year from the ledger floor to the current year', async () => {
-        // The headline defect: a 2019 bank statement imports, lands in every
-        // aggregate, and 2019 was never selectable because the floor was the
-        // hardcoded HISTORICAL_YEAR_START = 2024.
-        useReportYearFloor.mockReturnValue({
-          ...floorResult,
-          floorYear: 2019,
+      test('offers exactly the years the ledger holds, gaps included', async () => {
+        // The headline defect and its fix in one case. A 1984 statement
+        // imports and 1984 must be selectable — but 2025 holds no rows, so it
+        // must NOT be offered. The old contiguous floor gave 43 options here.
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [2026, 2024, 1984],
         });
         const user = setup();
         render(picker.render());
 
-        const years = await offeredYears(user, picker);
-
-        expect(years).toEqual([
-          2026, 2025, 2024, 2023, 2022, 2021, 2020, 2019,
-        ]);
+        expect(await offeredYears(user, picker)).toEqual([2026, 2024, 1984]);
       });
 
       test('offers exactly the current year when the ledger is empty', async () => {
-        useReportYearFloor.mockReturnValue({
-          ...floorResult,
-          floorYear: CURRENT_YEAR,
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [CURRENT_YEAR],
           hasTransactions: false,
         });
         const user = setup();
@@ -183,10 +196,10 @@ describe('the Reports year pickers follow the ledger-derived floor', () => {
         expect(await offeredYears(user, picker)).toEqual([CURRENT_YEAR]);
       });
 
-      test('is never empty while the floor is still loading', async () => {
-        useReportYearFloor.mockReturnValue({
-          ...floorResult,
-          floorYear: CURRENT_YEAR,
+      test('is never empty while the years are still loading', async () => {
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [CURRENT_YEAR],
           hasTransactions: false,
           loading: true,
         });
@@ -196,46 +209,61 @@ describe('the Reports year pickers follow the ledger-derived floor', () => {
         expect(await offeredYears(user, picker)).toEqual([CURRENT_YEAR]);
       });
 
-      test('keeps the selected year selectable if the floor later narrows past it', async () => {
-        // Pick 2019, then let a refetch narrow the floor to 2024 (e.g. the
-        // 2019 rows were deleted). Dropping 2019 from the list would leave the
-        // Select holding a value with no matching item — a blank trigger and
-        // an unreadable picker.
-        useReportYearFloor.mockReturnValue({
-          ...floorResult,
-          floorYear: 2019,
+      test('keeps the selected year selectable after a refetch drops it', async () => {
+        // Pick 1984, then let a refetch drop it (the last 1984 row was just
+        // deleted, and SSE re-derived the list). Dropping 1984 from the
+        // options would leave the Select holding a value with no matching
+        // item — a BLANK TRIGGER, silently, with no error.
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [2026, 2024, 1984],
         });
         const user = setup();
         const { rerender } = render(picker.render());
 
-        await user.click(
-          screen.getByRole('combobox', { name: picker.label }),
-        );
-        const listbox = await screen.findByRole('listbox');
-        await user.click(
-          within(listbox)
-            .getAllByRole('option')
-            .filter((el) => picker.optionYear(el.textContent ?? '') === 2019)[0],
-        );
+        await selectYear(user, picker, 1984);
 
-        useReportYearFloor.mockReturnValue({
-          ...floorResult,
-          floorYear: 2024,
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [2026, 2024],
         });
         rerender(picker.render());
 
-        expect(await offeredYears(user, picker)).toContain(2019);
+        expect(await offeredYears(user, picker)).toContain(1984);
+      });
+
+      test('still shows the selected year on the trigger after a refetch drops it', async () => {
+        // The user-visible half of the case above: `toContain` alone would
+        // still pass if the option existed but the trigger had gone blank.
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [2026, 2024, 1984],
+        });
+        const user = setup();
+        const { rerender } = render(picker.render());
+
+        await selectYear(user, picker, 1984);
+
+        useReportYears.mockReturnValue({
+          ...yearsResult,
+          years: [2026, 2024],
+        });
+        rerender(picker.render());
+
+        expect(
+          screen.getByRole('combobox', { name: picker.label }),
+        ).toHaveTextContent('1984');
       });
     });
   }
 
-  test('a floor arriving after mount widens the picker without resetting the selection', async () => {
+  test('years arriving after mount widen the picker without resetting the selection', async () => {
     // All four tabs select the current year on mount, so the first paint (with
-    // the current-year fallback) already has a valid selection. The floor
+    // the current-year fallback) already has a valid selection. The real list
     // landing afterwards must only ADD older options.
-    useReportYearFloor.mockReturnValue({
-      ...floorResult,
-      floorYear: CURRENT_YEAR,
+    useReportYears.mockReturnValue({
+      ...yearsResult,
+      years: [CURRENT_YEAR],
       hasTransactions: false,
       loading: true,
     });
@@ -248,8 +276,10 @@ describe('the Reports year pickers follow the ledger-derived floor', () => {
     ).toHaveLength(1);
     await user.keyboard('{Escape}');
 
-    // Now pick 2026 explicitly, then let the real floor arrive.
-    useReportYearFloor.mockReturnValue({ ...floorResult, floorYear: 2019 });
+    useReportYears.mockReturnValue({
+      ...yearsResult,
+      years: [2026, 2024, 1984],
+    });
     rerender(<SpendingTab />);
 
     const trigger = screen.getByRole('combobox', { name: /breakdown year/i });
@@ -257,6 +287,36 @@ describe('the Reports year pickers follow the ledger-derived floor', () => {
     await user.click(trigger);
     expect(
       within(await screen.findByRole('listbox')).getAllByRole('option'),
-    ).toHaveLength(8);
+    ).toHaveLength(3);
+  });
+
+  test('PatternsTab keeps BOTH of its selections alive in the shared list', async () => {
+    // One list feeds the heatmap `year` and the tag `tagYear`. A union that
+    // folded in only one selection would leave the other Select blank the
+    // moment the ledger narrowed — and only one of the two would show it, so
+    // a single-Select assertion would go green through the bug.
+    useReportYears.mockReturnValue({
+      ...yearsResult,
+      years: [2026, 2024, 1984],
+    });
+    const user = setup();
+    const heatmap = YEAR_PICKERS.find((p) => p.tab === 'Patterns (heatmap)')!;
+    const tagsPicker = YEAR_PICKERS.find((p) => p.tab === 'Patterns (tags)')!;
+    const { rerender } = render(<PatternsTab />);
+
+    await selectYear(user, heatmap, 1984);
+    await selectYear(user, tagsPicker, 2024);
+
+    // Both selected years leave the ledger at once.
+    useReportYears.mockReturnValue({ ...yearsResult, years: [2026] });
+    rerender(<PatternsTab />);
+
+    expect(
+      screen.getByRole('combobox', { name: heatmap.label }),
+    ).toHaveTextContent('1984');
+    expect(
+      screen.getByRole('combobox', { name: tagsPicker.label }),
+    ).toHaveTextContent('2024');
+    expect(await offeredYears(user, heatmap)).toEqual([2026, 2024, 1984]);
   });
 });

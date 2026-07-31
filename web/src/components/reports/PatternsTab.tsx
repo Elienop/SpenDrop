@@ -35,10 +35,10 @@ import {
 } from '@/hooks/useReports';
 import { SpendingHeatmap } from './SpendingHeatmap';
 import { tagChartHeightPx } from './tagChart';
-import { MONTH_NAMES_FULL, yearOptions } from '@/lib/dates';
+import { MONTH_NAMES_FULL, yearOptionsFrom } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { useReportYearFloor } from '@/hooks/useReportYearFloor';
+import { useReportYears } from '@/hooks/useReportYears';
 import { cn } from '@/lib/utils';
 
 const TAG_CONFIG = {
@@ -57,13 +57,14 @@ export function PatternsTab() {
   const baseCurrency = useBaseCurrency();
   const fmt = (amount: number) => formatCurrency(amount, baseCurrency);
 
-  // Ledger-derived floor, so an imported 2019 statement is selectable. One
-  // list feeds BOTH Selects on this tab (heatmap `year` and tag `tagYear`), so
-  // `Math.min` folds in both selections — either one falling below the floor
-  // after a refetch would otherwise leave that Select holding a value with no
-  // matching item and render a blank trigger.
-  const { floorYear } = useReportYearFloor();
-  const tagYears = yearOptions(Math.min(floorYear, year, tagYear));
+  // Exactly the years the ledger holds, so an imported 1984 statement is
+  // selectable and the empty years between are not offered. One list feeds
+  // BOTH Selects on this tab (heatmap `year` and tag `tagYear`), so BOTH
+  // selections are unioned in — dropping either from the list after a refetch
+  // would leave that Select holding a value with no matching item, which
+  // renders a blank trigger, silently, with no error.
+  const { years: ledgerYears } = useReportYears();
+  const tagYears = yearOptionsFrom(ledgerYears, year, tagYear);
 
   return (
     <div className="flex flex-col gap-6">
