@@ -11,7 +11,7 @@ import {
 } from 'recharts';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { useReportYearFloor } from '@/hooks/useReportYearFloor';
+import { useReportYears } from '@/hooks/useReportYears';
 import {
   ChartContainer,
   ChartTooltip,
@@ -32,7 +32,7 @@ import { AlertCircle } from 'lucide-react';
 import { useIncomeExpenses, useBudgetVsActual } from '@/hooks/useReports';
 import {
   MONTH_NAMES_SHORT,
-  yearOptions,
+  yearOptionsFrom,
   formatMonthTick,
   formatMonthLabel,
 } from '@/lib/dates';
@@ -95,12 +95,13 @@ export function OverviewTab() {
     [bva.data],
   );
 
-  // The floor comes from the ledger, so an imported 2019 statement is
-  // selectable. `Math.min` with the current selection keeps `bvaYear` in the
-  // list if a refetch ever narrows the floor past it — otherwise the Select
-  // would hold a value with no matching item and render a blank trigger.
-  const { floorYear } = useReportYearFloor();
-  const years = yearOptions(Math.min(floorYear, bvaYear));
+  // Exactly the years the ledger holds, so an imported 1984 statement is
+  // selectable and the empty years between are not offered. `bvaYear` is
+  // unioned in so a refetch that drops it (its last row was just deleted)
+  // cannot leave the Select holding a value with no matching item — that
+  // renders a blank trigger, silently, with no error.
+  const { years: ledgerYears } = useReportYears();
+  const years = yearOptionsFrom(ledgerYears, bvaYear);
 
   return (
     <div className="grid gap-6 md:grid-cols-2">

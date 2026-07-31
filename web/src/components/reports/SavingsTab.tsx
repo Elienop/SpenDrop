@@ -31,10 +31,10 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { AlertCircle } from 'lucide-react';
 import { useYearOverYear, useIncomeExpenses } from '@/hooks/useReports';
-import { MONTH_NAMES_SHORT, yearOptions } from '@/lib/dates';
+import { MONTH_NAMES_SHORT, yearOptionsFrom } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { useReportYearFloor } from '@/hooks/useReportYearFloor';
+import { useReportYears } from '@/hooks/useReportYears';
 import { cn } from '@/lib/utils';
 import { monthsToCoverYear } from './utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
@@ -154,12 +154,13 @@ export function SavingsTab() {
     };
   }, [yoy.data]);
 
-  // Ledger-derived floor, so an imported 2019 statement is selectable. Both
-  // Selects on this tab drive the same `year`, and `Math.min` keeps it in the
-  // list if a refetch ever narrows the floor past it — otherwise the Select
-  // would hold a value with no matching item and render a blank trigger.
-  const { floorYear } = useReportYearFloor();
-  const years = yearOptions(Math.min(floorYear, year));
+  // Exactly the years the ledger holds, so an imported 1984 statement is
+  // selectable and the empty years between are not offered. Both Selects on
+  // this tab drive the same `year`, which is unioned in so a refetch that
+  // drops it cannot leave either Select holding a value with no matching item
+  // — that renders a blank trigger, silently, with no error.
+  const { years: ledgerYears } = useReportYears();
+  const years = yearOptionsFrom(ledgerYears, year);
 
   return (
     <div className="flex flex-col gap-6">

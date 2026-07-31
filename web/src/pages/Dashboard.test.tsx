@@ -3,6 +3,7 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  within,
   type RenderOptions,
 } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -96,6 +97,20 @@ vi.mock('../hooks/useDashboard', () => ({
   useDashboard: (...args: unknown[]) => mockUseDashboard(...(args as [])),
 }));
 
+/**
+ * Years the mocked `reports/years` endpoint reports, per test. Kept mutable so
+ * a case can narrow the ledger and prove the persisted selection survives.
+ *
+ * Deliberately routed through the api-client mock rather than mocking
+ * `useReportYears` itself: this way the Dashboard drives the REAL hook, the
+ * REAL query key, and the REAL request path, so a typo in any of the three
+ * fails here. `useReportYears`'s own suite stubs `fetch` a level below and
+ * pins the wire field names.
+ */
+let reportYears: number[] = [2026];
+/** When set, `reports/years` rejects — the offline / 401 / 500 degradation. */
+let reportYearsFails = false;
+
 vi.mock('../api/client', () => ({
   api: {
     // Path-aware: `useBaseCurrency` (→ `useCurrencies`, now TanStack Query)
@@ -104,6 +119,17 @@ vi.mock('../api/client', () => ({
     // unmount the Dashboard subtree. The recent-transactions table reads the
     // paginated `transactions?...` response.
     get: vi.fn((path: string) => {
+      if (path === 'reports/years') {
+        if (reportYearsFails) {
+          return Promise.reject(new Error('offline'));
+        }
+        return Promise.resolve({
+          years: reportYears,
+          current_year: reportYears[0] ?? new Date().getFullYear(),
+          has_transactions: true,
+          out_of_range_years: [],
+        });
+      }
       if (path === 'currencies') {
         return Promise.resolve([
           {
@@ -161,6 +187,8 @@ describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseDashboard.mockReturnValue(defaultDashboardData);
+    reportYears = [new Date().getFullYear()];
+    reportYearsFails = false;
   });
 
   test('renders welcome heading with user name', () => {
@@ -478,6 +506,74 @@ describe('Dashboard', () => {
       expect(screen.queryByText('Education')).not.toBeInTheDocument();
       // "Show more" is back
       expect(screen.getByRole('button', { name: /show more/i })).toBeInTheDocument();
+    });
+  });
+
+  // The Dashboard year Select used to be `Array.from({length: 5}, ...)` — a
+  // rolling five-year window from today. `/api/dashboard/summary` is where an
+  // old row first shows up as a NUMBER, so a household that imported a 1984
+  // statement could see the total but never select the year that produced it.
+  //
+  // Its trend request is hardcoded `months=12`, so widening the picker costs
+  // nothing on the wire.
+  describe('the year picker follows the ledger', () => {
+    /** Open the Year Select and return the years it offers, newest first. */
+    async function offeredYears(
+      user: ReturnType<typeof userEvent.setup>,
+    ): Promise<number[]> {
+      await user.click(screen.getByRole('combobox', { name: /^year$/i }));
+      const listbox = await screen.findByRole('listbox');
+      return within(listbox)
+        .getAllByRole('option')
+        .map((el) => Number(el.textContent));
+    }
+
+    function setup() {
+      // An open Radix Select sets `pointer-events: none` on <body>, and
+      // happy-dom has no layout engine to tell the portalled content apart.
+      return userEvent.setup({ pointerEventsCheck: 0 });
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    test('offers exactly the years the ledger holds, gaps included', async () => {
+      reportYears = [2026, 2024, 1984];
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      await waitFor(async () =>
+        expect(await offeredYears(user)).toEqual([2026, 2024, 1984]),
+      );
+    });
+
+    test('keeps a persisted year the ledger no longer reports', async () => {
+      // `dashboardYear` is persisted in localStorage, so the selection can
+      // OUTLIVE the data that produced it — reinstall, restore, or just delete
+      // the last 2024 row. The years response then arrives NARROWER than the
+      // restored selection, and a Select holding a value with no matching item
+      // renders a blank trigger, silently. This is the one picker where the
+      // selection can be stale before the first render.
+      localStorage.setItem(STORAGE_KEYS.dashboardYear, '2024');
+      localStorage.setItem(STORAGE_KEYS.dashboardMonth, '3');
+      reportYears = [2026];
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      const trigger = screen.getByRole('combobox', { name: /^year$/i });
+      await waitFor(async () =>
+        expect(await offeredYears(user)).toEqual([2026, 2024]),
+      );
+      expect(trigger).toHaveTextContent('2024');
+    });
+
+    test('still offers a usable year when the request fails', async () => {
+      reportYearsFails = true;
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      expect(await offeredYears(user)).toEqual([new Date().getFullYear()]);
     });
   });
 });

@@ -45,14 +45,13 @@ export const MAX_REPORT_MONTHS = 2412;
  * whole of `year` is covered, given the report window always ends at the
  * current month.
  *
- * SavingsTab used a hardcoded 24, but `yearOptions` offers every year down to
- * the ledger-derived floor (`useReportYearFloor`, bottoming out at PLANNING_MIN_YEAR —
- * it was a hard-coded 2024 when this was written). In mid-2026 a 24-month
- * window began in August 2024,
- * so selecting 2024 filtered down to five months and rendered them as the
- * whole year: the cumulative savings curve started mid-year and goal progress
- * was measured against a partial total, with nothing on screen indicating the
- * data had been truncated.
+ * SavingsTab used a hardcoded 24, but the year Select offers every year the
+ * ledger holds (`useReportYears`, bounded below by MIN_DATA_YEAR — it was a
+ * hard-coded 2024 when this was written). In mid-2026 a 24-month window began
+ * in August 2024, so selecting 2024 filtered down to five months and rendered
+ * them as the whole year: the cumulative savings curve started mid-year and
+ * goal progress was measured against a partial total, with nothing on screen
+ * indicating the data had been truncated.
  *
  * Floored at 24 to preserve the previous behaviour for the current year, and
  * capped at MAX_REPORT_MONTHS purely as a sanity bound — the cap must never be
