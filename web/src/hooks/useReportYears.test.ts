@@ -22,6 +22,7 @@ interface YearsBody {
   current_year: number;
   has_transactions: boolean;
   out_of_range_years: number[];
+  future_years: number[];
 }
 
 const fetchMock = vi.fn();
@@ -71,6 +72,7 @@ describe('useReportYears', () => {
       current_year: 2026,
       has_transactions: true,
       out_of_range_years: [3021, 1850],
+      future_years: [2027],
     });
     const { wrapper } = makeHarness();
 
@@ -82,7 +84,32 @@ describe('useReportYears', () => {
     expect(result.current.currentYear).toBe(2026);
     expect(result.current.hasTransactions).toBe(true);
     expect(result.current.outOfRangeYears).toEqual([3021, 1850]);
+    expect(result.current.futureYears).toEqual([2027]);
     expect(requestedUrls()).toContain(YEARS_URL);
+  });
+
+  // The two reject lists are SEPARATE causes and the hook must not blur them:
+  // an out-of-window year is a defect the reports can never reach, an
+  // in-window future year is a plan the reports reach on their own once that
+  // year begins. The Reports notice words them differently, so a hook that
+  // merged or cross-fed them would put the wrong sentence on screen.
+  it('keeps out-of-range and future years in separate lists', async () => {
+    respondWith({
+      years: [2026],
+      current_year: 2026,
+      has_transactions: true,
+      out_of_range_years: [3021, 1850],
+      future_years: [2030, 2027],
+    });
+    const { wrapper } = makeHarness();
+
+    const { result } = renderHook(() => useReportYears(), { wrapper });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.outOfRangeYears).toEqual([3021, 1850]);
+    expect(result.current.futureYears).toEqual([2030, 2027]);
+    expect(result.current.futureYears).not.toContain(3021);
+    expect(result.current.outOfRangeYears).not.toContain(2027);
   });
 
   it('keeps the gap in a sparse ledger', async () => {
@@ -140,6 +167,7 @@ describe('useReportYears', () => {
     expect(result.current.years).toEqual([CURRENT_YEAR]);
     expect(result.current.hasTransactions).toBe(false);
     expect(result.current.outOfRangeYears).toEqual([]);
+    expect(result.current.futureYears).toEqual([]);
   });
 
   it('degrades to a usable one-year picker when the request fails outright', async () => {
@@ -170,10 +198,12 @@ describe('useReportYears', () => {
     expect(result.current.years).toEqual([CURRENT_YEAR]);
   });
 
-  it('treats a missing out_of_range_years as no out-of-range years', async () => {
-    // The field is non-optional in the TS type, but JSON from an older binary
-    // is not type-checked. The Reports notice reads `.length`, so an undefined
-    // here would throw and unmount the whole page.
+  it('treats missing reject lists as no rejected years', async () => {
+    // Both fields are non-optional in the TS type, but JSON from an older
+    // binary is not type-checked — and `future_years` is genuinely absent from
+    // every binary before this change, so this is the ROLLBACK case, not a
+    // hypothetical. The Reports notice reads `.length` on both, so an
+    // undefined here would throw and unmount the whole page.
     respondWith({
       years: [2026],
       current_year: 2026,
@@ -185,6 +215,7 @@ describe('useReportYears', () => {
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.outOfRangeYears).toEqual([]);
+    expect(result.current.futureYears).toEqual([]);
   });
 
   it('trusts the server clock for currentYear, not the browser', async () => {

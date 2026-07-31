@@ -580,9 +580,12 @@ export interface ReportYearsResponse {
    */
   has_transactions: boolean;
   /**
-   * Every year the ledger holds that `years` had to drop — outside the data
-   * window, or in the future. Newest first, deduplicated, and EMPTY for the
-   * ordinary household.
+   * Every dropped year that is OUTSIDE the data window [1900, 2100]. Newest
+   * first, deduplicated, and EMPTY for the ordinary household.
+   *
+   * The DEFECT bucket: legacy or corrupt rows. Every year-param endpoint 400s
+   * on these (measured against a live server for 1850 and 3021), and no
+   * passage of time changes that.
    *
    * Not optional, deliberately. This is the honesty signal: it is the only
    * thing that tells the user a row exists which no report can reach. Making
@@ -590,6 +593,23 @@ export interface ReportYearsResponse {
    * the silent-drop bug this endpoint was built to kill.
    */
   out_of_range_years: number[];
+  /**
+   * Every dropped year that is later than `current_year` but still INSIDE the
+   * data window. Newest first, deduplicated, and EMPTY for the ordinary
+   * household.
+   *
+   * The FEATURE bucket, and the reason this is a separate key. A planned 2027
+   * bill is normal: `POST /api/transactions` accepts the date, and every
+   * year-param endpoint answers for 2027 with the amount present. Only the
+   * picker's own cap withholds it, and that cap lifts on 1 January 2027.
+   *
+   * Consumers must NOT merge this with `out_of_range_years`. They used to be
+   * one list, and the Reports notice consequently told a user their deliberate
+   * plan was corrupt data. A year that qualifies as both — 3021 — is in
+   * `out_of_range_years` ONLY; the server applies that precedence, so a
+   * consumer can render both without double-naming a year.
+   */
+  future_years: number[];
 }
 
 // `ReportYearFloorResponse` (GET /api/settings/report-year-floor) lived here

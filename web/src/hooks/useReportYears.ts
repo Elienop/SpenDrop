@@ -14,10 +14,20 @@ export interface UseReportYearsResult {
   /** False when the ledger holds no live rows at all. Tracks ROWS, not offered
    *  years: a household whose only row is dated 3021 still has transactions. */
   hasTransactions: boolean;
-  /** Years the ledger holds that no picker can offer — outside the data window
-   *  or in the future. Empty for the ordinary household, and the ONLY signal
-   *  that some data is unreachable in Reports. */
+  /** Years the ledger holds that are OUTSIDE the data window [1900, 2100] —
+   *  legacy or corrupt rows. Every year-param endpoint 400s on them, so no
+   *  report can ever reach them. Empty for the ordinary household. */
   outOfRangeYears: number[];
+  /** Years the ledger holds that are later than `currentYear` but inside the
+   *  data window — a household planning ahead. The endpoints accept these; only
+   *  the picker's cap withholds them, and it lifts when the year arrives.
+   *
+   *  Kept SEPARATE from `outOfRangeYears` on purpose: they were one list, and
+   *  the Reports notice therefore described a deliberate 2027 entry in the
+   *  same sentence as a corrupt 1850 row. A year in both buckets (3021) is
+   *  reported by the server as out-of-range only, so a consumer can render
+   *  both lists without naming a year twice. */
+  futureYears: number[];
   /** True only on the very first fetch. The pickers are already usable while it
    *  is true (see the fallback below), so this is for hints, not for gating. */
   loading: boolean;
@@ -73,8 +83,11 @@ export function useReportYears(): UseReportYearsResult {
     hasTransactions: data?.has_transactions ?? false,
     // `?? []` is load-bearing despite the non-optional type: JSON from an
     // older binary is not type-checked, and the Reports notice reads
-    // `.length` on this — an undefined would throw and unmount the page.
+    // `.length` on both — an undefined would throw and unmount the page.
+    // `future_years` makes that concrete rather than defensive: every binary
+    // before this change omits the key, so a rollback hits this path.
     outOfRangeYears: data?.out_of_range_years ?? [],
+    futureYears: data?.future_years ?? [],
     loading: query.isLoading,
   };
 }

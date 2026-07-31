@@ -8,6 +8,7 @@ const yearsResult = {
   currentYear: 2026,
   hasTransactions: true,
   outOfRangeYears: [] as number[],
+  futureYears: [] as number[],
   loading: false,
 };
 const useReportYears = vi.fn(() => yearsResult);
@@ -113,19 +114,34 @@ describe('Reports', () => {
     });
 
     it('names EVERY out-of-range year, not just the first', () => {
-      // A future-dated row and a legacy row can coexist, and each is a
-      // separate thing the user has to go look at. Naming one and silently
-      // dropping the rest is the same silent-drop bug in miniature.
+      // Two legacy rows from opposite ends of the window are two separate
+      // things the user has to go look at. Naming one and silently dropping
+      // the rest is the same silent-drop bug in miniature.
       useReportYears.mockReturnValue({
         ...yearsResult,
-        outOfRangeYears: [3021, 2027, 1850],
+        outOfRangeYears: [3021, 1899, 1850],
       });
       renderReports();
 
       const note = screen.getByRole('status');
-      for (const year of ['3021', '2027', '1850']) {
+      for (const year of ['3021', '1899', '1850']) {
         expect(note).toHaveTextContent(year);
       }
+    });
+
+    // An out-of-range year must NOT pick up the future framing. 3021 is in
+    // the future too, but the endpoints will never accept it — telling the
+    // user it "appears once its year begins" is a promise nothing can keep.
+    it('does not promise an out-of-range year will arrive later', () => {
+      useReportYears.mockReturnValue({
+        ...yearsResult,
+        outOfRangeYears: [3021],
+      });
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).not.toHaveTextContent(/once its year begins/i);
+      expect(note).not.toHaveTextContent(/reports cover years up to/i);
     });
 
     // Regression guard. The first version of this notice claimed the amounts
@@ -173,6 +189,7 @@ describe('Reports', () => {
       useReportYears.mockReturnValue({
         ...yearsResult,
         outOfRangeYears: [],
+        futureYears: [],
       });
       renderReports();
 
@@ -180,16 +197,157 @@ describe('Reports', () => {
     });
 
     it('stays silent while the years are still loading', () => {
-      // `outOfRangeYears` defaults to [] before the response lands; asserting
+      // Both reject lists default to [] before the response lands; asserting
       // it here stops a future refactor from flashing the note on first paint.
       useReportYears.mockReturnValue({
         ...yearsResult,
         outOfRangeYears: [],
+        futureYears: [],
         loading: true,
       });
       renderReports();
 
       expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+  });
+
+  // A FUTURE-dated row is not a defect. Planning a 2027 bill is a normal
+  // workflow, and the previous notice — one list, one sentence — told those
+  // users their deliberate entry could not be reached, in the same breath it
+  // used for a corrupt 1850 row.
+  //
+  // Measured against a binary built from this tree (throwaway DB, sentinel
+  // rows seeded past the API's own validator at 1850/$777, 2027/$999,
+  // 3021/$888 and 2026/$111, clock 2026-07-31):
+  //
+  //   - POST /api/transactions accepted 2027-03-04 (201) and REJECTED
+  //     1850-06-01 and 3021-01-02 (400, "date must be between 1900-01-01 and
+  //     2100-12-31"). The future row is something the app itself let the user
+  //     create.
+  //   - budget-vs-actual?year=2027 -> 200 with actual=999 in month 3;
+  //     dashboard/summary?year=2027 -> 200 with savings_ytd=-999;
+  //     spending-heatmap?year=2027 -> 200 containing 999. The same three
+  //     endpoints 400 for 1850 and 3021. So the reports can already SEE the
+  //     2027 row; only the picker's cap withholds it.
+  //   - Every income-expenses window ends at the current month (months=12,
+  //     24, 1524 and 2412 all ended 2026-07), so the 2027 amount is in none of
+  //     them — including "All time".
+  //   - All four rows were present in GET /api/transactions.
+  //
+  // Hence the split wording: out-of-range is a LIMITATION ("cannot be
+  // selected"), future is SCOPE ("reports cover years up to 2026 … appears
+  // once its year begins"). The forward-looking half is pinned server-side by
+  // TestReportYears_FutureYearBecomesOfferableWhenItArrives, which advances
+  // the clock to 2027 and asserts 2027 moves into `years`.
+  describe('future-dated ledger rows', () => {
+    it('describes the scope of the reports rather than a data problem', () => {
+      useReportYears.mockReturnValue({
+        ...yearsResult,
+        futureYears: [2027],
+      });
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).toHaveTextContent(/2027/);
+      expect(note).toHaveTextContent(/reports cover years up to 2026/i);
+      expect(note).toHaveTextContent(/once its year begins/i);
+    });
+
+    it('does not reuse the out-of-range wording for a planned year', () => {
+      // The whole point of the split. "Cannot be selected here" and "not
+      // included in any total" describe a row the endpoints refuse; they
+      // refuse nothing about 2027.
+      useReportYears.mockReturnValue({
+        ...yearsResult,
+        futureYears: [2027],
+      });
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).not.toHaveTextContent(/cannot be selected/i);
+      expect(note).not.toHaveTextContent(/not included in any total/i);
+      expect(note).not.toHaveTextContent(/not even under all time/i);
+    });
+
+    it('names EVERY future year, not just the first', () => {
+      useReportYears.mockReturnValue({
+        ...yearsResult,
+        futureYears: [2030, 2027],
+      });
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).toHaveTextContent('2030');
+      expect(note).toHaveTextContent('2027');
+    });
+
+    it('takes the ceiling from the server clock, not the browser', () => {
+      // `currentYear` is the clock that CAPPED the list. Across a New Year
+      // boundary the browser disagrees, and "reports cover years up to
+      // <wrong year>" would contradict the picker sitting next to it.
+      useReportYears.mockReturnValue({
+        ...yearsResult,
+        currentYear: 2019,
+        years: [2019],
+        futureYears: [2027],
+      });
+      renderReports();
+
+      expect(screen.getByRole('status')).toHaveTextContent(
+        /reports cover years up to 2019/i,
+      );
+    });
+
+    it('stays silent when nothing is future-dated', () => {
+      useReportYears.mockReturnValue({ ...yearsResult, futureYears: [] });
+      renderReports();
+
+      expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    });
+  });
+
+  // Both causes at once. Two stacked alerts would read as two problems and
+  // bury the tab strip below them, so the page renders ONE notice carrying
+  // both sentences. `getByRole('status')` throws on more than one match, so
+  // the count assertion below is what actually holds that.
+  describe('both causes at once', () => {
+    const both = {
+      ...yearsResult,
+      outOfRangeYears: [3021, 1850],
+      futureYears: [2027],
+    };
+
+    it('renders exactly one notice', () => {
+      useReportYears.mockReturnValue(both);
+      renderReports();
+
+      expect(screen.getAllByRole('status')).toHaveLength(1);
+    });
+
+    it('says the true thing about each cause in that one notice', () => {
+      useReportYears.mockReturnValue(both);
+      renderReports();
+
+      const note = screen.getByRole('status');
+      expect(note).toHaveTextContent(/cannot be selected/i);
+      expect(note).toHaveTextContent(/not even under all time/i);
+      expect(note).toHaveTextContent(/reports cover years up to 2026/i);
+      expect(note).toHaveTextContent(/once its year begins/i);
+      for (const year of ['3021', '1850', '2027']) {
+        expect(note).toHaveTextContent(year);
+      }
+    });
+
+    it('does not name a year under both causes', () => {
+      // The server's precedence rule (window beats future) is what makes this
+      // hold: 3021 is out of range and is NOT in futureYears, so it is named
+      // once. If a future refactor sent it to both, the same year would be
+      // called unreachable and "arriving later" in one notice.
+      useReportYears.mockReturnValue(both);
+      renderReports();
+
+      const text = screen.getByRole('status').textContent ?? '';
+      expect(text.match(/3021/g)).toHaveLength(1);
     });
   });
 });
