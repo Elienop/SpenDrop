@@ -1,7 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { api, ApiError } from './client';
+import { api, ApiError, NetworkError } from './client';
 
 const originalFetch = globalThis.fetch;
+const originalOnLine = navigator.onLine;
+
+function setOnline(value: boolean): void {
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value });
+}
+
+afterEach(() => {
+  setOnline(originalOnLine);
+});
 
 function mockFetch(response: Partial<Response>) {
   const mock = vi.fn().mockResolvedValue({
@@ -133,6 +142,106 @@ describe('ApiClient.request', () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as ApiError).status).toBe(400);
     expect((err as ApiError).message).toBe('password too short');
+  });
+});
+
+// An unanswered request must never present as an authenticated "no". Every
+// caller that discriminates on `instanceof ApiError` (the offline queue's
+// permanent-rejection cap, the auth bootstrap, QuickAdd's retry toast) has to
+// be able to tell "the server said no" from "the server never answered".
+describe('ApiClient transport failures', () => {
+  beforeEach(() => {
+    globalThis.fetch = vi.fn();
+  });
+
+  afterEach(() => {
+    globalThis.fetch = originalFetch;
+  });
+
+  it('converts a failed fetch into a NetworkError, never an ApiError', async () => {
+    // What the browser throws when the request never leaves the device.
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const err = await api.get('auth/me').then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err).not.toBeInstanceOf(ApiError);
+    expect((err as NetworkError).cause).toBeInstanceOf(TypeError);
+  });
+
+  it('classifies a failed fetch as kind="offline" when navigator says the device is offline', async () => {
+    setOnline(false);
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const err = (await api.get('auth/me').catch((e: unknown) => e)) as NetworkError;
+
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err.kind).toBe('offline');
+  });
+
+  it('classifies a failed fetch as kind="unreachable" when navigator still says online', async () => {
+    setOnline(true);
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+
+    const err = (await api.get('auth/me').catch((e: unknown) => e)) as NetworkError;
+
+    expect(err.kind).toBe('unreachable');
+  });
+
+  // A browser abort throws a generic DOMException, not the app's error type.
+  // Converting it is the whole point: the offline queue treats a non-ApiError
+  // as "retry later" and an ApiError as "the server rejected this row", so a
+  // timeout misfiled as an ApiError would burn the poison-row cap and strand a
+  // real purchase behind a permanent "Not synced" badge.
+  it('converts an abort/timeout into a NetworkError of kind="timeout"', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new DOMException('signal timed out', 'TimeoutError'));
+
+    const err = (await api.get('auth/me').catch((e: unknown) => e)) as NetworkError;
+
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err).not.toBeInstanceOf(ApiError);
+    expect(err.kind).toBe('timeout');
+  });
+
+  it('converts a user-land AbortError into a NetworkError of kind="timeout"', async () => {
+    globalThis.fetch = vi
+      .fn()
+      .mockRejectedValue(new DOMException('The operation was aborted.', 'AbortError'));
+
+    const err = (await api.get('auth/me').catch((e: unknown) => e)) as NetworkError;
+
+    expect(err.kind).toBe('timeout');
+  });
+
+  it('passes an abort signal so a hung request cannot wait forever', async () => {
+    const fetchMock = mockFetch({ json: () => Promise.resolve({}) });
+
+    await api.get('auth/me');
+
+    const [, options] = fetchMock.mock.calls[0];
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('converts a failed upload fetch into a NetworkError too', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'));
+    const file = new File(['x'], 'x.csv', { type: 'text/csv' });
+
+    const err = await api.upload('imports', file).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(NetworkError);
+    expect(err).not.toBeInstanceOf(ApiError);
   });
 });
 

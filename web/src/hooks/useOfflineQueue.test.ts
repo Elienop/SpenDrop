@@ -5,7 +5,13 @@
 import 'fake-indexeddb/auto';
 import { describe, test, expect, beforeEach } from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
-import { enqueue, removeQueued, getAllQueued } from '@/lib/offline-queue';
+import {
+  enqueue,
+  removeQueued,
+  getAllQueued,
+  markNeedsSignIn,
+  clearNeedsSignIn,
+} from '@/lib/offline-queue';
 import { useOfflineQueue } from './useOfflineQueue';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
@@ -18,6 +24,7 @@ function payload(over: Partial<CreateTransactionInput> = {}): CreateTransactionI
 beforeEach(async () => {
   for (const uid of [U, 2]) {
     for (const item of await getAllQueued(uid)) await removeQueued(uid, item.id);
+    clearNeedsSignIn(uid);
   }
 });
 
@@ -47,6 +54,33 @@ describe('useOfflineQueue', () => {
     const { result } = renderHook(() => useOfflineQueue(undefined));
     await waitFor(() => expect(result.current.count).toBe(0));
     expect(result.current.pending).toEqual([]);
+  });
+
+  // "Will sync when you're back online" is a false promise for a queue the
+  // server has already refused; the screen needs to know so it can ask for a
+  // sign-in instead.
+  test('reports when the queue is held for sign-in, live', async () => {
+    await enqueue(U, payload());
+    const { result } = renderHook(() => useOfflineQueue(U));
+    await waitFor(() => expect(result.current.count).toBe(1));
+    expect(result.current.needsSignIn).toBe(false);
+
+    act(() => {
+      markNeedsSignIn(U);
+    });
+    await waitFor(() => expect(result.current.needsSignIn).toBe(true));
+
+    act(() => {
+      clearNeedsSignIn(U);
+    });
+    await waitFor(() => expect(result.current.needsSignIn).toBe(false));
+  });
+
+  test('the hold of another user never shows here', async () => {
+    markNeedsSignIn(2);
+    const { result } = renderHook(() => useOfflineQueue(U));
+    await waitFor(() => expect(result.current.count).toBe(0));
+    expect(result.current.needsSignIn).toBe(false);
   });
 
   test('shows only the selected user queue (per-user namespacing)', async () => {

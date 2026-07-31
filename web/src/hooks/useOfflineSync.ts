@@ -8,18 +8,28 @@ import { useAuth } from '@/hooks/useAuth';
  * queued expenses sync whenever the app is open and connectivity returns — not
  * only while /quick is mounted. iOS PWAs have no Background Sync API, so this
  * foreground replay (on app launch + the window 'online' event) is the
- * reliable mechanism. Replay is gated on an authenticated user because the
- * POST needs the session cookie; logging back in re-runs this effect, which
- * drains anything that 401'd while the session was expired.
+ * reliable mechanism.
+ *
+ * Replay is gated on a SERVER-CONFIRMED user, not merely on a user object.
+ * The server attributes a created row purely from the session cookie, so
+ * posting captures under an identity the server has not confirmed (see
+ * useAuth's `unverified`) is exactly how a row lands in the wrong household
+ * member's ledger. Confirmation re-runs this effect and drains everything that
+ * was waiting — including rows that 401'd while the session was expired, once
+ * signing back in releases their hold.
+ *
+ * The reconnection listener is attached unconditionally, never behind the
+ * auth check: a listener that only exists while things are already working is
+ * no use for recovering when they are not.
  */
 export function useOfflineSync(): void {
-  const { user } = useAuth();
+  const { user, unverified } = useAuth();
+  const userId = user?.id;
+  const canSync = userId !== undefined && !unverified;
 
   useEffect(() => {
-    if (!user) return;
-    const userId = user.id;
-
     const run = (): void => {
+      if (!canSync || userId === undefined) return;
       void drainQueue(userId)
         .then(({ synced }) => {
           if (synced > 0) {
@@ -36,8 +46,8 @@ export function useOfflineSync(): void {
         });
     };
 
-    run(); // launch / login drain (no-ops if empty or offline)
+    run(); // launch / login drain (no-ops if empty, offline, or unconfirmed)
     window.addEventListener('online', run);
     return () => window.removeEventListener('online', run);
-  }, [user]);
+  }, [canSync, userId]);
 }

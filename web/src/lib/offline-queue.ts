@@ -1,23 +1,30 @@
 import { api, ApiError } from '@/api/client';
 import type { Transaction } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
+import { QUEUE_NEEDS_SIGN_IN_PREFIX } from '@/lib/storage-keys';
 
 // IndexedDB-backed FIFO queue of transaction creates captured while the device
 // was offline. The /quick capture screen enqueues a write ONLY when
 // navigator.onLine === false (see useQuickAdd) — i.e. when the browser is
-// certain the request never left the device. POST /api/transactions has NO
-// content-hash dedup (that is import-only), so we cannot rely on the server to
-// swallow a double-post; dup-safety lives in the enqueue gate.
+// certain the request never left the device.
+//
+// What the server does with a duplicate create, precisely (handleCreateTransaction
+// / contentHashForManualEntry in internal/api/transaction_handlers.go): a manual
+// create DOES compute a content hash and DOES look for an existing row with the
+// same identity — but a collision is deliberately not an error, because real
+// household data contains legitimate duplicates (two identical coffees the same
+// day). The colliding row is still created; it just stores content_hash = NULL
+// so the first row stays the canonical anchor for import dedupe. So the server
+// DETECTS a double-post but does not SWALLOW it. Dup-safety therefore still
+// lives in the enqueue gate — an ambiguous online failure must not be queued.
 //
 // Delivery is at-least-once: the enqueue gate guarantees the row does not yet
 // exist server-side, so the common path creates it exactly once. The one
 // residual duplicate window is a successful POST whose `removeQueued` then
 // fails (IndexedDB abort/quota mid-drain) — the row survives and is re-POSTed
-// on the next drain. Closing that fully needs a client idempotency key AND a
-// matching server-side dedup on the create path; both land together in Phase 3
-// (POST /api/transactions has no content-hash dedup today, so a client key sent
-// ahead of the server would be inert dead weight on the wire). It is rare and
-// never loses data; we accept it for v1.
+// on the next drain. Closing that fully needs a client idempotency key AND the
+// server choosing to reject (rather than anchor) the collision it already
+// detects. It is rare and never loses data; we accept it for v1.
 //
 // iOS PWAs have no Background Sync API, so replay is foreground-only: it runs
 // on app launch and on the window 'online' event (see useOfflineSync).
@@ -138,6 +145,54 @@ function notify(): void {
   for (const fn of listeners) fn();
 }
 
+// --- Needs-sign-in hold -----------------------------------------------------
+
+/**
+ * A user's queue is HELD when the server has rejected that identity (a real
+ * 401), rather than merely being unreachable. Held rows are never discarded
+ * and never replayed: replaying them would post captures made by one household
+ * member through whatever session the device now has, which is exactly the
+ * misattribution the per-user namespacing exists to prevent. The hold is
+ * released by a server-confirmed sign-in as that same user (see useAuth).
+ *
+ * Stored in localStorage rather than in the row itself because it is a
+ * property of the identity, not of any one capture — and because the /quick
+ * screen must be able to read it without opening IndexedDB.
+ */
+function holdKey(userId: number): string {
+  return `${QUEUE_NEEDS_SIGN_IN_PREFIX}${userId}`;
+}
+
+export function needsSignIn(userId: number): boolean {
+  try {
+    return localStorage.getItem(holdKey(userId)) === '1';
+  } catch {
+    // Storage disabled (private mode / blocked cookies): fail OPEN. A device
+    // that cannot remember the hold must not permanently freeze the queue.
+    return false;
+  }
+}
+
+export function markNeedsSignIn(userId: number): void {
+  if (needsSignIn(userId)) return;
+  try {
+    localStorage.setItem(holdKey(userId), '1');
+  } catch {
+    return; // Nothing persisted, so nothing changed — do not notify.
+  }
+  notify();
+}
+
+export function clearNeedsSignIn(userId: number): void {
+  if (!needsSignIn(userId)) return;
+  try {
+    localStorage.removeItem(holdKey(userId));
+  } catch {
+    return;
+  }
+  notify();
+}
+
 // --- Queue operations -------------------------------------------------------
 
 export async function enqueue(
@@ -205,6 +260,10 @@ export async function purgeQueue(userId: number): Promise<void> {
     req.onerror = () => resolve();
     req.onblocked = () => resolve();
   });
+  // The rows are gone, so the hold has nothing left to protect; leaving it set
+  // would silently freeze this user's next set of captures after they sign
+  // back in on this device.
+  clearNeedsSignIn(userId);
   notify();
 }
 
@@ -256,16 +315,25 @@ export interface DrainResult {
  *
  * Per-row outcome:
  *  - 2xx            → removed from the queue (counted as synced).
- *  - 401            → stop the whole run, keep everything; a re-login + the
- *                     next 'online'/launch drains them (no loss).
+ *  - 401            → the server rejected this identity. Stop the whole run,
+ *                     keep everything, and HOLD the queue for sign-in so it is
+ *                     not replayed under someone else's session (no loss).
  *  - other ApiError → server rejected THIS row; bump attempts and move on so
  *                     it can't head-of-line block healthy rows. After
  *                     MAX_ATTEMPTS the row is left in place but skipped.
- *  - network reject → connectivity dropped mid-run; stop and keep the rest for
- *                     the next 'online' event.
+ *  - NetworkError   → the server never answered (offline / unreachable /
+ *    or other        timed out). This is NOT the row's fault, so attempts is
+ *    non-ApiError    deliberately NOT bumped: counting it would let a flaky
+ *                    radio burn the poison-row cap and strand a real purchase
+ *                    forever. Stop and keep the rest for the next 'online'.
  */
 export async function drainQueue(userId: number): Promise<DrainResult> {
   if (isOffline()) {
+    return { synced: 0, remaining: await safeCount(userId) };
+  }
+  if (needsSignIn(userId)) {
+    // Held: the server has rejected this identity and no one has signed back
+    // in as them yet. The rows stay exactly where they are.
     return { synced: 0, remaining: await safeCount(userId) };
   }
   if (draining.has(userId)) {
@@ -286,8 +354,15 @@ export async function drainQueue(userId: number): Promise<DrainResult> {
         await removeQueued(userId, item.id);
         synced++;
       } catch (err) {
+        // `instanceof ApiError` is the ONLY thing that means "the server saw
+        // this row and refused it". Transport failures are a different class
+        // (see api/client.ts NetworkError) and fall through to the break below
+        // without touching `attempts`.
         if (err instanceof ApiError) {
-          if (err.status === 401) break;
+          if (err.status === 401) {
+            markNeedsSignIn(userId);
+            break;
+          }
           // Record the rejection so the poison-row cap can eventually trip. If
           // even this write fails (IndexedDB unavailable mid-drain), stop the
           // run rather than spin — the next 'online'/launch retries.

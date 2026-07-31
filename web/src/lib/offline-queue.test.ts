@@ -11,7 +11,7 @@ vi.mock('@/api/client', async (importOriginal) => {
   return { ...actual, api: { post: vi.fn() } };
 });
 
-import { api, ApiError } from '@/api/client';
+import { api, ApiError, NetworkError } from '@/api/client';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import {
   enqueue,
@@ -21,6 +21,9 @@ import {
   purgeQueue,
   drainQueue,
   subscribe,
+  needsSignIn,
+  markNeedsSignIn,
+  clearNeedsSignIn,
 } from './offline-queue';
 
 const post = vi.mocked(api.post);
@@ -50,6 +53,7 @@ beforeEach(async () => {
   // every user id any test touches so cross-user state never leaks.
   for (const uid of [U, 2]) {
     for (const item of await getAllQueued(uid)) await removeQueued(uid, item.id);
+    clearNeedsSignIn(uid);
   }
 });
 
@@ -324,6 +328,139 @@ describe('offline-queue — drain', () => {
 
     // Both rows end up posted and the queue is empty.
     expect(await countQueued(U)).toBe(0);
+  });
+});
+
+describe('offline-queue — transport failures are not server rejections', () => {
+  // The drain treats an ApiError as "the server looked at THIS row and said
+  // no" and counts it toward MAX_ATTEMPTS. A request that never got an answer
+  // must never be counted that way, or a real purchase ends up stranded behind
+  // a permanent "Not synced" badge for a reason that was only ever a flaky
+  // radio.
+  test('a timed-out POST leaves attempts at 0 and keeps the row', async () => {
+    const id = await enqueue(U, payload({ description: 'lunch' }));
+    post.mockRejectedValue(
+      new NetworkError('The server took too long to answer', 'timeout'),
+    );
+
+    const result = await drainQueue(U);
+
+    expect(result).toEqual({ synced: 0, remaining: 1 });
+    const rows = await getAllQueued(U);
+    expect(rows[0].id).toBe(id);
+    expect(rows[0].attempts).toBe(0);
+  });
+
+  test('repeated timeouts never trip the poison-row cap', async () => {
+    await enqueue(U, payload({ description: 'lunch' }));
+    post.mockRejectedValue(
+      new NetworkError('The server took too long to answer', 'timeout'),
+    );
+
+    // More drains than MAX_ATTEMPTS: a row capped by mistake would stop being
+    // POSTed at all, so the call count is the tell.
+    for (let i = 0; i < 7; i++) await drainQueue(U);
+
+    expect(post).toHaveBeenCalledTimes(7);
+    const rows = await getAllQueued(U);
+    expect(rows[0].attempts).toBe(0);
+  });
+
+  test('an unreachable server stops the run and keeps the later rows', async () => {
+    await enqueue(U, payload({ description: 'a' }));
+    await enqueue(U, payload({ description: 'b' }));
+    post
+      .mockResolvedValueOnce({} as never)
+      .mockRejectedValueOnce(
+        new NetworkError('Could not reach the server', 'unreachable'),
+      );
+
+    const result = await drainQueue(U);
+
+    expect(result).toEqual({ synced: 1, remaining: 1 });
+    expect((await getAllQueued(U))[0].attempts).toBe(0);
+  });
+});
+
+describe('offline-queue — needs-sign-in hold', () => {
+  test('a 401 holds the queue for sign-in instead of dropping rows', async () => {
+    await enqueue(U, payload({ description: 'a' }));
+    await enqueue(U, payload({ description: 'b' }));
+    post.mockRejectedValue(new ApiError('Unauthorized', 401));
+
+    await drainQueue(U);
+
+    expect(needsSignIn(U)).toBe(true);
+    expect(await countQueued(U)).toBe(2); // held, never discarded
+  });
+
+  test('a held queue does not POST again until sign-in clears it', async () => {
+    await enqueue(U, payload({ description: 'a' }));
+    markNeedsSignIn(U);
+    post.mockResolvedValue({} as never);
+
+    const result = await drainQueue(U);
+
+    // Replaying under a session the server has already rejected is exactly how
+    // a capture ends up filed under the wrong household member.
+    expect(post).not.toHaveBeenCalled();
+    expect(result).toEqual({ synced: 0, remaining: 1 });
+    expect(await countQueued(U)).toBe(1);
+  });
+
+  test('clearing the hold lets the same rows drain untouched', async () => {
+    await enqueue(U, payload({ description: 'a' }));
+    markNeedsSignIn(U);
+    post.mockResolvedValue({} as never);
+
+    await drainQueue(U);
+    clearNeedsSignIn(U);
+    const result = await drainQueue(U);
+
+    expect(result.synced).toBe(1);
+    expect(await countQueued(U)).toBe(0);
+  });
+
+  test('the hold is per user — one member signing out cannot block another', async () => {
+    markNeedsSignIn(1);
+
+    expect(needsSignIn(1)).toBe(true);
+    expect(needsSignIn(2)).toBe(false);
+  });
+
+  test('a successful drain leaves the hold clear', async () => {
+    await enqueue(U, payload());
+    post.mockResolvedValue({} as never);
+
+    await drainQueue(U);
+
+    expect(needsSignIn(U)).toBe(false);
+  });
+
+  test('purgeQueue (logout) clears the hold along with the rows', async () => {
+    await enqueue(U, payload());
+    markNeedsSignIn(U);
+
+    await purgeQueue(U);
+
+    expect(needsSignIn(U)).toBe(false);
+    expect(await countQueued(U)).toBe(0);
+  });
+
+  test('marking / clearing the hold notifies subscribers so the UI updates', () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribe(listener);
+    try {
+      markNeedsSignIn(U);
+      expect(listener).toHaveBeenCalledTimes(1);
+      clearNeedsSignIn(U);
+      expect(listener).toHaveBeenCalledTimes(2);
+      // Clearing an already-clear hold is not a change; do not churn the UI.
+      clearNeedsSignIn(U);
+      expect(listener).toHaveBeenCalledTimes(2);
+    } finally {
+      unsubscribe();
+    }
   });
 });
 

@@ -28,6 +28,7 @@ describe('Register', () => {
     mockedUseAuth.mockReturnValue({
       user: null,
       loading: false,
+      unverified: false,
       login: vi.fn(),
       register: mockRegister,
       logout: vi.fn(),

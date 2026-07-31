@@ -23,19 +23,119 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Why a transport failure has its own class:
+ *
+ * `ApiError` means the server ANSWERED and said no. A dropped radio, a
+ * captive portal, or a request that hung until it was aborted means the
+ * server never answered at all — and the two are not interchangeable:
+ *
+ *  - the auth bootstrap must sign the user out on a real 401 and must NOT on
+ *    an unanswered request (that is the "logged out when I left the house"
+ *    bug);
+ *  - the offline replay queue counts an `ApiError` as "the server rejected
+ *    THIS row" and gives up after MAX_ATTEMPTS. A timeout misfiled as an
+ *    `ApiError` would strand a real purchase behind a permanent "Not synced"
+ *    badge (see offline-queue.ts).
+ *
+ * `fetch` rejects with a bare `TypeError` for a network failure and with a
+ * `DOMException` for an abort — neither is one of ours, so every caller
+ * would have to guess. Converting at this single edge is the fix, not a
+ * cosmetic detail: it means `err instanceof ApiError === false` reliably
+ * implies "we do not know whether the server saw this request".
+ */
+export type NetworkErrorKind =
+  /** `navigator.onLine === false` when the request failed. */
+  | 'offline'
+  /** The request was aborted — nothing came back within REQUEST_TIMEOUT_MS. */
+  | 'timeout'
+  /** The device believes it is online but the server could not be reached. */
+  | 'unreachable';
+
+export class NetworkError extends Error {
+  readonly kind: NetworkErrorKind;
+
+  constructor(
+    message: string,
+    kind: NetworkErrorKind,
+    options?: { cause?: unknown },
+  ) {
+    super(message, options);
+    this.name = 'NetworkError';
+    this.kind = kind;
+  }
+}
+
+// A request that never completes is indistinguishable from one that failed,
+// except that it also never lets the caller recover: the auth bootstrap would
+// sit on `loading` forever and the offline replay would never move on. A dead
+// mobile radio does exactly this, so every JSON request carries a deadline.
+// Uploads are deliberately exempt (see `upload`).
+const REQUEST_TIMEOUT_MS = 20_000;
+
+function isOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+function isAbort(err: unknown): boolean {
+  // A timeout signal aborts with `TimeoutError`; an explicit
+  // AbortController.abort() with `AbortError`. happy-dom/jsdom may raise a
+  // plain Error rather than a DOMException, so match on `name` either way.
+  const name =
+    err instanceof DOMException || err instanceof Error ? err.name : '';
+  return name === 'AbortError' || name === 'TimeoutError';
+}
+
+function toNetworkError(err: unknown): NetworkError {
+  if (err instanceof NetworkError) return err;
+  if (isAbort(err)) {
+    return new NetworkError(
+      'The server took too long to answer',
+      'timeout',
+      { cause: err },
+    );
+  }
+  if (isOffline()) {
+    return new NetworkError('The device is offline', 'offline', { cause: err });
+  }
+  return new NetworkError('Could not reach the server', 'unreachable', {
+    cause: err,
+  });
+}
+
+/**
+ * A deadline signal, or `undefined` where `AbortSignal.timeout` is missing
+ * (older browsers, some test environments) — the request then behaves exactly
+ * as it did before this was introduced rather than failing outright.
+ */
+function timeoutSignal(ms: number): AbortSignal | undefined {
+  return typeof AbortSignal !== 'undefined' &&
+    typeof AbortSignal.timeout === 'function'
+    ? AbortSignal.timeout(ms)
+    : undefined;
+}
+
 class ApiClient {
   private async request<T>(
     path: string,
     options?: RequestInit,
   ): Promise<T> {
-    const response = await fetch(`${API_BASE_URL}/${path}`, {
-      ...options,
-      credentials: 'include',
-      headers: {
-        'Content-Type': 'application/json',
-        ...options?.headers,
-      },
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE_URL}/${path}`, {
+        signal: timeoutSignal(REQUEST_TIMEOUT_MS),
+        ...options,
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          ...options?.headers,
+        },
+      });
+    } catch (err) {
+      // The server never answered. Never let this reach a caller as an
+      // ApiError — see the NetworkError doc comment above.
+      throw toNetworkError(err);
+    }
 
     if (response.status === 401) {
       throw new ApiError('Unauthorized', 401);
@@ -99,16 +199,25 @@ class ApiClient {
     });
   }
 
+  // No REQUEST_TIMEOUT_MS here on purpose: a spreadsheet import is a
+  // legitimately long upload on a slow link, and a 20s deadline would abort
+  // healthy transfers. Transport failures are still converted, so callers can
+  // discriminate them from a server rejection.
   async upload<T>(path: string, file: File, fieldName = 'file'): Promise<T> {
     const form = new FormData();
     form.append(fieldName, file);
 
-    const response = await fetch(`${API_BASE_URL}/${path}`, {
-      method: 'POST',
-      credentials: 'include',
-      body: form,
-      // Do NOT set Content-Type — browser sets it with boundary
-    });
+    let response: Response;
+    try {
+      response = await fetch(`${API_BASE_URL}/${path}`, {
+        method: 'POST',
+        credentials: 'include',
+        body: form,
+        // Do NOT set Content-Type — browser sets it with boundary
+      });
+    } catch (err) {
+      throw toNetworkError(err);
+    }
 
     if (response.status === 401) {
       throw new ApiError('Unauthorized', 401);

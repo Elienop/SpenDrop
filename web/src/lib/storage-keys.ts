@@ -38,6 +38,21 @@ export const STORAGE_KEYS = {
    * or on 404 from the resume GET.
    */
   importId: 'spendrop-import-id',
+  /**
+   * The last identity that the SERVER confirmed on this device, as JSON
+   * (see `lib/last-user.ts`). Not a credential — no token, no password — it
+   * exists so the offline capture screen is reachable when `GET /auth/me`
+   * cannot complete. Every read of it stays unverified until the server
+   * confirms it again.
+   */
+  lastUser: 'spendrop-last-user',
 } as const;
+
+/**
+ * Prefix (not a full key): the offline write queue for `<userId>` is held for
+ * sign-in. Per user because the queue itself is per user — one member's
+ * expired session must not freeze another's captures on a shared device.
+ */
+export const QUEUE_NEEDS_SIGN_IN_PREFIX = 'spendrop-queue-needs-signin-';
 
 export type StorageKey = (typeof STORAGE_KEYS)[keyof typeof STORAGE_KEYS];

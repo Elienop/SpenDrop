@@ -46,6 +46,7 @@ describe('Sidebar', () => {
     mockedUseAuth.mockReturnValue({
       user: mockUser,
       loading: false,
+      unverified: false,
       login: vi.fn(),
       register: vi.fn(),
       logout: mockLogout,
@@ -194,6 +195,7 @@ describe('Sidebar', () => {
       mockedUseAuth.mockReturnValue({
         user: { ...mockUser, role: 'member' },
         loading: false,
+        unverified: false,
         login: vi.fn(),
         register: vi.fn(),
         logout: mockLogout,
@@ -206,6 +208,7 @@ describe('Sidebar', () => {
       mockedUseAuth.mockReturnValue({
         user: { ...mockUser, role: 'member' },
         loading: false,
+        unverified: false,
         login: vi.fn(),
         register: vi.fn(),
         logout: mockLogout,

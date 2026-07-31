@@ -35,6 +35,11 @@ export function useCurrencies(): UseCurrenciesResult {
     // failure for the session). The focus/reconnect backstop and the SSE
     // `['currencies']` invalidation remain the recovery paths.
     retryOnMount: false,
+    // Same reason as useCategories: the service worker caches
+    // GET /api/currencies for exactly this case, and a query that pauses
+    // itself offline never gives that cache the chance to answer. Without a
+    // base currency the capture screen cannot build a payload at all.
+    networkMode: 'offlineFirst',
   });
 
   const list = query.data ?? [];

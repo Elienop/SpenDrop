@@ -1,4 +1,12 @@
 import { QueryClient } from '@tanstack/react-query';
+import { installOnlineTracking } from './online';
+
+// Teach TanStack's shared onlineManager about `navigator.onLine` BEFORE the
+// client exists. Without this an app launched with no signal believes it is
+// online: its queries fetch, fail, and render empty instead of pausing, and
+// the later 'online' event is swallowed as a no-op so refetchOnReconnect
+// never fires. See lib/online.ts for the full explanation.
+installOnlineTracking();
 
 /**
  * The single app-wide TanStack Query client.

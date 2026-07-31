@@ -1,9 +1,20 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
+import { renderHook, waitFor, act } from '@testing-library/react';
+import {
+  QueryClient,
+  QueryClientProvider,
+  onlineManager,
+} from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { createElement } from 'react';
+import { installOnlineTracking } from '@/lib/online';
 import type { Transaction } from '@/api/types';
+
+const realOnLine = navigator.onLine;
+
+function setNavigatorOnline(value: boolean): void {
+  Object.defineProperty(navigator, 'onLine', { configurable: true, value });
+}
 
 const apiGet = vi.fn();
 vi.mock('@/api/client', async (importOriginal) => ({
@@ -61,13 +72,20 @@ function tx(over: Partial<Transaction>): Transaction {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  setNavigatorOnline(true);
+  onlineManager.setOnline(true);
+});
+
+afterEach(() => {
+  setNavigatorOnline(realOnLine);
+  onlineManager.setOnline(true);
 });
 
 describe('useDescriptionHistory', () => {
   test('returns empty list before the fetch resolves', () => {
     apiGet.mockImplementation(() => new Promise(() => {})); // never resolves
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    expect(result.current).toEqual([]);
+    expect(result.current.descriptions).toEqual([]);
   });
 
   test('ranks distinct descriptions by frequency (desc)', async () => {
@@ -79,8 +97,8 @@ describe('useDescriptionHistory', () => {
       ],
     });
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    await waitFor(() => expect(result.current.length).toBe(2));
-    expect(result.current).toEqual(['lunch', 'coffee']);
+    await waitFor(() => expect(result.current.descriptions.length).toBe(2));
+    expect(result.current.descriptions).toEqual(['lunch', 'coffee']);
   });
 
   test('breaks ties on recency (more recent wins)', async () => {
@@ -92,8 +110,8 @@ describe('useDescriptionHistory', () => {
       ],
     });
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    await waitFor(() => expect(result.current.length).toBe(2));
-    expect(result.current).toEqual(['newer', 'older']);
+    await waitFor(() => expect(result.current.descriptions.length).toBe(2));
+    expect(result.current.descriptions).toEqual(['newer', 'older']);
   });
 
   test('case-insensitive dedupe — collapses to one entry preserving first-seen casing', async () => {
@@ -105,16 +123,58 @@ describe('useDescriptionHistory', () => {
       ],
     });
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    await waitFor(() => expect(result.current.length).toBe(1));
-    expect(result.current).toEqual(['Coffee']);
+    await waitFor(() => expect(result.current.descriptions.length).toBe(1));
+    expect(result.current.descriptions).toEqual(['Coffee']);
   });
 
-  test('silent on fetch error — returns [] and never throws', async () => {
+  // "We couldn't load your history" and "you have no history" look identical
+  // to the user unless the hook says which one happened. Suggestions silently
+  // vanishing reads as "the app has forgotten everything I ever typed".
+  test('reports a fetch error separately from an empty history', async () => {
     apiGet.mockRejectedValue(new Error('boom'));
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    // Give the rejected promise a tick to settle.
+
+    await waitFor(() => expect(result.current.failed).toBe(true));
+    expect(result.current.descriptions).toEqual([]);
+  });
+
+  test('an empty history is not an error', async () => {
+    apiGet.mockResolvedValue({ transactions: [] });
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
+
+    await waitFor(() => expect(apiGet).toHaveBeenCalled());
     await new Promise((r) => setTimeout(r, 10));
-    expect(result.current).toEqual([]);
+    expect(result.current.descriptions).toEqual([]);
+    expect(result.current.failed).toBe(false);
+  });
+
+  test('reports "waiting for a connection" while the query is paused offline', async () => {
+    setNavigatorOnline(false);
+    installOnlineTracking();
+    apiGet.mockResolvedValue({ transactions: [] });
+
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
+
+    await waitFor(() => expect(result.current.waitingForNetwork).toBe(true));
+    // Paused, not failed: there is nothing to retry until the radio is back.
+    expect(result.current.failed).toBe(false);
+    expect(apiGet).not.toHaveBeenCalled();
+  });
+
+  test('retry re-runs the fetch after a failure', async () => {
+    apiGet.mockRejectedValueOnce(new Error('boom'));
+    const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
+    await waitFor(() => expect(result.current.failed).toBe(true));
+
+    apiGet.mockResolvedValueOnce({
+      transactions: [tx({ id: 1, description: 'coffee' })],
+    });
+    act(() => {
+      result.current.retry();
+    });
+
+    await waitFor(() => expect(result.current.descriptions).toEqual(['coffee']));
+    expect(result.current.failed).toBe(false);
   });
 
   test('ignores blank / whitespace-only descriptions', async () => {
@@ -126,8 +186,8 @@ describe('useDescriptionHistory', () => {
       ],
     });
     const { result } = renderHook(() => useDescriptionHistory(), { wrapper: makeWrapper() });
-    await waitFor(() => expect(result.current.length).toBe(1));
-    expect(result.current).toEqual(['lunch']);
+    await waitFor(() => expect(result.current.descriptions.length).toBe(1));
+    expect(result.current.descriptions).toEqual(['lunch']);
   });
 
   test('fetches with per_page=200 sorted by date desc', async () => {

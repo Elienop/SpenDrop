@@ -7,14 +7,32 @@ import {
 } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../api/client';
-import { purgeQueue } from '@/lib/offline-queue';
+import { api, ApiError } from '../api/client';
+import {
+  purgeQueue,
+  markNeedsSignIn,
+  clearNeedsSignIn,
+} from '@/lib/offline-queue';
+import {
+  rememberUser,
+  readRememberedUser,
+  forgetRememberedUser,
+  toUnverifiedUser,
+} from '@/lib/last-user';
 import { getReadyRegistration } from '@/lib/push-sw';
 import type { User } from '../api/types';
 
 interface AuthContextType {
   user: User | null;
   loading: boolean;
+  /**
+   * True when `user` is the identity this device remembers but the server has
+   * NOT confirmed it — because `GET /auth/me` never completed, not because it
+   * said no. An unverified identity exists so offline capture stays reachable;
+   * it must never unlock anything that reads or writes household data. It
+   * clears itself the moment the server answers (see `verifySession`).
+   */
+  unverified: boolean;
   login: (username: string, password: string) => Promise<void>;
   register: (
     username: string,
@@ -29,21 +47,86 @@ const AuthContext = createContext<AuthContextType | null>(null);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [unverified, setUnverified] = useState(false);
   const navigate = useNavigate();
 
-  useEffect(() => {
-    api
-      .get<User>('auth/me')
-      .then((data) => {
-        setUser(data);
-      })
-      .catch(() => {
+  /**
+   * Ask the server who we are, and translate the answer honestly.
+   *
+   * The load-bearing distinction: a 401 is the SERVER saying "you are not
+   * signed in". Anything else — a dropped radio, a timeout, a 502 from the
+   * reverse proxy — is the server saying nothing at all, and must never be
+   * presented to the user as a sign-out. Catching with zero arity (the
+   * original `.catch(() => setUser(null))`) collapsed the two, which is why
+   * driving out of a car park signed the owner out of a session that was
+   * never cancelled.
+   */
+  const verifySession = useCallback(async (): Promise<void> => {
+    try {
+      const data = await api.get<User>('auth/me');
+      const previous = readRememberedUser();
+      if (previous && previous.id !== data.id) {
+        // This device now belongs to somebody else. Anything the previous
+        // person captured stays in THEIR queue, explicitly held — never
+        // stranded silently, and never posted through this session.
+        markNeedsSignIn(previous.id);
+      }
+      rememberUser(data);
+      // A confirmed session releases any hold an earlier expiry left on this
+      // user's queued captures.
+      clearNeedsSignIn(data.id);
+      setUser(data);
+      setUnverified(false);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        // The server answered, and the answer was no.
+        const remembered = readRememberedUser();
+        if (remembered) {
+          // The captures are NOT discarded and NOT replayed: they stay in this
+          // user's own database, held until that same person signs back in.
+          // Draining them under whatever session the device gets next is how a
+          // row ends up filed under the wrong household member.
+          markNeedsSignIn(remembered.id);
+        }
+        forgetRememberedUser();
         setUser(null);
-      })
-      .finally(() => {
-        setLoading(false);
-      });
+        setUnverified(false);
+      } else {
+        // No answer. Fall back to the identity this device last had confirmed
+        // so offline capture is reachable, and flag it as unverified.
+        const remembered = readRememberedUser();
+        setUser(remembered ? toUnverifiedUser(remembered) : null);
+        setUnverified(remembered !== null);
+      }
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void verifySession();
+  }, [verifySession]);
+
+  // Self-healing. Re-ask the server as soon as there is any reason to think it
+  // might answer this time — regained connectivity, or the PWA coming back to
+  // the foreground (a phone resumed from the background does not always fire
+  // 'online'). Without this the app stays stuck in the unverified state until
+  // the user force-quits and relaunches it.
+  useEffect(() => {
+    if (!unverified) return;
+    const retry = (): void => {
+      void verifySession();
+    };
+    const onVisible = (): void => {
+      if (document.visibilityState !== 'hidden') retry();
+    };
+    window.addEventListener('online', retry);
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      window.removeEventListener('online', retry);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [unverified, verifySession]);
 
   const login = useCallback(
     async (username: string, password: string) => {
@@ -51,7 +134,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         username,
         password,
       });
+      rememberUser(data);
+      // Signing back in as the same person releases their held captures, which
+      // then drain on the next trigger (see useOfflineSync).
+      clearNeedsSignIn(data.id);
       setUser(data);
+      setUnverified(false);
       navigate('/');
     },
     [navigate],
@@ -68,7 +156,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         password,
         display_name: displayName,
       });
+      rememberUser(data);
+      clearNeedsSignIn(data.id);
       setUser(data);
+      setUnverified(false);
       navigate('/');
     },
     [navigate],
@@ -127,13 +218,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // EventSource lives inside useLiveUpdates' auth-gated effect, so dropping
       // the user re-runs that effect's cleanup (es.close()). Keep this state
       // clear unconditional — it is the single teardown point for the socket.
+      //
+      // Forget the remembered identity too: a deliberate sign-out must not
+      // leave an offline capture screen reachable for the person who just
+      // left. (Their queue was purged just above; the hold goes with it.)
+      forgetRememberedUser();
       setUser(null);
+      setUnverified(false);
     }
     navigate('/login');
   }, [navigate, user]);
 
   return (
-    <AuthContext.Provider value={{ user, loading, login, register, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, unverified, login, register, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

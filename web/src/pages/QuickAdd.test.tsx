@@ -4,8 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
-import { ApiError } from '@/api/client';
+import { ApiError, NetworkError } from '@/api/client';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import type { UseDescriptionHistoryResult } from '@/hooks/useDescriptionHistory';
 import type { Category, Currency, Transaction } from '../api/types';
 
 // --- Mocks ----------------------------------------------------------------
@@ -134,10 +135,12 @@ vi.mock('../api/client', async (importOriginal) => ({
 const enqueue = vi.fn();
 const removeQueued = vi.fn();
 const getAllQueued = vi.fn();
+const needsSignIn = vi.fn<(userId: number) => boolean>();
 vi.mock('@/lib/offline-queue', () => ({
   enqueue: (...args: unknown[]) => enqueue(...args),
   removeQueued: (...args: unknown[]) => removeQueued(...args),
   getAllQueued: (...args: unknown[]) => getAllQueued(...args),
+  needsSignIn: (userId: number) => needsSignIn(userId),
   subscribe: () => () => {},
 }));
 
@@ -158,10 +161,25 @@ vi.mock('@/hooks/useAuth', () => ({
 // useDescriptionHistory has its own test; stub it here so QuickAdd tests
 // can deterministically inject a list (or empty) and skip the hook's
 // `transactions?...` fetch path.
-const historyMock = vi.fn<() => string[]>();
+const retryHistory = vi.fn();
+const historyMock = vi.fn<() => UseDescriptionHistoryResult>();
 vi.mock('@/hooks/useDescriptionHistory', () => ({
   useDescriptionHistory: () => historyMock(),
 }));
+
+/** The hook's result, defaulting to a healthy load of `descriptions`. */
+function history(
+  descriptions: string[],
+  over: Partial<UseDescriptionHistoryResult> = {},
+): UseDescriptionHistoryResult {
+  return {
+    descriptions,
+    failed: false,
+    waitingForNetwork: false,
+    retry: retryHistory,
+    ...over,
+  };
+}
 
 import { QuickAdd } from './QuickAdd';
 
@@ -202,9 +220,10 @@ beforeEach(() => {
   enqueue.mockResolvedValue(1);
   removeQueued.mockResolvedValue(undefined);
   getAllQueued.mockResolvedValue([]);
+  needsSignIn.mockReturnValue(false);
   // Default: no description history. Individual tests override via
   // `historyMock.mockReturnValue([...])`.
-  historyMock.mockReturnValue([]);
+  historyMock.mockReturnValue(history([]));
 });
 
 describe('QuickAdd — Freeform mode', () => {
@@ -654,6 +673,80 @@ describe('QuickAdd — offline capture', () => {
       await screen.findByText(/2 entries saved on this device/i),
     ).toBeInTheDocument();
   });
+
+  // Promising a sync that cannot happen is worse than saying nothing: the rows
+  // sit there while the owner believes they are on their way.
+  test('asks for a sign-in instead of promising a sync when the queue is held', async () => {
+    getAllQueued.mockResolvedValue([{ id: 1 }]);
+    needsSignIn.mockReturnValue(true);
+    renderQuickAdd();
+
+    expect(
+      await screen.findByText(/sign in to sync/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/will sync when online/i)).toBeNull();
+    expect(screen.getByRole('link', { name: /sign in/i })).toHaveAttribute(
+      'href',
+      '/login',
+    );
+  });
+});
+
+describe('QuickAdd — the server already had this one', () => {
+  // The Retry action on a failed save re-POSTs a write that may well have
+  // landed. The create endpoint detects that the row it just made is identical
+  // to an existing one, so the screen can say so instead of leaving the owner
+  // with a silent duplicate and no idea which copy to delete.
+  test('says so and offers the same Undo when the create reports a duplicate', async () => {
+    apiPost.mockResolvedValueOnce({
+      ...savedTransaction({ id: 123 }),
+      duplicate_of: 77,
+    });
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '43',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(toastSuccess.mock.calls[0][0]).toMatch(/already/i);
+    const [, opts] = toastSuccess.mock.calls[0] as [
+      string,
+      { action?: { label: string; onClick: () => void } },
+    ];
+    // The existing affordance, unchanged: one tap removes the copy just made.
+    expect(opts.action?.label).toMatch(/undo/i);
+    opts.action?.onClick();
+    await waitFor(() =>
+      expect(apiDel).toHaveBeenCalledWith('transactions/123'),
+    );
+  });
+
+  test('an ordinary save is still reported as saved', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent(
+        '43',
+      ),
+    );
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    expect(toastSuccess.mock.calls[0][0]).toMatch(/saved/i);
+    expect(toastSuccess.mock.calls[0][0]).not.toMatch(/already/i);
+  });
 });
 
 describe('QuickAdd — submit failure (online, never queues)', () => {
@@ -680,7 +773,9 @@ describe('QuickAdd — submit failure (online, never queues)', () => {
   });
 
   test('a network failure while "online" prompts retry and does NOT queue', async () => {
-    apiPost.mockRejectedValueOnce(new TypeError('Failed to fetch'));
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -706,9 +801,75 @@ describe('QuickAdd — anti-regression on within import', () => {
   });
 });
 
+// Typing "Cof" and seeing nothing is ambiguous: it reads as "you have never
+// bought coffee". The category panel on this same screen already distinguishes
+// "couldn't load" (message + Retry) from "nothing here yet"; the suggestions
+// strip has to be just as honest.
+describe('QuickAdd — suggestions that could not be loaded', () => {
+  async function typeAPrefix() {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'cof');
+    return user;
+  }
+
+  test('says the history could not be loaded and offers Retry', async () => {
+    historyMock.mockReturnValue(history([], { failed: true }));
+
+    const user = await typeAPrefix();
+
+    expect(
+      await screen.findByText(/couldn’t load your past entries/i),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole('button', { name: /retry past entries/i }),
+    );
+    expect(retryHistory).toHaveBeenCalled();
+  });
+
+  test('says it is waiting for a connection when the fetch is paused offline', async () => {
+    historyMock.mockReturnValue(history([], { waitingForNetwork: true }));
+
+    await typeAPrefix();
+
+    expect(
+      await screen.findByText(/past entries will appear when you reconnect/i),
+    ).toBeInTheDocument();
+    // Nothing to retry — the request has not been attempted.
+    expect(
+      screen.queryByRole('button', { name: /retry past entries/i }),
+    ).toBeNull();
+  });
+
+  test('stays silent when the history simply has nothing to suggest', async () => {
+    historyMock.mockReturnValue(history([]));
+
+    await typeAPrefix();
+
+    expect(
+      screen.queryByText(/couldn’t load your past entries/i),
+    ).toBeNull();
+    expect(
+      screen.queryByText(/past entries will appear when you reconnect/i),
+    ).toBeNull();
+  });
+
+  test('does not nag before the user has typed a description', async () => {
+    historyMock.mockReturnValue(history([], { failed: true }));
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    expect(
+      screen.queryByText(/couldn’t load your past entries/i),
+    ).toBeNull();
+  });
+});
+
 describe('QuickAdd — description suggestions strip (freeform)', () => {
   test('shows matching past descriptions as chips when typing a prefix', async () => {
-    historyMock.mockReturnValue(['lunch', 'lunchbox', 'coffee']);
+    historyMock.mockReturnValue(history(['lunch', 'lunchbox', 'coffee']));
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -735,7 +896,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     // parser then re-splits into description="test" and amount=$2, the
     // opposite of what the user just picked. The round-trip filter must
     // drop these so only suggestions the parser leaves intact are shown.
-    historyMock.mockReturnValue(['tests', 'test 2', 'test #weekly']);
+    historyMock.mockReturnValue(history(['tests', 'test 2', 'test #weekly']));
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -759,7 +920,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
   });
 
   test('tapping a chip rewrites the input to "<suggestion> " (trailing space)', async () => {
-    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    historyMock.mockReturnValue(history(['lunch', 'lunchbox']));
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -776,7 +937,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
   });
 
   test('the strip disappears once an amount is typed', async () => {
-    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    historyMock.mockReturnValue(history(['lunch', 'lunchbox']));
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -799,7 +960,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
   });
 
   test('Tab in the freeform input accepts the first chip when the strip is visible', async () => {
-    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    historyMock.mockReturnValue(history(['lunch', 'lunchbox']));
     const user = userEvent.setup();
     renderQuickAdd();
 
@@ -816,7 +977,7 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
   });
 
   test('switching to tap mode hides the strip (it is freeform-only)', async () => {
-    historyMock.mockReturnValue(['lunch', 'lunchbox']);
+    historyMock.mockReturnValue(history(['lunch', 'lunchbox']));
     const user = userEvent.setup();
     renderQuickAdd();
 

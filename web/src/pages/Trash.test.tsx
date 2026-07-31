@@ -110,6 +110,7 @@ function asAdmin() {
       created_at: '2024-01-01',
     },
     loading: false,
+    unverified: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
@@ -126,6 +127,7 @@ function asMember() {
       created_at: '2024-01-01',
     },
     loading: false,
+    unverified: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
@@ -136,6 +138,7 @@ function asLoading() {
   mockedUseAuth.mockReturnValue({
     user: null,
     loading: true,
+    unverified: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),

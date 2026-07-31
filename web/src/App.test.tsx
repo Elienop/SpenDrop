@@ -104,6 +104,7 @@ describe('App', () => {
       mockedUseAuth.mockReturnValue({
         user: authenticatedUser,
         loading: false,
+        unverified: false,
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),
@@ -154,6 +155,7 @@ describe('App', () => {
       mockedUseAuth.mockReturnValue({
         user: null,
         loading: false,
+        unverified: false,
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),
