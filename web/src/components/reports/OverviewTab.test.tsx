@@ -73,7 +73,7 @@ vi.mock('recharts', () => ({
 }));
 
 import { OverviewTab } from './OverviewTab';
-import { monthsToCoverYear, MAX_REPORT_MONTHS } from './utils';
+import { monthsToCoverYear, MAX_AXIS_TICKS, MAX_REPORT_MONTHS } from './utils';
 
 function setup() {
   return userEvent.setup({
@@ -247,19 +247,59 @@ describe('OverviewTab chart axes', () => {
     vi.clearAllMocks();
   });
 
-  test('the Net Cash Flow axis thins its ticks instead of rendering one per bucket', () => {
-    // `interval={0}` forces Recharts to emit one rotated <text> node per
-    // bucket. At 6 or 12 buckets that is free; at the 516 buckets All time
-    // produces for a 1984 ledger it is the dominant render cost of the tab.
-    // The sibling Income-vs-Expenses BarChart already thins its ticks — this
-    // axis was simply never updated to match.
-    const { container } = render(<OverviewTab />);
+  // Tick thinning must be DERIVED from the bucket count, because both fixed
+  // strategies are wrong at one end of the range:
+  //
+  //   interval={0}              one rotated <text> node per bucket — free at
+  //                             12, the dominant render cost of the tab at the
+  //                             516 buckets All time produces for a 1984 ledger.
+  //   interval="preserveStartEnd"  pins first AND last, thins between. On the
+  //                             AreaChart's point scale the last tick sits hard
+  //                             against the right edge, so its neighbour loses
+  //                             the minTickGap contest: a real 12-month window
+  //                             at 598px rendered 11 ticks, May'26 -> Jul'26.
+  //                             The June point was present and hoverable, only
+  //                             its label gone — nothing looked broken.
+  //
+  // An earlier version of this test asserted data-interval === 'preserveStartEnd',
+  // pinning the second bug as though it were the requirement. Assert the
+  // requirement itself instead: every bucket labelled while they fit, bounded
+  // after that.
+  function seedMonths(count: number) {
+    useIncomeExpenses.mockReturnValue({
+      data: Array.from({ length: count }, (_, i) => ({
+        year: 2026 - Math.floor((count - 1 - i) / 12),
+        month: ((i % 12) + 1),
+        income: 0,
+        expenses: 0,
+        net: 1,
+      })),
+      loading: false,
+      fetching: false,
+      error: '',
+    });
+  }
 
+  function cashFlowInterval(): number {
+    const { container } = render(<OverviewTab />);
     const areaChart = container.querySelector('[data-chart="area"]');
     expect(areaChart).not.toBeNull();
     const axis = within(areaChart as HTMLElement).getByTestId('xaxis');
+    return Number(axis.getAttribute('data-interval'));
+  }
 
-    expect(axis).toHaveAttribute('data-interval', 'preserveStartEnd');
-    expect(axis).toHaveAttribute('data-min-tick-gap', '8');
+  test('the Net Cash Flow axis labels every month of a 12-month window', () => {
+    seedMonths(12);
+    // interval 0 = every bucket. This is the assertion the old test inverted,
+    // and the one that would have caught the missing June.
+    expect(cashFlowInterval()).toBe(0);
+  });
+
+  test('the Net Cash Flow axis thins its ticks for an All-time window', () => {
+    seedMonths(516);
+    const interval = cashFlowInterval();
+    expect(interval).toBeGreaterThan(0);
+    // Bounded, not merely thinned: at most MAX_AXIS_TICKS labels render.
+    expect(Math.ceil(516 / (interval + 1))).toBeLessThanOrEqual(MAX_AXIS_TICKS);
   });
 });
