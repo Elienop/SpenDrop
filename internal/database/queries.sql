@@ -387,25 +387,33 @@ LIMIT ?;
 -- would make "what did I change yesterday" reports lie.
 UPDATE transactions SET content_hash = ? WHERE id = ?;
 
--- name: GetOldestTransactionYear :one
--- Drives the Reports year picker's floor (GET /api/settings/report-year-floor).
--- Household-wide on purpose: the transactions list is visible to every
--- authenticated user (handleListTransactions), so the year picker must span
--- every member's rows or one member cannot select the year another member's
--- imported statement lands in.
+-- name: ListTransactionYears :many
+-- Drives the Reports year picker (GET /api/reports/years). Returns every
+-- calendar year the household's LIVE ledger holds, newest first. The handler
+-- filters and annotates; this query is deliberately unfiltered on year so the
+-- handler can report what it dropped.
 --
--- deleted_at IS NULL per soft-delete discipline: a tombstoned 2015 row does
--- not exist from the user's perspective and must not widen the picker to a
--- year that renders empty.
+-- Household-wide for the same reason ListTransactions is: the
+-- transactions list is visible to every authenticated user, so a picker scoped
+-- to the caller's own rows would hide a year whose amounts are already on
+-- screen in every aggregate.
 --
--- MIN() over zero rows is NULL, so the result is nullable (sql.NullInt64) and
--- the caller supplies the empty-ledger fallback. The extraction mirrors the
--- CAST(strftime('%Y', t.date) AS INTEGER) idiom used by every aggregation in
--- this file: t.date is stored in the driver's RFC3339 text form, so the year
--- must be parsed out rather than compared lexically.
-SELECT CAST(MIN(CAST(strftime('%Y', t.date) AS INTEGER)) AS INTEGER) AS oldest_year
+-- deleted_at IS NULL per soft-delete discipline. This is an inline filter, NOT
+-- an exemption: a tombstoned 2015 row does not exist from the user's
+-- perspective and must not put 2015 in a dropdown that then renders empty.
+--
+-- CAST(strftime('%Y', t.date) AS INTEGER) is the same idiom every aggregation
+-- in this file uses to bucket by year. It has to be: a picker that derived
+-- years differently from how the aggregates bucket them could offer a year
+-- whose report comes back empty. t.date is stored in the driver's RFC3339 text
+-- form, so the year is parsed out rather than compared lexically.
+--
+-- Zero rows is a real state (fresh install, or everything in the trash), not
+-- an error; the handler supplies the current-year fallback.
+SELECT DISTINCT CAST(strftime('%Y', t.date) AS INTEGER) AS year
 FROM transactions t
-WHERE t.deleted_at IS NULL;
+WHERE t.deleted_at IS NULL
+ORDER BY year DESC;
 
 -- Budgets
 

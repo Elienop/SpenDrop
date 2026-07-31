@@ -33,6 +33,18 @@ type reportYearFloorResponse struct {
 // handleReportYearFloor reports the oldest year the Reports year picker should
 // offer, derived from the ledger instead of a hard-coded constant.
 //
+// Deprecated: use GET /api/reports/years, which returns the years the ledger
+// actually holds instead of a contiguous range implied by one floor, and which
+// names the years it had to drop rather than swallowing them behind a boolean.
+//
+// This route is kept, and kept BYTE-IDENTICAL on the wire, because an
+// installed PWA keeps serving its cached bundle until its service worker
+// updates: a client that shipped before /api/reports/years existed is still
+// calling this path, and removing or altering it would break the year picker
+// on a phone the user has not reopened in a week. It is now one query with two
+// views — it reads ListTransactionYears, the same source /api/reports/years
+// reads, so the two can never disagree about what is in the ledger.
+//
 // Why this endpoint exists: the picker's floor used to be
 // HISTORICAL_YEAR_START = 2024 in web/src/lib/dates.ts, while the importer
 // deliberately accepts 1900-2100 so historic bank statements can be loaded. A
@@ -76,20 +88,25 @@ func (h *Handler) handleReportYearFloor(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	oldest, err := h.queries.GetOldestTransactionYear(r.Context())
+	// Same query as GET /api/reports/years. It returns DISTINCT live years
+	// newest-first, so the last element is the ledger's minimum — exactly what
+	// the MIN() aggregate this used to run returned, and derived through the
+	// identical CAST(strftime('%Y', t.date) AS INTEGER) idiom.
+	ledgerYears, err := h.queries.ListTransactionYears(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get report year floor")
 		return
 	}
 
+	hasTransactions := len(ledgerYears) > 0
 	currentYear := h.clock.Now().Year()
 
 	// Empty-ledger fallback.
 	floor := currentYear
 	clamped := false
 
-	if oldest.Valid {
-		floor = int(oldest.Int64)
+	if hasTransactions {
+		floor = int(ledgerYears[len(ledgerYears)-1])
 		// Reported off the RAW oldest year, before any clamping: the claim is
 		// "the household has live rows the picker cannot reach", and that is
 		// true regardless of what the floor is subsequently pulled up to.
@@ -102,13 +119,17 @@ func (h *Handler) handleReportYearFloor(w http.ResponseWriter, r *http.Request) 
 	// Applied last so the contract's invariant — floor_year is always a year
 	// the year-param endpoints accept — holds on every path, including the
 	// fallback under a misconfigured server clock.
+	//
+	// PlanningMinYear, not MinDataYear, and deliberately so: this is a frozen
+	// wire contract, not a live constraint. The reports would accept 1900 now,
+	// but a cached client bundle reads floor_year expecting the old semantics.
 	if floor < PlanningMinYear {
 		floor = PlanningMinYear
 	}
 
 	writeJSON(w, http.StatusOK, reportYearFloorResponse{
 		FloorYear:       floor,
-		HasTransactions: oldest.Valid,
+		HasTransactions: hasTransactions,
 		Clamped:         clamped,
 	})
 }

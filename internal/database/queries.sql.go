@@ -583,29 +583,6 @@ func (q *Queries) GetCurrency(ctx context.Context, code string) (Currency, error
 	return i, err
 }
 
-const getOldestTransactionYear = `-- name: GetOldestTransactionYear :one
-SELECT CAST(MIN(CAST(strftime('%Y', t.date) AS INTEGER)) AS INTEGER) AS oldest_year
-FROM transactions t
-WHERE t.deleted_at IS NULL
-`
-
-// GetOldestTransactionYear returns the calendar year of the oldest LIVE transaction in the
-// ledger, household-wide. Drives the Reports year picker's floor.
-//
-// The result is nullable and INVALID means "the ledger has no live rows at
-// all" - MIN() over zero rows is NULL. That is a real state (a fresh install,
-// or every row in the trash), not an error, so the caller decides the
-// fallback rather than this returning a misleading 0.
-//
-// deleted_at IS NULL keeps tombstoned rows from widening the picker to a year
-// the user would find empty (soft-delete discipline).
-func (q *Queries) GetOldestTransactionYear(ctx context.Context) (sql.NullInt64, error) {
-	row := q.db.QueryRowContext(ctx, getOldestTransactionYear)
-	var oldest_year sql.NullInt64
-	err := row.Scan(&oldest_year)
-	return oldest_year, err
-}
-
 const getSavingsGoal = `-- name: GetSavingsGoal :one
 
 SELECT id, year, updated_at, target_amount_cents FROM savings_goals WHERE year = ?
@@ -1382,6 +1359,54 @@ func (q *Queries) ListTransactionAuditByID(ctx context.Context, arg ListTransact
 		}
 		items = append(items, i)
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listTransactionYears = `-- name: ListTransactionYears :many
+SELECT DISTINCT CAST(strftime('%Y', t.date) AS INTEGER) AS year
+FROM transactions t
+WHERE t.deleted_at IS NULL
+ORDER BY year DESC
+`
+
+// ListTransactionYears returns every calendar year the household's LIVE ledger holds,
+// newest first. Drives the Reports year picker (GET /api/reports/years).
+//
+// Deliberately unfiltered on year: the handler applies the reportable window
+// and reports what it dropped, so a legacy row from a year no report accepts
+// is surfaced rather than silently vanishing.
+//
+// An empty slice is a real state (fresh install, or every row in the trash),
+// not an error - the caller supplies the current-year fallback.
+//
+// deleted_at IS NULL keeps a tombstoned row from putting its year in a
+// dropdown that would then render empty (soft-delete discipline).
+//
+// The year is extracted with the same CAST(strftime('%Y', t.date) AS INTEGER)
+// idiom every aggregation in this file uses to bucket by year. Deriving it any
+// other way could offer a year whose report comes back empty.
+func (q *Queries) ListTransactionYears(ctx context.Context) ([]int64, error) {
+	rows, err := q.db.QueryContext(ctx, listTransactionYears)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int64{}
+	for rows.Next() {
+		var year int64
+		if err := rows.Scan(&year); err != nil {
+			return nil, err
+		}
+		items = append(items, year)
+	}
+	// Explicit close before returning: SetMaxOpenConns(1) means an open cursor
+	// blocks the next query on the same connection.
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
