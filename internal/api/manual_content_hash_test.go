@@ -179,6 +179,39 @@ func TestHandleCreateTransaction_ConcurrentIdenticalCreatesAllSucceed(t *testing
 					round, i, rec.Code, rec.Body.String())
 			}
 		}
+
+		// Wire contract under contention: exactly one response anchors the
+		// identity (no duplicate_of) and every other must name that row, so the
+		// user is told which entry the retry duplicated.
+		//
+		// This is the only coverage the UNIQUE-violation recovery's id lookup
+		// gets. A worker that LOSES the race never saw the winner through the
+		// advisory probe — it learns the anchor's id only by re-reading after
+		// the failed insert, and that re-read is what this asserts. The probe
+		// path is covered deterministically in duplicate_of_test.go.
+		var anchorID int64
+		anchors := 0
+		dupTargets := make([]int64, 0, workers)
+		for _, rec := range recs {
+			m := decodeObject(t, rec)
+			if id, present := duplicateOf(t, m); present {
+				dupTargets = append(dupTargets, id)
+				continue
+			}
+			anchors++
+			anchorID = idOf(t, m)
+		}
+		if anchors != 1 {
+			t.Fatalf("round %d: %d of %d responses omitted duplicate_of, want exactly 1 "+
+				"(one row anchors the identity, the rest are duplicates of it)",
+				round, anchors, workers)
+		}
+		for _, target := range dupTargets {
+			if target != anchorID {
+				t.Fatalf("round %d: duplicate_of = %d, want %d (the row holding the hash)",
+					round, target, anchorID)
+			}
+		}
 	}
 
 	// Status codes alone are not enough — a 201 whose row had been rolled

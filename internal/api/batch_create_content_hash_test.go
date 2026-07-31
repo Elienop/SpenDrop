@@ -37,10 +37,15 @@ func contentHashesByDescription(t *testing.T, h *Handler) map[string][]sql.NullS
 // for the dedupe fix reaching only one of the two create paths.
 //
 // Single-create computes a content_hash so import dedupe can see hand-entered
-// rows. Batch-create did not, leaving content_hash NULL — and batch-create is
-// what the mobile quick-add and the offline queue drain into. Re-importing a
-// spreadsheet containing those entries therefore duplicated every one of them,
-// which is the exact bug the single-path fix was written to stop.
+// rows. Batch-create did not, leaving content_hash NULL, so re-importing a
+// spreadsheet containing those entries duplicated every one of them — the exact
+// bug the single-path fix was written to stop.
+//
+// This comment used to claim the mobile quick-add and the offline queue drain
+// into batch-create. They do not: both post to POST /api/transactions
+// (web/src/hooks/useQuickAdd.ts, web/src/lib/offline-queue.ts), and nothing
+// under web/src calls POST /api/transactions/batch at all. The false claim
+// misdirected a later analysis, so it is corrected rather than deleted.
 func TestHandleBatchCreateTransactions_AssignsContentHash(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "member", "member")
