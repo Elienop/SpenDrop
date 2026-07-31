@@ -1371,7 +1371,7 @@ func (q *Queries) ListTransactionAuditByID(ctx context.Context, arg ListTransact
 const listTransactionYears = `-- name: ListTransactionYears :many
 SELECT DISTINCT CAST(strftime('%Y', t.date) AS INTEGER) AS year
 FROM transactions t
-WHERE t.deleted_at IS NULL
+WHERE t.deleted_at IS NULL AND strftime('%Y', t.date) IS NOT NULL
 ORDER BY year DESC
 `
 

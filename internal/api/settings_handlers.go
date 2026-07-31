@@ -89,9 +89,18 @@ func (h *Handler) handleReportYearFloor(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Same query as GET /api/reports/years. It returns DISTINCT live years
-	// newest-first, so the last element is the ledger's minimum — exactly what
-	// the MIN() aggregate this used to run returned, and derived through the
-	// identical CAST(strftime('%Y', t.date) AS INTEGER) idiom.
+	// newest-first, so the last element is the ledger's minimum, derived
+	// through the identical CAST(strftime('%Y', t.date) AS INTEGER) idiom.
+	//
+	// It is NOT unconditionally "whatever the MIN() aggregate this replaced
+	// returned" — that claim was measured false. MIN() skips NULLs for free;
+	// a row scan into int64 does not, so a date SQLite cannot parse used to be
+	// ignored and would instead have failed this whole request with
+	// "converting NULL to int64 is unsupported" — a 500 where the aggregate
+	// returned 200. ListTransactionYears now filters strftime IS NOT NULL to
+	// restore that behaviour explicitly. Keep the filter and this note
+	// together: the equivalence holds because the query enforces it, not
+	// because the two shapes are naturally the same.
 	ledgerYears, err := h.queries.ListTransactionYears(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get report year floor")

@@ -135,8 +135,18 @@ func TestReportYears_HidesTombstoned(t *testing.T) {
 
 	seedTestTransaction(t, q, user.ID, cat.ID, "2019-03-15", 42, "live")
 	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "1984-06-01", 999, "trashed")
+	// A SECOND tombstone, deliberately out-of-window. partitionReportYears
+	// routes each year to exactly one bucket, so an in-window tombstone can
+	// only ever exercise the `years` assertion below — leaving the
+	// out_of_range_years assertion dead against a tombstone leak in the query.
+	// This row is what makes that second assertion load-bearing, and it covers
+	// the case nothing else in this file does: a trashed row from a year no
+	// report accepts must be invisible, not merely unreachable.
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "3021-01-02", 998, "trashed far future")
 
-	years := yearsField(t, getReportYears(t, h, user), "years")
+	resp := getReportYears(t, h, user)
+	years := yearsField(t, resp, "years")
+	out := yearsField(t, resp, "out_of_range_years")
 
 	if containsYear(years, 1984) {
 		t.Errorf("years = %v — a tombstoned 1984 row must not put 1984 in the picker; "+
@@ -145,10 +155,59 @@ func TestReportYears_HidesTombstoned(t *testing.T) {
 	if !containsYear(years, 2019) {
 		t.Errorf("years = %v, want 2019 present", years)
 	}
-	// It is not an out-of-RANGE year either: it does not exist at all.
-	if out := yearsField(t, getReportYears(t, h, user), "out_of_range_years"); containsYear(out, 1984) {
+	// Neither tombstone is an out-of-RANGE year: they do not exist at all.
+	if containsYear(out, 1984) {
 		t.Errorf("out_of_range_years = %v — a tombstoned row is deleted, not unreachable; "+
 			"reporting it would tell the user data is hidden when they threw it away", out)
+	}
+	if containsYear(out, 3021) {
+		t.Errorf("out_of_range_years = %v — a tombstoned row outside the reportable "+
+			"window is still deleted; the trash is not a source of out-of-range years", out)
+	}
+	if containsYear(years, 3021) {
+		t.Errorf("years = %v — 3021 is both tombstoned and unreportable", years)
+	}
+}
+
+// TestReportYears_ToleratesUnparseableDate pins that one corrupt date does not
+// take down the whole endpoint.
+//
+// The query scans rows into a bare int64. SQLite returns NULL from strftime
+// for a date text it cannot parse, and a row scan — unlike the MIN() aggregate
+// this replaced — cannot absorb that: it fails the entire query with
+// "converting NULL to int64 is unsupported". Without the strftime IS NOT NULL
+// filter, a single such row 500s BOTH this endpoint and the report-year-floor
+// shim built on the same query, where the old aggregate returned 200.
+//
+// No write path can currently produce such a row (every one binds a time.Time,
+// and validateDate accepts only 4-digit years), so this is reachable through
+// hand-edited databases and foreign tooling. That is precisely the class of row
+// this endpoint's out-of-window reporting exists to surface rather than crash
+// on, which is why tolerating it is the correct behaviour and not leniency.
+func TestReportYears_ToleratesUnparseableDate(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)})
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Groceries "+t.Name(), "expense")
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2019-03-15", 42, "live")
+	poisoned := seedTestTransaction(t, q, user.ID, cat.ID, "2020-05-05", 7, "corrupt date")
+
+	// Bypass every validator, exactly as sqlite3 surgery or a foreign import
+	// tool would. "not-a-date" is unparseable by strftime, which yields NULL.
+	if _, err := db.Exec(`UPDATE transactions SET date = ? WHERE id = ?`, "not-a-date", poisoned.ID); err != nil {
+		t.Fatalf("seeding the corrupt row failed: %v", err)
+	}
+
+	resp := getReportYears(t, h, user)
+	years := yearsField(t, resp, "years")
+
+	if !containsYear(years, 2019) {
+		t.Errorf("years = %v, want 2019 present — one unparseable date must not "+
+			"suppress the years that ARE readable", years)
+	}
+	if !containsYear(years, 2026) {
+		t.Errorf("years = %v, want the current year present", years)
 	}
 }
 

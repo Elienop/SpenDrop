@@ -410,9 +410,21 @@ UPDATE transactions SET content_hash = ? WHERE id = ?;
 --
 -- Zero rows is a real state (fresh install, or everything in the trash), not
 -- an error; the handler supplies the current-year fallback.
+--
+-- strftime IS NOT NULL is load-bearing, not defensive noise. SQLite returns
+-- NULL for a date text it cannot parse, and this is a row scan into a bare
+-- int64, so one such row fails the whole query with "converting NULL to int64
+-- is unsupported" — a 500 on BOTH this endpoint and the report-year-floor shim
+-- built on it. The MIN() aggregate this replaced ignored NULLs for free, so
+-- omitting the filter is a silent regression against that behaviour rather
+-- than new strictness. No write path can currently produce such a row (every
+-- one binds a time.Time, and validateDate accepts only 4-digit years), so this
+-- guards against hand-edited databases and foreign tooling — the same class
+-- of row the handler's out-of-window reporting exists to surface rather than
+-- crash on.
 SELECT DISTINCT CAST(strftime('%Y', t.date) AS INTEGER) AS year
 FROM transactions t
-WHERE t.deleted_at IS NULL
+WHERE t.deleted_at IS NULL AND strftime('%Y', t.date) IS NOT NULL
 ORDER BY year DESC;
 
 -- Budgets
