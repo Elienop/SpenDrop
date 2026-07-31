@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -36,6 +37,16 @@ import (
 // value (a typed decode would just zero-fill it).
 func getReportYears(t *testing.T, h *Handler, user database.User) map[string]any {
 	t.Helper()
+	resp, _ := getReportYearsRaw(t, h, user)
+	return resp
+}
+
+// getReportYearsRaw additionally returns the response body verbatim, which is
+// the only way to tell an empty JSON array apart from `null`: both decode into
+// a `map[string]any` entry, and `null` is the one that unmounts the Reports
+// page when the consumer reads `.length` off it.
+func getReportYearsRaw(t *testing.T, h *Handler, user database.User) (map[string]any, string) {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/api/reports/years", nil)
 	req = withUser(req, user)
 	rec := httptest.NewRecorder()
@@ -45,9 +56,10 @@ func getReportYears(t *testing.T, h *Handler, user database.User) map[string]any
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
+	body := rec.Body.String()
 	var resp map[string]any
 	decodeResponse(t, rec, &resp)
-	return resp
+	return resp, body
 }
 
 // yearsField pulls a []int out of the decoded body, failing loudly when the
@@ -124,6 +136,9 @@ func TestReportYears_ListsLedgerYearsNewestFirst(t *testing.T) {
 	}
 	if out := yearsField(t, resp, "out_of_range_years"); len(out) != 0 {
 		t.Errorf("out_of_range_years = %v, want empty — every seeded year is reportable", out)
+	}
+	if fut := yearsField(t, resp, "future_years"); len(fut) != 0 {
+		t.Errorf("future_years = %v, want empty — every seeded year is in the past", fut)
 	}
 }
 
@@ -232,9 +247,174 @@ func TestReportYears_ExcludesFutureYears(t *testing.T) {
 	if !containsYear(years, 2026) {
 		t.Errorf("years = %v, want the current year present", years)
 	}
-	if out := yearsField(t, resp, "out_of_range_years"); !containsYear(out, 2030) {
-		t.Errorf("out_of_range_years = %v, want 2030 — a filtered year must be REPORTED, "+
-			"or the planned row silently vanishes from the UI's view of the ledger", out)
+	if fut := yearsField(t, resp, "future_years"); !containsYear(fut, 2030) {
+		t.Errorf("future_years = %v, want 2030 — a filtered year must be REPORTED, "+
+			"or the planned row silently vanishes from the UI's view of the ledger", fut)
+	}
+	if out := yearsField(t, resp, "out_of_range_years"); containsYear(out, 2030) {
+		t.Errorf("out_of_range_years = %v — 2030 is inside [%d, %d]; calling it out of range "+
+			"tells the user their deliberate plan is corrupt data", out, MinDataYear, MaxDataYear)
+	}
+}
+
+// --- the two causes, kept apart ---
+//
+// `out_of_range_years` and `future_years` used to be one list, and that list
+// conflated a DEFECT with a FEATURE. Measured against a live server (binary
+// built from this tree, throwaway DB, rows seeded past the API's own
+// validator):
+//
+//	GET /api/reports/years
+//	  {"years":[2026],"current_year":2026,"has_transactions":true,
+//	   "out_of_range_years":[3021,2027,1850]}
+//
+//	              1850      3021      2027
+//	  budget-vs-actual?year=   400       400       200, actual=999 in month 3
+//	  dashboard/summary?year=  400       400       200, savings_ytd=-999
+//	  spending-heatmap?year=   400       400       200, contains 999
+//
+// So 1850 and 3021 are unreachable in a way 2027 is not: every year-param
+// endpoint REFUSES them, and no future clock will change that. 2027 is refused
+// by nothing — only the picker's own cap keeps it out, and that cap lifts on
+// its own when 2027 arrives (TestReportYears_FutureYearBecomesOfferableWhenItArrives).
+//
+// Reporting them under one key is what made the Reports notice tell a user
+// their deliberate 2027 bill was a data problem.
+
+// TestReportYears_FutureInWindowYear_IsFutureNotOutOfRange is the split itself.
+//
+// SEEDED WITH THE FUTURE ROW ALONE, deliberately. Adding a current-year row
+// would make `years` contain 2026 whether the clamp ran or not, and would let
+// `has_transactions` pass on the wrong row — the assertions below only mean
+// something on a ledger whose ONLY row is the future one.
+func TestReportYears_FutureInWindowYear_IsFutureNotOutOfRange(t *testing.T) {
+	h, q, user, cat := reportYearsFixture(t)
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2027-03-04", 999, "planned bill")
+
+	resp := getReportYears(t, h, user)
+
+	if fut := yearsField(t, resp, "future_years"); len(fut) != 1 || fut[0] != 2027 {
+		t.Errorf("future_years = %v, want [2027]", fut)
+	}
+	if out := yearsField(t, resp, "out_of_range_years"); len(out) != 0 {
+		t.Errorf("out_of_range_years = %v, want empty — 2027 is inside [%d, %d], so it is "+
+			"planning, not corruption; the notice words the two differently", out, MinDataYear, MaxDataYear)
+	}
+	if years := yearsField(t, resp, "years"); len(years) != 1 || years[0] != 2026 {
+		t.Errorf("years = %v, want [2026] — the future year is still not OFFERABLE today", years)
+	}
+	if has, ok := resp["has_transactions"].(bool); !ok || !has {
+		t.Errorf("has_transactions = %v, want true — the planned row exists", resp["has_transactions"])
+	}
+}
+
+// TestReportYears_OutOfWindowFutureYear_IsOutOfRangeOnly pins the PRECEDENCE
+// rule. 3021 qualifies under both causes; the window violation is the more
+// actionable fact (every year-param endpoint 400s on it, forever), so it is
+// reported there and nowhere else. Listing it twice would name the same year
+// in two sentences of one notice, one of which — "reports cover up to 2026,
+// this will appear later" — is a promise the endpoint can never keep.
+func TestReportYears_OutOfWindowFutureYear_IsOutOfRangeOnly(t *testing.T) {
+	h, q, user, cat := reportYearsFixture(t)
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "3021-01-02", 888, "legacy, above the window")
+
+	resp := getReportYears(t, h, user)
+
+	if out := yearsField(t, resp, "out_of_range_years"); len(out) != 1 || out[0] != 3021 {
+		t.Errorf("out_of_range_years = %v, want [3021]", out)
+	}
+	if fut := yearsField(t, resp, "future_years"); len(fut) != 0 {
+		t.Errorf("future_years = %v, want empty — 3021 is out of range FIRST; it must be "+
+			"named once, not in both halves of the notice", fut)
+	}
+}
+
+// TestReportYears_BothYearArraysAreEmptyNotNull guards the wire shape for the
+// ordinary household. A nil Go slice marshals to `null`, the hook's `?? []`
+// only covers a MISSING key, and `null.length` throws — React then unmounts
+// the whole Reports page with no error on screen.
+//
+// Asserted against the RAW body: `null` and `[]` both land in a
+// `map[string]any` and only the bytes tell them apart.
+func TestReportYears_BothYearArraysAreEmptyNotNull(t *testing.T) {
+	h, q, user, cat := reportYearsFixture(t)
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-02-02", 10, "ordinary")
+
+	resp, body := getReportYearsRaw(t, h, user)
+
+	for _, key := range []string{"out_of_range_years", "future_years"} {
+		raw, ok := resp[key]
+		if !ok {
+			t.Fatalf("response has no %q key: %s", key, body)
+		}
+		if raw == nil {
+			t.Errorf("%s is JSON null — the consumer reads .length off it and unmounts the page; body: %s", key, body)
+			continue
+		}
+		if list, ok := raw.([]any); !ok || len(list) != 0 {
+			t.Errorf("%s = %v, want an empty array; body: %s", key, raw, body)
+		}
+		if strings.Contains(body, `"`+key+`":null`) {
+			t.Errorf("body encodes %s as null: %s", key, body)
+		}
+	}
+}
+
+// TestReportYears_TombstonedFutureRow_IsInNeitherArray — a planned row that was
+// deleted is gone, not "unreachable". Naming it would tell the user their
+// reports are hiding something they threw away themselves.
+func TestReportYears_TombstonedFutureRow_IsInNeitherArray(t *testing.T) {
+	h, q, user, cat := reportYearsFixture(t)
+
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-02-02", 10, "live")
+	seedTombstonedTestTransaction(t, q, user.ID, cat.ID, "2027-03-04", 999, "cancelled plan")
+
+	resp := getReportYears(t, h, user)
+
+	if fut := yearsField(t, resp, "future_years"); containsYear(fut, 2027) {
+		t.Errorf("future_years = %v — the 2027 row is tombstoned; it does not exist to the user", fut)
+	}
+	if out := yearsField(t, resp, "out_of_range_years"); containsYear(out, 2027) {
+		t.Errorf("out_of_range_years = %v — a tombstoned row is deleted, not out of range", out)
+	}
+	if years := yearsField(t, resp, "years"); containsYear(years, 2027) {
+		t.Errorf("years = %v — 2027 is both tombstoned and in the future", years)
+	}
+}
+
+// TestReportYears_FutureYearBecomesOfferableWhenItArrives is the measurement
+// behind the notice's one forward-looking claim: that a future-dated row shows
+// up on its own once that year begins. Same ledger, clock advanced one year —
+// 2027 moves out of `future_years` and into `years`.
+//
+// The other half of that claim was measured against the live server: with the
+// 2027 sentinel seeded, budget-vs-actual?year=2027 already returns
+// actual=999 in month 3 and dashboard/summary?year=2027 returns
+// savings_ytd=-999. So nothing but the picker's cap is withholding the row,
+// and this test is what proves the cap lifts.
+func TestReportYears_FutureYearBecomesOfferableWhenItArrives(t *testing.T) {
+	q, db := setupTestDB(t)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Groceries "+t.Name(), "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2027-03-04", 999, "planned bill")
+
+	before := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 12, 31, 23, 0, 0, 0, time.UTC)})
+	if fut := yearsField(t, getReportYears(t, before, user), "future_years"); !containsYear(fut, 2027) {
+		t.Fatalf("future_years = %v on 2026-12-31, want 2027 — the premise of this test", fut)
+	}
+
+	after := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2027, 1, 1, 1, 0, 0, 0, time.UTC)})
+	resp := getReportYears(t, after, user)
+
+	if years := yearsField(t, resp, "years"); !containsYear(years, 2027) {
+		t.Errorf("years = %v on 2027-01-01, want 2027 offered — the notice promises the row "+
+			"appears once the year begins, and this is the only thing that keeps that promise", years)
+	}
+	if fut := yearsField(t, resp, "future_years"); len(fut) != 0 {
+		t.Errorf("future_years = %v on 2027-01-01, want empty — 2027 is no longer in the future", fut)
 	}
 }
 
@@ -270,9 +450,13 @@ func TestReportYears_ExcludesOutOfWindowYears(t *testing.T) {
 		}
 	}
 	// Newest first, and no duplicates: 3021 qualifies on both the window and
-	// the future rule.
+	// the future rule, and the window wins (see
+	// TestReportYears_OutOfWindowFutureYear_IsOutOfRangeOnly).
 	if len(out) != 2 || out[0] != 3021 || out[1] != 1850 {
 		t.Errorf("out_of_range_years = %v, want [3021 1850] exactly (newest first, no duplicates)", out)
+	}
+	if fut := yearsField(t, resp, "future_years"); len(fut) != 0 {
+		t.Errorf("future_years = %v, want empty — 3021 is out of range, not merely planned", fut)
 	}
 }
 
