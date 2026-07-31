@@ -592,16 +592,8 @@ export interface ReportYearsResponse {
   out_of_range_years: number[];
 }
 
-/**
- * Wire contract of `GET /api/settings/report-year-floor`.
- *
- * @deprecated Superseded by {@link ReportYearsResponse}. The route itself
- * stays for one more release — a stale PWA bundle keeps calling it until its
- * service worker updates, and 404ing it would degrade those users to a
- * one-year picker — but nothing in this app should read it any more.
- */
-export interface ReportYearFloorResponse {
-  floor_year: number;
-  has_transactions: boolean;
-  clamped: boolean;
-}
+// `ReportYearFloorResponse` (GET /api/settings/report-year-floor) lived here
+// and is gone: nothing in this app reads that route any more. The ROUTE itself
+// deliberately stays on the server for one more release — a stale PWA bundle
+// keeps calling it until its service worker updates, and 404ing it now would
+// degrade those users to a one-year picker.

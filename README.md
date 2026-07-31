@@ -73,12 +73,14 @@ A **Recently added** list on the capture screen shows your last few entries (sti
 
 Four report tabs covering different angles of your finances:
 
-- **Overview** -- Income vs Expenses bar chart, Net Cash Flow line chart, Budget vs Actual comparison
+- **Overview** -- Income vs Expenses bar chart, Net Cash Flow line chart, Budget vs Actual comparison. The time-period control offers 6 / 12 / 24 months or **All time**, which widens the window to reach the oldest year your ledger holds
 - **Spending** -- Category breakdown (horizontal bars), category trends over time (multi-line), top merchants table
 - **Savings** -- Savings goals and progress tracking
 - **Patterns** -- Expense velocity and spending pattern analysis
 
-Every year picker on this page goes back as far as your data does, not a fixed number of years: the oldest year offered comes from the household's own transactions, so an imported 2019 bank statement is selectable the moment it lands. Import accepts dates back to 1900 but the pickers stop at 2000; if you have rows older than that, Reports says so -- those rows stay in your ledger and in the Transactions list, but they are **not** included in the report totals you can see, because no report window the pickers can request reaches them.
+Every year picker on this page -- and the one on the Dashboard -- offers exactly the years your ledger actually holds, newest first. An imported 1984 bank statement is selectable the moment it lands, and years with no transactions are not offered at all, so a household with rows in 1984 and 2026 gets two options rather than forty-three.
+
+Transaction dates are accepted from 1900 to 2100. If your ledger holds a row outside that range, or one dated in the future, Reports names those years explicitly -- the rows stay in your ledger and in the Transactions list, but their years cannot be selected and their amounts are **not** in any total the reports show, including All time.
 
 ![Reports Overview](docs/screenshots/03-reports-overview.png)
 ![Reports Spending](docs/screenshots/04-reports-spending.png)
