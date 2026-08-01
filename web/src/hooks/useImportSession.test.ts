@@ -74,9 +74,32 @@ function freshPreviewBody(importID: string) {
     columns: ['Date', 'Description', 'Amount', 'Category'],
     unique_categories: ['Food'],
     collision_groups: [],
+    // Present on EVERY preview the backend emits — upload, PATCH and
+    // GET alike — so this fixture carries it too. Omitting it on a
+    // PATCH or GET reply would model the disappearing-flag bug rather
+    // than the fixed behaviour: `applyResponse` spreads the response
+    // wholesale, so a missing key lands as `undefined` and silently
+    // clears every flag while confirm keeps refusing the import.
+    field_errors: [] as { row_id: number; field: string; message: string }[],
     expires_at: '2099-01-01T00:00:00Z',
   };
 }
+
+/**
+ * The exact strings `importFieldLengthMessage` emits in
+ * internal/api/import_handlers.go. Mirrored here ONLY as test input —
+ * production renders whatever the wire carries — so that fixtures look
+ * like real responses. `validateImportField` returns these same strings
+ * for its PATCH 400s, which is why a test cannot tell the two sources
+ * apart by wording alone.
+ */
+const SERVER_FIELD_MESSAGES: Record<string, string> = {
+  description:
+    'Too long for SpenDrop, which stores 500 characters. Shorten it here, or skip this row.',
+  tags: "This row's tags are longer than the 500 characters SpenDrop stores. Skip this row, or shorten them in your spreadsheet and upload again.",
+  notes:
+    "This row's note is longer than the 2,000 characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.",
+};
 
 describe('useImportSession', () => {
   beforeEach(() => {
@@ -420,5 +443,259 @@ describe('useImportSession', () => {
     // every member. The `canImport` flag is computed from the rows'
     // skip state, not from `collision_groups.length`.
     expect(result.current.preview?.collision_groups).toHaveLength(1);
+  });
+
+  describe('over-length field errors', () => {
+    /**
+     * Preview response carrying the given field errors on the 2-row
+     * fixture. Every error gets the server's own message, because the
+     * server sends one on every error — a fixture without it would be
+     * testing a response shape the backend cannot produce.
+     */
+    function bodyWithFieldErrors(
+      fieldErrors: { row_id: number; field: string }[],
+      rowOverrides: Partial<{ skip: boolean }>[] = [],
+    ) {
+      const base = freshPreviewBody('abc');
+      return {
+        ...base,
+        rows: base.rows.map((r, i) => ({ ...r, ...(rowOverrides[i] ?? {}) })),
+        field_errors: fieldErrors.map((fe) => ({
+          ...fe,
+          message: SERVER_FIELD_MESSAGES[fe.field],
+        })),
+      };
+    }
+
+    async function uploadWith(body: unknown) {
+      installFetchQueue([{ body }]);
+      const { result } = renderHook(() => useImportSession());
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      return result;
+    }
+
+    it('blocks import straight from the upload response, before any confirm', async () => {
+      const result = await uploadWith(
+        bodyWithFieldErrors([{ row_id: 0, field: 'description' }]),
+      );
+
+      expect(result.current.fieldErrorRowCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+      // Not a collision — the two blockers are counted separately so the
+      // status line can name the right one.
+      expect(result.current.unresolvedCount).toBe(0);
+    });
+
+    it('counts rows, not errors — one row with two bad fields is one row to fix', async () => {
+      const result = await uploadWith(
+        bodyWithFieldErrors([
+          { row_id: 0, field: 'description' },
+          { row_id: 0, field: 'notes' },
+        ]),
+      );
+
+      expect(result.current.fieldErrorRowCount).toBe(1);
+    });
+
+    it('treats a skipped row as resolved, exactly like a fully skipped collision group', async () => {
+      const result = await uploadWith(
+        bodyWithFieldErrors([{ row_id: 1, field: 'notes' }], [{}, { skip: true }]),
+      );
+
+      expect(result.current.fieldErrorRowCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('ignores an error naming a row the preview does not hold', async () => {
+      // A stale 409 payload must not wedge the gate shut against a row
+      // the user has no way to reach.
+      const result = await uploadWith(
+        bodyWithFieldErrors([{ row_id: 99, field: 'description' }]),
+      );
+
+      expect(result.current.fieldErrorRowCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('seeds a cell error for description, which has a cell to point at', async () => {
+      const result = await uploadWith(
+        bodyWithFieldErrors([{ row_id: 0, field: 'description' }]),
+      );
+
+      expect(result.current.cellErrors['0:description']).toEqual({
+        field: 'description',
+        message: SERVER_FIELD_MESSAGES.description,
+      });
+    });
+
+    it('shows something rather than an empty box if a message is missing', async () => {
+      // Defensive: the server populates `message` on every error today,
+      // so this path should be unreachable. It exists so a response that
+      // somehow omits it does not render a red box with no words in it.
+      const result = await uploadWith({
+        ...freshPreviewBody('abc'),
+        field_errors: [{ row_id: 0, field: 'description' }],
+      });
+
+      expect(result.current.cellErrors['0:description'].message).toBe(
+        'This value is too long for SpenDrop. Shorten it here, or skip this row.',
+      );
+      // Distinguishable from the server's sentence on sight. A near-copy
+      // would drift invisibly, since nothing renders this in practice.
+      expect(result.current.cellErrors['0:description'].message).not.toBe(
+        SERVER_FIELD_MESSAGES.description,
+      );
+      // No number, because this side no longer holds the bounds and a
+      // guessed one would be the drift the mirror was removed to avoid.
+      expect(result.current.cellErrors['0:description'].message).not.toMatch(
+        /\d/,
+      );
+    });
+
+    it("prefers the server's wording over the local fallback", async () => {
+      // The backend emits one string for this condition and reuses it
+      // for the PATCH 400, so the cell must read the same whether the
+      // user met the error by uploading or by editing. Deliberately
+      // unlike the local fallback so a regression to client-composed
+      // copy cannot pass.
+      const result = await uploadWith({
+        ...freshPreviewBody('abc'),
+        field_errors: [
+          {
+            row_id: 0,
+            field: 'description',
+            message: 'Server says: too long, shorten it here.',
+          },
+        ],
+      });
+
+      expect(result.current.cellErrors['0:description'].message).toBe(
+        'Server says: too long, shorten it here.',
+      );
+    });
+
+    it('seeds no cell error for tags or notes, which have no column', async () => {
+      const result = await uploadWith(
+        bodyWithFieldErrors([
+          { row_id: 0, field: 'notes' },
+          { row_id: 1, field: 'tags' },
+        ]),
+      );
+
+      // Still blocks the import — it is surfaced at row level by the
+      // table instead of in a cell that does not exist.
+      expect(result.current.fieldErrorRowCount).toBe(2);
+      expect(result.current.cellErrors).toEqual({});
+    });
+
+    it('lets a rejected PATCH message win over the derived flag on the same cell', async () => {
+      // The distinction under test: the PATCH error describes the value
+      // the user JUST TYPED, while the derived flag describes the last
+      // value the server accepted.
+      //
+      // It cannot be tested with a too-long PATCH any more. The backend
+      // now returns one string for that condition and reuses it for the
+      // 400, so both sources would read identically and the assertion
+      // would pass whichever won. So this models the other real journey:
+      // the user shortens a flagged description all the way to empty,
+      // and the live problem is no longer the length.
+      installFetchQueue([
+        { body: bodyWithFieldErrors([{ row_id: 0, field: 'description' }]) },
+        {
+          ok: false,
+          status: 400,
+          body: { error: 'description cannot be empty' },
+        },
+      ]);
+      const { result } = renderHook(() => useImportSession());
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      // The derived flag is what is showing before the edit.
+      expect(result.current.cellErrors['0:description'].message).toBe(
+        SERVER_FIELD_MESSAGES.description,
+      );
+
+      await act(async () => {
+        await result.current.patchRow(0, 'description', '   ').catch(() => {});
+      });
+
+      expect(result.current.cellErrors['0:description'].message).toBe(
+        'description cannot be empty',
+      );
+    });
+
+    it('clears the flag when the server stops reporting it', async () => {
+      const cleaned = {
+        ...freshPreviewBody('abc'),
+        field_errors: [],
+      };
+      installFetchQueue([
+        { body: bodyWithFieldErrors([{ row_id: 0, field: 'description' }]) },
+        { body: cleaned },
+      ]);
+      const { result } = renderHook(() => useImportSession());
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      expect(result.current.canImport).toBe(false);
+
+      await act(async () => {
+        await result.current.patchRow(0, 'description', 'Coffee');
+      });
+
+      // Derived from the response, so there is no client-side clear to
+      // forget: the flag and the cell error both go with the payload.
+      expect(result.current.fieldErrorRowCount).toBe(0);
+      expect(result.current.cellErrors['0:description']).toBeUndefined();
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('refreshes flags and explains itself on a 409 FIELD_TOO_LONG confirm', async () => {
+      installFetchQueue([
+        // Upload reports nothing wrong...
+        { body: { ...freshPreviewBody('abc'), field_errors: [] } },
+        // ...but confirm disagrees.
+        {
+          ok: false,
+          status: 409,
+          body: {
+            code: 'FIELD_TOO_LONG',
+            field_errors: [
+              {
+                row_id: 1,
+                field: 'notes',
+                message: SERVER_FIELD_MESSAGES.notes,
+              },
+            ],
+          },
+        },
+      ]);
+      const { result } = renderHook(() => useImportSession());
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      expect(result.current.canImport).toBe(true);
+
+      await act(async () => {
+        await result.current.confirmImport({}, null);
+      });
+
+      expect(result.current.preview?.field_errors).toEqual([
+        { row_id: 1, field: 'notes', message: SERVER_FIELD_MESSAGES.notes },
+      ]);
+      expect(result.current.fieldErrorRowCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+      expect(result.current.error).toBe(
+        'Some rows are too long — please shorten or skip the highlighted rows',
+      );
+      // The confirm did NOT succeed — staying on the preview step is
+      // what gives the user somewhere to perform the fix.
+      expect(result.current.importStep).toBe('preview');
+      // Rows survive the 409: only the field_errors slice is replaced.
+      expect(result.current.preview?.rows).toHaveLength(2);
+    });
   });
 });

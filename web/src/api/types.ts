@@ -240,6 +240,52 @@ export interface CollisionGroup {
   db_match?: DbMatchPreview;
 }
 
+/**
+ * The fields an uploaded row can carry that are longer than SpenDrop
+ * stores. Only these three have a length bound worth reporting: `date`
+ * and `amount` are parsed, so an over-long value fails as unparseable
+ * long before length matters.
+ */
+export type ImportFieldErrorField = 'description' | 'tags' | 'notes';
+
+/**
+ * One field on one row whose value exceeds the limit the rest of the
+ * API enforces. Upload, PATCH and GET report these on the preview so
+ * the UI can flag a row on load rather than only after a failed
+ * confirm; confirm reports them again in its 409 body.
+ *
+ * Carries its own explanation. The remedies genuinely differ between
+ * fields — a description is editable in the preview table ("shorten it
+ * here") while tags and notes have no cell to point at and can only be
+ * skipped or fixed in the source spreadsheet — but the backend writes
+ * both, so this side never composes one. See `message` below.
+ *
+ * Where the error is SHOWN is still ours to decide: `description` goes
+ * in its cell, the rest in a detail line under the row. That split is
+ * `isEditableInPreview` in `lib/import-field-errors.ts`.
+ */
+export interface ImportFieldError {
+  row_id: number;
+  field: ImportFieldErrorField;
+  /**
+   * Server-authored explanation for this one field, rendered VERBATIM.
+   * Do not reword it and do not compose an alternative: the same cell
+   * can be filled from two directions — this list, and the 400 body of
+   * a rejected PATCH — and the backend emits one string for both
+   * (`importFieldLengthMessage`, reused by `validateImportField`). Any
+   * wording written on this side would match only by coincidence, and
+   * only until either copy was edited.
+   *
+   * It is also why this side holds no length constants: the sentence
+   * arrives with the number already in it, correct by construction.
+   *
+   * Optional so a response that omits it still type-checks;
+   * `fallbackFieldTooLongMessage` covers that case with a numberless
+   * sentence rather than a guessed bound.
+   */
+  message?: string;
+}
+
 export interface ImportPreview {
   import_id: string;
   row_count: number;
@@ -252,6 +298,21 @@ export interface ImportPreview {
    * and every GET — never derived on the client.
    */
   collision_groups: CollisionGroup[];
+  /**
+   * Every field on every row that is longer than SpenDrop stores.
+   * Recomputed by the backend alongside `collision_groups`, so a row
+   * edited back under the limit drops out of this array on the PATCH
+   * response and its flag clears without any client-side bookkeeping.
+   *
+   * Optional for the same reason `expires_at` below is optional: the
+   * field is only meaningful once the Go side emits it on all three
+   * response maps (upload / PATCH / GET). Marking it required would
+   * tell consumers it is always present, and a preview built before
+   * that lands would type-check while being `undefined` at runtime.
+   * Every read goes through `activeFieldErrorRowIDs`, which treats
+   * `undefined` as "none".
+   */
+  field_errors?: ImportFieldError[];
   /**
    * ISO-8601 timestamp (UTC) at which the backend will evict this
    * session from the in-memory importStore. The frontend reads this

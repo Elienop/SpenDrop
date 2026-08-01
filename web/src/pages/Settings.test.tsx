@@ -619,6 +619,47 @@ describe('Settings', () => {
       expect(screen.getByText(/date.*description.*amount/i)).toBeInTheDocument();
     });
 
+    // End-to-end through Settings → ImportCard → ImportPreviewStep →
+    // ImportPreviewTable, deliberately not through the hook or the table
+    // in isolation. Both of those are gated correctly on their own; what
+    // this pins is that the page actually WIRES the gate — the failure
+    // shape where a control is right in isolation and the caller hands it
+    // the weaker variant has already shipped twice in this batch.
+    test('an over-long field in the upload response blocks Import on the real page', async () => {
+      const serverNoteMessage =
+        "This row's note is longer than the 2,000 characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.";
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        field_errors: [
+          { row_id: 1, field: 'notes', message: serverNoteMessage },
+        ],
+      });
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'categories') return Promise.resolve(mockCategories);
+        return Promise.resolve([]);
+      });
+
+      const user = await goToDataTab();
+      await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+      // Blocked on arrival — no confirm round-trip was needed to learn
+      // that the server would refuse this row.
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^Import \d+$/ }),
+        ).toBeDisabled();
+      });
+      // The server's sentence reaches the screen unaltered through every
+      // layer between the API client and the table.
+      expect(screen.getByText(serverNoteMessage)).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Skip this row' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Fix or skip 1 too-long row to enable import/),
+      ).toBeInTheDocument();
+    });
+
     test('uploads file and shows preview on file selection', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
       mockedApi.get.mockImplementation((path: string) => {

@@ -1,6 +1,7 @@
 import { api } from './client';
 import type {
   CollisionGroup,
+  ImportFieldError,
   ImportPreview,
   ImportResult,
   PatchRowRequest,
@@ -60,6 +61,30 @@ export class UnresolvedCollisionsError extends Error {
  * and any backend change (or localization) would quietly turn the
  * expected-404 path into a visible error banner.
  */
+/**
+ * Thrown when `POST /api/import/confirm` returns 409 FIELD_TOO_LONG —
+ * at least one row the user asked to import carries a field longer
+ * than SpenDrop stores. Carries the server's full `field_errors` array
+ * so the hook can refresh the flags without a second round-trip.
+ *
+ * A sibling of `UnresolvedCollisionsError` on purpose: both are 409s
+ * that mean "your selection is not importable yet, here is precisely
+ * what to fix", and both resolve through the same edit-or-skip loop.
+ * Keeping the shapes parallel is what lets the hook's 409 handling and
+ * the table's scroll-to-the-problem effect cover the new case by
+ * extension rather than by a second mechanism.
+ */
+export class FieldTooLongError extends Error {
+  readonly field_errors: ImportFieldError[];
+
+  constructor(field_errors: ImportFieldError[]) {
+    super('Import has fields that are too long');
+    Object.setPrototypeOf(this, FieldTooLongError.prototype);
+    this.name = 'FieldTooLongError';
+    this.field_errors = field_errors;
+  }
+}
+
 export class NotFoundError extends Error {
   readonly importID: string;
 
@@ -157,18 +182,25 @@ export async function confirmImport(payload: {
 
   if (response.status === 409) {
     const body = (await response.json().catch(() => null)) as
-      | { code?: string; collision_groups?: CollisionGroup[]; error?: string }
+      | {
+          code?: string;
+          collision_groups?: CollisionGroup[];
+          field_errors?: ImportFieldError[];
+          error?: string;
+        }
       | null;
-    // Only the UNRESOLVED_COLLISIONS code carries a `collision_groups`
-    // payload the caller can act on. Any other 409 (current or future
-    // — e.g. duplicate session, optimistic-lock conflict) would leave
-    // `collision_groups` empty, which would look to the hook like "the
-    // collisions were resolved while we waited" and silently retry.
-    // Fall those through to the generic error branch so the user sees
-    // the server's actual `error` message instead of a confusing
-    // no-op retry loop.
+    // Each recognised code carries the payload the caller can act on.
+    // Any other 409 (current or future — e.g. duplicate session,
+    // optimistic-lock conflict) would leave both payloads empty, which
+    // would look to the hook like "the problem resolved itself while we
+    // waited" and silently retry. Fall those through to the generic
+    // error branch so the user sees the server's actual `error` message
+    // instead of a confusing no-op retry loop.
     if (body?.code === 'UNRESOLVED_COLLISIONS') {
       throw new UnresolvedCollisionsError(body.collision_groups ?? []);
+    }
+    if (body?.code === 'FIELD_TOO_LONG') {
+      throw new FieldTooLongError(body.field_errors ?? []);
     }
     throw new Error(body?.error || `HTTP 409`);
   }

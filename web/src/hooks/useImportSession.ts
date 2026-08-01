@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type {
   CollisionGroup,
+  ImportFieldError,
   ImportPreview,
   ImportResult,
   ImportRow,
@@ -12,9 +13,14 @@ import {
   patchImportRow,
   confirmImport as confirmImportAPI,
   cancelImport as cancelImportAPI,
+  FieldTooLongError,
   NotFoundError,
   UnresolvedCollisionsError,
 } from '../api/import';
+import {
+  fallbackFieldTooLongMessage,
+  isEditableInPreview,
+} from '@/lib/import-field-errors';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 export type ImportStep = 'upload' | 'preview' | 'done';
@@ -37,6 +43,12 @@ export interface UseImportSessionResult {
 
   // Derived state
   unresolvedCount: number;
+  /**
+   * Distinct non-skipped rows carrying at least one over-length field.
+   * Blocks `canImport` on its own, so the button is disabled straight
+   * off the upload response rather than only after a failed confirm.
+   */
+  fieldErrorRowCount: number;
   canImport: boolean;
 
   // Actions
@@ -65,6 +77,31 @@ export interface UseImportSessionResult {
  * main body is busy with promise-chain plumbing and localStorage
  * side effects.
  */
+/**
+ * Narrows the server's `field_errors` to the ones that still block the
+ * import: an error on a row the user has skipped is resolved, exactly
+ * as a collision group whose members are all skipped is resolved. An
+ * error naming a row_id the preview no longer holds is dropped rather
+ * than counted, so a stale 409 payload can never wedge the gate shut
+ * with a flag the user has no row to act on.
+ *
+ * Exported because the gate (this hook) and the flagging (the preview
+ * table) must agree on the word "active" — deriving it twice is how the
+ * two drift and the button disables against rows nothing highlights.
+ */
+export function activeFieldErrors(
+  fieldErrors: ImportFieldError[] | undefined,
+  rows: ImportRow[],
+): ImportFieldError[] {
+  if (!fieldErrors || fieldErrors.length === 0) return [];
+  const rowById = new Map<number, ImportRow>();
+  for (const row of rows) rowById.set(row.row_id, row);
+  return fieldErrors.filter((fe) => {
+    const row = rowById.get(fe.row_id);
+    return row !== undefined && !row.skip;
+  });
+}
+
 function computeUnresolvedCount(
   groups: CollisionGroup[],
   rows: ImportRow[],
@@ -89,7 +126,12 @@ export function useImportSession(): UseImportSessionResult {
   const [result, setResult] = useState<ImportResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingPatchCount, setPendingPatchCount] = useState(0);
-  const [cellErrors, setCellErrors] = useState<Record<string, CellError>>({});
+  // Errors from a PATCH the server REJECTED. Kept separate from the
+  // server's derived `field_errors`; `cellErrors` below is the merge of
+  // the two that consumers actually read.
+  const [patchCellErrors, setPatchCellErrors] = useState<
+    Record<string, CellError>
+  >({});
 
   // Single-lane PATCH queue. Every enqueued PATCH awaits the previous
   // one's settlement before firing, so the backend never sees two
@@ -156,7 +198,65 @@ export function useImportSession(): UseImportSessionResult {
     return computeUnresolvedCount(preview.collision_groups, preview.rows);
   }, [preview]);
 
-  const canImport = preview !== null && unresolvedCount === 0 && pendingPatchCount === 0;
+  // Number of distinct rows still carrying an over-length field. Counted
+  // per ROW, not per error, because that is the unit the user acts on:
+  // a row whose description AND note are both too long is one row to
+  // shorten or skip, and reporting "2" for it would not match anything
+  // the table highlights.
+  const fieldErrorRowCount = useMemo(() => {
+    if (!preview) return 0;
+    const active = activeFieldErrors(preview.field_errors, preview.rows);
+    return new Set(active.map((fe) => fe.row_id)).size;
+  }, [preview]);
+
+  /**
+   * Per-cell errors as the table consumes them: the server's own
+   * over-length flags merged under any error from a rejected PATCH.
+   *
+   * Merging here rather than seeding `patchCellErrors` from the upload
+   * response keeps the two halves on the lifecycles they actually have.
+   * The server half is derived, so a row edited back under the limit
+   * loses its flag the moment the PATCH response lands, with no
+   * client-side deletion to forget; the PATCH half stays imperative,
+   * since a 400 is a fact about a keystroke the server never accepted
+   * and no later payload will mention it. Seeding one from the other
+   * would give the derived half a manual clear path, which is precisely
+   * the stale-flag bug the table's build-from-props rule exists to
+   * prevent.
+   *
+   * Only fields the preview can actually edit appear here — today just
+   * `description`, which is the only over-lengthable column rendered as
+   * a cell. `tags` and `notes` have nothing to attach to and are
+   * surfaced at row level by the table instead.
+   *
+   * Both halves carry the SERVER's sentence. That is the whole point of
+   * the merge being uninteresting: whichever way the user reached the
+   * error, they read the same words, because the backend emits one
+   * string for the flag and for `validateImportField`'s PATCH 400.
+   *
+   * A live PATCH error still wins on a collision: it describes the
+   * value the user just typed, while the derived flag describes the
+   * last value the server accepted.
+   */
+  const cellErrors = useMemo(() => {
+    const merged: Record<string, CellError> = {};
+    if (preview) {
+      for (const fe of activeFieldErrors(preview.field_errors, preview.rows)) {
+        if (!isEditableInPreview(fe.field)) continue;
+        merged[`${fe.row_id}:${fe.field}`] = {
+          field: fe.field,
+          message: fe.message || fallbackFieldTooLongMessage(fe.field),
+        };
+      }
+    }
+    return { ...merged, ...patchCellErrors };
+  }, [preview, patchCellErrors]);
+
+  const canImport =
+    preview !== null &&
+    unresolvedCount === 0 &&
+    fieldErrorRowCount === 0 &&
+    pendingPatchCount === 0;
 
   // ---- row merge helpers ----
   /**
@@ -197,7 +297,7 @@ export function useImportSession(): UseImportSessionResult {
       const fresh = await uploadImport(file);
       setPreview(fresh);
       setImportStep('preview');
-      setCellErrors({});
+      setPatchCellErrors({});
       try {
         localStorage.setItem(STORAGE_KEYS.importId, fresh.import_id);
       } catch {
@@ -227,7 +327,7 @@ export function useImportSession(): UseImportSessionResult {
           // Clear any prior 400 error on this exact cell. Does NOT
           // clear errors on OTHER cells in the same row — each cell
           // owns its own error lifecycle.
-          setCellErrors((prev) => {
+          setPatchCellErrors((prev) => {
             if (!(cellKey in prev)) return prev;
             const next = { ...prev };
             delete next[cellKey];
@@ -236,7 +336,7 @@ export function useImportSession(): UseImportSessionResult {
         } catch (err) {
           const message =
             err instanceof Error ? err.message : 'Update failed';
-          setCellErrors((prev) => ({
+          setPatchCellErrors((prev) => ({
             ...prev,
             [cellKey]: { field, message },
           }));
@@ -303,6 +403,22 @@ export function useImportSession(): UseImportSessionResult {
           );
           return;
         }
+        if (err instanceof FieldTooLongError) {
+          // Same shape as the collisions branch above: replace only the
+          // field_errors slice, leaving rows / row_count / columns /
+          // unique_categories untouched. Refreshing from the server
+          // rather than trusting the flags we already had matters when
+          // the two disagree — a row edited in another tab, or a
+          // backend that started reporting a field the upload response
+          // predates.
+          setPreview((prev) =>
+            prev ? { ...prev, field_errors: err.field_errors } : prev,
+          );
+          setError(
+            'Some rows are too long — please shorten or skip the highlighted rows',
+          );
+          return;
+        }
         setError(err instanceof Error ? err.message : 'Import failed');
       }
     },
@@ -321,7 +437,7 @@ export function useImportSession(): UseImportSessionResult {
     setPreview(null);
     setImportStep('upload');
     setError(null);
-    setCellErrors({});
+    setPatchCellErrors({});
     setPendingPatchCount(0);
   }, [preview]);
 
@@ -332,7 +448,7 @@ export function useImportSession(): UseImportSessionResult {
     setImportStep('upload');
     setResult(null);
     setError(null);
-    setCellErrors({});
+    setPatchCellErrors({});
     setPendingPatchCount(0);
   }, []);
 
@@ -344,6 +460,7 @@ export function useImportSession(): UseImportSessionResult {
     pendingPatchCount,
     cellErrors,
     unresolvedCount,
+    fieldErrorRowCount,
     canImport,
     uploadFile,
     patchRow,

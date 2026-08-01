@@ -87,6 +87,118 @@ type collisionGroup struct {
 	DBMatch      *dbMatchPreview `json:"db_match,omitempty"`
 }
 
+// importFieldError names one preview row whose value in one field is longer
+// than the ledger will store, and carries the explanation with it.
+//
+// The message travels on the wire rather than being composed by the frontend,
+// because this condition is reachable four ways — flagged at upload, re-flagged
+// after a PATCH, restored by a GET resume, and refused by the confirm 409 — and
+// one of those already returns a server-authored message today (the PATCH 400
+// from validateImportField). Wording composed on the client for three of the
+// four would mean the same condition reading two different ways depending on
+// how the user got there, and drifting apart the first time either side was
+// edited. Collisions are modelled the other way round on purpose: they are
+// explained per GROUP by one banner, so there is no per-cell string to keep in
+// step.
+type importFieldError struct {
+	RowID   int    `json:"row_id"`
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Field names as they appear in importFieldError.Field and in the PATCH
+// endpoint's request body, so a frontend can route an error straight to the
+// control that edits it.
+const (
+	importFieldDescription = "description"
+	importFieldTags        = "tags"
+	importFieldNotes       = "notes"
+)
+
+// importFieldLengthMessage is the single source of the explanation for a field
+// being too long. Every surface that reports the condition calls it, including
+// validateImportField's PATCH 400, so a description error reads identically
+// however the user reached it.
+//
+// The remedies differ between fields because the preview's capabilities do:
+// validateImportField accepts edits to date, description and amount only, so a
+// description really can be shortened in place, while tags and notes can only
+// be dropped with the row or fixed in the source spreadsheet. Telling someone
+// to shorten a note "here" would be an instruction the UI cannot honour.
+//
+// Each message names the LIMIT and never the overage. A count of how far over
+// a value is would be a lie in any non-ASCII text: these caps are compared with
+// len() over bytes, so 500 is about 250 Arabic characters, and reporting "you
+// are 43 characters over" would be wrong for exactly the household that writes
+// Arabic. Naming the limit is true regardless of script. That the label says
+// "characters" at all is inherited from the existing limits and is a separate
+// question from this one.
+func importFieldLengthMessage(field string) string {
+	switch field {
+	case importFieldDescription:
+		return fmt.Sprintf(
+			"Too long for SpenDrop, which stores %d characters. Shorten it here, or skip this row.",
+			MaxDescriptionLength)
+	case importFieldTags:
+		return fmt.Sprintf(
+			"This row's tags are longer than the %d characters SpenDrop stores. Skip this row, or shorten them in your spreadsheet and upload again.",
+			MaxTagsLength)
+	case importFieldNotes:
+		return fmt.Sprintf(
+			"This row's note is longer than the %d characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.",
+			MaxNotesLength)
+	}
+	return ""
+}
+
+// checkImportRowLengths reports every non-skipped row whose description, tags
+// or notes exceed what the ledger stores.
+//
+// THE MEASUREMENT MUST MATCH THE WRITE PATH, and that is the whole risk in this
+// function. validateTransactionRequest bounds these three fields with a bare
+// len() over bytes and no trimming (transaction_handlers.go, plus
+// validateTagsField); the import parser has already trimmed each cell by the
+// time a row reaches here, so len() over the stored value is the same quantity
+// the single-row API would apply. Measure anything else — runes, a trimmed
+// copy, a different cap — and this becomes a gate that passes rows the write
+// path would refuse, which is worse than no gate, because the failure moves
+// from a preview the user can act on to an insert they cannot.
+// TestImportFieldLengths_MatchTheWritePath pins the agreement.
+//
+// Note what is deliberately NOT decided here: len() means the caps are byte
+// limits wearing a character label, so 500 is roughly 250 Arabic characters.
+// That is a real problem and a separate one — fixing it here would make the two
+// sides disagree, which is exactly the failure this function exists to avoid.
+//
+// Rows the user has skipped are exempt. Skipping IS the remedy the gate offers,
+// so a skipped row must not keep blocking the confirm it was skipped to unblock.
+func checkImportRowLengths(rows []importRow) []importFieldError {
+	fieldErrors := []importFieldError{}
+	for _, row := range rows {
+		if row.Skip {
+			continue
+		}
+		for _, check := range []struct {
+			field string
+			value string
+			limit int
+		}{
+			{importFieldDescription, row.Description, MaxDescriptionLength},
+			{importFieldTags, row.Tags, MaxTagsLength},
+			{importFieldNotes, row.Notes, MaxNotesLength},
+		} {
+			if len(check.value) > check.limit {
+				fieldErrors = append(fieldErrors, importFieldError{
+					RowID:   row.RowID,
+					Field:   check.field,
+					Message: importFieldLengthMessage(check.field),
+				})
+			}
+		}
+	}
+	return fieldErrors
+}
+
 // buildCollisionGroups computes the collision view for a preview session.
 // It groups rows by their resolved content hash, then flags each group as
 // intra_file (multiple preview rows sharing a hash with no DB match) or
@@ -294,7 +406,10 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 			return nil, "INVALID_DESCRIPTION", "description cannot be empty"
 		}
 		if len(trimmed) > MaxDescriptionLength {
-			return nil, "INVALID_DESCRIPTION", fmt.Sprintf("description exceeds %d characters", MaxDescriptionLength)
+			// Same string the preview's field_errors carry, so an over-long
+			// description reads identically whether the user met it by
+			// uploading, by editing, by resuming, or at confirm.
+			return nil, "INVALID_DESCRIPTION", importFieldLengthMessage(importFieldDescription)
 		}
 		return trimmed, "", ""
 
@@ -1277,6 +1392,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		"columns":           detectedColumns,
 		"unique_categories": uniqueCategories,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(parsedRows),
 	})
 }
 
@@ -1308,6 +1424,7 @@ const (
 	skipReasonUnparseableDate  importSkipReason = "unparseable_date"
 	skipReasonMissingCategory  importSkipReason = "missing_category"
 	skipReasonDuplicate        importSkipReason = "duplicate"
+	skipReasonFieldTooLong     importSkipReason = "field_too_long"
 )
 
 // importInserted records a row that made it into the transactions table.
@@ -1451,6 +1568,30 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// the SQL transaction that follows runs on the local filteredRows
 	// slice, so there is no need to keep entry locked during DB inserts.
 	entry.mu.Lock()
+
+	// Field lengths are re-checked here, ahead of the collision rebuild,
+	// because the preview is only a preview: the rows may have been edited by
+	// PATCH since upload, and nothing stops a client calling confirm without
+	// ever having read the flags. This is the gate; the upload-time list is a
+	// courtesy that lets the user fix things before they get here.
+	//
+	// Ordering against the collision check is deliberate rather than
+	// incidental. A row can be both too long and colliding, and a user who
+	// resolves the collision by editing a description only to be told the
+	// description is too long has been sent round the loop twice. Reporting
+	// length first means one round trip surfaces the problem that a content
+	// edit cannot accidentally introduce.
+	if fieldErrors := checkImportRowLengths(entry.Rows); len(fieldErrors) > 0 {
+		entry.mu.Unlock()
+		// Same body shape as UNRESOLVED_COLLISIONS below — a machine-readable
+		// code plus the full list — so a frontend's existing 409 handling
+		// extends to this rather than being replaced.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":         "FIELD_TOO_LONG",
+			"field_errors": fieldErrors,
+		})
+		return
+	}
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -1802,6 +1943,7 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		"columns":           entry.Columns,
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(entry.Rows),
 	})
 }
 
@@ -1898,6 +2040,7 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		"columns":           entry.Columns,
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(entry.Rows),
 	})
 }
 
@@ -1986,6 +2129,26 @@ func processImportRows(
 			result.Skipped = append(result.Skipped, importSkipped{
 				RowIndex: i,
 				Reason:   skipReasonEmptyDescription,
+			})
+			continue
+		}
+
+		// A floor, and one that should never fire: handleImportConfirm refuses
+		// the whole batch with 409 FIELD_TOO_LONG before reaching this loop, so
+		// by the time a row is here its fields are already within the caps.
+		// It exists because this loop is the last thing between a preview row
+		// and the ledger, and because the property tests in
+		// import_handlers_property_test.go require every skipped row to name a
+		// declared reason — a silent drop here would be a row that vanished
+		// between preview and ledger with nothing recording why.
+		//
+		// It is also the reason the gate above cannot be quietly deleted: doing
+		// so would not let over-long rows through, it would move the rejection
+		// from a preview the user can act on to a count they cannot explain.
+		if len(checkImportRowLengths([]importRow{row})) > 0 {
+			result.Skipped = append(result.Skipped, importSkipped{
+				RowIndex: i,
+				Reason:   skipReasonFieldTooLong,
 			})
 			continue
 		}

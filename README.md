@@ -1021,13 +1021,19 @@ Import is the only endpoint that hands an untrusted binary file to a third-party
 
 An uploaded workbook is also bounded by its shape, not only by `MAX_UPLOAD_BYTES` — that cap limits the *compressed* xlsx, and a few kilobytes of it can describe an arbitrarily large sheet. A workbook is refused, with a 400 naming the limit rather than a truncated import, if it expands past 128 MiB in total or 64 MiB in any single part; if a sheet extends past row 1,048,576 (Excel's own maximum, so only a malformed file reaches it); if any row declares more than 100,000 cells or holds more than 32 MiB of text; if a single cell holds more than 256 KiB; or if the sheet exceeds 4,000,000 cells or 64 MiB of text overall. Every one of these sits above what a spreadsheet application can produce — the per-row and per-cell limits are roughly 6x and 2x the format's own maxima — so a file exported from Excel or Google Sheets cannot reach them. `MaxImportRows` still caps the parsed rows at 10,000.
 
+**Rows whose fields are too long are flagged, not refused.** A spreadsheet cell can hold far more text than the ledger stores — descriptions are capped at 500, tags at 500 and notes at 2,000, the same limits every other write path enforces — and import used to be the one path that never checked, so an over-long value went straight into the ledger where the API itself would have refused it. Refusing the whole file over one long note would be worse: it fails every good row alongside the bad one, and your only recourse is the spreadsheet. So each preview response reports which rows and fields are over the limit, the import stays blocked while any row you have not skipped is flagged, and `/confirm` refuses with 409 `FIELD_TOO_LONG` if it is reached anyway. A flagged **description** can be shortened in the preview; **tags** and **notes** are not editable there, so the remedy is to skip the row or fix the spreadsheet and upload again. Nothing is ever silently truncated.
+
+> These limits are measured in **bytes**, though everything calls them characters. For ASCII the two agree; for Arabic or accented French a "500 character" description is refused at roughly 250 or 170 actual characters. That is why the app states the limit and never a count of what you typed — a count would be wrong for exactly the households that hit it.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/import/upload` | Upload Excel file and open a preview session (returns `import_id`, parsed rows, and any content-hash collision groups) |
-| GET | `/api/import/{importID}` | Resume an existing preview session (used by the frontend after a reload to restore the in-progress import) |
-| PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `skip`) on a preview row; backend recomputes collisions and returns the full session snapshot |
+| POST | `/api/import/upload` | Upload Excel file and open a preview session (returns `import_id`, parsed rows, any content-hash collision groups, and any `field_errors`) |
+| GET | `/api/import/{importID}` | Resume an existing preview session (used by the frontend after a reload to restore the in-progress import, including its collision groups and `field_errors`) |
+| PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `skip`) on a preview row; backend recomputes collisions and field-length errors, and returns the full session snapshot |
 | DELETE | `/api/import/{importID}` | Cancel the preview session and free the server-side slot |
-| POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active) |
+| POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active, or 409 `FIELD_TOO_LONG` if any row you have not skipped has a field over its limit) |
+
+Every preview response — upload, resume and edit alike — carries `field_errors` as `[{row_id, field, message}]`, recomputed from the current rows. The `message` is generated server-side so that the same problem reads identically whether you meet it on upload, after an edit, after a page refresh, or at confirm.
 
 ## Homepage integration
 

@@ -3,6 +3,7 @@ import {
   confirmImport,
   getImportSession,
   patchImportRow,
+  FieldTooLongError,
   NotFoundError,
   UnresolvedCollisionsError,
 } from './import';
@@ -139,6 +140,68 @@ describe('api/import', () => {
       field: 'description',
       value: 'Coffee',
     });
+  });
+
+  it('confirmImport throws FieldTooLongError carrying field_errors on 409 FIELD_TOO_LONG', async () => {
+    mockFetch([
+      {
+        ok: false,
+        status: 409,
+        body: {
+          code: 'FIELD_TOO_LONG',
+          field_errors: [
+            { row_id: 2, field: 'description' },
+            { row_id: 5, field: 'notes' },
+          ],
+        },
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      await confirmImport({ import_id: 'abc', category_map: {} });
+      throw new Error('expected confirmImport to reject');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FieldTooLongError);
+    // Distinct from the sibling 409 — the hook branches on type, so a
+    // FieldTooLongError that also satisfied `instanceof
+    // UnresolvedCollisionsError` would take the wrong branch and wipe
+    // the collision groups.
+    expect(caught).not.toBeInstanceOf(UnresolvedCollisionsError);
+    if (caught instanceof FieldTooLongError) {
+      expect(caught.field_errors).toEqual([
+        { row_id: 2, field: 'description' },
+        { row_id: 5, field: 'notes' },
+      ]);
+    }
+  });
+
+  it('confirmImport falls through to the generic error for an unrecognised 409 code', async () => {
+    // A 409 the client does not model carries no payload it can act on.
+    // Treating it as either typed error would look to the hook like "the
+    // problem resolved itself", so it must surface the server's message.
+    mockFetch([
+      {
+        ok: false,
+        status: 409,
+        body: { code: 'SOMETHING_NEW', error: 'session already consumed' },
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      await confirmImport({ import_id: 'abc', category_map: {} });
+      throw new Error('expected confirmImport to reject');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).not.toBeInstanceOf(FieldTooLongError);
+    expect(caught).not.toBeInstanceOf(UnresolvedCollisionsError);
+    expect((caught as Error).message).toBe('session already consumed');
   });
 
   it('getImportSession throws NotFoundError on 404', async () => {
