@@ -2,6 +2,8 @@ import {
   render as rtlRender,
   screen,
   waitFor,
+  fireEvent,
+  act,
   type RenderOptions,
 } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
@@ -448,6 +450,62 @@ describe('TransactionEntryRow', () => {
       expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled(),
     );
     expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  // The mouse path is protected by the disabled attribute, because React
+  // flushes a click synchronously and the second click lands on a button that
+  // is already disabled. The KEYBOARD path is not: `form.handleSubmit(submit)()`
+  // validates asynchronously (zodResolver), so two presses in the same tick both
+  // get through before `setIsSending(true)` has committed — and each builds its
+  // own payload with its own client_key, which is two real rows rather than one
+  // replay. Only the synchronous `sendingRef` guard stops that, and only a test
+  // that never awaits between the presses can see it.
+  it('two Ctrl+Enter presses in one tick submit ONE entry, not two', async () => {
+    const user = userEvent.setup();
+    // Hold the first save open so both presses land inside the in-flight window.
+    let release!: (tx: Transaction) => void;
+    onSubmit.mockImplementation(
+      () =>
+        new Promise<Transaction>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+
+    const amount = screen.getByLabelText(/amount/i);
+    amount.focus();
+    // Deliberately no await between these two: userEvent's keyboard() flushes
+    // between presses, which lets the guard's state commit and hides the race.
+    fireEvent.keyDown(amount, { key: 'Enter', ctrlKey: true });
+    fireEvent.keyDown(amount, { key: 'Enter', ctrlKey: true });
+
+    // Let both validation passes settle, so a second submission would have
+    // arrived by the time we count.
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    const keys = new Set(
+      onSubmit.mock.calls.map(
+        (call) => (call[0] as CreateTransactionInput).client_key,
+      ),
+    );
+    // Two keys here would mean the server sees two unrelated submissions and
+    // creates two rows — the failure the whole feature exists to prevent.
+    expect(keys.size).toBe(1);
+
+    release(savedTransaction);
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
   });
 
   it('a save after editing the failed row mints a NEW key', async () => {

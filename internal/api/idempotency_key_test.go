@@ -570,6 +570,90 @@ func TestCreateTransaction_ReplayDoesNotRenotifyHousehold(t *testing.T) {
 	}
 }
 
+// TestCreateTransaction_KeySurvivesAnEdit pins that editing a row does not
+// release the key its creating submission claimed.
+//
+// The key records WHICH ATTEMPT created the row, and that fact is immutable for
+// the row's life — editing the description afterwards does not make the original
+// POST a different submission. UpdateTransaction therefore omits
+// idempotency_key from its SET list, deliberately, one line away from
+// content_hash, which has the OPPOSITE policy and IS cleared when a hash input
+// moves. That adjacency is the trap: a plausible "unify the derived-column
+// handling" cleanup gives the key the same conditional clear and reopens a
+// duplicate window.
+//
+// The window it reopens is the nastiest kind. A queued offline POST draining
+// late, or a user tapping Retry on a tab left open before the edit, arrives
+// carrying the original key; with the key cleared it collides with nothing and
+// inserts a second row. The content hash cannot catch it either — the edit
+// already moved the content apart — so the household ends up with two rows that
+// no longer look like duplicates of each other.
+func TestCreateTransaction_KeySurvivesAnEdit(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "owner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Food")
+
+	body := withKey(lunchBody(catID), "edit-survivor-key-000001")
+
+	created := postCreate(t, h, user, body)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d, body = %s", created.Code, created.Body.String())
+	}
+	id := idOf(t, decodeObject(t, created))
+
+	// A full-replace PUT changing the description — the ordinary inline edit,
+	// and one that moves a content_hash input so the hash is legitimately
+	// cleared. The key must not follow it.
+	editBody := fmt.Sprintf(`{"date":"2026-07-01","amount":12.50,"description":"Lunch, edited","category_id":%d}`, catID)
+	editReq := withUserAndURLParam(
+		httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/transactions/%d", id),
+			strings.NewReader(editBody)),
+		user, "id", fmt.Sprint(id))
+	editRec := httptest.NewRecorder()
+	h.handleUpdateTransaction(editRec, editReq)
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("edit: status = %d, body = %s", editRec.Code, editRec.Body.String())
+	}
+
+	// Errorf, not Fatalf, on purpose: if the key was cleared, the retry below is
+	// exactly what a real client does next and its consequence — a duplicated
+	// row — is the failure worth reporting. Stopping here would leave the
+	// duplication assertion unexecuted, so it would never be proven to bite.
+	wantKey := body["client_key"].(string)
+	if k := storedKey(t, h, id); !k.Valid || k.String != wantKey {
+		t.Errorf("EDIT CLEARED THE KEY: stored idempotency_key = %#v, want %q — the "+
+			"original submission can now be replayed into a second row", k, wantKey)
+	}
+
+	// The late retry: the ORIGINAL body, with the original key, arriving after
+	// the edit. It must resolve to the row it created and store nothing.
+	replay := postCreate(t, h, user, body)
+	if replay.Code < 200 || replay.Code > 299 {
+		t.Fatalf("replay after edit: status = %d, want 2xx; body = %s",
+			replay.Code, replay.Body.String())
+	}
+
+	var mine int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM transactions WHERE user_id = ?`, user.ID).Scan(&mine); err != nil {
+		t.Fatalf("count this user's rows: %v", err)
+	}
+	if mine != 1 {
+		t.Fatalf("transactions rows = %d, want 1 — the retry duplicated the row after an edit", mine)
+	}
+
+	replayObj := decodeObject(t, replay)
+	if got := idOf(t, replayObj); got != id {
+		t.Errorf("replay returned id %d, want the original row %d", got, id)
+	}
+	// The replay reports the row's CURRENT state, not the body that was resent.
+	// The attempt created this row; what the row says now is a later, separate
+	// intent, exactly as with the soft-delete case.
+	if desc := replayObj["description"]; desc != "Lunch, edited" {
+		t.Errorf("replay description = %#v, want the edited value — the response "+
+			"must describe the row as it stands, not echo the resent body", desc)
+	}
+}
+
 // TestCreateTransaction_ClientKeyLengthBoundaries walks both ends of the
 // accepted range one character at a time. Testing the exact boundaries is what
 // makes the bounds real: a test that only sends a wildly overlong key passes

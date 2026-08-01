@@ -466,11 +466,27 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// or "not found" before writing — would turn this endpoint into a silent
 	// oracle over another member's submission history. Do not add that.
 	//
-	// Re-tested AFTER the content-hash recovery above, not instead of it: a
+	// Re-tested AFTER the content-hash recovery above, not instead of it. A
 	// retry of the same submission carries the same key AND the same content,
-	// so the INSERT violates both partial indexes and SQLite picks which one
-	// to name. If it named content_hash, the recovery above already retried
-	// with a NULL hash and that retry surfaces the key violation here.
+	// so the INSERT violates BOTH partial indexes at once and SQLite names only
+	// one of them. Ordering the two recoveries this way means either name lands
+	// on the right branch: if it named content_hash, the recovery above already
+	// retried with a NULL hash, and that retry surfaces the key violation here.
+	//
+	// Measured, that second rung is currently defensive rather than exercised.
+	// A double-violating INSERT is reported as the key index every time on this
+	// schema, so the hash-first path is NOT covered by any test and must not be
+	// described as tested behaviour.
+	//
+	// Do not conclude from that it is dead code. The report order is not a
+	// property of either index — it follows index CREATION order, and SQLite
+	// checks the most recently created one first. Verified against the real
+	// migration set: with 008 then 017 the error names
+	// transactions.user_id, transactions.idempotency_key; drop and recreate
+	// idx_transactions_content_hash (as any migration retuning its predicate
+	// would) and the identical INSERT reports transactions.content_hash
+	// instead. So the hash-first rung is one migration away from being live,
+	// and nothing about it would announce that it had become so. Keep both.
 	//
 	// Known limitation, deliberate for now: the replayed BODY is not checked
 	// against the original row. A client that reuses one key for genuinely

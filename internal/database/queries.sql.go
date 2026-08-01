@@ -2307,6 +2307,24 @@ type UpdateTransactionParams struct {
 //
 // This was harmless before 13f0deb, when only imported rows carried a hash.
 // That commit gave every hand-typed row one, and those are the rows users edit.
+//
+// idempotency_key is ABSENT from this SET list, and that absence is a decision,
+// not an oversight. Do not "unify the derived-column handling" by giving it the
+// same conditional clear content_hash has one line above — the two columns
+// answer different questions and want OPPOSITE policies on edit.
+//
+// content_hash describes the row's CONTENT, so an edit that moves a hash input
+// makes the stored hash a lie and it must be cleared. idempotency_key describes
+// the SUBMISSION ATTEMPT that created the row, and editing the row afterwards
+// does not change which attempt created it — that fact is immutable for the
+// row's whole life. Clearing it on edit releases the key, so a retry of the
+// original submission arriving after the edit (a queued offline POST draining
+// late, a user tapping Retry on a stale tab) finds nothing to collide with and
+// inserts a SECOND row. The edit-then-retry window is exactly when a duplicate
+// is hardest to notice, because the two rows no longer look alike.
+//
+// Pinned by TestCreateTransaction_KeySurvivesAnEdit, which fails with
+// "the retry duplicated the row after an edit" if the column is added here.
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
