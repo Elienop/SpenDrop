@@ -353,7 +353,7 @@ Every released image knows its own release tag — the same tag is baked into th
 docker exec spendrop ./spendrop -version
 ```
 
-Prints the bare tag (e.g. `v0.35.0`) and exits, so it drops straight into a script or a health check. It reads the value the running server reads, needs no environment or database, and works even when the deployment's configuration is broken — which is often exactly when you need to know what is deployed.
+Prints the bare tag (e.g. `v0.35.0`) and exits, so it drops straight into a script or a health check. It reads the value the running server reads, needs no environment or database, and works even when the deployment's configuration is broken — which is often exactly when you need to know what is deployed. Use `docker exec` as shown (or `docker run --entrypoint /app/spendrop <image> -version` against a stopped image) — a plain `docker run <image> -version` does not work, because the entrypoint would try to execute `-version` as the container command.
 
 The same string is available over HTTP at [`GET /api/version`](#health-and-monitoring) (auth required) and in the UI. An image built outside the release pipeline — a local `docker build`, `docker-compose.dev.yml`, or a plain `go build` — reports `dev`.
 

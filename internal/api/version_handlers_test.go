@@ -66,6 +66,13 @@ func TestHandleVersion(t *testing.T) {
 		if !ok {
 			t.Fatalf("response has no `version` key; got %v", body)
 		}
+		// Presence alone is not enough: a map decode still passes when the
+		// handler grows extra fields, and this payload is documented as
+		// public information — a future build_path/db_path addition must
+		// fail here, not ship.
+		if len(body) != 1 {
+			t.Errorf("response carries %d keys, want exactly 1 (`version`); got %v", len(body), body)
+		}
 		if got != version.Version() {
 			t.Errorf("version = %v, want %q", got, version.Version())
 		}

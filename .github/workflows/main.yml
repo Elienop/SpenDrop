@@ -66,11 +66,15 @@ jobs:
         env:
           APP_VERSION: ${{ steps.version.outputs.new_tag }}
         run: |
-          # Refuse anything that is not a plain v<major>.<minor>.<patch>.
-          # Two guards, because each catches what the other misses: the
-          # charset guard rejects whitespace and metacharacters, the shape
-          # guard rejects well-formed-but-wrong values like "v.." that the
-          # charset guard would happily pass.
+          # Refuse anything that does not look like a plain
+          # v<major>.<minor>.<patch>. Two guards, because each catches what
+          # the other misses: the charset guard rejects whitespace and
+          # metacharacters, the shape guard rejects well-formed-but-wrong
+          # values like "v.." that the charset guard would happily pass.
+          # The shape glob's trailing * is unanchored, so digits-and-dots
+          # tails ("v1.2.3.4") still pass — the charset guard is the
+          # injection barrier; the shape guard is a sanity check, not an
+          # exact-format promise.
           #
           # Whitespace is the one that matters. `go build -ldflags "<value>"`
           # splits its argument into a LIST of linker flags, so a tag
