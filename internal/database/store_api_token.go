@@ -28,7 +28,7 @@ const (
 //
 // The unit is CHARACTERS, because that is the unit the constraint is written
 // in: SQLite's length() counts characters on a TEXT value. See
-// truncateUserAgent for why counting bytes here was wrong twice over.
+// TruncateUserAgent for why counting bytes here was wrong twice over.
 const maxUserAgentLen = 500
 
 // ActorContext describes who performed an API-token mutation. All four
@@ -262,12 +262,12 @@ func writeAPITokenAudit(
 		UserID:           actor.UserID,
 		Action:           string(action),
 		ActorIp:          nullStringOrEmpty(actor.IP),
-		ActorUserAgent:   nullStringOrEmpty(truncateUserAgent(actor.UserAgent)),
+		ActorUserAgent:   nullStringOrEmpty(TruncateUserAgent(actor.UserAgent)),
 		ActorSessionHash: nullStringOrEmpty(actor.SessionHash),
 	})
 }
 
-// truncateUserAgent clips a User-Agent string to maxUserAgentLen CHARACTERS,
+// TruncateUserAgent clips a User-Agent string to maxUserAgentLen CHARACTERS,
 // which is the unit the column is declared in: migration 011 constrains
 // CHECK(length(actor_user_agent) <= 500), and SQLite's length() counts
 // characters on a TEXT value (it counts bytes only on a BLOB).
@@ -284,7 +284,7 @@ func writeAPITokenAudit(
 //
 // Counting characters cannot overflow the constraint: 500 characters is at most
 // 2,000 bytes, and the CHECK bounds characters, not bytes.
-func truncateUserAgent(ua string) string {
+func TruncateUserAgent(ua string) string {
 	if utf8.RuneCountInString(ua) <= maxUserAgentLen {
 		return ua
 	}

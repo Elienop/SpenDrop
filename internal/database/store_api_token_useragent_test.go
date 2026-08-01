@@ -49,7 +49,7 @@ func TestTruncateUserAgent_CountsCharactersNotBytes(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := truncateUserAgent(tc.in)
+			got := TruncateUserAgent(tc.in)
 
 			if n := utf8.RuneCountInString(got); n != tc.wantChars {
 				t.Errorf("length = %d characters, want %d (input was %d characters, %d bytes)",
