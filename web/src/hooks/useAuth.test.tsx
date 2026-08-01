@@ -1,5 +1,5 @@
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -90,9 +90,33 @@ vi.mock('@/lib/queryClient', () => ({
   queryClient: { invalidateQueries: vi.fn().mockResolvedValue(undefined) },
 }));
 
+/**
+ * Let React flush the passive effect scheduled by the render this test just
+ * observed in the DOM.
+ *
+ * `waitFor` can resolve one macrotask BEFORE that effect runs: happy-dom
+ * delivers MutationObserver records on the microtask queue, so the assertion is
+ * satisfied by the commit itself, while React's passive-effect flush is a
+ * separate scheduler task. An event dispatched into that gap reaches no
+ * listener and is gone for good — there is no retry. Measured margin without
+ * this call is exactly one event-loop turn, which a loaded CI worker loses.
+ */
+async function flushPendingEffects(): Promise<void> {
+  await act(async () => {});
+}
+
 describe('useAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // `clearAllMocks` only wipes call records — it does NOT drain the queues
+    // built by mockResolvedValueOnce/mockRejectedValueOnce (only `mockReset`
+    // does). A response queued by one test and never consumed would be handed
+    // to the NEXT test's `/auth/me`, shifting every later test in this file by
+    // one response and turning a single failure into a file-wide cascade of
+    // nonsensical ones.
+    mockedApi.get.mockReset();
+    mockedApi.post.mockReset();
+    mockedApi.del.mockReset();
     localStorage.clear();
     purgeQueue.mockResolvedValue(undefined);
     cachesDelete.mockResolvedValue(true);
@@ -243,6 +267,7 @@ describe('useAuth', () => {
     await waitFor(() => {
       expect(screen.getByTestId('unverified')).toHaveTextContent('true');
     });
+    await flushPendingEffects();
 
     mockedApi.get.mockResolvedValueOnce({
       id: 5,
@@ -278,6 +303,7 @@ describe('useAuth', () => {
     await waitFor(() => {
       expect(screen.getByTestId('unverified')).toHaveTextContent('true');
     });
+    await flushPendingEffects();
 
     mockedApi.get.mockResolvedValueOnce({
       id: 5,

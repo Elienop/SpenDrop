@@ -1,12 +1,13 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import { render, screen, waitFor, within, act } from '@testing-library/react';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 import { ApiError, NetworkError } from '@/api/client';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { UseDescriptionHistoryResult } from '@/hooks/useDescriptionHistory';
+import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category, Currency, Transaction } from '../api/types';
 
 // --- Mocks ----------------------------------------------------------------
@@ -22,16 +23,46 @@ vi.mock('@/hooks/useIsCoarsePointer', () => ({
 // action without rendering a real Toaster (which needs matchMedia in jsdom).
 const toastSuccess = vi.fn();
 const toastError = vi.fn();
+const toastLoading = vi.fn();
 vi.mock('sonner', () => ({
   toast: Object.assign(
     () => undefined,
     {
       success: (...args: unknown[]) => toastSuccess(...args),
       error: (...args: unknown[]) => toastError(...args),
+      loading: (...args: unknown[]) => toastLoading(...args),
     },
   ),
   Toaster: () => null,
 }));
+
+/** The options object the component hands sonner, as far as tests read it. */
+type ToastOpts = {
+  id?: string | number;
+  duration?: number;
+  closeButton?: boolean;
+  action?: {
+    label: string;
+    onClick: (event: { preventDefault: () => void }) => void;
+  };
+};
+
+/**
+ * Invoke a toast action the way sonner does — with an event whose
+ * `preventDefault` decides whether sonner keeps the toast open.
+ *
+ * act-wrapped and awaited because the handler kicks off an async send whose
+ * state updates would otherwise land outside act and warn.
+ */
+async function tapAction(
+  opts: ToastOpts,
+): Promise<{ preventDefault: ReturnType<typeof vi.fn> }> {
+  const event = { preventDefault: vi.fn() };
+  await act(async () => {
+    opts.action?.onClick(event);
+  });
+  return event;
+}
 
 // QuickAdd renders the app's Toaster wrapper (`@/components/ui/sonner`),
 // which consumes useTheme() and would otherwise require a ThemeProvider in
@@ -794,8 +825,238 @@ describe('QuickAdd — submit failure (online, never queues)', () => {
     await user.click(screen.getByRole('button', { name: /^add$/i }));
 
     await waitFor(() => expect(toastError).toHaveBeenCalled());
-    expect(toastError.mock.calls[0][0]).toMatch(/reach the server/i);
+    // The load-bearing part is that the outcome is UNKNOWN and that trying
+    // again is safe — not that the network is down.
+    expect(toastError.mock.calls[0][0]).toMatch(/confirm the save/i);
+    expect(toastError.mock.calls[0][0]).toMatch(/duplicate/i);
     expect(enqueue).not.toHaveBeenCalled();
+  });
+});
+
+// The field bug: a POST that reached the server and committed, but whose
+// response was lost, surfaced a Retry that created a second identical row. The
+// client mints one key per submission, so a re-send of that submission is
+// recognizable as the same intent — which only works if Retry re-sends the
+// payload that was already built rather than rebuilding it from the form.
+describe('QuickAdd — one idempotency key per intent', () => {
+  async function typeAndAdd(user: UserEvent, entry: string) {
+    await user.type(screen.getByPlaceholderText(/lunch/i), entry);
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+  }
+
+  function postedBody(call: number): CreateTransactionInput {
+    return apiPost.mock.calls[call][1] as CreateTransactionInput;
+  }
+
+  test('a create carries a client_key', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalled());
+    expect(postedBody(0).client_key).toEqual(expect.any(String));
+    // The server caps the column at 64 characters; a longer key would be
+    // rejected or truncated into a different key.
+    expect(postedBody(0).client_key?.length).toBeLessThanOrEqual(64);
+  });
+
+  test('Retry re-sends the identical body, key included', async () => {
+    // "Online but unreachable" is the ambiguous case: the write may well have
+    // landed, which is precisely when a re-keyed retry duplicates.
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    expect(opts.action?.label).toMatch(/retry/i);
+
+    await tapAction(opts);
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
+    const first = postedBody(0);
+    const second = postedBody(1);
+    expect(first.client_key).toEqual(expect.any(String));
+    expect(second.client_key).toBe(first.client_key);
+    // Byte-identical on the wire, not merely equal in the fields we happened
+    // to think of.
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+  });
+
+  test('Retry after a 5xx also re-sends the same key', async () => {
+    // A server that broke rather than judged: the same request may well work a
+    // moment later, and it must go out under the original key in case the
+    // failure happened after the row was written.
+    apiPost.mockRejectedValueOnce(new ApiError('server error', 500));
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    expect(opts.action?.label).toMatch(/retry/i);
+    await tapAction(opts);
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
+    expect(postedBody(1).client_key).toBe(postedBody(0).client_key);
+  });
+
+  test('a 4xx rejection offers no Retry — sending it again changes nothing', async () => {
+    apiPost.mockRejectedValueOnce(new ApiError('bad request', 400));
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [message, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    // The server's own words, and no button that would repeat the refusal.
+    expect(message).toMatch(/bad request/i);
+    expect(opts.action).toBeUndefined();
+    // The entry is still on screen to correct.
+    expect(screen.getByPlaceholderText(/lunch/i)).toHaveValue('groceries 43');
+  });
+
+  test('the failure toast never expires and can be dismissed by hand', async () => {
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    // The Add button next to it mints a fresh key and never expires; a toast
+    // that timed out would quietly leave only the duplicating path.
+    expect(opts.duration).toBe(Infinity);
+    expect(opts.closeButton).toBe(true);
+  });
+
+  test('Retry swaps the toast in place instead of stacking a new one', async () => {
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [, errorOpts] = toastError.mock.calls[0] as [string, ToastOpts];
+    const slot = errorOpts.id;
+    expect(slot).toEqual(expect.any(String));
+
+    const event = await tapAction(errorOpts);
+    // sonner would otherwise dismiss the toast the moment the action runs.
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(toastLoading).toHaveBeenCalledWith(
+      expect.stringMatching(/retrying/i),
+      expect.objectContaining({ id: slot }),
+    );
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    const [, successOpts] = toastSuccess.mock.calls[0] as [string, ToastOpts];
+    expect(successOpts.id).toBe(slot);
+  });
+
+  test('a retry that succeeds does not wipe a draft typed since the failure', async () => {
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+
+    // The user gives up waiting and starts the next entry.
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.clear(input);
+    await user.type(input, 'transport 9');
+
+    // ...then the earlier failure's Retry finally goes through.
+    const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    await tapAction(opts);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    // The rescued entry saved, but clearing the form would have destroyed the
+    // draft as a side effect of tidying up.
+    expect(postedBody(1)).toMatchObject({ description: 'groceries' });
+    expect(input).toHaveValue('transport 9');
+  });
+
+  test('a retry on an untouched form still clears it for the next entry', async () => {
+    apiPost.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+
+    const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
+    await tapAction(opts);
+
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByPlaceholderText(/lunch/i)).toHaveValue(''),
+    );
+  });
+
+  test('the next entry after a successful save gets a NEW key', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+
+    await typeAndAdd(user, 'transport 9');
+    await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
+
+    // Reusing a key here would make the server answer the second entry with
+    // the first one's row — the transaction would vanish.
+    expect(postedBody(1).client_key).not.toBe(postedBody(0).client_key);
+    expect(postedBody(1)).toMatchObject({ amount: 9, category_id: 3 });
+  });
+
+  test('an offline capture stores the key inside the queued payload', async () => {
+    Object.defineProperty(navigator, 'onLine', {
+      configurable: true,
+      value: false,
+    });
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    await typeAndAdd(user, 'groceries 43');
+
+    await waitFor(() => expect(enqueue).toHaveBeenCalled());
+    const queuedPayload = enqueue.mock.calls[0][1] as CreateTransactionInput;
+    // Minted at capture, then replayed verbatim by the queue — so a drain
+    // that runs twice cannot create two rows.
+    expect(queuedPayload.client_key).toEqual(expect.any(String));
   });
 });
 

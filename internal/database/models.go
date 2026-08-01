@@ -164,6 +164,7 @@ type Transaction struct {
 	AmountCents         int64          `json:"amount_cents"`
 	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
 	ContentHash         sql.NullString `json:"content_hash"`
+	IdempotencyKey      sql.NullString `json:"idempotency_key"`
 }
 
 type TransactionAudit struct {

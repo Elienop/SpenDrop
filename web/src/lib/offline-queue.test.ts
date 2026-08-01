@@ -382,6 +382,52 @@ describe('offline-queue — transport failures are not server rejections', () =>
   });
 });
 
+// The queue's promise to replay the payload verbatim is what makes a client
+// idempotency key work at all: the key is minted once at capture, and every
+// re-POST of that row — after a lost response, or from a second tab — carries
+// it unchanged so the server can answer with the row it already created.
+describe('offline-queue — the idempotency key survives replay', () => {
+  test('re-sends the stored key byte-identically after a lost response', async () => {
+    await enqueue(U, payload({ description: 'lunch', client_key: 'key-abc' }));
+
+    // The key lives inside the stored payload, so it survives a reload.
+    const [stored] = await getAllQueued(U);
+    expect(stored.payload.client_key).toBe('key-abc');
+
+    // The server never answered the first attempt, so the row is kept — it may
+    // or may not have committed, which is exactly the case the key covers.
+    post.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+    expect((await drainQueue(U)).synced).toBe(0);
+    expect(await countQueued(U)).toBe(1);
+
+    post.mockResolvedValueOnce({} as never);
+    expect((await drainQueue(U)).synced).toBe(1);
+
+    expect(post).toHaveBeenCalledTimes(2);
+    const firstBody = post.mock.calls[0][1] as CreateTransactionInput;
+    const secondBody = post.mock.calls[1][1] as CreateTransactionInput;
+    expect(secondBody.client_key).toBe('key-abc');
+    // Deliberately NOT deduped client-side: sending the same key twice is the
+    // mechanism. What must not change is the body.
+    expect(JSON.stringify(secondBody)).toBe(JSON.stringify(firstBody));
+  });
+
+  test('a row queued before client_key existed still drains, keylessly', async () => {
+    // Rows captured by an older build have no key. They must replay exactly as
+    // they always did rather than crash the drain and strand every row behind
+    // them.
+    await enqueue(U, payload({ description: 'legacy' }));
+    post.mockResolvedValue({} as never);
+
+    const result = await drainQueue(U);
+
+    expect(result).toEqual({ synced: 1, remaining: 0 });
+    expect(post.mock.calls[0][1]).not.toHaveProperty('client_key');
+  });
+});
+
 describe('offline-queue — needs-sign-in hold', () => {
   test('a 401 holds the queue for sign-in instead of dropping rows', async () => {
     await enqueue(U, payload({ description: 'a' }));

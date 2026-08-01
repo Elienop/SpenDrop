@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
 } from 'react';
 import { useForm, useWatch } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -39,6 +40,12 @@ import { AmountCurrencyInput } from './AmountCurrencyInput';
 import type { Category, Transaction } from '../api/types';
 import { formatYYYYMMDD } from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import { newClientKey } from '@/lib/client-key';
+import {
+  isRetryableSaveFailure,
+  noRateMessage,
+  saveFailureMessage,
+} from '@/lib/save-failure';
 import { toCreatePayload } from '@/lib/currency';
 import { useCurrencies } from '@/hooks/useCurrencies';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
@@ -105,6 +112,38 @@ const entrySchema = z.object({
 });
 type EntryFormValues = z.infer<typeof entrySchema>;
 
+/**
+ * One save attempt, built once. `payload` already carries the `client_key`
+ * minted when it was assembled, so re-sending THIS object — rather than
+ * rebuilding it from the form — is what lets a retry after an ambiguous
+ * failure resolve to the row already created instead of a second one.
+ * `values` rides along because the success path needs the submitted form
+ * state for the sticky writes, the undo buffer, and the post-save reset.
+ */
+interface EntrySubmission {
+  payload: CreateTransactionInput;
+  values: EntryFormValues;
+  /**
+   * Toast slot for this submission — the failure, the "Retrying…" spinner and
+   * the eventual result all render into it, so one save never stacks three
+   * toasts. Shares the client key's value: one intent, one identity.
+   */
+  toastId: string;
+}
+
+/** Field-by-field equality, so a retry can tell whether the row still holds
+ *  the entry it is about to save or a draft the user has started since. */
+function sameEntry(a: EntryFormValues, b: EntryFormValues): boolean {
+  return (
+    a.date === b.date &&
+    a.amount === b.amount &&
+    a.currency === b.currency &&
+    a.description === b.description &&
+    a.category_id === b.category_id &&
+    a.tags === b.tags
+  );
+}
+
 export interface TransactionEntryRowProps {
   categories: Category[];
   onSubmit: (input: CreateTransactionInput) => Promise<Transaction>;
@@ -129,6 +168,16 @@ export function TransactionEntryRow({
     saved: Transaction;
     values: EntryFormValues;
   } | null>(null);
+  // Latest send, so the error toast's Retry action can re-run it without
+  // making `send` depend on itself.
+  const sendRef = useRef<
+    (submission: EntrySubmission, isRetry?: boolean) => void
+  >(() => {});
+  // A save is in flight. The state drives the button; the ref is read
+  // synchronously by `submit`, which can fire from the keyboard before React
+  // has re-rendered the disabled button.
+  const [isSending, setIsSending] = useState(false);
+  const sendingRef = useRef(false);
 
   const { list, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
 
@@ -189,29 +238,53 @@ export function TransactionEntryRow({
     setTimeout(() => amountRef.current?.focus(), 0);
   }, [onDelete, form]);
 
-  const submit = useCallback(
-    async (values: EntryFormValues) => {
-      let payload: CreateTransactionInput;
-      try {
-        // Union-to-optional widening: toCreatePayload returns a discriminated
-        // union (collapsed vs. expanded shape), while CreateTransactionInput
-        // declares original_amount / original_currency as optional. Both
-        // branches are structurally compatible at runtime — the cast only
-        // tells the type system that the optional-field form subsumes both.
-        payload = toCreatePayload(values, baseCode, rateFor) as CreateTransactionInput;
-      } catch {
-        toast.error('Failed to save transaction');
-        return;
-      }
+  // Sends an already-built save. Takes the submission rather than reading the
+  // form, so a retry re-sends exactly what went out before — same body, same
+  // client_key — instead of rebuilding it and minting a second identity for a
+  // write the server may already have committed.
+  const send = useCallback(
+    async (submission: EntrySubmission, isRetry = false) => {
+      const { payload, values, toastId } = submission;
       let saved: Transaction;
+      sendingRef.current = true;
+      setIsSending(true);
       try {
         saved = await onSubmit(payload);
-      } catch {
-        toast.error('Failed to save transaction');
+      } catch (err) {
+        toast.error(saveFailureMessage(err), {
+          id: toastId,
+          // Never auto-dismiss. This toast holds the only path that cannot
+          // duplicate the row; the Add button beside it mints a fresh key and
+          // never expires. A window that closes on its own would quietly demote
+          // the safe option to the risky one, so the user closes it themselves.
+          duration: Infinity,
+          closeButton: true,
+          // Retry re-sends THIS submission. Pressing Add again instead is a
+          // fresh intent with a fresh key — right for a write the server
+          // rejected, but a duplicate for one that landed and lost its
+          // response. Offered only where sending again could change the answer:
+          // a 401 needs a sign-in and a 400 will be refused identically.
+          action: isRetryableSaveFailure(err)
+            ? {
+                label: 'Retry',
+                onClick: (event: MouseEvent<HTMLButtonElement>) => {
+                  // sonner dismisses a toast after its action runs unless the
+                  // event is default-prevented. Keep it, and reuse the slot so
+                  // the spinner replaces the error where the user is looking.
+                  event.preventDefault();
+                  toast.loading('Retrying…', { id: toastId });
+                  sendRef.current(submission, true);
+                },
+              }
+            : undefined,
+        });
         // Leave the form untouched so the user can retry. Do not clear
         // undoBufferRef — a previous successful save's undo buffer, if any,
         // stays valid because nothing new was saved.
         return;
+      } finally {
+        sendingRef.current = false;
+        setIsSending(false);
       }
       saveLastCategory(values.category_id);
       saveLastDate(values.date);
@@ -219,6 +292,9 @@ export function TransactionEntryRow({
       undoBufferRef.current = { saved, values };
 
       toast.success('Transaction saved', {
+        // Same slot as the failure it replaces, so a retry resolves where the
+        // user is already looking instead of stacking a third toast.
+        id: toastId,
         duration: 4000,
         action: {
           label: 'Undo (\u2318Z)',
@@ -230,6 +306,12 @@ export function TransactionEntryRow({
           undoBufferRef.current = null;
         },
       });
+
+      // A retry can succeed long after the failure, by which time the row may
+      // hold a different entry the user has started. Clearing it then would
+      // destroy work to tidy up after a save they already believe happened. The
+      // entry itself is saved either way — only the row is spared.
+      if (isRetry && !sameEntry(form.getValues(), values)) return;
 
       form.reset({
         date: values.date,
@@ -246,15 +328,59 @@ export function TransactionEntryRow({
       // runs, which makes the useEffect skip the sync and strand the
       // pre-submit rawInput (e.g. "25") in the DOM.
       // Blur first. The deferred focus() alone only helps when focus was
-    // elsewhere; submitting with Cmd/Ctrl+Enter FROM the amount field leaves
-    // it focused throughout, and AmountCurrencyInput deliberately ignores
-    // incoming `value` while focused — so the reset to 0 was swallowed and
-    // the old text stayed in the DOM, ready to concatenate into the next
-    // transaction's amount. Blur runs its unconditional re-sync from `value`.
-    amountRef.current?.blur();
-    setTimeout(() => amountRef.current?.focus(), 0);
+      // elsewhere; submitting with Cmd/Ctrl+Enter FROM the amount field leaves
+      // it focused throughout, and AmountCurrencyInput deliberately ignores
+      // incoming `value` while focused — so the reset to 0 was swallowed and
+      // the old text stayed in the DOM, ready to concatenate into the next
+      // transaction's amount. Blur runs its unconditional re-sync from `value`.
+      amountRef.current?.blur();
+      setTimeout(() => amountRef.current?.focus(), 0);
     },
-    [onSubmit, form, undoLastSave, baseCode, rateFor],
+    [onSubmit, form, undoLastSave],
+  );
+
+  // Keep the error toast's Retry handler pointed at the current send closure.
+  // Only the closure is refreshed — the submission it is handed is the one
+  // captured when that toast was raised.
+  useEffect(() => {
+    sendRef.current = (submission, isRetry) => void send(submission, isRetry);
+  }, [send]);
+
+  const submit = useCallback(
+    async (values: EntryFormValues) => {
+      // A second submit while one is in flight would mint a second key and
+      // create a genuine duplicate. The Add button is disabled for exactly this
+      // window; the guard also covers the Cmd/Ctrl+Enter path, which never
+      // touches the button. A RETRY is deliberately not gated — it re-sends the
+      // same key, so sending it twice cannot duplicate.
+      if (sendingRef.current) return;
+      const clientKey = newClientKey();
+      let payload: CreateTransactionInput;
+      try {
+        // Union-to-optional widening: toCreatePayload returns a discriminated
+        // union (collapsed vs. expanded shape), while CreateTransactionInput
+        // declares original_amount / original_currency as optional. Both
+        // branches are structurally compatible at runtime — the cast only
+        // tells the type system that the optional-field form subsumes both.
+        //
+        // The single client_key mint site for this form: one per submit, so
+        // editing the row and saving again is correctly a new intent. A retry
+        // of THIS submit goes through `send` and keeps this key.
+        payload = toCreatePayload(
+          { ...values, client_key: clientKey },
+          baseCode,
+          rateFor,
+        ) as CreateTransactionInput;
+      } catch {
+        // Nothing was built and nothing was sent, so there is no Retry to offer
+        // — and a generic "failed to save" would send the user looking for a
+        // network problem. Name the missing rate instead.
+        toast.error(noRateMessage(values.currency));
+        return;
+      }
+      await send({ payload, values, toastId: clientKey });
+    },
+    [send, baseCode, rateFor],
   );
 
   const categoryNameById = (id: number): string | undefined =>
@@ -536,9 +662,12 @@ export function TransactionEntryRow({
                 type="submit"
                 size="sm"
                 className="h-8 text-xs"
-                disabled={currenciesLoading || hasNoRate}
+                // Disabled for the in-flight window: a second click there mints
+                // a second key, which is a real duplicate rather than a replay.
+                disabled={currenciesLoading || hasNoRate || isSending}
+                aria-busy={isSending}
               >
-                Add
+                {isSending ? 'Saving…' : 'Add'}
               </Button>
             </div>
           </div>

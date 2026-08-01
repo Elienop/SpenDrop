@@ -894,7 +894,7 @@ Tokens are also revoked atomically when you change your password — if the pass
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/transactions` | List transactions (supports search, pagination, sorting, date/category filters) |
-| POST | `/api/transactions` | Create a transaction |
+| POST | `/api/transactions` | Create a transaction. The body may carry an optional `client_key`: 16–64 characters of `A-Z a-z 0-9 _ . : -`, minted fresh for each submission attempt (the app sends a UUID). If a create bearing a key you have already used arrives — a retry after a lost response — the server creates nothing and returns your original row, indistinguishable from a fresh success. **Script authors: never reuse a structured constant like `import-run-1` across submissions** — the second one is treated as a retry of the first and is silently not stored. The namespace is per-user, so two members may hold the same key value and each replays only against their own row. Keys identify the *submission*, not the content: two entries with identical fields and different keys both insert (two household members entering the same lunch is normal data, not a duplicate). Requests without a key behave exactly as before. |
 | POST | `/api/transactions/batch` | Batch create transactions |
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
 | POST | `/api/transactions/delete-by-filter` | Delete every transaction matching the current filter (atomic, single query) |

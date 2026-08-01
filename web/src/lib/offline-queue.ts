@@ -19,12 +19,15 @@ import { QUEUE_NEEDS_SIGN_IN_PREFIX } from '@/lib/storage-keys';
 // lives in the enqueue gate — an ambiguous online failure must not be queued.
 //
 // Delivery is at-least-once: the enqueue gate guarantees the row does not yet
-// exist server-side, so the common path creates it exactly once. The one
-// residual duplicate window is a successful POST whose `removeQueued` then
-// fails (IndexedDB abort/quota mid-drain) — the row survives and is re-POSTed
-// on the next drain. Closing that fully needs a client idempotency key AND the
-// server choosing to reject (rather than anchor) the collision it already
-// detects. It is rare and never loses data; we accept it for v1.
+// exist server-side, so the common path creates it exactly once. Replays that
+// the gate cannot prevent — a successful POST whose `removeQueued` then fails
+// (IndexedDB abort/quota mid-drain), or two tabs draining the same row — are
+// covered instead by the `client_key` inside the stored payload: it was minted
+// once at capture, the payload is replayed verbatim, so every re-POST of that
+// row carries the same key and the server answers with the row it already
+// created. Do NOT add client-side dedup on top of this; sending the same key
+// again is the mechanism, not a bug. Rows captured before `client_key` existed
+// have none and fall back to the old at-least-once behavior.
 //
 // iOS PWAs have no Background Sync API, so replay is foreground-only: it runs
 // on app launch and on the window 'online' event (see useOfflineSync).
@@ -64,7 +67,8 @@ export interface QueuedTransaction {
   /**
    * Exact wire payload to POST on replay. `amount` is dollars, per the Money
    * Wire-Edge DTO discipline — built by `toCreatePayload` at capture time and
-   * stored verbatim, so replay re-sends the identical body. For a non-base
+   * stored verbatim, so replay re-sends the identical body, `client_key`
+   * included (that verbatim replay is what makes the key work). For a non-base
    * currency this freezes the exchange rate at capture time (the dollar
    * `amount` is already converted; `original_amount`/`original_currency` carry
    * what the user typed); replay re-sends that captured-rate value, matching
