@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"unicode/utf8"
 )
 
 // APITokenAuditAction is a typed audit action. The underlying string MUST
@@ -20,10 +21,14 @@ const (
 	APITokenAuditRevokedByMassRevoke     APITokenAuditAction = "revoked_by_mass_revoke"
 )
 
-// maxUserAgentLen caps the actor_user_agent column at the length enforced
-// by the CHECK constraint in migration 011. Browsers routinely emit >500
-// byte UA strings; truncating in Go yields a clean insert instead of a
-// CHECK-violation error the handler would have to translate.
+// maxUserAgentLen caps the actor_user_agent column at the length enforced by
+// the CHECK constraint in migration 011. Browsers routinely emit long UA
+// strings; truncating in Go yields a clean insert instead of a CHECK-violation
+// error the handler would have to translate.
+//
+// The unit is CHARACTERS, because that is the unit the constraint is written
+// in: SQLite's length() counts characters on a TEXT value. See
+// TruncateUserAgent for why counting bytes here was wrong twice over.
 const maxUserAgentLen = 500
 
 // ActorContext describes who performed an API-token mutation. All four
@@ -38,7 +43,7 @@ const maxUserAgentLen = 500
 //	IP          — remote client IP ("" maps to NULL). Handlers extract this
 //	              via the existing clientIP helper used for login audits.
 //	UserAgent   — User-Agent header raw ("" maps to NULL). Truncated to
-//	              maxUserAgentLen bytes before INSERT.
+//	              maxUserAgentLen characters before INSERT.
 //	SessionHash — lowercase hex SHA-256 of the session cookie value ("" maps
 //	              to NULL). Handlers construct this via auth.HashSessionToken
 //	              from Chunk 1; the store itself does no hashing to avoid an
@@ -257,22 +262,40 @@ func writeAPITokenAudit(
 		UserID:           actor.UserID,
 		Action:           string(action),
 		ActorIp:          nullStringOrEmpty(actor.IP),
-		ActorUserAgent:   nullStringOrEmpty(truncateUserAgent(actor.UserAgent)),
+		ActorUserAgent:   nullStringOrEmpty(TruncateUserAgent(actor.UserAgent)),
 		ActorSessionHash: nullStringOrEmpty(actor.SessionHash),
 	})
 }
 
-// truncateUserAgent clips a User-Agent string to maxUserAgentLen bytes.
-// Byte-based truncation is safe because UA strings are ASCII-ish and the
-// CHECK constraint is expressed in length(), which SQLite measures in
-// bytes for BLOBs and UTF-8 for TEXT. UA strings rarely contain multi-byte
-// runes, and a mid-rune cut here only costs a single-byte replacement
-// sequence in downstream display — not a correctness issue.
-func truncateUserAgent(ua string) string {
-	if len(ua) <= maxUserAgentLen {
+// TruncateUserAgent clips a User-Agent string to maxUserAgentLen CHARACTERS,
+// which is the unit the column is declared in: migration 011 constrains
+// CHECK(length(actor_user_agent) <= 500), and SQLite's length() counts
+// characters on a TEXT value (it counts bytes only on a BLOB).
+//
+// This used to cut at 500 BYTES, with a comment arguing that was safe because
+// UA strings are ASCII-ish and a mid-rune cut costs only a replacement
+// character downstream. Both halves were wrong. A byte cut is stricter than the
+// column for any non-ASCII UA — Arabic reaches 500 bytes at 250 characters, so
+// the store discarded half of what the schema would have accepted, the same
+// handler-stricter-than-its-own-column defect that the api_token name check
+// carried. And a byte cut can land mid-rune, writing invalid UTF-8 into a TEXT
+// column; that is not a display artifact, it is malformed data at rest, and
+// length() over it is not meaningful.
+//
+// Counting characters cannot overflow the constraint: 500 characters is at most
+// 2,000 bytes, and the CHECK bounds characters, not bytes.
+func TruncateUserAgent(ua string) string {
+	if utf8.RuneCountInString(ua) <= maxUserAgentLen {
 		return ua
 	}
-	return ua[:maxUserAgentLen]
+	n := 0
+	for i := range ua {
+		if n == maxUserAgentLen {
+			return ua[:i]
+		}
+		n++
+	}
+	return ua
 }
 
 // nullStringOrEmpty maps "" to NULL. The three optional columns

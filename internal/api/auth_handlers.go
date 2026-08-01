@@ -158,25 +158,33 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
-		return
-	}
+	// CHARSET GATE FIRST, then the length bound — the same order as the
+	// identical pair in handleCreateUser, where the fuller note lives. It is
+	// what makes the len() bound below a character count by construction
+	// (isValidUsername admits only one-byte ASCII) instead of by reading ahead,
+	// and it answers a non-ASCII username with the charset message rather than a
+	// character count the input did not violate.
 	if !isValidUsername(req.Username) {
 		writeError(w, http.StatusBadRequest, "username may only contain letters, numbers, hyphens, and underscores")
+		return
+	}
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if req.Password == "" {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
+	// BYTES, and it must stay bytes — bcrypt truncates at 72. See
+	// passwordTooLongMessage in password_change_handlers.go for the full reason.
 	minLen, maxLen := getPasswordBounds()
 	if len(req.Password) < minLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
+		writeError(w, http.StatusBadRequest, passwordTooShortMessage(minLen))
 		return
 	}
 	if len(req.Password) > maxLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
+		writeError(w, http.StatusBadRequest, passwordTooLongMessage(maxLen))
 		return
 	}
 
@@ -211,7 +219,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Default display name to username if not provided
 	displayName := req.DisplayName
-	if len(displayName) > MaxDisplayNameLength {
+	if charLen(displayName) > MaxDisplayNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}

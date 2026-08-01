@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	// Name bounds in CHARACTERS, matching migration 011's
+	// CHECK(length(name) BETWEEN 1 AND 100) — SQLite's length() counts
+	// characters on TEXT. Enforced with charLen, never len.
 	apiTokenNameMin        = 1
 	apiTokenNameMax        = 100
 	apiTokenMaxExpiryYears = 10
@@ -52,10 +55,18 @@ type apiTokenListResponse struct {
 // mutation handler. Session cookie value is hashed, never stored raw.
 func newActorContext(r *http.Request, user database.User) database.ActorContext {
 	ip := extractIP(r.RemoteAddr)
+	// The header is passed through WHOLE. It used to be cut here at 500 BYTES,
+	// which quietly defeated the store's own truncation: ApiTokenStore calls
+	// database.TruncateUserAgent, which cuts at 500 CHARACTERS to match the
+	// column's CHECK(length(actor_user_agent) <= 500) — and SQLite counts
+	// characters there. Cutting bytes first meant the character-based helper
+	// only ever saw an already-shortened string, so a 433-character Arabic
+	// agent, comfortably inside the column's bound, was stored as 266 and the
+	// byte cut could land mid-character and write invalid UTF-8.
+	//
+	// One truncation point, in the store, next to the constraint it satisfies.
+	// The raw header is bounded by net/http's MaxHeaderBytes long before here.
 	ua := r.Header.Get("User-Agent")
-	if len(ua) > 500 {
-		ua = ua[:500]
-	}
 	sessionHash := ""
 	if cookie, err := r.Cookie("session"); err == nil {
 		sessionHash = auth.HashSessionToken(cookie.Value)
@@ -102,7 +113,12 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.TrimSpace(req.Name)
-	if len(name) < apiTokenNameMin || len(name) > apiTokenNameMax {
+	// CHARACTERS, because the schema counts characters: migration 011 puts
+	// CHECK(length(name) BETWEEN 1 AND 100) on this column, and SQLite's
+	// length() counts characters on a TEXT value. Bounding with len() over bytes
+	// made the handler stricter than the table it writes to — an Arabic token
+	// name was refused at ~50 characters for a column that would have taken 100.
+	if charLen(name) < apiTokenNameMin || charLen(name) > apiTokenNameMax {
 		writeError(w, http.StatusBadRequest, "invalid name")
 		return
 	}

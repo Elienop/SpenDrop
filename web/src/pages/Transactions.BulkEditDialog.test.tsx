@@ -1,9 +1,10 @@
 import { describe, test, expect, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useState } from 'react';
 
 import { BulkEditDialog } from './Transactions.BulkEditDialog';
+import { MAX_DESCRIPTION_LENGTH } from '../lib/constants';
 import type { Category } from '../api/types';
 
 const categories: Category[] = [
@@ -111,5 +112,55 @@ describe('BulkEditDialog', () => {
     await waitFor(() => {
       expect(onSubmit).toHaveBeenCalledTimes(1);
     });
+  });
+
+  // The description cap is a CHARACTER count matching the server's
+  // MaxDescriptionLength. Zod's `.max()` and `String.length` would count UTF-16
+  // code units instead, so 500 astral-plane characters measure 1,000 to them —
+  // and a patch the server accepts would be refused here, with no way for the
+  // user to tell why. The emoji case is the only one that discriminates:
+  // Arabic and ASCII agree under both counts.
+  test.each([
+    ['plain ASCII', 'd'],
+    ['an astral-plane emoji', '🧾'],
+  ])(
+    'accepts a description of exactly the full limit written in %s',
+    async (_label, unit) => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const onSubmit = vi.fn();
+      render(<Harness onSubmit={onSubmit} />);
+
+      const atLimit = unit.repeat(MAX_DESCRIPTION_LENGTH);
+      // fireEvent rather than user.type: 500 keystrokes is slow and tests
+      // nothing extra.
+      fireEvent.change(screen.getByLabelText('Description'), {
+        target: { value: atLimit },
+      });
+      await user.click(screen.getByRole('button', { name: /apply/i }));
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      const patch = onSubmit.mock.calls[0][0] as {
+        patch: { description?: string };
+      };
+      expect(patch.patch.description).toBe(atLimit);
+    },
+  );
+
+  test('refuses a description one character over the limit', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onSubmit = vi.fn();
+    render(<Harness onSubmit={onSubmit} />);
+
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'ب'.repeat(MAX_DESCRIPTION_LENGTH + 1) },
+    });
+    await user.click(screen.getByRole('button', { name: /apply/i }));
+
+    expect(
+      await screen.findByText(
+        `Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`,
+      ),
+    ).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

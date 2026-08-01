@@ -240,6 +240,82 @@ export interface CollisionGroup {
   db_match?: DbMatchPreview;
 }
 
+/**
+ * The fields an uploaded row can carry that are longer than SpenDrop
+ * stores. Only these three have a length bound worth reporting: `date`
+ * and `amount` are parsed, so an over-long value fails as unparseable
+ * long before length matters.
+ */
+export type ImportFieldErrorField = 'description' | 'tags' | 'notes';
+
+/**
+ * One field on one row whose value exceeds the limit the rest of the
+ * API enforces. Upload, PATCH and GET report these on the preview so
+ * the UI can flag a row on load rather than only after a failed
+ * confirm; confirm reports them again in its 409 body.
+ *
+ * Carries its own explanation. The remedies genuinely differ between
+ * fields — a description is editable in the preview table ("shorten it
+ * here") while tags and notes have no cell to point at and can only be
+ * skipped or fixed in the source spreadsheet — but the backend writes
+ * both, so this side never composes one. See `message` below.
+ *
+ * Where the error is SHOWN is still ours to decide: `description` goes
+ * in its cell, the rest in a detail line under the row. That split is
+ * `isEditableInPreview` in `lib/import-field-errors.ts`.
+ */
+export interface ImportFieldError {
+  row_id: number;
+  field: ImportFieldErrorField;
+  /**
+   * Server-authored explanation for this one field, rendered VERBATIM.
+   * Do not reword it and do not compose an alternative: the same cell
+   * can be filled from two directions — this list, and the 400 body of
+   * a rejected PATCH — and the backend emits one string for both
+   * (`importFieldLengthMessage`, reused by `validateImportField`). Any
+   * wording written on this side would match only by coincidence, and
+   * only until either copy was edited.
+   *
+   * It is also why this side holds no length constants: the sentence
+   * arrives with the number already in it, correct by construction.
+   *
+   * Optional so a response that omits it still type-checks;
+   * `fallbackFieldTooLongMessage` covers that case with a numberless
+   * sentence rather than a guessed bound.
+   */
+  message?: string;
+}
+
+/**
+ * Why a category value on an uploaded row has no decision behind it yet.
+ * - `unmapped`: the cell names a category the household does not have.
+ *   Remedy: pick a target for that name.
+ * - `missing`: the cell is empty. Remedy: pick a default category.
+ *
+ * The two are separate because their remedies are separate controls, and a
+ * single "unresolved" label would point the user at the wrong one.
+ */
+export type UnresolvedCategoryReason = 'unmapped' | 'missing';
+
+/**
+ * One distinct category value in the upload that nothing resolves. `name` is
+ * `''` for the missing-cell case; `row_ids` is every non-skipped row carrying
+ * it, which is what turns "one category needs mapping" into "…and it covers
+ * 312 of your 400 rows".
+ *
+ * Emitted on every preview response computed as if the user had decided
+ * NOTHING — so the list is stable and the client marks each entry resolved
+ * against its own mapping state. Rows the backend would reject before ever
+ * consulting their category (unparseable date, empty description, zero
+ * amount) are excluded, which is what stops a trailing "TOTAL" row from
+ * demanding a category it will never use.
+ */
+export interface UnresolvedCategory {
+  name: string;
+  reason: UnresolvedCategoryReason;
+  row_ids: number[];
+}
+
 export interface ImportPreview {
   import_id: string;
   row_count: number;
@@ -252,6 +328,32 @@ export interface ImportPreview {
    * and every GET — never derived on the client.
    */
   collision_groups: CollisionGroup[];
+  /**
+   * Every field on every row that is longer than SpenDrop stores.
+   * Recomputed by the backend alongside `collision_groups`, so a row
+   * edited back under the limit drops out of this array on the PATCH
+   * response and its flag clears without any client-side bookkeeping.
+   *
+   * Optional for the same reason `expires_at` below is optional: the
+   * field is only meaningful once the Go side emits it on all three
+   * response maps (upload / PATCH / GET). Marking it required would
+   * tell consumers it is always present, and a preview built before
+   * that lands would type-check while being `undefined` at runtime.
+   * Every read goes through `activeFieldErrorRowIDs`, which treats
+   * `undefined` as "none".
+   */
+  field_errors?: ImportFieldError[];
+  /**
+   * Every category value in the upload that no decision covers. Recomputed
+   * by the backend alongside `collision_groups`, so skipping the last row
+   * carrying an undecided name drops the entry on the PATCH response and
+   * the gate clears with no client-side bookkeeping.
+   *
+   * Optional for the same reason `field_errors` is: a preview built before
+   * the Go side emitted it would type-check while being `undefined` at
+   * runtime. Every read treats `undefined` as "nothing to decide".
+   */
+  unresolved_categories?: UnresolvedCategory[];
   /**
    * ISO-8601 timestamp (UTC) at which the backend will evict this
    * session from the in-memory importStore. The frontend reads this
@@ -292,6 +394,19 @@ export interface ImportResult {
   imported: number;
   skipped: number;
   total: number;
+  /**
+   * `skipped` split by cause, counts keyed by reason. A bare "488 skipped"
+   * is a number the user cannot act on and cannot distinguish from a broken
+   * import; this is what makes it explicable.
+   *
+   * Keys are the backend's own reason strings — `duplicate`,
+   * `unparseable_date`, `empty_description`, `zero_amount`,
+   * `missing_category`, `field_too_long` — plus `user_skipped` (rows the
+   * user skipped in the preview) and `error`. Only non-zero causes appear,
+   * so a consumer must render whatever keys arrive rather than a fixed list,
+   * and the counts sum to `skipped`.
+   */
+  skipped_reasons?: Record<string, number>;
 }
 
 // Reports

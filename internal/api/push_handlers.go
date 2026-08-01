@@ -165,10 +165,13 @@ func (h *Handler) handleCreatePushSubscription(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	ua := r.Header.Get("User-Agent")
-	if len(ua) > 500 {
-		ua = ua[:500]
-	}
+	// Character-based, not the byte cut this used to do. push_subscriptions.
+	// user_agent carries no CHECK constraint, so there is no
+	// stricter-than-the-column defect here — but a byte cut can still land
+	// mid-character and write invalid UTF-8 into a TEXT column, which is
+	// malformed data at rest rather than a display artifact. Same helper as the
+	// audit path so the two cannot drift.
+	ua := database.TruncateUserAgent(r.Header.Get("User-Agent"))
 	if err := h.queries.UpsertPushSubscription(r.Context(), database.UpsertPushSubscriptionParams{
 		UserID:    user.ID,
 		Endpoint:  req.Endpoint,

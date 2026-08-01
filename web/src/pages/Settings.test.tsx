@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -32,6 +32,8 @@ import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
+import { MAX_CURRENCY_SYMBOL_LENGTH } from '../lib/constants';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
@@ -311,6 +313,108 @@ describe('Settings', () => {
       });
     });
 
+    // The symbol field capped at 3 characters — both in the schema and as a
+    // `maxLength` on the input — while the server allows 10
+    // (MaxCurrencySymbolLength). Real symbols exceed 3: the Lebanese pound is
+    // written "ل.ل.", four characters, and this household keeps its ledger in
+    // LBP and USD. The `maxLength` made it worse than a validation error, since
+    // the browser silently refused the fourth keystroke with nothing to read.
+    // Two cases, doing two different jobs. "ل.ل." is the real one — four
+    // characters, which the old cap of 3 refused outright. The row of
+    // astral-plane characters is the one that discriminates the UNIT: it is
+    // exactly at the limit in characters but twice that in UTF-16 code units,
+    // so `String.length` or Zod's `.max()` would refuse it. Arabic cannot make
+    // that distinction, because it is one UTF-16 unit per character.
+    test('accepts the Lebanese pound symbol, typed keystroke by keystroke', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^code$/i)).toBeInTheDocument();
+      });
+
+      await user.type(screen.getByLabelText(/^code$/i), 'LBP');
+      await user.type(screen.getByLabelText(/^name$/i), 'Lebanese Pound');
+      // user.type, deliberately: it is the only thing that exercises the
+      // input's `maxLength`, and `maxLength={3}` swallowed the fourth
+      // keystroke silently — no message, no way for the user to tell the
+      // field from a broken keyboard. fireEvent would set the value directly
+      // and never notice.
+      await user.type(screen.getByLabelText(/^symbol$/i), 'ل.ل.');
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '90000');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'currencies',
+          expect.objectContaining({ code: 'LBP', symbol: 'ل.ل.' }),
+        );
+      });
+    });
+
+    test('accepts a symbol of exactly the limit in astral-plane characters', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^code$/i)).toBeInTheDocument();
+      });
+
+      const symbol = '𝟙'.repeat(MAX_CURRENCY_SYMBOL_LENGTH);
+      await user.type(screen.getByLabelText(/^code$/i), 'XAA');
+      await user.type(screen.getByLabelText(/^name$/i), 'Test Currency');
+      fireEvent.change(screen.getByLabelText(/^symbol$/i), {
+        target: { value: symbol },
+      });
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '2');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'currencies',
+          expect.objectContaining({ code: 'XAA', symbol }),
+        );
+      });
+    });
+
+    test('refuses a currency symbol one character over the limit', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^symbol$/i)).toBeInTheDocument();
+      });
+
+      await user.type(screen.getByLabelText(/^code$/i), 'XXX');
+      await user.type(screen.getByLabelText(/^name$/i), 'Too Wide');
+      // fireEvent, because the input no longer carries a maxLength to stop it
+      // and typing 11 characters one at a time proves nothing extra.
+      fireEvent.change(screen.getByLabelText(/^symbol$/i), {
+        target: { value: 'ب'.repeat(MAX_CURRENCY_SYMBOL_LENGTH + 1) },
+      });
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '2');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      expect(
+        await screen.findByText(
+          `Symbol must be ${MAX_CURRENCY_SYMBOL_LENGTH} characters or fewer`,
+        ),
+      ).toBeInTheDocument();
+      expect(mockedApi.post).not.toHaveBeenCalled();
+    });
+
     test('changes user role via PUT (not PATCH)', async () => {
       mockedApi.put.mockResolvedValue({});
       const user = userEvent.setup({ pointerEventsCheck: 0 });
@@ -418,6 +522,8 @@ describe('Settings', () => {
   });
 
   describe('as member', () => {
+    const originalFetch = globalThis.fetch;
+
     beforeEach(() => {
       mockedUseAuth.mockReturnValue({
         user: {
@@ -435,6 +541,10 @@ describe('Settings', () => {
       });
     });
 
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
     test('hides users tab for non-admin', () => {
       renderSettings();
       expect(
@@ -442,12 +552,78 @@ describe('Settings', () => {
       ).not.toBeInTheDocument();
     });
 
-    test('still shows account, currencies, api-tokens, and data tabs', () => {
+    test('still shows account, currencies, api-tokens, and export tabs', () => {
       renderSettings();
       expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /currencies/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /api tokens/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /import \/ export/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^export$/i })).toBeInTheDocument();
+    });
+
+    // /api/import/* is behind auth.RequireAdmin, so the tab a member sees
+    // holds only the Export card. Naming it "Import / Export" would have
+    // the container promise a capability the panel cannot deliver, which
+    // is the half a card-only gate leaves behind.
+    test('labels the data tab "Export", never "Import / Export"', () => {
+      renderSettings();
+      expect(
+        screen.queryByRole('tab', { name: /import/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    test('data tab keeps export but drops the import card', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /^export$/i }));
+
+      await waitFor(() => {
+        // Export stays fully available — it is not admin-gated server-side.
+        expect(
+          screen.getByRole('button', { name: /^export$/i }),
+        ).toBeInTheDocument();
+      });
+      // CardTitle renders as a <div>, so the card is matched by text.
+      expect(screen.queryByText(/^import$/i)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/excel file/i)).not.toBeInTheDocument();
+    });
+
+    // The import hooks must not mount for a member at all, not merely
+    // render nothing: useImportSession's mount effect resumes a stored
+    // import id with GET /api/import/{id} (raw fetch, not the mocked api
+    // client), and a member who had a wizard open before the route was
+    // gated still has that id in localStorage. Gating only the card's JSX
+    // would leave that request firing and 403ing. Once, not repeatedly —
+    // the effect's catch drops the stored id before inspecting the error
+    // — but that one 403 is not the NotFoundError the catch stays silent
+    // for, so it surfaces as a raw `forbidden` banner to a member who
+    // cannot act on it.
+    test('does not resume a stored import session', async () => {
+      localStorage.setItem(STORAGE_KEYS.importId, 'stale-import-id');
+      // Stubbed as the 403 the gated route actually returns to a member,
+      // so that if the gate regresses this test fails on the assertion
+      // below rather than on some incidental crash inside the hook.
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({ error: 'admin access required' }),
+      } as Response);
+      globalThis.fetch = fetchMock;
+
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+      await user.click(screen.getByRole('tab', { name: /^export$/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^export$/i }),
+        ).toBeInTheDocument();
+      });
+
+      const importCalls = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/import/'),
+      );
+      expect(importCalls).toHaveLength(0);
     });
   });
 
@@ -546,6 +722,47 @@ describe('Settings', () => {
       expect(screen.getByText(/date.*description.*amount/i)).toBeInTheDocument();
     });
 
+    // End-to-end through Settings → ImportCard → ImportPreviewStep →
+    // ImportPreviewTable, deliberately not through the hook or the table
+    // in isolation. Both of those are gated correctly on their own; what
+    // this pins is that the page actually WIRES the gate — the failure
+    // shape where a control is right in isolation and the caller hands it
+    // the weaker variant has already shipped twice in this batch.
+    test('an over-long field in the upload response blocks Import on the real page', async () => {
+      const serverNoteMessage =
+        "This row's note is longer than the 2,000 characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.";
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        field_errors: [
+          { row_id: 1, field: 'notes', message: serverNoteMessage },
+        ],
+      });
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'categories') return Promise.resolve(mockCategories);
+        return Promise.resolve([]);
+      });
+
+      const user = await goToDataTab();
+      await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+      // Blocked on arrival — no confirm round-trip was needed to learn
+      // that the server would refuse this row.
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^Import \d+$/ }),
+        ).toBeDisabled();
+      });
+      // The server's sentence reaches the screen unaltered through every
+      // layer between the API client and the table.
+      expect(screen.getByText(serverNoteMessage)).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Skip this row' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText(/Fix or skip 1 too-long row to enable import/),
+      ).toBeInTheDocument();
+    });
+
     test('uploads file and shows preview on file selection', async () => {
       mockedApi.upload.mockResolvedValue(mockPreview);
       mockedApi.get.mockImplementation((path: string) => {
@@ -586,8 +803,17 @@ describe('Settings', () => {
       });
     });
 
-    test('shows default category dropdown in preview step', async () => {
-      mockedApi.upload.mockResolvedValue(mockPreview);
+    // The default category control appears when it has a job to do, and
+    // not otherwise: rows with an empty Category cell need it, a file whose
+    // categories all match does not. Asking for a decision that changes
+    // nothing is how a control ends up ignored.
+    test('shows default category dropdown when rows have an empty category', async () => {
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        unresolved_categories: [
+          { name: '', reason: 'missing' as const, row_ids: [2] },
+        ],
+      });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -600,6 +826,27 @@ describe('Settings', () => {
       await waitFor(() => {
         expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
       });
+    });
+
+    test('hides the default category dropdown when nothing needs one', async () => {
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        unresolved_categories: [],
+      });
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'categories') return Promise.resolve(mockCategories);
+        return Promise.resolve([]);
+      });
+
+      const user = await goToDataTab();
+      await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^import \d+$/i }),
+        ).toBeEnabled();
+      });
+      expect(screen.queryByLabelText(/default category/i)).toBeNull();
     });
 
     test('shows import and cancel buttons in preview step', async () => {
@@ -642,10 +889,17 @@ describe('Settings', () => {
       // dialog → click "Confirm and Import") is gone.
       await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
+      // A run that did not land every row leads with what did not land.
+      // The old flat "4 imported, 1 skipped" sentence read identically
+      // whether one row or four hundred had been dropped.
       await waitFor(() => {
-        expect(screen.getByText(/4 imported/i)).toBeInTheDocument();
-        expect(screen.getByText(/1 skipped/i)).toBeInTheDocument();
+        expect(
+          screen.getByText(/1 of 5 rows were not imported/i),
+        ).toBeInTheDocument();
       });
+      expect(
+        screen.getByText(/4 rows were added to your ledger/i),
+      ).toBeInTheDocument();
     });
 
     test('shows "Import Another" button after successful import', async () => {
@@ -818,6 +1072,227 @@ describe('Settings', () => {
         import_id: string;
       };
       expect(parsedBody.import_id).toBe('abc-123');
+    });
+
+    // End-to-end through Settings -> ImportCard -> ImportPreviewStep ->
+    // ImportPreviewTable, deliberately not through the hook in isolation.
+    // The hook's gate and the panel's controls are each correct on their
+    // own; what these pin is that the page WIRES them together — the
+    // failure shape where a control is right in isolation and the caller
+    // hands it the weaker variant has shipped in this repo before.
+    describe('unresolved categories', () => {
+      const previewWithUnmapped: ImportPreview = {
+        ...mockPreview,
+        unresolved_categories: [
+          { name: 'Grocries', reason: 'unmapped', row_ids: [0, 2] },
+        ],
+      };
+
+      function stubCategoriesFetch() {
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+      }
+
+      test('a category matching nothing blocks Import on the real page', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeDisabled();
+        });
+        expect(
+          screen.getByText(/1 category choice still needed below/),
+        ).toBeInTheDocument();
+        // How many rows the decision covers is the difference between
+        // "one typo" and "half my ledger".
+        expect(screen.getByText('2 rows')).toBeInTheDocument();
+        expect(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        ).toBeInTheDocument();
+      });
+
+      test('mapping the name through the panel enables Import', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).toBeInTheDocument();
+        });
+
+        await user.click(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        );
+        await user.click(screen.getByRole('option', { name: 'Transport' }));
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+      });
+
+      // Accepting the default for a name that matched nothing is allowed —
+      // it just has to be something the user DID, not something that
+      // happened to them because they picked a default for empty cells.
+      test('choosing a default alone does not unblock an unmatched name', async () => {
+        mockedApi.upload.mockResolvedValue({
+          ...previewWithUnmapped,
+          unresolved_categories: [
+            { name: 'Grocries', reason: 'unmapped' as const, row_ids: [0, 2] },
+            { name: '', reason: 'missing' as const, row_ids: [1] },
+          ],
+        });
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
+        });
+
+        // Two decisions outstanding: the typo'd name, and the empty cells.
+        expect(
+          screen.getByText(/2 category choices still needed below/),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByLabelText(/default category/i));
+        await user.click(screen.getByRole('option', { name: 'Food' }));
+
+        // The default settled the empty cells and ONLY the empty cells —
+        // two down to one, not two down to zero. Asserting the button is
+        // still disabled would pass vacuously, since it was disabled
+        // before the click too.
+        await waitFor(() => {
+          expect(
+            screen.getByText(/1 category choice still needed below/),
+          ).toBeInTheDocument();
+        });
+        expect(
+          screen.getByRole('button', { name: /^Import \d+$/ }),
+        ).toBeDisabled();
+      });
+
+      test('the bulk control files every remaining name under the default in one click', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+        const fetchMock = mockConfirmFetch({ body: mockImportResult });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
+        });
+
+        // Nothing to apply until there is a default to apply.
+        expect(
+          screen.getByRole('button', {
+            name: /Pick a default below to fill these at once/i,
+          }),
+        ).toBeDisabled();
+
+        await user.click(screen.getByLabelText(/default category/i));
+        await user.click(screen.getByRole('option', { name: 'Food' }));
+        await user.click(
+          screen.getByRole('button', { name: /Use Food for the remaining 1/i }),
+        );
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+
+        await user.click(screen.getByRole('button', { name: /^Import \d+$/ }));
+
+        // The decision travels as an explicit mapping, not as a fallback
+        // the server has to infer. That is what makes it auditable in the
+        // request and visible in every control afterwards.
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalled();
+        });
+        const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        const parsedBody = JSON.parse(init.body as string) as {
+          category_map: Record<string, number>;
+        };
+        expect(parsedBody.category_map.Grocries).toBe(1);
+      });
+    });
+
+    describe('import result', () => {
+      test('leads with what did not land, itemised', async () => {
+        mockedApi.upload.mockResolvedValue(mockPreview);
+        mockConfirmFetch({
+          body: {
+            imported: 12,
+            skipped: 488,
+            total: 500,
+            skipped_reasons: { duplicate: 400, user_skipped: 88 },
+          },
+        });
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^import \d+$/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
+
+        await waitFor(() => {
+          expect(
+            screen.getByText(/488 of 500 rows were not imported/i),
+          ).toBeInTheDocument();
+        });
+        // A bare count is something the user can neither trust nor act on.
+        expect(
+          screen.getByText(/400 already in your ledger/i),
+        ).toBeInTheDocument();
+        expect(screen.getByText(/88 you skipped/i)).toBeInTheDocument();
+      });
+
+      test('a clean run says so without an alarm', async () => {
+        mockedApi.upload.mockResolvedValue(mockPreview);
+        mockConfirmFetch({
+          body: { imported: 5, skipped: 0, total: 5, skipped_reasons: {} },
+        });
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^import \d+$/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
+
+        await waitFor(() => {
+          expect(screen.getByText(/Imported all 5 rows/i)).toBeInTheDocument();
+        });
+        expect(screen.queryByText(/were not imported/i)).toBeNull();
+      });
     });
   });
 });

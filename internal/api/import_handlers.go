@@ -1,12 +1,16 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -81,6 +85,120 @@ type collisionGroup struct {
 	Reason       string          `json:"reason"`
 	MemberRowIDs []int           `json:"member_row_ids"`
 	DBMatch      *dbMatchPreview `json:"db_match,omitempty"`
+}
+
+// importFieldError names one preview row whose value in one field is longer
+// than the ledger will store, and carries the explanation with it.
+//
+// The message travels on the wire rather than being composed by the frontend,
+// because this condition is reachable four ways — flagged at upload, re-flagged
+// after a PATCH, restored by a GET resume, and refused by the confirm 409 — and
+// one of those already returns a server-authored message today (the PATCH 400
+// from validateImportField). Wording composed on the client for three of the
+// four would mean the same condition reading two different ways depending on
+// how the user got there, and drifting apart the first time either side was
+// edited. Collisions are modelled the other way round on purpose: they are
+// explained per GROUP by one banner, so there is no per-cell string to keep in
+// step.
+type importFieldError struct {
+	RowID   int    `json:"row_id"`
+	Field   string `json:"field"`
+	Message string `json:"message"`
+}
+
+// Field names as they appear in importFieldError.Field and in the PATCH
+// endpoint's request body, so a frontend can route an error straight to the
+// control that edits it.
+const (
+	importFieldDescription = "description"
+	importFieldTags        = "tags"
+	importFieldNotes       = "notes"
+)
+
+// importFieldLengthMessage is the single source of the explanation for a field
+// being too long. Every surface that reports the condition calls it, including
+// validateImportField's PATCH 400, so a description error reads identically
+// however the user reached it.
+//
+// The remedies differ between fields because the preview's capabilities do:
+// validateImportField accepts edits to date, description and amount only, so a
+// description really can be shortened in place, while tags and notes can only
+// be dropped with the row or fixed in the source spreadsheet. Telling someone
+// to shorten a note "here" would be an instruction the UI cannot honour.
+//
+// Each message names the LIMIT and never the overage, and that rule now rests
+// on a different reason than it did when it was written. It used to be that the
+// caps were compared with len() over bytes while the messages said
+// "characters", so any overage count would have been a lie in non-ASCII text.
+// The caps are character counts now (charLen, limits.go), so an overage would
+// at least be arithmetically true — but it would still be noise the user cannot
+// act on without counting, and naming the limit is the shorter true statement.
+// Keep it as is.
+func importFieldLengthMessage(field string) string {
+	switch field {
+	case importFieldDescription:
+		return fmt.Sprintf(
+			"Too long for SpenDrop, which stores %d characters. Shorten it here, or skip this row.",
+			MaxDescriptionLength)
+	case importFieldTags:
+		return fmt.Sprintf(
+			"This row's tags are longer than the %d characters SpenDrop stores. Skip this row, or shorten them in your spreadsheet and upload again.",
+			MaxTagsLength)
+	case importFieldNotes:
+		return fmt.Sprintf(
+			"This row's note is longer than the %d characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.",
+			MaxNotesLength)
+	}
+	return ""
+}
+
+// checkImportRowLengths reports every non-skipped row whose description, tags
+// or notes exceed what the ledger stores.
+//
+// THE MEASUREMENT MUST MATCH THE WRITE PATH, and that is the whole risk in this
+// function. validateTransactionRequest bounds these three fields with charLen —
+// CHARACTERS, Unicode code points — and no trimming (transaction_handlers.go,
+// plus validateTagsField); the import parser has already trimmed each cell by
+// the time a row reaches here, so charLen over the stored value is the same
+// quantity the single-row API would apply. Measure anything else — len() over
+// bytes, a trimmed copy, a different cap — and this becomes a gate that passes
+// rows the write path would refuse, which is worse than no gate, because the
+// failure moves from a preview the user can act on to an insert they cannot.
+// TestImportFieldLengths_MatchTheWritePath pins the agreement, on values that
+// straddle the boundary in both units.
+//
+// Both sides used to be len() over bytes, which made these caps byte limits
+// wearing a character label — 500 was about 250 Arabic characters. They moved
+// to characters TOGETHER, in one change, because moving either alone is exactly
+// the divergence this function exists to prevent.
+//
+// Rows the user has skipped are exempt. Skipping IS the remedy the gate offers,
+// so a skipped row must not keep blocking the confirm it was skipped to unblock.
+func checkImportRowLengths(rows []importRow) []importFieldError {
+	fieldErrors := []importFieldError{}
+	for _, row := range rows {
+		if row.Skip {
+			continue
+		}
+		for _, check := range []struct {
+			field string
+			value string
+			limit int
+		}{
+			{importFieldDescription, row.Description, MaxDescriptionLength},
+			{importFieldTags, row.Tags, MaxTagsLength},
+			{importFieldNotes, row.Notes, MaxNotesLength},
+		} {
+			if charLen(check.value) > check.limit {
+				fieldErrors = append(fieldErrors, importFieldError{
+					RowID:   row.RowID,
+					Field:   check.field,
+					Message: importFieldLengthMessage(check.field),
+				})
+			}
+		}
+	}
+	return fieldErrors
 }
 
 // buildCollisionGroups computes the collision view for a preview session.
@@ -289,8 +407,11 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		if trimmed == "" {
 			return nil, "INVALID_DESCRIPTION", "description cannot be empty"
 		}
-		if len(trimmed) > MaxDescriptionLength {
-			return nil, "INVALID_DESCRIPTION", fmt.Sprintf("description exceeds %d characters", MaxDescriptionLength)
+		if charLen(trimmed) > MaxDescriptionLength {
+			// Same string the preview's field_errors carry, so an over-long
+			// description reads identically whether the user met it by
+			// uploading, by editing, by resuming, or at confirm.
+			return nil, "INVALID_DESCRIPTION", importFieldLengthMessage(importFieldDescription)
 		}
 		return trimmed, "", ""
 
@@ -441,6 +562,501 @@ func uniqueCategoriesFromRows(rows []importRow) []string {
 	return out
 }
 
+// Compile-time assertion that our row cap stays at or below excelize's own
+// TotalRows limit. readImportSheetRows reports the library's ErrMaxRows using
+// our row-cap message, which is only truthful while a sheet that trips the
+// library's limit has necessarily passed ours. Raise MaxImportSheetRows above
+// Excel's maximum row and this stops compiling rather than silently making
+// that message a lie.
+const _ = uint(excelize.TotalRows - MaxImportSheetRows)
+
+// Sentinel errors for the workbook-shape caps. All three are surfaced to the
+// caller verbatim as a 400 body, so they are written as advice rather than as
+// diagnostics — a user who hits one needs to know what to change about the
+// file. None interpolates any part of the upload.
+//
+// The wording of each has to describe what is actually counted, which is not
+// always what a user would count. The row cap counts row SLOTS and the cell
+// cap counts cells AFTER padding, so phrasing either in terms of visible
+// content would send someone hunting for data that is not there. See the
+// limits.go comment for why the counters are right and the naive phrasings
+// were wrong.
+var (
+	errImportSheetTooManyRows = fmt.Errorf(
+		"spreadsheet extends past row %d, which is beyond Excel's own maximum, so the file is malformed rather than merely large; re-save it from a spreadsheet application, or split it",
+		MaxImportSheetRows)
+	errImportSheetTooManyCells = fmt.Errorf(
+		"spreadsheet is too wide once each row is padded out to its rightmost value (limit %d cells); a single value in a far-right column costs that row its full width, so clear anything to the right of your data, then split the file if it is still too large",
+		MaxImportSheetCells)
+	errImportArchiveTooLarge = fmt.Errorf(
+		"spreadsheet expands to more than %d MiB when decompressed; split it into smaller files",
+		MaxImportUnzippedBytes>>20)
+	errImportCellTooLong = fmt.Errorf(
+		"a single cell holds more than %d KiB of text, which is beyond what any spreadsheet cell can contain, so the file is malformed rather than merely large; re-save it from a spreadsheet application",
+		MaxImportCellBytes>>10)
+	errImportRowTooWide = fmt.Errorf(
+		"a row declares more than %d cells, which is beyond what any spreadsheet can hold; re-save the file from a spreadsheet application",
+		MaxImportCellsPerRow)
+	errImportRowTooLarge = fmt.Errorf(
+		"a single row holds more than %d MiB of text; split the sheet into smaller files",
+		MaxImportRowBytes>>20)
+	errImportTooManySharedStrings = fmt.Errorf(
+		"spreadsheet declares more than %d distinct text values, which is more than its own cells could reference; re-save it from a spreadsheet application",
+		MaxImportSheetCells)
+	errImportPartTooLarge = fmt.Errorf(
+		"one part of the spreadsheet expands to more than %d MiB on its own; split the sheet into smaller files",
+		MaxImportPartBytes>>20)
+	errImportNotAZipArchive = errors.New(
+		"file is not a readable .xlsx workbook; export it as .xlsx (not .xls, and not password-protected) and try again")
+	errImportSheetTooManyBytes = fmt.Errorf(
+		"spreadsheet holds more than %d MiB of cell text; split it into smaller files",
+		MaxImportSheetBytes>>20)
+)
+
+// checkImportArchiveSize rejects a workbook whose zip directory declares more
+// decompressed bytes than MaxImportUnzippedBytes, BEFORE any of it is
+// decompressed.
+//
+// This runs ahead of excelize.OpenReader because OpenReader inflates the whole
+// archive up front — every entry, including parts the importer never reads —
+// so by the time any of our other caps could look at the data, the allocation
+// has already happened. Measured: a 2.00 MiB upload drove +10,244 MiB inside
+// OpenReader alone.
+//
+// Reading the zip directory is cheap and does not decompress anything: the
+// sizes are metadata.
+//
+// Acting on a declared size is safe in the direction that matters here.
+// OVER-declaring is the dangerous direction, because excelize preallocates a
+// buffer from the declared size before reading (lib.go, readFile), so a large
+// declaration costs memory whether or not the entry can deliver it — which is
+// exactly what this rejects. Under-declaring buys an attacker nothing, because
+// Go's archive/zip stops a reader the moment it returns more bytes than its
+// entry declared (reader.go, checksumReader.Read).
+//
+// Every size is compared and summed UNSIGNED, and every entry is bounded
+// individually before it is added. archive/zip copies UncompressedSize64 out
+// of the zip64 extra field without a range check, and FileInfo().Size()
+// converts it to int64 unguarded, so an entry declaring 1<<63 reports a
+// NEGATIVE size. A signed comparison then lets it past — and a signed running
+// total goes so far negative that no later entry brings it back over any
+// limit. A 161-byte archive defeated the signed version of this check
+// entirely, and prefixing that entry to 200 MiB of honestly-declared parts
+// defeated it too.
+//
+// Be precise about which half does the work, because the obvious reading is
+// wrong. Reading the uint64 FIELD rather than Size() is NOT what holds:
+// mutating both reads to uint64(entry.FileInfo().Size()) compiles and every
+// test still passes, since uint64(int64(x)) round-trips the same bits. What
+// holds is that the comparison operand is unsigned at all, and that a single
+// oversized entry is rejected BEFORE the addition — which leaves the total at
+// or below the limit on entry to each iteration, so it cannot wrap.
+//
+// That distinction cost three rounds to find: the mutation meant to prove this
+// changed `var total uint64` to int64, which does not compile in a loop adding
+// a uint64, and `FAIL [build failed]` greps identically to a real failure. It
+// was reported as a passing mutation while proving nothing.
+//
+// Note that excelize's own UnzipSizeLimit — passed at the call site as a
+// second layer — computes the same signed sum internally and has the same
+// blind spot, so it does not back this check up for this input. It reaches
+// make([]byte, 0, negative) and panics instead. That is another reason this
+// check must be correct on its own rather than treated as belt-and-braces.
+func checkImportArchiveSize(data []byte) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		// Refuse anything that is not a zip, rather than passing it through
+		// for excelize to diagnose.
+		//
+		// This used to return nil on the reasoning that both sides call
+		// archive/zip over the same bytes, so a reader we cannot open is one
+		// excelize cannot open either. That is false, and dangerously so:
+		// excelize sniffs an 8-byte OLE/CFB header first and, on a match,
+		// runs its decryption path BEFORE any zip reader — where extractPart
+		// does make([]byte, entry.Size) from an unvalidated CFB directory
+		// field. An 8,704-byte upload declaring an 8 GiB stream allocated
+		// 8,448 MiB; declaring 64 GiB aborted the process with a runtime
+		// out-of-memory, which chi's Recoverer cannot catch. Neither this
+		// check nor UnzipSizeLimit sees that path at all.
+		//
+		// A plain .xlsx is a zip. Encrypted and legacy .xls workbooks are not
+		// supported input, so refusing them here costs nothing and keeps the
+		// parser off every byte sequence we have not bounded.
+		return errImportNotAZipArchive
+	}
+	// The PER-ENTRY bound is what makes a declared size safe to act on, and it
+	// has to come before the addition.
+	//
+	// archive/zip copies UncompressedSize64 out of the zip64 extra field
+	// unchecked, and FileInfo().Size() converts it to int64 without a range
+	// check, so an entry declaring 1<<63 reports a NEGATIVE size. Left to
+	// accumulate, one such entry drags a signed running total so far down that
+	// nothing later recovers it, and two of them sum to exactly 2^64 and wrap
+	// an unsigned one to zero. Bounding each entry first removes both: no
+	// value large enough to misbehave ever reaches the sum.
+	//
+	// Note what is NOT load-bearing here, because an earlier version of this
+	// comment claimed it was. total's unsignedness is not: uint64(int64(x))
+	// round-trips the same bits, so the per-entry check refuses a 1<<63
+	// declaration by VALUE whichever type it is read through, and with every
+	// addend bounded the sum cannot wrap either way. uint64 is simply the type
+	// the field already has.
+	//
+	// The per-entry bound is NOT redundant with the total, even though an
+	// earlier version of it was and was deleted as dead code. That one used
+	// the same limit as the total, so the total always caught it first. This
+	// one is stricter, and it exists for a reason the total cannot serve: the
+	// prescan reads one XML text node whole to measure it, and encoding/xml
+	// grows its buffer by doubling before handing back a copy, so a part of
+	// size P costs about 2P. Bounding the largest PART is what makes the
+	// prescan's own peak statable; bounding only their sum does not, because
+	// one part may be the whole sum.
+	var total uint64
+	for _, entry := range zr.File {
+		if entry.UncompressedSize64 > MaxImportPartBytes {
+			return errImportPartTooLarge
+		}
+		total += entry.UncompressedSize64
+		if total > MaxImportUnzippedBytes {
+			return errImportArchiveTooLarge
+		}
+	}
+	return nil
+}
+
+// openImportWorkbook opens an uploaded workbook with the options this
+// importer requires.
+//
+// It is a named function rather than an inline literal at the call site
+// specifically so the options can be tested. They are a SECOND layer —
+// checkImportArchiveSize rejects an oversized archive before this runs — and a
+// backstop is invisible to every test for as long as the layer in front of it
+// works. Deleting both options once left all nine packages green while a
+// 1,049,793-byte upload peaked at 5,126 MiB and returned 200, so the claim that
+// this call site stays bounded on its own needs a test that exercises it on its
+// own. TestOpenImportWorkbook_BoundsDecompressionWithoutTheArchiveCheck is it.
+//
+// RawCellValue:true tells excelize to skip number-format rendering when
+// returning cell values. Without it, a date cell with number format "mm-dd-yy"
+// renders as "07-21-25", which matches none of the fallback text formats in
+// parseImportDate and silently drops the row. With RawCellValue:true, date
+// cells return their underlying Excel serial number (e.g. "45859"), which
+// parseImportDate converts via excelize.ExcelDateToTime — format-agnostic.
+//
+// UnzipSizeLimit defaults to 16 GB, which is what made a zip bomb reachable
+// here in the first place. UnzipXMLSizeLimit is the temp-file staging
+// threshold, pinned to our own constant so a change to excelize's default
+// cannot silently alter how much of a worksheet is held in memory.
+func openImportWorkbook(data []byte) (*excelize.File, error) {
+	return excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		RawCellValue:      true,
+		UnzipSizeLimit:    MaxImportUnzippedBytes,
+		UnzipXMLSizeLimit: MaxImportUnzippedPartBytes,
+	})
+}
+
+// prescanImportWorkbook bounds how large a single Rows.Columns() call can get,
+// and does it before excelize materialises anything.
+//
+// This exists because every other cap in this file is evaluated on the slice
+// Columns() already returned, and so can only report an allocation rather than
+// prevent one. Columns() builds a whole row at once, and the row's cost is the
+// sum over its cells of the string each one resolves to. excelize bounds
+// neither factor: a cell without an `r` attribute never reaches
+// CellNameToCoordinates, so cells-per-row is unbounded, and a shared string is
+// rebuilt per referencing cell at whatever length the table declares.
+//
+// WHY THIS SUMS PER ROW RATHER THAN CAPPING COLUMNS. The obvious cheaper design
+// — cap cells-per-row, cap bytes-per-cell, call the product the peak — was
+// implemented first and is wrong for this application. It forces the two caps
+// low enough that their product is acceptable, and a cells-per-row cap low
+// enough to matter (1,024 at a 32 KiB cell) refuses files real spreadsheet
+// applications produce: Google Sheets allows 18,278 columns and 50,000
+// characters per cell, and this household imports Google Sheets exports every
+// month. Summing the row's actual projected bytes bounds exactly the quantity
+// that allocates, so the individual limits can each sit far above anything a
+// spreadsheet can emit while the peak stays bounded. False rejections here cost
+// a working workflow; tightness buys nothing beyond the bound.
+//
+// Resolving shared-string references is what makes that possible, so this is
+// not purely structural: it reads the shared-string table's lengths (not its
+// contents) and adds the right one per reference. It still builds no rows,
+// keeps no strings, and interprets no values — a cell's TYPE only selects which
+// length to add.
+//
+// Cost is one extra streaming decompression of the shared-string table and each
+// worksheet, plus one int per distinct shared string. Measured at 0 MiB of
+// allocation rejecting payloads that drove excelize to 1,258 MiB.
+func prescanImportWorkbook(data []byte) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return errImportNotAZipArchive
+	}
+
+	sharedLens, err := prescanSharedStrings(zr)
+	if err != nil {
+		return err
+	}
+	for _, zf := range zr.File {
+		if strings.HasPrefix(strings.ToLower(zf.Name), "xl/worksheets/sheet") {
+			if err := prescanSheet(zf, sharedLens); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// prescanSharedStrings returns the text length of every <si> in the workbook's
+// shared-string table, indexed as the sheets reference them. An <si> may be
+// split across several <r> runs, so the lengths accumulate until the item ends.
+//
+// It deliberately does NOT reject an over-LONG item here, even though that
+// looks like the natural place for it. An entry costs memory only when a cell
+// references it, and prescanSheet adds its length at every reference — so an
+// item long enough to matter is refused there, and one nothing references
+// costs nothing beyond the archive-bounded load that already happened.
+//
+// It DOES reject an over-MANY table, because that cost is this function's own:
+// the returned slice holds one int per item whether or not any cell refers to
+// it. The two are not inconsistent, though they look it — one bounds a cost
+// paid elsewhere and so not paid here, the other bounds a cost paid right
+// here. Both are tested.
+func prescanSharedStrings(zr *zip.Reader) ([]int, error) {
+	var entry *zip.File
+	for _, zf := range zr.File {
+		if strings.EqualFold(zf.Name, "xl/sharedStrings.xml") {
+			entry = zf
+			break
+		}
+	}
+	if entry == nil {
+		return nil, nil // inline-strings-only workbook
+	}
+	rc, err := entry.Open()
+	if err != nil {
+		return nil, nil // let excelize report it
+	}
+	defer rc.Close()
+
+	lengths := []int{}
+	decoder := xml.NewDecoder(rc)
+	current, inItem, inText := 0, false, false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			// EOF, or malformed XML which is excelize's to report.
+			return lengths, nil
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "si":
+				current, inItem = 0, true
+			case "t":
+				inText = true
+			}
+		case xml.CharData:
+			if inItem && inText {
+				current += len(element)
+			}
+		case xml.EndElement:
+			switch element.Name.Local {
+			case "t":
+				inText = false
+			case "si":
+				inItem = false
+				lengths = append(lengths, current)
+				if len(lengths) > MaxImportSheetCells {
+					return nil, errImportTooManySharedStrings
+				}
+			}
+		}
+	}
+}
+
+// prescanSheet walks one worksheet and rejects any row whose cells would
+// together materialise more than MaxImportRowBytes, or which declares more
+// cells than MaxImportCellsPerRow.
+//
+// The cell count is bounded separately from the bytes because empty cells cost
+// nothing in text but still cost a slice slot: excelize pads a row out to the
+// column index of its rightmost value, so a run of empty cells followed by one
+// value allocates a header per skipped column.
+func prescanSheet(zf *zip.File, sharedLens []int) error {
+	rc, err := zf.Open()
+	if err != nil {
+		return nil // let excelize report it
+	}
+	defer rc.Close()
+
+	decoder := xml.NewDecoder(rc)
+	var (
+		rowBytes, cellsThisRow int
+		cellIsShared, inValue  bool
+		cellBytes              int
+	)
+	addCellBytes := func(n int) error {
+		cellBytes += n
+		if cellBytes > MaxImportCellBytes {
+			return errImportCellTooLong
+		}
+		rowBytes += n
+		if rowBytes > MaxImportRowBytes {
+			return errImportRowTooLarge
+		}
+		return nil
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil // EOF, or malformed XML for excelize to report
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "row":
+				rowBytes, cellsThisRow = 0, 0
+			case "c":
+				cellBytes = 0
+				cellIsShared = false
+				for _, attr := range element.Attr {
+					if attr.Name.Local == "t" && attr.Value == "s" {
+						cellIsShared = true
+					}
+				}
+				cellsThisRow++
+				if cellsThisRow > MaxImportCellsPerRow {
+					return errImportRowTooWide
+				}
+			case "v", "t":
+				inValue = true
+			}
+		case xml.CharData:
+			if !inValue {
+				continue
+			}
+			if cellIsShared {
+				// A shared reference costs the length of the item it points
+				// at, once per reference. An unparseable or out-of-range
+				// index is excelize's to reject; it cannot cost memory here.
+				index, convErr := strconv.Atoi(strings.TrimSpace(string(element)))
+				if convErr != nil || index < 0 || index >= len(sharedLens) {
+					continue
+				}
+				if err := addCellBytes(sharedLens[index]); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := addCellBytes(len(element)); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if element.Name.Local == "v" || element.Name.Local == "t" {
+				inValue = false
+			}
+		}
+	}
+}
+
+// readImportSheetRows reads a worksheet into the same [][]string shape that
+// excelize's File.GetRows returns, but stops at MaxImportSheetRows scanned row
+// slots and MaxImportSheetCells materialised cells. It replaces the GetRows
+// call this handler used to make, which is unbounded on both axes and lets a
+// few KB of upload direct the parser into an indefinite CPU spin or a
+// multi-gigabyte allocation. See the cap declarations in limits.go for the
+// measurements and for why the upstream v2.11.0 guard does not cover the
+// reachable shape.
+//
+// The body deliberately mirrors GetRows statement for statement — the blank
+// run padding, the trailing `results[:maxVal]` trim, and the break-on-error
+// are all reproduced — so that swapping it in changes only what the caps
+// reject and nothing about how a legitimate file parses. Columns() is called
+// with no options for the same reason: it inherits RawCellValue from the
+// options passed to OpenReader, exactly as GetRows did.
+//
+// The budgets below are checked after Columns() returns, because that is the
+// only place they can be: Columns() materialises a whole row before yielding
+// it. They therefore bound TOTALS, not the peak of any one row — the peak is
+// bounded ahead of them by prescanImportWorkbook, and it has to be, because a
+// single row costs (cells in the row) x (bytes per cell) and both factors are
+// attacker-chosen.
+//
+// This comment used to price a pathological row at "≈262 KB at Excel's
+// 16384-column maximum". That was wrong twice over and is the reason the
+// post-hoc placement looked safe: it counted only the 16-byte string headers
+// and none of the content those headers point at, and 16,384 is not a ceiling
+// on this path at all. Priced properly the same row is 512 MiB, and measured
+// at that shape, 514.4 MiB.
+func readImportSheetRows(f *excelize.File, sheet string) ([][]string, error) {
+	rows, err := f.Rows(sheet)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results, cur, maxVal, cells, textBytes := make([][]string, 0, 64), 0, 0, 0, 0
+	for rows.Next() {
+		cur++
+		if cur > MaxImportSheetRows {
+			return nil, errImportSheetTooManyRows
+		}
+		row, err := rows.Columns()
+		if err != nil {
+			break
+		}
+		if len(row) > 0 {
+			cells += len(row)
+			if cells > MaxImportSheetCells {
+				return nil, errImportSheetTooManyCells
+			}
+			// Bound the bytes, not only the geometry. Counting cells says
+			// nothing about how much memory they hold, and excelize rebuilds a
+			// shared string per referencing cell, so a handful of cells can
+			// carry gigabytes. Both bounds are needed: the per-cell one
+			// catches a single enormous string, the running total catches many
+			// merely-large ones. See the limits.go comment for the
+			// measurements.
+			// Per-cell and per-row limits are enforced by
+			// prescanImportWorkbook, before this row was built — a check here
+			// could only report a cell that had already been allocated. What
+			// remains here is the SHEET total, which the prescan does not
+			// accumulate because it bounds each row independently.
+			for _, value := range row {
+				textBytes += len(value)
+			}
+			if textBytes > MaxImportSheetBytes {
+				return nil, errImportSheetTooManyBytes
+			}
+			if emptyRows := cur - maxVal - 1; emptyRows > 0 {
+				results = append(results, make([][]string, emptyRows)...)
+			}
+			results = append(results, row)
+			maxVal = cur
+		}
+	}
+	// Read the iterator's deferred error directly instead of via Close().
+	// Close() only reports it when the sheet was parsed in memory; once the
+	// decompressed XML crosses excelize's UnzipXMLSizeLimit the worksheet is
+	// staged in a temp file and Close() returns that file's close error
+	// instead, swallowing ErrMaxRows on precisely the large inputs where it
+	// is most likely to fire.
+	if err := rows.Error(); err != nil {
+		// excelize's own row-limit rejection is the same complaint as ours,
+		// so it gets the same advice rather than a generic parse failure the
+		// user can do nothing with. The two limits are now EQUAL — not ours
+		// below theirs — and the message stays truthful either way, because a
+		// sheet the library refuses has reached the same row number ours names.
+		if errors.Is(err, excelize.ErrMaxRows) {
+			return nil, errImportSheetTooManyRows
+		}
+		return nil, err
+	}
+	return results[:maxVal], nil
+}
+
 // handleImportUpload accepts a multipart xlsx file upload, parses it, stores
 // the rows in memory, and returns a preview.
 func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
@@ -460,14 +1076,38 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	// RawCellValue:true tells excelize to skip number-format rendering when
-	// returning cell values. Without it, a date cell with number format
-	// "mm-dd-yy" renders as "07-21-25", which matches none of the fallback
-	// text formats in parseImportDate and silently drops the row. With
-	// RawCellValue:true, date cells return their underlying Excel serial
-	// number (e.g. "45859"), which parseImportDate converts via
-	// excelize.ExcelDateToTime — format-agnostic.
-	f, err := excelize.OpenReader(file, excelize.Options{RawCellValue: true})
+	// Buffer the upload so the archive can be sized before any of it is
+	// decompressed. MaxBytesReader above already bounds this read to
+	// MAX_UPLOAD_BYTES, and excelize.OpenReader does io.ReadAll internally
+	// anyway, so nothing is held that would not have been held regardless.
+	data, err := io.ReadAll(file)
+	if err != nil {
+		// The likely cause is MaxBytesReader tripping, which is the client's
+		// problem, not ours.
+		writeError(w, http.StatusBadRequest, "failed to read uploaded file")
+		return
+	}
+
+	// Bound the decompressed size FIRST. Every other cap in this handler runs
+	// against already-parsed data, and OpenReader inflates the entire archive
+	// before returning, so this is the only place a zip bomb can be caught.
+	if err := checkImportArchiveSize(data); err != nil {
+		log.Printf("import: rejected archive: %v", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Bound the peak of a single row before excelize can build one. Everything
+	// after this point only observes allocations; this is the last place they
+	// can still be prevented. See prescanImportWorkbook.
+	if err := prescanImportWorkbook(data); err != nil {
+		log.Printf("import: rejected workbook shape: %v", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Options, and why each one is required, live on openImportWorkbook.
+	f, err := openImportWorkbook(data)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse xlsx file")
 		return
@@ -485,9 +1125,18 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := f.GetRows(sheetName)
+	rows, err := readImportSheetRows(f, sheetName)
 	if err != nil {
-		log.Printf("import: failed to read sheet %q: %v", sheetName, err)
+		log.Printf("import: failed to read sheet %q: %v", sanitizeLogValue(sheetName), err)
+		// A file rejected for its shape gets the specific reason, so the
+		// user can act on it. Every other read failure stays generic —
+		// excelize's parse errors quote fragments of the uploaded XML.
+		if errors.Is(err, errImportSheetTooManyRows) ||
+			errors.Is(err, errImportSheetTooManyCells) ||
+			errors.Is(err, errImportSheetTooManyBytes) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "failed to read spreadsheet data")
 		return
 	}
@@ -556,7 +1205,24 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	sections = append(sections, currentSection)
 
 	// Parse data rows from all sections
-	parsedRows := make([]importRow, 0, len(rows)-headerIdx-1)
+	// Size the preallocation off what MaxImportRows can actually admit, not off
+	// the sheet's geometry. importRow is 128 bytes, so a bare
+	// len(rows)-headerIdx-1 reserves 128 MiB for a sheet whose last row element
+	// sits at Excel's maximum — from a 2 KB file, on a path that RETURNS 200
+	// and so has no error to push back with. Raising MaxImportSheetRows to
+	// Excel's maximum is what made that reachable; before it, the same file was
+	// refused at slot 100,001. MaxImportRows is not consulted until after this
+	// loop, so the clamp has to happen here.
+	//
+	// Clamping only affects the initial capacity. A sheet with side-by-side
+	// sections can still legitimately produce more rows than it has lines, and
+	// append grows to fit; the over-cap case is rejected a few statements later
+	// regardless.
+	prealloc := len(rows) - headerIdx - 1
+	if prealloc > MaxImportRows {
+		prealloc = MaxImportRows
+	}
+	parsedRows := make([]importRow, 0, prealloc)
 	for _, row := range rows[headerIdx+1:] {
 		for _, sec := range sections {
 			ir := importRow{}
@@ -728,6 +1394,15 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		"columns":           detectedColumns,
 		"unique_categories": uniqueCategories,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(parsedRows),
+		// Computed with nil/0 for the same reason collision_groups is:
+		// the user has chosen nothing yet. So this is the full list of
+		// names the file contains that nothing in the household matches
+		// — precisely what the mapping UI has to ask about. The frontend
+		// marks each entry resolved against its own local choices, which
+		// is how its gate stays the same shape as the confirm gate
+		// without reimplementing which rows are eligible.
+		"unresolved_categories": unresolvedImportCategories(parsedRows, nil, catNameToID, 0),
 	})
 }
 
@@ -759,6 +1434,7 @@ const (
 	skipReasonUnparseableDate  importSkipReason = "unparseable_date"
 	skipReasonMissingCategory  importSkipReason = "missing_category"
 	skipReasonDuplicate        importSkipReason = "duplicate"
+	skipReasonFieldTooLong     importSkipReason = "field_too_long"
 )
 
 // importInserted records a row that made it into the transactions table.
@@ -902,6 +1578,74 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// the SQL transaction that follows runs on the local filteredRows
 	// slice, so there is no need to keep entry locked during DB inserts.
 	entry.mu.Lock()
+
+	// Field lengths are re-checked here, ahead of the collision rebuild,
+	// because the preview is only a preview: the rows may have been edited by
+	// PATCH since upload, and nothing stops a client calling confirm without
+	// ever having read the flags. This is the gate; the upload-time list is a
+	// courtesy that lets the user fix things before they get here.
+	//
+	// Ordering against the collision check is deliberate rather than
+	// incidental. A row can be both too long and colliding, and a user who
+	// resolves the collision by editing a description only to be told the
+	// description is too long has been sent round the loop twice. Reporting
+	// length first means one round trip surfaces the problem that a content
+	// edit cannot accidentally introduce.
+	if fieldErrors := checkImportRowLengths(entry.Rows); len(fieldErrors) > 0 {
+		entry.mu.Unlock()
+		// Same body shape as UNRESOLVED_COLLISIONS below — a machine-readable
+		// code plus the full list — so a frontend's existing 409 handling
+		// extends to this rather than being replaced.
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":         "FIELD_TOO_LONG",
+			"field_errors": fieldErrors,
+		})
+		return
+	}
+
+	// An id the categories table does not have cannot be a choice the user
+	// made. Left alone, every row it covers lands in processImportRows'
+	// Errored bucket and is folded into `skipped` with nothing saying why —
+	// a whole import reported as "0 imported, 500 skipped". Rejected here
+	// with the offending ids named instead.
+	if unknown := unknownCategoryIDs(req, catIDToName); len(unknown) > 0 {
+		entry.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"code":                 "UNKNOWN_CATEGORY",
+			"unknown_category_ids": unknown,
+			"error":                fmt.Sprintf("no such category: %v", unknown),
+		})
+		return
+	}
+
+	// The category gate. This is the gate, in the same sense the length
+	// check above is: the preview lists what needs deciding as a courtesy,
+	// but a client can POST straight here, and a preview is only a preview.
+	//
+	// It sits AFTER length and BEFORE collisions, and neither position is
+	// incidental.
+	//
+	// Length stays first for the reason it always has: it is the only check
+	// whose remedy is an edit to a row's content, and being told to shorten
+	// a description only after editing it to resolve something else is the
+	// round trip that ordering avoids.
+	//
+	// Collisions come last because the collision view is a FUNCTION of the
+	// resolved category — the content hash is computed from the canonical
+	// category name, and a row whose category does not resolve is dropped
+	// from grouping entirely. Reporting collisions computed against
+	// categories the user has not chosen would name rows that stop
+	// colliding once the mapping lands, and stay silent about rows that
+	// start. The user would resolve a collision that was never real.
+	if unresolved := unresolvedImportCategories(entry.Rows, req.CategoryMap, catNameToID, req.DefaultCategoryID); len(unresolved) > 0 {
+		entry.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":                  "UNRESOLVED_CATEGORIES",
+			"unresolved_categories": unresolved,
+		})
+		return
+	}
+
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -953,6 +1697,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		filteredRows = append(filteredRows, row)
 	}
 	totalRowCount := len(entry.Rows)
+	userSkippedCount := totalRowCount - len(filteredRows)
 	entry.mu.Unlock()
 
 	// Start a database transaction for all inserts
@@ -1049,12 +1794,44 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	//   not_inserted = total - inserted
 	//                = user_skipped + (processed - inserted)
 	//                = user_skipped + processor_skipped + errored
+	//
+	// `skipped` alone is a number the user cannot act on. A run that reports
+	// "12 imported, 488 skipped" is indistinguishable from a broken import
+	// unless the response says what happened to the 488, so the same three
+	// buckets are also emitted split by reason. Keys are the importSkipReason
+	// values, plus two the processor has no name for because they never reach
+	// it: rows the user skipped in the preview, and rows that errored.
+	//
+	// Only non-zero reasons appear. The map is a description of what
+	// happened, and a wall of zeroes describes nothing.
+	skippedReasons := make(map[string]int, 4)
+	for _, s := range result.Skipped {
+		skippedReasons[string(s.Reason)]++
+	}
+	if len(result.Errored) > 0 {
+		skippedReasons[importOutcomeError] = len(result.Errored)
+	}
+	if userSkippedCount > 0 {
+		skippedReasons[importOutcomeUserSkipped] = userSkippedCount
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"imported": len(result.Inserted),
-		"skipped":  totalRowCount - len(result.Inserted),
-		"total":    totalRowCount,
+		"imported":        len(result.Inserted),
+		"skipped":         totalRowCount - len(result.Inserted),
+		"total":           totalRowCount,
+		"skipped_reasons": skippedReasons,
 	})
 }
+
+// Wire-only outcome keys for the confirm response's skipped_reasons rollup.
+// They are deliberately NOT importSkipReason values: that type is the closed
+// set the property tests assert over result.Skipped, and neither of these
+// ever reaches processImportRows — a user-skipped row is filtered out before
+// the batch, and an errored row lands in result.Errored.
+const (
+	importOutcomeUserSkipped = "user_skipped"
+	importOutcomeError       = "error"
+)
 
 // handleImportCancel removes a pending import entry from memory so the
 // per-user slot is freed immediately (instead of waiting for TTL expiry).
@@ -1253,6 +2030,13 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		"columns":           entry.Columns,
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(entry.Rows),
+		// Recomputed on every PATCH, like every other derived field on
+		// this response. That is what makes a skip toggle resolve a
+		// category entry: skipped rows are excluded, so skipping the
+		// last row carrying an undecided name drops the entry, and the
+		// frontend's gate clears with no client-side bookkeeping.
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
 	})
 }
 
@@ -1349,6 +2133,11 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		"columns":           entry.Columns,
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
+		"field_errors":      checkImportRowLengths(entry.Rows),
+		// Present on the resume path for the same reason field_errors is:
+		// without it, reloading the page during an import clears every
+		// flag the preview was asking the user to act on.
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
 	})
 }
 
@@ -1399,56 +2188,20 @@ func processImportRows(
 	var minDate time.Time
 
 	for i, row := range in.Rows {
-		// Parse date first — every other check below depends on having
-		// a valid time.Time to feed into the hash formula, and an
-		// unparseable date is the single most common real-world input
-		// bug (stray header rows, footer totals, blank rows). Ordering
-		// matters for which reason "wins" on a row with multiple
-		// defects; the order here matches the pre-refactor behaviour
-		// so no existing test changes its outcome label.
-		//
-		// Phase 3.5 introduced the realistic household ledger window
-		// [1900-01-01, 2100-12-31] as a caller-side guard after
-		// parseImportDate returned. Phase 3.7 pushed that check into
-		// parseImportDate itself (see validateImportYear) so the
-		// [1900, 2100] contract is enforced in one place and every
-		// future caller — including the fuzz target — inherits it for
-		// free. An out-of-window date now returns an error from the
-		// parser and routes here as skipReasonUnparseableDate via the
-		// dateErr branch. Property test `TestImportProperty_DateSanity`
-		// asserts every inserted row lands in this window.
-		date, dateErr := parseImportDate(row.Date)
-		if dateErr != nil {
+		// Everything that rejects a row without ever consulting its
+		// category, in one place — see preCategorySkipReason for why the
+		// order matters and why it is shared rather than inlined here.
+		// The parsed date travels out of the check so the hash formula
+		// below does not re-parse what was just validated.
+		date, reason, blocked := preCategorySkipReason(row)
+		if blocked {
 			result.Skipped = append(result.Skipped, importSkipped{
 				RowIndex: i,
-				Reason:   skipReasonUnparseableDate,
+				Reason:   reason,
 			})
 			continue
 		}
-
-		// Required fields. Description is compared to "" not whitespace —
-		// the parsing path already runs strings.TrimSpace before it lands
-		// here, so an all-whitespace cell arrives as "". Amount uses
-		// math.Abs because negative values in spreadsheets (refunds,
-		// credits) are legitimate and get flipped positive at insert
-		// time; the policy is "expense/income is determined by category,
-		// not amount sign".
-		if row.Description == "" {
-			result.Skipped = append(result.Skipped, importSkipped{
-				RowIndex: i,
-				Reason:   skipReasonEmptyDescription,
-			})
-			continue
-		}
-
 		amount := math.Abs(row.Amount)
-		if amount == 0 {
-			result.Skipped = append(result.Skipped, importSkipped{
-				RowIndex: i,
-				Reason:   skipReasonZeroAmount,
-			})
-			continue
-		}
 
 		categoryID := resolveCategoryID(row.Category, in.CategoryMap, in.CatNameToID, in.DefaultCategoryID)
 		if categoryID == 0 {
@@ -1571,6 +2324,54 @@ func processImportRows(
 	}
 
 	return result, minDate
+}
+
+// preCategorySkipReason reports whether a row is rejected before its category
+// is consulted at all, and returns the parsed date so the caller does not
+// re-parse it.
+//
+// Date first: every later check depends on having a valid time.Time for the
+// hash formula, and an unparseable date is the single most common real-world
+// input bug (stray header rows, footer totals, blank rows). The order decides
+// which reason "wins" on a row with several defects, and it is the order
+// processImportRows has always used — no existing outcome label changes.
+//
+// Description is compared to "" not whitespace: the parsing path already runs
+// strings.TrimSpace before a row lands here, so an all-whitespace cell arrives
+// as "". Amount uses math.Abs because negative values in spreadsheets
+// (refunds, credits) are legitimate and get flipped positive at insert time —
+// the policy is "expense/income is determined by category, not amount sign".
+//
+// The length check is a floor that should never fire from the HTTP path:
+// handleImportConfirm refuses the whole batch with 409 FIELD_TOO_LONG first.
+// It exists because this is the last thing between a preview row and the
+// ledger, and because the property tests require every skipped row to name a
+// declared reason — a silent drop here would be a row that vanished with
+// nothing recording why. It is also why the confirm-time gate cannot be
+// quietly deleted: doing so would not let over-long rows through, it would
+// move the rejection from a preview the user can act on to a count they
+// cannot explain.
+//
+// Shared with unresolvedImportCategories rather than inlined, because the
+// category gate must flag exactly the rows whose ONLY obstacle is the
+// category. Two copies of this list would drift, and the drift would show up
+// as a file the preview refuses to import for a decision that could not
+// change its outcome.
+func preCategorySkipReason(row importRow) (time.Time, importSkipReason, bool) {
+	date, err := parseImportDate(row.Date)
+	if err != nil {
+		return time.Time{}, skipReasonUnparseableDate, true
+	}
+	if row.Description == "" {
+		return time.Time{}, skipReasonEmptyDescription, true
+	}
+	if len(checkImportRowLengths([]importRow{row})) > 0 {
+		return time.Time{}, skipReasonFieldTooLong, true
+	}
+	if math.Abs(row.Amount) == 0 {
+		return time.Time{}, skipReasonZeroAmount, true
+	}
+	return date, "", false
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
@@ -1734,24 +2535,171 @@ func validateImportYear(t time.Time, raw string) (time.Time, error) {
 }
 
 // resolveCategoryID determines the category ID for an imported row.
-// Priority: explicit category_map > name match against existing categories > default.
+// Priority: explicit category_map > name match against existing categories,
+// and the default applies ONLY to a row whose Category cell is empty.
+//
+// A non-empty name that matches neither the user's map nor an existing
+// category resolves to 0 — never to the default. Falling back would file the
+// row under a category the user never chose for it, and would do so with
+// nothing to notice: the row lands in the ledger, the confirm response counts
+// it as imported, and only the ledger itself records that "Grocries" became
+// whatever the default happened to be. The name is a decision, and
+// handleImportConfirm refuses the batch with 409 UNRESOLVED_CATEGORIES until
+// the user makes it.
+//
+// The default IS honoured for an empty cell, because there is no name to
+// decide about — choosing "Default Category" in the preview is itself the
+// decision for those rows, and the control says so.
+//
+// Returning 0 needs no new handling in either caller: buildCollisionGroups
+// already drops a 0 row from grouping and processImportRows already records
+// it as skipReasonMissingCategory. So even with the 409 gate removed, an
+// unmatched name costs a counted skip rather than a silent re-home.
+//
+// Map keys are matched EXACTLY (after trimming), not case-insensitively.
+// The preview's unresolved_categories list is keyed the same way, so every
+// distinct spelling the sheet contains gets its own control and its own key
+// — the client never has to guess which casing the server will look up.
 func resolveCategoryID(categoryName string, categoryMap map[string]int64, catNameToID map[string]int64, defaultID int64) int64 {
 	name := strings.TrimSpace(categoryName)
 
-	// 1. Explicit mapping from the confirm request
-	if name != "" && categoryMap != nil {
+	// 1. No name to decide about — the user's default is the decision.
+	if name == "" {
+		return defaultID
+	}
+
+	// 2. Explicit mapping from the confirm request
+	if categoryMap != nil {
 		if id, found := categoryMap[name]; found {
 			return id
 		}
 	}
 
-	// 2. Case-insensitive match against existing categories
-	if name != "" {
-		if id, found := catNameToID[strings.ToLower(name)]; found {
-			return id
-		}
+	// 3. Case-insensitive match against existing categories
+	if id, found := catNameToID[strings.ToLower(name)]; found {
+		return id
 	}
 
-	// 3. Fall back to default
-	return defaultID
+	// 4. Undecided. NOT the default — see the doc comment.
+	return 0
+}
+
+// Reasons an import row's category is unresolved, as they appear on the wire.
+//
+//	unmapped — the cell names a category that matches nothing the household
+//	           has and nothing the user mapped. Remedy: map that name.
+//	missing  — the cell is empty. Remedy: choose a default category.
+//
+// The two are named separately because their remedies are different controls
+// in the preview, and a single "unresolved" label would point the user at
+// the wrong one.
+const (
+	unresolvedCategoryUnmapped = "unmapped"
+	unresolvedCategoryMissing  = "missing"
+)
+
+// unresolvedCategory names one distinct spreadsheet category value that no
+// decision covers yet, with the preview rows carrying it. Name is "" for the
+// missing-cell case; RowIDs lets the frontend say how much of the file each
+// undecided name accounts for, which is the difference between "one typo"
+// and "half my ledger".
+type unresolvedCategory struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+	RowIDs []int  `json:"row_ids"`
+}
+
+// unresolvedImportCategories lists every category value among `rows` that
+// resolveCategoryID cannot turn into an id under the given choices. It is
+// the shared definition behind three surfaces:
+//
+//  1. the preview responses (upload / PATCH / GET), called with a nil map
+//     and a zero default — i.e. "what would need deciding if you decided
+//     nothing", which is exactly the list the mapping UI renders;
+//  2. handleImportConfirm's 409 gate, called with the user's actual choices;
+//  3. nothing else — the frontend's own gate consumes (1) and marks entries
+//     resolved against local state, so the two can disagree only about
+//     choices the user has made since the last preview response.
+//
+// Rows the user marked Skip are excluded, mirroring the collision gate: a
+// row that is not going to be inserted needs no category.
+//
+// Rows that would be rejected BEFORE their category is ever consulted are
+// excluded too, via preCategorySkipReason. This is what keeps the gate from
+// being an obstacle for real files: a trailing "TOTAL 5,000" footer row has
+// no date and no category, and demanding a category decision for a row that
+// is going to be dropped as unparseable either way would block a file that
+// has nothing wrong with it.
+//
+// Grouping is by exact trimmed name, and entries come back in
+// first-appearance order — no sort, because the sheet's own order is what
+// the user is looking at.
+func unresolvedImportCategories(
+	rows []importRow,
+	categoryMap map[string]int64,
+	catNameToID map[string]int64,
+	defaultCategoryID int64,
+) []unresolvedCategory {
+	byName := make(map[string]*unresolvedCategory)
+	order := make([]*unresolvedCategory, 0, 4)
+
+	for _, row := range rows {
+		if row.Skip {
+			continue
+		}
+		if _, _, blocked := preCategorySkipReason(row); blocked {
+			continue
+		}
+		if resolveCategoryID(row.Category, categoryMap, catNameToID, defaultCategoryID) != 0 {
+			continue
+		}
+
+		name := strings.TrimSpace(row.Category)
+		entry, seen := byName[name]
+		if !seen {
+			reason := unresolvedCategoryUnmapped
+			if name == "" {
+				reason = unresolvedCategoryMissing
+			}
+			entry = &unresolvedCategory{Name: name, Reason: reason, RowIDs: []int{}}
+			byName[name] = entry
+			order = append(order, entry)
+		}
+		entry.RowIDs = append(entry.RowIDs, row.RowID)
+	}
+
+	out := make([]unresolvedCategory, 0, len(order))
+	for _, entry := range order {
+		out = append(out, *entry)
+	}
+	return out
+}
+
+// unknownCategoryIDs returns the ids in the confirm request that name no
+// live category, sorted. A stale id is a client bug or a category deleted
+// between preview and confirm; either way the rows it covers would land in
+// processImportRows' Errored bucket and be folded into an unexplained
+// `skipped` count. Naming the ids up front turns that into a message.
+func unknownCategoryIDs(req importConfirmRequest, catIDToName map[int64]string) []int64 {
+	seen := map[int64]struct{}{}
+	var unknown []int64
+	check := func(id int64) {
+		if id == 0 {
+			return
+		}
+		if _, ok := catIDToName[id]; ok {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		unknown = append(unknown, id)
+	}
+	check(req.DefaultCategoryID)
+	for _, id := range req.CategoryMap {
+		check(id)
+	}
+	sort.Slice(unknown, func(i, j int) bool { return unknown[i] < unknown[j] })
+	return unknown
 }

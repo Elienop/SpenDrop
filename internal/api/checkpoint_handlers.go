@@ -167,7 +167,7 @@ func validateCheckpointRequest(req checkpointRequest) error {
 		}
 	}
 
-	if len(req.Note) > MaxNotesLength {
+	if charLen(req.Note) > MaxNotesLength {
 		return fmt.Errorf("note must be %d characters or less", MaxNotesLength)
 	}
 	return nil

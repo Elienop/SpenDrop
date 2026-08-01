@@ -24,6 +24,7 @@ import type {
   CreateTokenResponse,
   Currency,
   ImportPreview,
+  ImportResult,
   ListTokensResponse,
   NotificationSettings,
   PatchRowRequest,
@@ -43,6 +44,11 @@ import { PasswordInput } from '@/components/ui/password-input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { cn, selectAllOnFocus } from '@/lib/utils';
+import {
+  MAX_API_TOKEN_NAME_LENGTH,
+  MAX_CURRENCY_SYMBOL_LENGTH,
+} from '@/lib/constants';
+import { charCount } from '@/lib/text';
 import {
   Card,
   CardContent,
@@ -141,11 +147,17 @@ function computeExpiresAt(choice: ExpiryChoice): string | null {
 }
 
 const createTokenSchema = z.object({
+  // charCount, not Zod's .max(): .max() counts UTF-16 code units, so an emoji
+  // in a token name would count 2 here and 1 in both the Go handler
+  // (apiTokenNameMax, via charLen) and the column's own
+  // CHECK(length(name) BETWEEN 1 AND 100) — SQLite counts characters too.
   name: z
     .string()
     .trim()
     .min(1, 'Name is required')
-    .max(100, 'Name must be 100 characters or fewer'),
+    .refine((value) => charCount(value) <= MAX_API_TOKEN_NAME_LENGTH, {
+      message: `Name must be ${MAX_API_TOKEN_NAME_LENGTH} characters or fewer`,
+    }),
   expires: z.enum(['never', '7d', '30d', '90d', '1y']),
 });
 type CreateTokenValues = z.infer<typeof createTokenSchema>;
@@ -348,9 +360,24 @@ function AccountSection() {
 /* ---------- Currencies Tab ---------- */
 
 const newCurrencySchema = z.object({
+  // `code` stays on Zod's .max(3), and stays measured in UTF-16 code units,
+  // because an ISO 4217 code is three ASCII letters by definition and the
+  // server gates it on /^[A-Z]{3}$/ — bytes, characters and code units are the
+  // same number for every value that can be stored. The `maxLength={3}` on the
+  // input is exact for the same reason.
   code: z.string().min(1, 'Code is required').max(3),
   name: z.string().min(1, 'Name is required'),
-  symbol: z.string().min(1, 'Symbol is required').max(3),
+  // 10 CHARACTERS, matching the server's MaxCurrencySymbolLength. This was 3,
+  // which is not a limit the product states anywhere and is too narrow for real
+  // symbols — the Lebanese pound writes "ل.ل.", four characters, and this
+  // household keeps its ledger in LBP and USD. Counted with charCount so an
+  // astral-plane symbol costs the same 1 here as it does on the server.
+  symbol: z
+    .string()
+    .min(1, 'Symbol is required')
+    .refine((value) => charCount(value) <= MAX_CURRENCY_SYMBOL_LENGTH, {
+      message: `Symbol must be ${MAX_CURRENCY_SYMBOL_LENGTH} characters or fewer`,
+    }),
   rate_to_base: z.number().positive('Rate must be positive'),
 });
 type NewCurrencyValues = z.infer<typeof newCurrencySchema>;
@@ -543,7 +570,19 @@ function CurrenciesSection() {
                   <FormItem>
                     <FormLabel>Symbol</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="\u00A3" maxLength={3} />
+                      {/* No maxLength: the HTML attribute counts UTF-16 code
+                          units, so it would stop typing at 5 astral-plane
+                          characters against a 10-character limit. The schema's
+                          charCount check is the gate.
+
+                          The placeholder is a JS expression, not a JSX string
+                          attribute. A JSX attribute value is HTML-like and does
+                          NOT process backslash escapes, so writing the escape
+                          directly in the quotes put those six literal
+                          characters on screen instead of a pound sign. Braces
+                          make it a real string literal, where the escape is
+                          processed. Verified in dist/assets/index-*.js. */}
+                      <Input {...field} placeholder={'\u00A3'} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
@@ -1493,6 +1532,7 @@ interface ImportPreviewStepProps {
   preview: ImportPreview;
   cellErrors: Record<string, CellError>;
   unresolvedCount: number;
+  unresolvedCategoryCount: number;
   canImport: boolean;
   pendingPatchCount: number;
   patchRow: (
@@ -1513,6 +1553,7 @@ function ImportPreviewStep({
   preview,
   cellErrors,
   unresolvedCount,
+  unresolvedCategoryCount,
   canImport,
   pendingPatchCount,
   patchRow,
@@ -1529,27 +1570,64 @@ function ImportPreviewStep({
     [preview.unique_categories],
   );
 
-  const { matched, unmatched } = useMemo(() => {
-    const m: { name: string; target: string }[] = [];
-    const u: string[] = [];
-    for (const catName of uniqueImportCategories) {
-      const mappedId = categoryMap[catName];
-      if (mappedId) {
-        const target = categories.find((c) => String(c.id) === mappedId);
-        m.push({ name: catName, target: target?.name ?? mappedId });
-      } else {
-        u.push(catName);
-      }
-    }
-    return { matched: m, unmatched: u };
-  }, [uniqueImportCategories, categoryMap, categories]);
-
-  const rowsWithoutCategory = useMemo(
-    () => preview.rows.filter((r) => !r.category).length,
-    [preview.rows],
+  // Which names need a decision is the SERVER's answer, not a client-side
+  // re-derivation of it. The backend knows which rows are actually eligible
+  // — it excludes skipped rows and rows it would drop for an unparseable
+  // date before their category ever mattered — and reproducing that here
+  // would mean parsing dates in the browser to decide what to ask about.
+  const unresolvedCategories = useMemo(
+    () => preview.unresolved_categories ?? [],
+    [preview.unresolved_categories],
+  );
+  const unmatched = useMemo(
+    () => unresolvedCategories.filter((u) => u.reason === 'unmapped'),
+    [unresolvedCategories],
+  );
+  const missingCategoryRows = useMemo(
+    () =>
+      unresolvedCategories.find((u) => u.reason === 'missing')?.row_ids.length ??
+      0,
+    [unresolvedCategories],
   );
 
-  const needsDefaultCategory = unmatched.length > 0 || rowsWithoutCategory > 0;
+  // "Matched automatically" means the household already has a category by
+  // that name — which is exactly the set the server did NOT list as needing
+  // a decision. Deriving it from the local map instead would let a name the
+  // user mapped by hand count as automatic.
+  const matched = useMemo(() => {
+    const needsDecision = new Set(unmatched.map((u) => u.name));
+    return uniqueImportCategories.filter((name) => !needsDecision.has(name));
+  }, [uniqueImportCategories, unmatched]);
+
+  const unmappedNames = useMemo(
+    () => unmatched.filter((u) => !categoryMap[u.name]).map((u) => u.name),
+    [unmatched, categoryMap],
+  );
+
+  const defaultCategoryName = useMemo(
+    () => categories.find((c) => c.id === defaultCategoryId)?.name ?? '',
+    [categories, defaultCategoryId],
+  );
+
+  // The default is offered whenever it has a job to do: filling empty
+  // Category cells, or serving as the source for the bulk-apply below.
+  const needsDefaultCategory = unmatched.length > 0 || missingCategoryRows > 0;
+
+  // One click that files every still-unmapped name under the chosen default.
+  // This is what keeps "I know, put them all in Miscellaneous" cheap without
+  // making it something that happens to the user: it writes real map
+  // entries, so the decision is visible in every control afterwards and
+  // travels to the server as an explicit mapping rather than as a fallback.
+  function applyDefaultToUnmapped() {
+    if (defaultCategoryId === null) return;
+    setCategoryMap((prev) => {
+      const next = { ...prev };
+      for (const name of unmappedNames) {
+        next[name] = String(defaultCategoryId);
+      }
+      return next;
+    });
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1566,6 +1644,7 @@ function ImportPreviewStep({
         preview={preview}
         cellErrors={cellErrors}
         unresolvedCount={unresolvedCount}
+        unresolvedCategoryCount={unresolvedCategoryCount}
         canImport={canImport}
         pendingPatchCount={pendingPatchCount}
         onPatchRow={patchRow}
@@ -1589,12 +1668,8 @@ function ImportPreviewStep({
                 </span>
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                {matched.map((m) => (
-                  <span key={m.name}>
-                    {m.name === m.target
-                      ? m.name
-                      : `${m.name} \u2192 ${m.target}`}
-                  </span>
+                {matched.map((name) => (
+                  <span key={name}>{name}</span>
                 ))}
               </div>
             </div>
@@ -1606,22 +1681,41 @@ function ImportPreviewStep({
               <div className="flex items-center gap-2 text-sm">
                 <CircleAlert className="h-4 w-4 text-yellow-500" />
                 <span>
-                  {unmatched.length} {unmatched.length === 1 ? 'category needs' : 'categories need'} mapping
+                  {unmatched.length}{' '}
+                  {unmatched.length === 1
+                    ? 'category in this file matches nothing you have'
+                    : 'categories in this file match nothing you have'}
+                  . Nothing is imported until each has a destination.
                 </span>
               </div>
-              {unmatched.map((catName) => (
-                <div key={catName} className="flex max-w-sm items-center gap-3">
-                  <Label className="w-32 shrink-0 text-sm">{catName}</Label>
+              {unmatched.map((entry) => (
+                <div
+                  key={entry.name}
+                  className="flex max-w-sm items-center gap-3"
+                >
+                  {/* The row count is the difference between "one typo" and
+                      "half my ledger" \u2014 without it the user cannot tell
+                      whether this decision matters. */}
+                  <Label className="w-32 shrink-0 text-sm">
+                    <span className="block truncate" title={entry.name}>
+                      {entry.name}
+                    </span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {entry.row_ids.length === 1
+                        ? '1 row'
+                        : `${entry.row_ids.length} rows`}
+                    </span>
+                  </Label>
                   <Select
-                    value={categoryMap[catName] ?? undefined}
+                    value={categoryMap[entry.name] ?? undefined}
                     onValueChange={(v) =>
                       setCategoryMap((prev) => ({
                         ...prev,
-                        [catName]: v,
+                        [entry.name]: v,
                       }))
                     }
                   >
-                    <SelectTrigger aria-label={`Map category ${catName}`}>
+                    <SelectTrigger aria-label={`Map category ${entry.name}`}>
                       <SelectValue placeholder="Select category..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1636,6 +1730,20 @@ function ImportPreviewStep({
                   </Select>
                 </div>
               ))}
+              {unmappedNames.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-fit"
+                  disabled={defaultCategoryId === null}
+                  onClick={applyDefaultToUnmapped}
+                >
+                  {defaultCategoryId === null
+                    ? 'Pick a default below to fill these at once'
+                    : `Use ${defaultCategoryName} for the remaining ${unmappedNames.length}`}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -1647,7 +1755,9 @@ function ImportPreviewStep({
           <Label htmlFor="default-category">
             Default Category
             <span className="ml-1 text-xs font-normal text-muted-foreground">
-              (for unmapped or missing categories)
+              {missingCategoryRows > 0
+                ? `(for the ${missingCategoryRows === 1 ? '1 row' : `${missingCategoryRows} rows`} with an empty Category cell)`
+                : '(for rows with an empty Category cell)'}
             </span>
           </Label>
           <Select
@@ -1673,25 +1783,116 @@ function ImportPreviewStep({
   );
 }
 
+/* ---------- Import result ---------- */
+
+/**
+ * Human phrasing for the backend's skip reasons. Anything not listed falls
+ * back to the raw key rather than being dropped: a reason the backend adds
+ * later must still show up in the total the user is reading, and a silently
+ * omitted line would make the counts stop adding up.
+ */
+const IMPORT_SKIP_REASON_LABELS: Record<string, string> = {
+  user_skipped: 'you skipped',
+  duplicate: 'already in your ledger',
+  unparseable_date: 'no readable date',
+  empty_description: 'no description',
+  zero_amount: 'no amount',
+  missing_category: 'no category',
+  field_too_long: 'too long to store',
+  error: 'could not be saved',
+};
+
+/**
+ * Outcome of a finished import.
+ *
+ * A run that lands 12 of 500 rows is not a success, and reporting it in the
+ * same flat sentence as a clean run is how "my import worked" and "my import
+ * dropped 488 rows" came to look identical. When anything did not land, the
+ * count leads and the reasons are itemised — a bare number is something the
+ * user can neither trust nor act on.
+ */
+function ImportResultSummary({ result }: { result: ImportResult }) {
+  const reasons = Object.entries(result.skipped_reasons ?? {})
+    .filter(([, count]) => count > 0)
+    .sort(([, a], [, b]) => b - a);
+
+  if (result.skipped === 0) {
+    return (
+      <p className="text-sm font-medium">
+        {result.imported === 1
+          ? 'Imported 1 row.'
+          : `Imported all ${result.imported} rows.`}
+      </p>
+    );
+  }
+
+  return (
+    <Alert>
+      <AlertTriangle className="h-4 w-4 text-amber-500" />
+      <AlertTitle>
+        {`${result.skipped} of ${result.total} rows were not imported`}
+      </AlertTitle>
+      <AlertDescription>
+        <div className="flex flex-col gap-1">
+          <span>
+            {result.imported === 1
+              ? '1 row was added to your ledger.'
+              : `${result.imported} rows were added to your ledger.`}
+          </span>
+          {reasons.length > 0 && (
+            <ul className="list-disc pl-4">
+              {reasons.map(([reason, count]) => (
+                <li key={reason}>
+                  {`${count} ${IMPORT_SKIP_REASON_LABELS[reason] ?? reason}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </AlertDescription>
+    </Alert>
+  );
+}
+
 /* ---------- Import / Export Tab ---------- */
 
-function DataSection() {
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
-
+/**
+ * Excel import wizard. Admin-only: the whole `/api/import/*` route group
+ * sits behind `auth.RequireAdmin`, so every control in this card would
+ * earn a member a 403.
+ *
+ * A separate component rather than an `{admin && …}` block inside
+ * <DataSection> so that none of the import hooks mount for a member. That
+ * is load-bearing, not tidiness: `useImportSession` runs a mount effect
+ * that resumes a stored import id with GET /api/import/{id}, and a member
+ * who had the wizard open before the route was gated still has that id in
+ * localStorage. Sharing <DataSection>'s hooks would let that resume fire
+ * — once, not on every visit, since the effect's catch drops the stored
+ * id before it inspects the error — and a 403 is not the NotFoundError
+ * the catch stays silent for, so it would land as a raw `forbidden`
+ * banner on a tab whose owner can do nothing about it. The `categories`
+ * fetch below is import-only too.
+ */
+function ImportCard() {
   // Import wizard state — preview / importStep / result are owned by the
   // hook now; destructure them so the rest of the function reads identically
   // to the old local-state version.
-  const importSession = useImportSession();
-  const { preview, importStep, result, error: importError } = importSession;
-
   const [defaultCategoryId, setDefaultCategoryId] = useState<number | null>(
     null,
   );
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
+
+  // The gate needs the category decisions, so they are passed in rather than
+  // read back out. Memoised because the hook derives `unresolvedCategoryCount`
+  // from this object — a fresh literal every render would recompute it every
+  // render for no reason.
+  const categoryDecisions = useMemo(
+    () => ({ categoryMap, defaultCategoryId }),
+    [categoryMap, defaultCategoryId],
+  );
+  const importSession = useImportSession(categoryDecisions);
+  const { preview, importStep, result, error: importError } = importSession;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Tracks the import_id we last auto-mapped categories for. Resets to null
   // on cancel / startOver so the next upload (or a re-upload) re-runs the
@@ -1764,6 +1965,128 @@ function DataSection() {
     clearFileInput();
   }
 
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Import</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {importError && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{importError}</AlertDescription>
+          </Alert>
+        )}
+
+        {importStep === 'upload' && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-muted-foreground">
+              Upload an Excel file with columns: date, description, amount.
+              Optional columns: category, tags, notes, original_amount,
+              original_currency.
+            </p>
+            <Input
+              ref={fileInputRef}
+              id="excel-file"
+              type="file"
+              accept=".xlsx,.xls"
+              aria-label="Excel File"
+              onChange={(e) => void handleFileChange(e)}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.currentTarget.setAttribute('data-drag-over', 'true');
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.currentTarget.removeAttribute('data-drag-over');
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.currentTarget.removeAttribute('data-drag-over');
+                const file = e.dataTransfer.files[0];
+                if (file) {
+                  const dt = new DataTransfer();
+                  dt.items.add(file);
+                  if (fileInputRef.current) {
+                    fileInputRef.current.files = dt.files;
+                    fileInputRef.current.dispatchEvent(
+                      new Event('change', { bubbles: true }),
+                    );
+                  }
+                }
+              }}
+              className={cn(
+                'flex max-w-sm flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 px-6 py-8 text-center transition-colors',
+                'hover:border-muted-foreground/50 hover:bg-muted/50',
+                'data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/5',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+              )}
+            >
+              <Upload className="size-8 text-muted-foreground" />
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">
+                  Drag & drop your Excel file here, or click to browse
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  .xlsx, .xls
+                </span>
+              </div>
+            </button>
+          </div>
+        )}
+
+        {importStep === 'preview' && preview && (
+          <ImportPreviewStep
+            preview={preview}
+            cellErrors={importSession.cellErrors}
+            unresolvedCount={importSession.unresolvedCount}
+            unresolvedCategoryCount={importSession.unresolvedCategoryCount}
+            canImport={importSession.canImport}
+            pendingPatchCount={importSession.pendingPatchCount}
+            patchRow={importSession.patchRow}
+            categories={categories}
+            categoryMap={categoryMap}
+            setCategoryMap={setCategoryMap}
+            defaultCategoryId={defaultCategoryId}
+            setDefaultCategoryId={setDefaultCategoryId}
+            onConfirm={() => void handleConfirmImport()}
+            onCancel={() => void handleCancelImport()}
+          />
+        )}
+
+        {importStep === 'done' && result && (
+          <div className="flex flex-col gap-4">
+            <ImportResultSummary result={result} />
+            <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
+              Import Another
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+interface DataSectionProps {
+  // Import is admin-only (see <ImportCard>); export is not — /api/export/*
+  // is registered in the plain authenticated group, so members keep it in
+  // full. The tab's own label follows this flag as well: calling the tab
+  // "Import / Export" for someone who only ever sees the Export card
+  // advertises a capability they do not have.
+  admin: boolean;
+}
+
+function DataSection({ admin }: DataSectionProps) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
+
   function handleExportMonthly() {
     window.open(`/api/export/monthly/${year}/${month}`, '_blank');
   }
@@ -1774,111 +2097,7 @@ function DataSection() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* ---------- Import card ---------- */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Import</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {importError && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{importError}</AlertDescription>
-            </Alert>
-          )}
-
-          {importStep === 'upload' && (
-            <div className="flex flex-col gap-4">
-              <p className="text-sm text-muted-foreground">
-                Upload an Excel file with columns: date, description, amount.
-                Optional columns: category, tags, notes, original_amount,
-                original_currency.
-              </p>
-              <Input
-                ref={fileInputRef}
-                id="excel-file"
-                type="file"
-                accept=".xlsx,.xls"
-                aria-label="Excel File"
-                onChange={(e) => void handleFileChange(e)}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.setAttribute('data-drag-over', 'true');
-                }}
-                onDragLeave={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.removeAttribute('data-drag-over');
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.removeAttribute('data-drag-over');
-                  const file = e.dataTransfer.files[0];
-                  if (file) {
-                    const dt = new DataTransfer();
-                    dt.items.add(file);
-                    if (fileInputRef.current) {
-                      fileInputRef.current.files = dt.files;
-                      fileInputRef.current.dispatchEvent(
-                        new Event('change', { bubbles: true }),
-                      );
-                    }
-                  }
-                }}
-                className={cn(
-                  'flex max-w-sm flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 px-6 py-8 text-center transition-colors',
-                  'hover:border-muted-foreground/50 hover:bg-muted/50',
-                  'data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/5',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-                )}
-              >
-                <Upload className="size-8 text-muted-foreground" />
-                <div className="flex flex-col gap-1">
-                  <span className="text-sm font-medium">
-                    Drag & drop your Excel file here, or click to browse
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    .xlsx, .xls
-                  </span>
-                </div>
-              </button>
-            </div>
-          )}
-
-          {importStep === 'preview' && preview && (
-            <ImportPreviewStep
-              preview={preview}
-              cellErrors={importSession.cellErrors}
-              unresolvedCount={importSession.unresolvedCount}
-              canImport={importSession.canImport}
-              pendingPatchCount={importSession.pendingPatchCount}
-              patchRow={importSession.patchRow}
-              categories={categories}
-              categoryMap={categoryMap}
-              setCategoryMap={setCategoryMap}
-              defaultCategoryId={defaultCategoryId}
-              setDefaultCategoryId={setDefaultCategoryId}
-              onConfirm={() => void handleConfirmImport()}
-              onCancel={() => void handleCancelImport()}
-            />
-          )}
-
-          {importStep === 'done' && result && (
-            <div className="flex flex-col gap-4">
-              <p className="text-sm font-medium">
-                {`${result.imported} imported, ${result.skipped} skipped out of ${result.total} total rows.`}
-              </p>
-              <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
-                Import Another
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {admin && <ImportCard />}
 
       {/* ---------- Export card ---------- */}
       <Card>
@@ -2432,7 +2651,14 @@ export function Settings() {
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}
           <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
-          <TabsTrigger value="data">Import / Export</TabsTrigger>
+          {/* The tab value stays "data" for both roles so existing
+              ?tab=data bookmarks keep resolving; only the visible label
+              narrows. Import is admin-only (see <ImportCard>), and a
+              member whose panel holds nothing but the Export card should
+              not be told the tab offers import. */}
+          <TabsTrigger value="data">
+            {admin ? 'Import / Export' : 'Export'}
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="account" className="mt-6">
           <AccountSection />
@@ -2452,7 +2678,7 @@ export function Settings() {
           <NotificationsSection />
         </TabsContent>
         <TabsContent value="data" className="mt-6">
-          <DataSection />
+          <DataSection admin={admin} />
         </TabsContent>
       </Tabs>
       {/* Outside the Tabs on purpose: "which build am I on" is a property of

@@ -73,7 +73,7 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > MaxCurrencyNameLength {
+	if charLen(req.Name) > MaxCurrencyNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCurrencyNameLength))
 		return
 	}
@@ -81,7 +81,7 @@ func (h *Handler) handleCreateCurrency(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "symbol is required")
 		return
 	}
-	if len(req.Symbol) > MaxCurrencySymbolLength {
+	if charLen(req.Symbol) > MaxCurrencySymbolLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("symbol must be %d characters or less", MaxCurrencySymbolLength))
 		return
 	}

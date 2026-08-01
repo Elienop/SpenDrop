@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -9,6 +10,11 @@ import {
 import { AlertTriangle } from 'lucide-react';
 import type { CollisionGroup, ImportPreview, PatchRowRequest } from '@/api/types';
 import type { CellError } from '@/hooks/useImportSession';
+import { activeFieldErrors } from '@/hooks/useImportSession';
+import {
+  fallbackFieldTooLongMessage,
+  isEditableInPreview,
+} from '@/lib/import-field-errors';
 import {
   Table,
   TableBody,
@@ -25,9 +31,28 @@ import { Separator } from '@/components/ui/separator';
 type EditableField = 'date' | 'description' | 'amount';
 type EditingCell = { rowID: number; field: EditableField } | null;
 
+/** DOM id of the explanation attached under a specific flagged row. */
+const fieldErrorDetailId = (rowID: number) => `import-field-error-${rowID}`;
+
 type RenderUnit =
+  | { kind: 'field-error-bar'; rowIDs: number[] }
   | { kind: 'group-header'; group: CollisionGroup }
-  | { kind: 'row'; row: ImportPreview['rows'][number]; isCollision: boolean; groupHeaderId?: string };
+  | {
+      kind: 'row';
+      row: ImportPreview['rows'][number];
+      isCollision: boolean;
+      groupHeaderId?: string;
+      hasFieldError: boolean;
+      /**
+       * Server-authored explanations for this row's over-length fields
+       * that have NO cell of their own (tags, notes). Rendered verbatim
+       * in a detail row beneath this one. Description errors are absent
+       * here on purpose — they are shown in their own cell via
+       * `cellErrors`, and repeating them would print the same sentence
+       * twice for one row.
+       */
+      rowLevelMessages: string[];
+    };
 
 /**
  * Walks `preview` to produce the ordered render plan: every collision
@@ -47,13 +72,54 @@ type RenderUnit =
  *     `aria-describedby` can point at the "N rows collide" message —
  *     screen readers then announce the group context on every row
  *     focus.
+ *
+ * Over-length fields are handled differently on purpose, in two ways.
+ *
+ * They are not pulled into a group of their own. Grouping them would
+ * fight the collision layout in the one case where it matters most: two
+ * rows with the same 5,000-character description are both a collision
+ * AND both too long, and whichever section claimed them first would
+ * leave the other rendering a header that counts rows it no longer
+ * shows. Marking in place lets a row carry both signals at once.
+ *
+ * And their EXPLANATION travels with the row, not with the set. The
+ * server writes one sentence per field error, phrased about a single
+ * row ("This row's note is longer than…"), so it is rendered verbatim
+ * in a detail row beneath the row it describes. Only the bulk control
+ * at the top is aggregate, and it deliberately carries a count and a
+ * button rather than an explanation — the sentences are the server's,
+ * the framing around them is ours.
  */
 function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
   const byRowId = new Map<number, ImportPreview['rows'][number]>();
   for (const r of preview.rows) byRowId.set(r.row_id, r);
 
+  const active = activeFieldErrors(preview.field_errors, preview.rows);
+  const fieldErrorRowIDs = new Set(active.map((fe) => fe.row_id));
+  // Explanations for fields with no cell, grouped by the row they
+  // describe. A row can trip more than one (tags AND notes), so each
+  // keeps its own sentence rather than being collapsed into a summary.
+  const rowLevelMessages = new Map<number, string[]>();
+  for (const fe of active) {
+    if (isEditableInPreview(fe.field)) continue;
+    const existing = rowLevelMessages.get(fe.row_id) ?? [];
+    existing.push(fe.message || fallbackFieldTooLongMessage(fe.field));
+    rowLevelMessages.set(fe.row_id, existing);
+  }
+
   const emitted = new Set<number>();
   const units: RenderUnit[] = [];
+
+  if (fieldErrorRowIDs.size > 0) {
+    units.push({
+      kind: 'field-error-bar',
+      // Ordered by the preview's own row order so the bulk skip fires
+      // its PATCH burst top-to-bottom, matching what the user sees.
+      rowIDs: preview.rows
+        .filter((r) => fieldErrorRowIDs.has(r.row_id))
+        .map((r) => r.row_id),
+    });
+  }
 
   for (const group of preview.collision_groups) {
     const headerId = `collision-group-${group.group_id}`;
@@ -61,7 +127,14 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
     for (const rowID of group.member_row_ids) {
       const row = byRowId.get(rowID);
       if (row && !emitted.has(rowID)) {
-        units.push({ kind: 'row', row, isCollision: true, groupHeaderId: headerId });
+        units.push({
+          kind: 'row',
+          row,
+          isCollision: true,
+          groupHeaderId: headerId,
+          hasFieldError: fieldErrorRowIDs.has(rowID),
+          rowLevelMessages: rowLevelMessages.get(rowID) ?? [],
+        });
         emitted.add(rowID);
       }
     }
@@ -69,7 +142,13 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
 
   for (const row of preview.rows) {
     if (!emitted.has(row.row_id)) {
-      units.push({ kind: 'row', row, isCollision: false });
+      units.push({
+        kind: 'row',
+        row,
+        isCollision: false,
+        hasFieldError: fieldErrorRowIDs.has(row.row_id),
+        rowLevelMessages: rowLevelMessages.get(row.row_id) ?? [],
+      });
     }
   }
 
@@ -80,6 +159,13 @@ export interface ImportPreviewTableProps {
   preview: ImportPreview;
   cellErrors: Record<string, CellError>;
   unresolvedCount: number;
+  /**
+   * Distinct category values still awaiting a decision. Passed in rather
+   * than derived here, because resolving one is an act performed in the
+   * mapping panel BELOW this table — the table can see the server's list
+   * but not the user's answers to it.
+   */
+  unresolvedCategoryCount: number;
   canImport: boolean;
   pendingPatchCount: number;
   onPatchRow: (
@@ -103,6 +189,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     preview,
     cellErrors,
     unresolvedCount,
+    unresolvedCategoryCount,
     canImport,
     pendingPatchCount,
     onPatchRow,
@@ -140,33 +227,59 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // prevents the 409 scroll-into-view effect from mis-targeting if the
   // page ever renders two import tables at once.
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Derived from `preview` with the same helper the hook's gate uses,
+  // rather than passed in as a count prop beside `unresolvedCount`.
+  // One definition of "still blocking" means the button cannot end up
+  // disabled against rows this table is not highlighting. Declared up
+  // here because the scroll effect below reads it.
+  const fieldErrorRowCount = useMemo(
+    () =>
+      new Set(
+        activeFieldErrors(preview.field_errors, preview.rows).map(
+          (fe) => fe.row_id,
+        ),
+      ).size,
+    [preview],
+  );
   // Previous unresolvedCount snapshot for the 0 → >0 edge detection. We
   // do NOT scroll on initial mount (prev defaults to the current value),
   // and we do NOT scroll on N → N+1 transitions (un-skipping a row in an
   // already-visible group is its own user-initiated action and does not
   // need the page to jump).
-  const prevUnresolvedRef = useRef(unresolvedCount);
+  const prevBlockedRef = useRef(unresolvedCount + fieldErrorRowCount);
   useEffect(() => {
-    // 409 UX: confirmImport returns 409 UNRESOLVED_COLLISIONS → the hook
-    // drops the fresh collision_groups into state → unresolvedCount flips
-    // 0 → >0. Scrolling the first collision row into view saves the user
-    // from having to scan a long preview to find what blocked the import.
+    // 409 UX: confirmImport returns 409 UNRESOLVED_COLLISIONS or 409
+    // FIELD_TOO_LONG → the hook drops the fresh collision_groups or
+    // field_errors into state → the blocked count flips 0 → >0.
+    // Scrolling the first blocked row into view saves the user from
+    // having to scan a long preview to find what stopped the import.
     // We defer to rAF so the newly-rendered rows settle into layout
     // before scrollIntoView reads their positions (without this, Safari
     // has been observed to scroll to the pre-layout offset).
-    if (prevUnresolvedRef.current === 0 && unresolvedCount > 0) {
+    //
+    // Summing the two counts rather than watching them separately keeps
+    // this to a single 0 → >0 edge. Two effects would both fire when a
+    // preview carries both kinds, and the second scroll would win —
+    // landing the user on whichever row it happened to target rather
+    // than the first problem in the table.
+    const blockedCount = unresolvedCount + fieldErrorRowCount;
+    if (prevBlockedRef.current === 0 && blockedCount > 0) {
       requestAnimationFrame(() => {
         const container = scrollContainerRef.current;
-        const firstCollisionRow = container?.querySelector<HTMLTableRowElement>(
-          'tr[data-collision="true"]',
+        // Comma selector, so this resolves to the first match in
+        // DOCUMENT order — the topmost blocked row, whichever kind it
+        // is — not the first branch of the selector.
+        const firstBlockedRow = container?.querySelector<HTMLTableRowElement>(
+          'tr[data-collision="true"], tr[data-field-error="true"]',
         );
-        if (firstCollisionRow) {
-          firstCollisionRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        if (firstBlockedRow) {
+          firstBlockedRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
       });
     }
-    prevUnresolvedRef.current = unresolvedCount;
-  }, [unresolvedCount]);
+    prevBlockedRef.current = blockedCount;
+  }, [unresolvedCount, fieldErrorRowCount]);
 
   // Build the render plan from props on EVERY render. No useState, no
   // useEffect — structural guarantee against importcsv #16 (the
@@ -176,16 +289,25 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // clean rows follow.
   const renderPlan = useMemo(() => buildRenderPlan(preview), [preview]);
 
-  const skipAllInGroup = useCallback(
-    async (group: CollisionGroup) => {
+  const skipAllRows = useCallback(
+    async (rowIDs: number[]) => {
       // Sequential awaits — the hook's patchQueueRef already serializes
       // cross-row PATCHes, but awaiting here keeps the fire order stable
       // and makes the button's pending count settle predictably.
-      for (const rowID of group.member_row_ids) {
+      for (const rowID of rowIDs) {
         await onPatchRow(rowID, 'skip', true);
       }
     },
     [onPatchRow],
+  );
+
+  // Both bulk escapes are the same burst over a different row set, so
+  // they share one implementation: skipping a collision group and
+  // skipping every over-length row differ only in how the ids were
+  // chosen.
+  const skipAllInGroup = useCallback(
+    (group: CollisionGroup) => skipAllRows(group.member_row_ids),
+    [skipAllRows],
   );
 
   const keepCount = preview.rows.filter((r) => !r.skip).length;
@@ -294,9 +416,17 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     // undefined so we never emit a useless attribute.
     const describedby =
       [extraAriaDescribedby, errorMessageId].filter(Boolean).join(' ') || undefined;
+    // Description is the only free-text editable column, so it is the
+    // only one whose value can be arbitrarily long — date and amount are
+    // both parsed before they reach here. An unbounded cell renders the
+    // whole value: a 5,500-character description measured 2,211px tall,
+    // burying the banner that asks the user to act on it under two
+    // screens of its own text. The rows that get flagged are exactly the
+    // rows that would make the preview unreadable.
+    const isFreeText = field === 'description';
     return (
       <TableCell
-        className={`${extraClass} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
+        className={`${extraClass} ${isFreeText ? 'max-w-[28rem]' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
         data-cell-error={err ? 'true' : undefined}
         // Cover both idle (cell is tabable) and edit (Input announces)
         // modes with the same describedby tokens so the group-header
@@ -326,7 +456,27 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
             className={`h-7 px-2 py-0 text-sm ${err ? 'ring-1 ring-destructive' : ''}`}
           />
         ) : (
-          <span>{displayValue}</span>
+          /*
+            The bound lives on this span, NOT on the TableCell the way
+            TransactionRow does it. `truncate` sets `white-space: nowrap`
+            on whatever carries it, and this cell has a sibling below —
+            the server's error sentence — which must wrap and be read in
+            full. Putting `truncate` on the cell would clip that sentence
+            to one line with an ellipsis, silently destroying the copy
+            this flag exists to deliver.
+
+            Truncation is presentational only: `beginEdit` is called with
+            `displayValue`, never with the DOM's text, so double-clicking
+            a truncated cell still opens the editor on the whole value.
+            That matters because "shorten it here" is the remedy the
+            message points at.
+          */
+          <span
+            className={isFreeText ? 'block max-w-[28rem] truncate' : undefined}
+            title={isFreeText ? displayValue : undefined}
+          >
+            {displayValue}
+          </span>
         )}
         {err && (
           <p id={errorMessageId} className="text-xs text-destructive mt-0.5">
@@ -342,12 +492,46 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // between the amber / emerald states. Ternary-ing between two
   // aria-live elements remounts the live region and screen readers
   // skip the update (AT-2024-07 regression).
+  // Listed rather than branched so the two blockers compose: a preview
+  // can carry collisions AND over-length rows at once, and naming only
+  // one of them would send the user to fix half the problem and watch
+  // the button stay disabled. The collisions-only wording is unchanged
+  // from before over-length rows existed.
+  const blockers: string[] = [];
+  if (unresolvedCount > 0) {
+    blockers.push(
+      `${unresolvedCount} ${unresolvedCount === 1 ? 'collision' : 'collisions'}`,
+    );
+  }
+  if (fieldErrorRowCount > 0) {
+    blockers.push(
+      `${fieldErrorRowCount} too-long ${fieldErrorRowCount === 1 ? 'row' : 'rows'}`,
+    );
+  }
+  // Named separately from the other two because the remedy is somewhere
+  // else — the mapping panel below the table, not a cell in it. "Fix or
+  // skip" would point at the wrong thing, so this blocker carries its own
+  // verb and the sentence composes the two halves.
+  //
+  // "choices", not "unmatched names": the count covers both a name that
+  // matches nothing AND rows with an empty Category cell, and only the
+  // panel below knows which is which. Wording that named one of the two
+  // would be wrong for the other half of the time.
+  const categoryBlocker =
+    unresolvedCategoryCount > 0
+      ? `${unresolvedCategoryCount} category ${unresolvedCategoryCount === 1 ? 'choice' : 'choices'} still needed below`
+      : '';
+  const rowBlockerText =
+    blockers.length > 0
+      ? `Fix or skip ${blockers.join(' and ')} to enable import`
+      : '';
   const statusText =
-    unresolvedCount > 0
-      ? `Fix or skip ${unresolvedCount} ${unresolvedCount === 1 ? 'collision' : 'collisions'} to enable import`
-      : `Ready to import ${keepCount} rows`;
+    [rowBlockerText, categoryBlocker].filter(Boolean).join('. ') ||
+    `Ready to import ${keepCount} rows`;
   const statusColor =
-    unresolvedCount > 0 ? 'text-amber-500' : 'text-emerald-500';
+    blockers.length > 0 || unresolvedCategoryCount > 0
+      ? 'text-amber-500'
+      : 'text-emerald-500';
 
   return (
     <div className="flex flex-col gap-3">
@@ -370,6 +554,58 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
           </TableHeader>
           <TableBody>
             {renderPlan.map((unit) => {
+              if (unit.kind === 'field-error-bar') {
+                const count = unit.rowIDs.length;
+                // Same guard as the collision group's Skip-all: two fast
+                // clicks would otherwise double-fire the PATCH burst.
+                const skipAllDisabled = pendingPatchCount > 0;
+                return (
+                  <TableRow
+                    key="field-error-bar"
+                    data-field-error-bar="true"
+                    className="bg-amber-500/15 border-l-2 border-l-amber-500 hover:bg-amber-500/15"
+                  >
+                    <TableCell colSpan={5}>
+                      <div className="flex items-center justify-between gap-3">
+                        {/*
+                          Count and action only. The explanation of WHY
+                          any given row is too long is the server's
+                          sentence and lives with that row — an aggregate
+                          restatement here would be a second copy of the
+                          same wording, phrased by us, free to drift.
+                        */}
+                        <div
+                          role="heading"
+                          aria-level={3}
+                          className="flex items-center gap-2 text-sm"
+                        >
+                          <AlertTriangle
+                            className="size-4 shrink-0 text-amber-500"
+                            aria-hidden="true"
+                          />
+                          <span>
+                            {count === 1
+                              ? '1 row is too long to import'
+                              : `${count} rows are too long to import`}
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          className="shrink-0"
+                          disabled={skipAllDisabled}
+                          onClick={() => void skipAllRows(unit.rowIDs)}
+                        >
+                          {count === 1
+                            ? 'Skip this row'
+                            : `Skip these ${count} rows`}
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                );
+              }
               if (unit.kind === 'group-header') {
                 const count = unit.group.member_row_ids.length;
                 const matchesExisting = unit.group.reason === 'db_match';
@@ -425,7 +661,33 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                   </TableRow>
                 );
               }
-              const { row, isCollision, groupHeaderId } = unit;
+              const {
+                row,
+                isCollision,
+                groupHeaderId,
+                hasFieldError,
+                rowLevelMessages: rowMessages,
+              } = unit;
+              // A row can block the import for either reason, or both.
+              // They share the amber treatment because they are the same
+              // instruction to the user — this row needs attention
+              // before Import will run.
+              const rowBlocked = isCollision || hasFieldError;
+              // Both descriptions are attached when both apply, so a
+              // row that collides AND carries an uneditable over-length
+              // field announces both. The field-error target is this
+              // row's own detail line rather than the bar at the top:
+              // the detail holds the sentence that applies to THIS row,
+              // where the bar only holds a count.
+              const rowDescribedby =
+                [
+                  groupHeaderId,
+                  rowMessages.length > 0
+                    ? fieldErrorDetailId(row.row_id)
+                    : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ') || undefined;
               // Skipped rows render faded + struck-through so the user
               // can visually confirm which rows the confirm step will
               // drop without having to mentally intersect `skip` with
@@ -438,21 +700,36 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
               // row_id+1 as a last resort.
               const rowLabel = row.description.trim() || `row ${row.row_id + 1}`;
               return (
+                <Fragment key={row.row_id}>
                 <TableRow
-                  key={row.row_id}
                   data-row-id={row.row_id}
                   data-collision={isCollision ? 'true' : undefined}
-                  className={isCollision ? 'bg-amber-500/10 border-l-2 border-l-amber-500' : ''}
+                  data-field-error={hasFieldError ? 'true' : undefined}
+                  className={rowBlocked ? 'bg-amber-500/10 border-l-2 border-l-amber-500' : ''}
                 >
-                  {renderEditableCell(row, 'date', row.date, skipClass, groupHeaderId)}
-                  {renderEditableCell(row, 'description', row.description, skipClass, groupHeaderId)}
-                  <TableCell className={`text-muted-foreground ${skipClass}`}>{row.category}</TableCell>
+                  {renderEditableCell(row, 'date', row.date, skipClass, rowDescribedby)}
+                  {renderEditableCell(row, 'description', row.description, skipClass, rowDescribedby)}
+                  {/*
+                    Category is free text out of the spreadsheet too, and
+                    unlike description it is not length-checked by the
+                    backend at all — so an absurd one can never be
+                    flagged and would blow the row height out with no
+                    banner to explain it. Bounded here with the plain
+                    TransactionRow treatment: this cell has no error
+                    sibling to clip, so `truncate` can sit on the cell.
+                  */}
+                  <TableCell
+                    className={`max-w-[28rem] truncate text-muted-foreground ${skipClass}`}
+                    title={row.category}
+                  >
+                    {row.category}
+                  </TableCell>
                   {renderEditableCell(
                     row,
                     'amount',
                     row.amount.toFixed(2),
                     `text-right font-mono tabular-nums ${skipClass}`,
-                    groupHeaderId,
+                    rowDescribedby,
                   )}
                   <TableCell>
                     {/*
@@ -473,6 +750,32 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                     />
                   </TableCell>
                 </TableRow>
+                {rowMessages.length > 0 && (
+                  /*
+                    Explanation for the fields this table has no cell
+                    for. Rendered as its own row directly beneath the one
+                    it describes, so the sentence the server wrote about
+                    "this row" sits against that row. Not focusable and
+                    not a control — the fix is the Skip checkbox above,
+                    or the source spreadsheet.
+                  */
+                  <TableRow
+                    data-field-error-detail={row.row_id}
+                    className="bg-amber-500/10 border-l-2 border-l-amber-500 hover:bg-amber-500/10"
+                  >
+                    <TableCell colSpan={5} className="pt-0">
+                      <div
+                        id={fieldErrorDetailId(row.row_id)}
+                        className="flex flex-col gap-0.5 text-xs text-muted-foreground"
+                      >
+                        {rowMessages.map((message) => (
+                          <span key={message}>{message}</span>
+                        ))}
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                )}
+                </Fragment>
               );
             })}
           </TableBody>

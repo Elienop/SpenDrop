@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // Clock is a thin time source abstraction so every reports/dashboard handler
@@ -69,7 +70,18 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
 }
 
+// sanitizeLogValueMaxBytes bounds one logged value. BYTES, not characters:
+// nothing here is a limit the product states to a user, so what needs bounding
+// is the width of a log line, and that is a byte quantity.
+const sanitizeLogValueMaxBytes = 100
+
 // sanitizeLogValue replaces control characters and truncates to prevent log injection.
+//
+// The truncation walks the cut index back to a rune boundary, the same guard
+// summarizePatch uses. A bare s[:100] slices whatever byte happens to sit at
+// offset 100, and in Arabic — two bytes per character, so the boundary falls
+// mid-character half the time — that emits a broken UTF-8 sequence into the log
+// as the last thing on the line.
 func sanitizeLogValue(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -77,8 +89,12 @@ func sanitizeLogValue(s string) string {
 		}
 		return r
 	}, s)
-	if len(s) > 100 {
-		s = s[:100]
+	if len(s) > sanitizeLogValueMaxBytes {
+		cut := sanitizeLogValueMaxBytes
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return s
 }

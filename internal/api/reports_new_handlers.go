@@ -311,7 +311,7 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "year and description required")
 		return
 	}
-	if len(req.Description) > MaxDescriptionLength {
+	if charLen(req.Description) > MaxDescriptionLength {
 		writeError(w, http.StatusBadRequest, "description too long")
 		return
 	}

@@ -322,7 +322,15 @@ export function TransactionRow({
       <TableCell className="whitespace-nowrap">
         {format(new Date(transaction.date), 'MMM d, yyyy')}
       </TableCell>
-      <TableCell className="font-medium">{transaction.description}</TableCell>
+      {/* Width-bounded on purpose. Import does not enforce the 500-character
+          description limit the rest of the app does — validateImportField runs
+          only on the per-row edit route — so a spreadsheet cell can put a far
+          longer description into the ledger. Unbounded, one such row stretches
+          the table for every row and both members. title= keeps the full text
+          reachable on hover. */}
+      <TableCell className="max-w-[28rem] truncate font-medium" title={transaction.description}>
+        {transaction.description}
+      </TableCell>
       <TableCell>
         <CategoryBadge
           category={{ id: transaction.category_id, name: transaction.category_name }}

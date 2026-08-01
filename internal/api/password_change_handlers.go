@@ -12,6 +12,44 @@ import (
 	"github.com/elienop/spendrop/internal/database"
 )
 
+// passwordTooShortMessage / passwordTooLongMessage are the single source of the
+// wording for the password bounds, shared by handleRegister, handleCreateUser
+// and validateNewPassword so all three password-entry paths say the same thing.
+//
+// THE TWO MESSAGES NAME DIFFERENT UNITS ON PURPOSE — maximum in bytes, minimum
+// in characters. That reads as an inconsistency and is not one; do not
+// "fix" it to match without reading the next two paragraphs.
+//
+// Both bounds are ENFORCED in bytes, and the maximum has to be: bcrypt hashes
+// at most the first 72 bytes of its input and silently discards the rest, so a
+// character bound would accept a password whose tail never reaches the hasher,
+// and two distinct passwords agreeing on their first 72 bytes would then
+// authenticate the same account. config.Validate refuses a PASSWORD_MAX_LENGTH
+// above 72 for the same reason. Every other user-facing text cap in this app is
+// a character count (see charLen in limits.go), so the maximum says bytes and
+// carries a clarifier: it is the bound that can REFUSE text a character count
+// would have admitted, and a 40-character Arabic password is 80 bytes. Telling
+// that user "72 characters or less" would name a limit the server is not
+// applying.
+//
+// The minimum says characters because naming bytes there buys no accuracy and
+// costs clarity. For every ASCII password the two counts are the same number,
+// so the message is identical either way; for non-ASCII input a byte minimum is
+// LOOSER than a character minimum, so the mismatch can only err toward
+// accepting a password the message implied was too short — never toward
+// refusing one it implied was long enough. It also matches what the frontend
+// says (web/src/pages/Settings.tsx), and "at least 12 bytes" is jargon in a
+// field where nobody is counting bytes.
+func passwordTooShortMessage(minLen int) string {
+	return fmt.Sprintf("password must be at least %d characters", minLen)
+}
+
+func passwordTooLongMessage(maxLen int) string {
+	return fmt.Sprintf(
+		"password must be %d bytes or less (accented and non-Latin characters use more than one byte each)",
+		maxLen)
+}
+
 // validateNewPassword enforces the runtime-configured min/max byte length on a
 // new password. Returns an error message (empty == valid) so callers can map
 // it straight to a 400 body. Mirrors the bounds checks in handleRegister /
@@ -22,10 +60,10 @@ func validateNewPassword(pw string) string {
 	}
 	minLen, maxLen := getPasswordBounds()
 	if len(pw) < minLen {
-		return fmt.Sprintf("password must be at least %d characters", minLen)
+		return passwordTooShortMessage(minLen)
 	}
 	if len(pw) > maxLen {
-		return fmt.Sprintf("password must be %d characters or less", maxLen)
+		return passwordTooLongMessage(maxLen)
 	}
 	return ""
 }

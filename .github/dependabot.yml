@@ -1,11 +1,83 @@
-# Keeps the SHA-pinned GitHub Actions (in .github/workflows/*.yml) fresh:
-# Dependabot opens weekly PRs that bump each pinned commit SHA to the latest
-# release of its tracked major version, with the `# vX` comment updated, so the
-# pins do not silently rot. Without this, SHA pinning trades a supply-chain
-# risk for a staleness risk.
+# Keeps every dependency surface in this repo fresh, so pinning does not
+# quietly become rotting. There are four, and each rots in its own way:
+#
+#   github-actions — every third-party action is pinned by commit SHA, which
+#     defeats tag-moving supply-chain attacks but freezes the code at that
+#     SHA forever. Dependabot bumps each pin to the latest release of its
+#     tracked major version and updates the trailing `# vX` comment, trading
+#     the staleness risk back out without giving up the SHA pin. Keep it
+#     that way: a floating `@v7` in a new workflow is invisible here, since
+#     Dependabot has nothing to rewrite and stays silent.
+#   gomod — the backend, and the entry this repo most obviously needed:
+#     excelize sat at v2.10.1 with a known parser denial of service while
+#     nothing watched go.mod at all. Worth being precise about which tool
+#     would have caught it, because the two disagree. Dependabot WOULD have
+#     flagged it: it matches GHSA-h69g-9hx6-f3v4's `< 2.11.0` range against
+#     go.mod and does no symbol analysis (that advisory's function list is
+#     empty). govulncheck reported NOT AFFECTED, because the Go vuln DB
+#     entry for the same bug (GO-2026-5960) lists ~108 symbols and none of
+#     them is GetRows/Rows/Columns — the streaming API this app actually
+#     calls. Range matching beat reachability analysis here, which is the
+#     argument for keeping this entry rather than leaning on a scanner.
+#   npm — the frontend, which lives in web/, not the repo root. A root-only
+#     npm entry silently matches nothing.
+#   docker — the base images in the Dockerfile. These carry OS-level CVEs
+#     that no language-level scanner sees, and an alpine base can go stale
+#     without a single line of this repo changing.
+#
+# Updates are grouped per ecosystem so a quiet week produces one PR to review
+# instead of five. Major bumps are deliberately left OUT of the groups: they
+# arrive as individual PRs because a major is a change to read, not a change
+# to rubber-stamp. Every PR still has to pass CI and is merged by hand — the
+# squash subject drives the semver bump, so retitle before merging.
 version: 2
 updates:
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
+    groups:
+      actions-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      go-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # The frontend package.json is in web/, so this directory is NOT "/".
+  - package-ecosystem: npm
+    directory: "/web"
+    schedule:
+      interval: weekly
+    groups:
+      npm-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # Dockerfile base images (golang, node, alpine).
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      docker-minor-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch

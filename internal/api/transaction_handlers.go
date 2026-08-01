@@ -1008,7 +1008,7 @@ func validateDescription(s string) (string, error) {
 	if s == "" {
 		return "", fmt.Errorf("description must not be empty")
 	}
-	if len(s) > MaxDescriptionLength {
+	if charLen(s) > MaxDescriptionLength {
 		return "", fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
 	return s, nil
@@ -1028,7 +1028,7 @@ func validateCategoryID(id int64) (int64, error) {
 // validateTagsField length-checks against MaxTagsLength. Tags storage is
 // verbatim — no lowercase, no canonical normalization. See spec §3.3.
 func validateTagsField(s string) (string, error) {
-	if len(s) > MaxTagsLength {
+	if charLen(s) > MaxTagsLength {
 		return "", fmt.Errorf("tags must be %d characters or less", MaxTagsLength)
 	}
 	return s, nil
@@ -1058,13 +1058,13 @@ func validateTransactionRequest(req transactionRequest, storedDate string) error
 	// Inline raw length check — preserve the legacy single-row behavior.
 	// The trimming validateDescription helper exists for the bulk-edit
 	// path, not this one.
-	if len(req.Description) > MaxDescriptionLength {
+	if charLen(req.Description) > MaxDescriptionLength {
 		return fmt.Errorf("description must be %d characters or less", MaxDescriptionLength)
 	}
 	if _, err := validateTagsField(optionalStringValue(req.Tags)); err != nil {
 		return err
 	}
-	if req.Notes != nil && len(*req.Notes) > MaxNotesLength {
+	if req.Notes != nil && charLen(*req.Notes) > MaxNotesLength {
 		return fmt.Errorf("notes must be %d characters or less", MaxNotesLength)
 	}
 	if _, err := validateCategoryID(req.CategoryID); err != nil {
@@ -1283,7 +1283,7 @@ func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "new_description is required")
 		return
 	}
-	if len(req.NewDescription) > MaxDescriptionLength {
+	if charLen(req.NewDescription) > MaxDescriptionLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("new_description must be %d characters or less", MaxDescriptionLength))
 		return
 	}

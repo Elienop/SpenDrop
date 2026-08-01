@@ -195,7 +195,7 @@ func TestHandleImportUpload_ValidFile_ReturnsPreview(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "importer", "member")
+	user := seedTestUser(t, q, "importer", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category", "Tags", "Notes",
@@ -244,7 +244,7 @@ func TestHandleImportUpload_AlternateHeaders_Works(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "importer2", "member")
+	user := seedTestUser(t, q, "importer2", "admin")
 
 	xlsxData := createTestXLSX(t, "Sheet1", []string{
 		"Transaction Date", "Description", "Amount (USD)",
@@ -273,7 +273,7 @@ func TestHandleImportUpload_MissingRequiredColumns_Returns400(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "importer3", "member")
+	user := seedTestUser(t, q, "importer3", "admin")
 
 	// Missing Amount column
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -319,7 +319,7 @@ func TestHandleImportUpload_PreviewCappedAt10(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "importer4", "member")
+	user := seedTestUser(t, q, "importer4", "admin")
 
 	// Create 15 rows
 	rows := make([][]string, 15)
@@ -358,7 +358,7 @@ func TestHandleImportConfirm_ValidImport_InsertsTransactions(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "confirmer", "member")
+	user := seedTestUser(t, q, "confirmer", "admin")
 
 	// Upload first to get import_id
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -434,7 +434,7 @@ func TestHandleImportConfirm_InvalidImportID_Returns404(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "confirmer2", "member")
+	user := seedTestUser(t, q, "confirmer2", "admin")
 
 	// Must be exactly 32 hex chars to pass the length check and reach the
 	// store lookup, which then returns 404 because no such entry exists.
@@ -457,8 +457,8 @@ func TestHandleImportConfirm_WrongUser_Returns403(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user1 := seedTestUser(t, q, "uploader1", "member")
-	user2 := seedTestUser(t, q, "attacker1", "member")
+	user1 := seedTestUser(t, q, "uploader1", "admin")
+	user2 := seedTestUser(t, q, "attacker1", "admin")
 
 	// User1 uploads
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -498,7 +498,7 @@ func TestHandleImportConfirm_MultipleDateFormats_Parsed(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "dateimporter", "member")
+	user := seedTestUser(t, q, "dateimporter", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -547,7 +547,7 @@ func TestHandleImportConfirm_SkipsUnparseableDate(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "skipdate", "member")
+	user := seedTestUser(t, q, "skipdate", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -603,7 +603,7 @@ func TestHandleImportConfirm_NativeDateCells_mmddyyFormat(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "mmddyyimporter", "member")
+	user := seedTestUser(t, q, "mmddyyimporter", "admin")
 
 	xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
 		[]string{"Date", "Description", "Amount"},
@@ -670,7 +670,7 @@ func TestHandleImportConfirm_NativeDateCells_FormatAgnostic(t *testing.T) {
 			clearImportStore()
 			q, db := setupTestDB(t)
 			h := NewHandler(q, db)
-			user := seedTestUser(t, q, "fmtimporter_"+fmtStr, "member")
+			user := seedTestUser(t, q, "fmtimporter_"+fmtStr, "admin")
 
 			xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
 				[]string{"Date", "Description", "Amount"},
@@ -723,7 +723,7 @@ func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "catmatcher", "member")
+	user := seedTestUser(t, q, "catmatcher", "admin")
 
 	// Seed categories that exist in DB
 	cats, _ := q.ListAllCategories(context.Background())
@@ -771,7 +771,7 @@ func TestHandleImportConfirm_NegativeAmounts_ConvertedToAbsolute(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "refundimporter", "member")
+	user := seedTestUser(t, q, "refundimporter", "admin")
 
 	// Negative amounts in spreadsheets (refunds/credits) should be converted
 	// to absolute values during import, not silently skipped. The system uses
@@ -946,7 +946,7 @@ func TestHandleImportUpload_AccountingNegatives_ParsedCorrectly(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "acctformat", "member")
+	user := seedTestUser(t, q, "acctformat", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -996,7 +996,7 @@ func TestHandleImportConfirm_ZeroAmount_Skipped(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "zeroimporter", "member")
+	user := seedTestUser(t, q, "zeroimporter", "admin")
 
 	// Zero-amount rows should be skipped (they have no financial meaning)
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -1048,7 +1048,7 @@ func TestHandleImportCancel_OwnerCanCancel(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "canceler", "member")
+	user := seedTestUser(t, q, "canceler", "admin")
 
 	// Upload to get an import_id
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -1091,8 +1091,8 @@ func TestHandleImportCancel_WrongUser_Returns403(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user1 := seedTestUser(t, q, "owner", "member")
-	user2 := seedTestUser(t, q, "attacker", "member")
+	user1 := seedTestUser(t, q, "owner", "admin")
+	user2 := seedTestUser(t, q, "attacker", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -1215,7 +1215,7 @@ func TestHandleImport_DoubleImport_SkipsDuplicates(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "dbl", "member")
+	user := seedTestUser(t, q, "dbl", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -1324,7 +1324,7 @@ func TestHandleImportUpload_CollisionGroups_ReflectsExistingRows(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "predictor", "member")
+	user := seedTestUser(t, q, "predictor", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -1410,7 +1410,7 @@ func TestHandleImport_ReimportAfterTombstone_SucceedsOnConfirm(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "reimporter", "member")
+	user := seedTestUser(t, q, "reimporter", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -1477,7 +1477,7 @@ func TestHandleImportUpload_IntraFileCollisionGroup(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "grouping", "member")
+	user := seedTestUser(t, q, "grouping", "admin")
 
 	// Migration 001 already seeds "Food", so buildCollisionGroups can
 	// resolve the category name at upload-time grouping without any
@@ -1544,7 +1544,7 @@ func TestHandleImportUpload_HidesTombstonedFromDbMatch(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "tombstoned", "member")
+	user := seedTestUser(t, q, "tombstoned", "admin")
 
 	// Resolve the default "Food" category (seeded by migration 001) so
 	// the insert below can reference its ID.
@@ -1623,7 +1623,7 @@ func TestHandleImportPatchRow_HappyPath_UnbreaksRowFromGroupOfThree(t *testing.T
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "patcher", "member")
+	user := seedTestUser(t, q, "patcher", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	// Three identical rows — same date, description, amount, category.
@@ -1719,7 +1719,7 @@ func TestHandleImportPatchRow_ResponseMatchesImportPreviewShape(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "shapechecker", "member")
+	user := seedTestUser(t, q, "shapechecker", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	// Two rows with two different category names so unique_categories is
@@ -1821,7 +1821,7 @@ func TestHandleImportPatchRow_ReCollision_PreservesSkip(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "stickyskipper", "member")
+	user := seedTestUser(t, q, "stickyskipper", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	xlsxData := createTestXLSX(t, "Transactions",
@@ -1903,7 +1903,7 @@ func TestHandleImportPatchRow_ExpiredSession_Returns404(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "expirysub", "member")
+	user := seedTestUser(t, q, "expirysub", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	xlsxData := createTestXLSX(t, "Transactions",
@@ -1957,7 +1957,7 @@ func TestHandleImportPatchRow_WhitespaceCasePreservesCollision(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "hashparity", "member")
+	user := seedTestUser(t, q, "hashparity", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	xlsxData := createTestXLSX(t, "Transactions",
@@ -2048,7 +2048,7 @@ func TestHandleImportPatchRow_HidesTombstonedFromDbMatch(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "tombstoner", "member")
+	user := seedTestUser(t, q, "tombstoner", "admin")
 	cat := seedTestCategory(t, q, "Coffee", "expense")
 
 	// Seed one live + one tombstoned row that would share a content hash
@@ -2182,7 +2182,7 @@ func TestHandleImportPatchRow_AmountFieldModeParity(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "amountparity", "member")
+	user := seedTestUser(t, q, "amountparity", "admin")
 	seedTestCategory(t, q, "Coffee", "expense")
 
 	// Upload mode: empty amount cell must coerce to 0 and the row must
@@ -2268,7 +2268,7 @@ func TestHandleImportGetSession_HappyPath(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "getter", "member")
+	user := seedTestUser(t, q, "getter", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -2338,7 +2338,7 @@ func TestHandleImportGetSession_ExpiredSession_Returns404(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "expirer", "member")
+	user := seedTestUser(t, q, "expirer", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -2396,7 +2396,7 @@ func TestHandleImportConfirm_UnresolvedCollisions_Returns409(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "collider", "member")
+	user := seedTestUser(t, q, "collider", "admin")
 
 	// Two identical rows — intra_file collision with no resolution.
 	xlsxData := createTestXLSX(t, "Transactions", []string{
@@ -2497,7 +2497,7 @@ func TestHandleImportConfirm_PersistsContentHash(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "hasher", "member")
+	user := seedTestUser(t, q, "hasher", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -2600,7 +2600,7 @@ func TestHandleImportConfirm_SkippedRows_ExcludedFromInserts(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "skipper", "member")
+	user := seedTestUser(t, q, "skipper", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -2724,7 +2724,7 @@ func TestHandleImportUpload_PreviewCanonicalizesSerialDate(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "previewdateimporter", "member")
+	user := seedTestUser(t, q, "previewdateimporter", "admin")
 
 	xlsxData := createTestXLSXWithNativeDateCells(t, "Transactions",
 		[]string{"Date", "Description", "Amount"},
@@ -2780,8 +2780,8 @@ func TestHandleImportPatchRow_WrongUser_Returns403(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user1 := seedTestUser(t, q, "patchowner", "member")
-	user2 := seedTestUser(t, q, "patchattacker", "member")
+	user1 := seedTestUser(t, q, "patchowner", "admin")
+	user2 := seedTestUser(t, q, "patchattacker", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -2825,8 +2825,8 @@ func TestHandleImportGetSession_WrongUser_Returns403(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user1 := seedTestUser(t, q, "getowner", "member")
-	user2 := seedTestUser(t, q, "getattacker", "member")
+	user1 := seedTestUser(t, q, "getowner", "admin")
+	user2 := seedTestUser(t, q, "getattacker", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount",
@@ -2864,7 +2864,7 @@ func TestHandleImportConfirm_WritesPerRowInsertAudit(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "auditconfirmer", "member")
+	user := seedTestUser(t, q, "auditconfirmer", "admin")
 
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
@@ -2974,7 +2974,7 @@ func TestHandleImportConfirm_WritesPerRowInsertAudit(t *testing.T) {
 // survives.
 func TestProcessImportRows_AuditRollsBackWithData(t *testing.T) {
 	q, db := setupTestDB(t)
-	user := seedTestUser(t, q, "auditrollback", "member")
+	user := seedTestUser(t, q, "auditrollback", "admin")
 	cat := seedTestCategory(t, q, "RollbackCat", "expense")
 	store := database.NewTransactionStore(db, q)
 

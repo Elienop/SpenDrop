@@ -10,6 +10,14 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=UTC
+      # Soft memory ceiling for the Go runtime, deliberately BELOW mem_limit
+      # (see the bottom of this service). It is what turns a memory spike into
+      # slowness instead of a kill: past this figure the garbage collector runs
+      # harder rather than letting the heap grow, so mem_limit is only ever
+      # reached by something the collector genuinely cannot reclaim. Raise the
+      # two together or not at all — a soft limit at or above the hard one does
+      # nothing.
+      - GOMEMLIMIT=768MiB
       # Cookie security mode. Default "auto" detects from the request scheme.
       # Set to "true" when behind an HTTPS reverse proxy (with TRUST_PROXY=true).
       # Set to "false" for plain-HTTP LAN deployments.
@@ -36,6 +44,34 @@ services:
       # - VAPID_PRIVATE_KEY=<base64url P-256 private key>
       # - VAPID_SUBJECT=mailto:you@example.com
     restart: unless-stopped
+
+    # Hard memory ceiling. Its job is blast radius, not thrift: without it a
+    # runaway allocation grows until the HOST is out of memory, and the kernel
+    # then picks a victim by badness score — which is not guaranteed to be
+    # SpenDrop. On a NAS running other services, that means this app can get
+    # something else killed. With it, the kernel kills only this container and
+    # `restart: unless-stopped` brings it back in seconds.
+    #
+    # Nothing durable is at risk when that happens: an import writes nothing
+    # until you confirm, and confirming is a single transaction, so SQLite is
+    # left at the last committed state. The cost is an in-flight import preview.
+    #
+    # SIZED FROM MEASUREMENT, AND THE TRAP IS SETTING IT TOO LOW — a limit under
+    # ~250 MiB starts killing ordinary Excel exports. Peak live heap, measured
+    # 2026-08-01:
+    #
+    #   export, 50,000 rows (MaxExportRows)   208 MiB   <-- the real worst case
+    #   import, 10,000 rows (MaxImportRows)    41 MiB
+    #   import, a realistic Google Sheets file  6-9 MiB
+    #
+    # Export is the one that matters: it builds the whole workbook in memory and,
+    # unlike import, is reachable by any household member with an ordinary GET.
+    # Two members exporting a full ledger at once is ~416 MiB, which is unlikely
+    # but legitimate and must not be killed. 1 GiB clears that with room for the
+    # base process and SQLite's cache, and is still small for a TrueNAS box.
+    #
+    # Before lowering this, check the export path first, not the import path.
+    mem_limit: 1g
 
 volumes:
   spendrop-data:
