@@ -187,11 +187,11 @@ const (
 //     name invites the false claim that a 32,767-character cell always fits.
 //     The honest justification is in bytes — the longest field the product
 //     accepts is MaxNotesLength (2,000 characters), which is at most 8,000
-//     bytes even at UTF-8's 4-byte worst case, so this leaves 4x headroom for
-//     any script.
+//     bytes even at UTF-8's 4-byte worst case, so this leaves ~33x headroom
+//     for any script.
 //
 //   - MaxImportSheetBytes bounds the total, because a per-cell cap alone does
-//     not: four million cells just under the per-cell limit is still 131 GB.
+//     not: four million cells just under the per-cell limit is still 1,048 GB.
 //     64 MiB is ~2x the largest legitimate workbook measured below, whose
 //     31.31 MiB unzipped bounds its own text a fortiori.
 //
@@ -209,18 +209,27 @@ const (
 // enforces it BEFORE excelize materialises anything, because no cap checked
 // after Columns() can be:
 //
-//	peak per row <= MaxImportRowBytes                    = 32 MiB
-//	plus blank-run padding, at most
-//	  MaxImportCellsPerRow string headers                =  1.6 MiB
-//	peak accumulated <= MaxImportSheetBytes              = 64 MiB
-//	prescan's own worst case, one text node read whole   <= 128 MiB
+//	prescan, largest part admitted (2 x MaxImportPartBytes)   114 MiB measured
+//	parse, worst row every cap admits                          35 MiB measured
+//	parse, worst sheet every cap admits                       118 MiB measured
 //
-// so a single request stays inside MaxImportUnzippedBytes overall. The prescan
-// term is the largest and is worth being honest about: encoding/xml returns a
-// text node as one CharData, so a workbook declaring a single enormous string
-// is read into memory once to be measured and rejected. It is bounded by the
-// archive cap, is not multiplied by anything, and is the price of knowing a
-// string's length before excelize copies it per referencing cell.
+// EVERY FIGURE HERE IS MEASURED END TO END, and the multipliers are why. An
+// earlier version of this table derived them instead, stating the prescan term
+// as "one text node read whole <= 128 MiB" and concluding a request stayed
+// inside MaxImportUnzippedBytes. Both were wrong: encoding/xml grows its buffer
+// by DOUBLING and then hands back a CharData copy, so reading a text node of
+// size P costs about 2P, and a 100 MiB <si> in a 107,818-byte upload peaked at
+// 227 MiB against a stated 128. Likewise the accumulated term, derived as
+// MaxImportSheetBytes, measures 118 MiB rather than 64. This is the fourth time
+// in this work that a derived number in a comment turned out to be the thing
+// justifying a placement, so these are measurements, not arithmetic.
+//
+// MaxImportPartBytes is what makes the prescan term statable rather than merely
+// described: without it the largest text node is bounded only by the whole
+// archive, so the doubling cost would be ~256 MiB. Bounding the largest PART at
+// 64 MiB puts the measured peak at 114 MiB, inside MaxImportUnzippedBytes.
+// Bounding only the archive TOTAL cannot achieve this, because one part may be
+// the entire total.
 //
 // THE BOUND IS THE ROW'S SUM, NOT A PRODUCT OF TWO CAPS, and that choice is
 // what keeps real files importable. Capping cells-per-row and bytes-per-cell
@@ -256,6 +265,7 @@ const (
 	MaxImportCellsPerRow = 100_000
 
 	MaxImportUnzippedBytes     = 128 << 20
+	MaxImportPartBytes         = 64 << 20
 	MaxImportUnzippedPartBytes = 16 << 20
 
 	MaxImportSheetBytes = 64 << 20

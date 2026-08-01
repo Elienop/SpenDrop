@@ -397,6 +397,14 @@ func TestReadImportSheetRows_MatchesGetRows(t *testing.T) {
 // decompressed before anything decides which parts matter.
 func buildXLSXWithPaddingEntry(t *testing.T, inflatedBytes int) []byte {
 	t.Helper()
+	return buildXLSXWithPaddingEntries(t, inflatedBytes, 1)
+}
+
+// buildXLSXWithPaddingEntries spreads the padding across count entries. Which
+// bound a payload trips depends on that split: one huge part trips
+// MaxImportPartBytes, several smaller ones trip the archive total.
+func buildXLSXWithPaddingEntries(t *testing.T, bytesPerEntry, count int) []byte {
+	t.Helper()
 
 	f := excelize.NewFile()
 	sheet := f.GetSheetName(0)
@@ -436,14 +444,16 @@ func buildXLSXWithPaddingEntry(t *testing.T, inflatedBytes int) []byte {
 		}
 		rc.Close()
 	}
-	w, err := zw.Create("xl/theme/theme1.xml")
-	if err != nil {
-		t.Fatalf("create padding entry: %v", err)
-	}
 	chunk := bytes.Repeat([]byte("A"), 1<<20)
-	for written := 0; written < inflatedBytes; written += len(chunk) {
-		if _, err := w.Write(chunk); err != nil {
-			t.Fatalf("write padding: %v", err)
+	for i := 0; i < count; i++ {
+		w, err := zw.Create(fmt.Sprintf("xl/theme/theme%d.xml", i))
+		if err != nil {
+			t.Fatalf("create padding entry: %v", err)
+		}
+		for written := 0; written < bytesPerEntry; written += len(chunk) {
+			if _, err := w.Write(chunk); err != nil {
+				t.Fatalf("write padding: %v", err)
+			}
 		}
 	}
 	if err := zw.Close(); err != nil {
@@ -472,7 +482,11 @@ func TestHandleImportUpload_ZipBomb_RejectedBeforeDecompression(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "dos-bomb", "admin")
 
-	payload := buildXLSXWithPaddingEntry(t, MaxImportUnzippedBytes+(8<<20))
+	// Several parts, each comfortably under MaxImportPartBytes, together past
+	// the archive total — so the TOTAL is what refuses this and the per-part
+	// bound cannot mask it.
+	const perEntry = MaxImportPartBytes / 2
+	payload := buildXLSXWithPaddingEntries(t, perEntry, (MaxImportUnzippedBytes/perEntry)+2)
 	if len(payload) > 1<<20 {
 		t.Fatalf("payload is %d bytes; a zip bomb that is not tiny is not a zip bomb", len(payload))
 	}
@@ -593,6 +607,20 @@ func TestImportShapeCaps_ClearRealWorldRequirements(t *testing.T) {
 	if peak > peakBudgetMiB {
 		t.Errorf("worst-case single row is %d MiB (MaxImportRowBytes=%d MiB + %d padded headers), want <= %d MiB",
 			peak, MaxImportRowBytes>>20, MaxImportCellsPerRow, peakBudgetMiB)
+	}
+
+	// The prescan reads one XML text node whole, and encoding/xml doubles its
+	// buffer before copying, so the largest admitted PART costs about twice its
+	// size. Keeping 2x the part bound inside the archive bound is what makes
+	// the budget table's prescan term true; raising MaxImportPartBytes past
+	// half the archive cap silently falsifies it.
+	if 2*MaxImportPartBytes > MaxImportUnzippedBytes {
+		t.Errorf("MaxImportPartBytes=%d MiB doubles to %d MiB, past MaxImportUnzippedBytes=%d MiB",
+			MaxImportPartBytes>>20, (2*MaxImportPartBytes)>>20, MaxImportUnzippedBytes>>20)
+	}
+	if MaxImportPartBytes < unzippedBytesRealFilesNeed {
+		t.Errorf("MaxImportPartBytes=%d MiB is below the largest legitimate workbook measured (%d MiB), so one part of a real file could exceed it",
+			MaxImportPartBytes>>20, unzippedBytesRealFilesNeed>>20)
 	}
 }
 
@@ -810,8 +838,8 @@ func TestCheckImportArchiveSize_RejectsOverflowingDeclaredSize(t *testing.T) {
 			t.Fatalf("FileInfo().Size()=%d, want negative — the payload no longer overflows", got)
 		}
 
-		if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportArchiveTooLarge) {
-			t.Errorf("err=%v, want errImportArchiveTooLarge from a %d-byte archive", err, buf.Len())
+		if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportPartTooLarge) {
+			t.Errorf("err=%v, want the size refusal from a %d-byte archive", err, buf.Len())
 		}
 	})
 
@@ -849,8 +877,8 @@ func TestCheckImportArchiveSize_RejectsOverflowingDeclaredSize(t *testing.T) {
 			t.Fatalf("close archive: %v", err)
 		}
 
-		if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportArchiveTooLarge) {
-			t.Errorf("err=%v, want errImportArchiveTooLarge — the decoy suppressed %d MiB of declared bulk",
+		if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportPartTooLarge) {
+			t.Errorf("err=%v, want the size refusal — the decoy suppressed %d MiB of declared bulk",
 				err, (bulkEntries*len(payload))>>20)
 		}
 	})
@@ -1195,16 +1223,17 @@ func TestPrescanImportWorkbook_BoundsPeakBeforeMaterialising(t *testing.T) {
 		cellsInRow int
 		omitR      bool
 		wantErr    error
+		assertPeak bool
 	}{
 		// Text-heavy: few enough cells to clear the width bound, so only the
 		// row's byte sum can refuse it.
 		{"a row whose cells sum past the row budget", MaxImportCellBytes,
-			(MaxImportRowBytes / MaxImportCellBytes) + 8, false, errImportRowTooLarge},
+			(MaxImportRowBytes / MaxImportCellBytes) + 8, false, errImportRowTooLarge, true},
 		// Cell-heavy: the cells carry no text at all, so the byte sum stays at
 		// zero and only the width bound can refuse it. This is the shape that
 		// costs a string header per padded column.
 		{"a row declaring more cells than any sheet can hold", 0,
-			MaxImportCellsPerRow + 8, true, errImportRowTooWide},
+			MaxImportCellsPerRow + 8, true, errImportRowTooWide, false},
 	}
 
 	for _, tc := range cases {
@@ -1224,10 +1253,20 @@ func TestPrescanImportWorkbook_BoundsPeakBeforeMaterialising(t *testing.T) {
 				t.Fatalf("err=%v, want %v", err, tc.wantErr)
 			}
 
-			// The prescan streams and holds one int per shared string. The
-			// rows it refuses here would have materialised at 512 MiB and
-			// 1,258 MiB respectively.
-			const budgetMiB = 32
+			// A peak assertion is only worth making where it can discriminate.
+			// Measured, the text-heavy payload costs 4 MiB scanned and 35 MiB
+			// materialised, so a budget between them is a real check; the
+			// cell-count payload costs 7 MiB and 9 MiB, because a row of EMPTY
+			// cells is cheap however many there are — its bound is about slice
+			// slots, not bytes, and a peak assertion there would pass under
+			// every mutation and read as protection it is not providing.
+			if !tc.assertPeak {
+				return
+			}
+			// Half the row budget: comfortably above a scan, well below the
+			// materialisation the bound prevents. Expressed against the cap so
+			// that loosening the cap cannot silently make this vacuous.
+			budgetMiB := uint64(MaxImportRowBytes >> 21)
 			if peakMiB > budgetMiB {
 				t.Errorf("prescan peaked at %d MiB rejecting a %d-byte upload, want <= %d MiB — it is materialising rather than scanning",
 					peakMiB, len(payload), budgetMiB)
@@ -1245,7 +1284,12 @@ func TestHandleImportUpload_WideRow_RejectedWithBoundedPeak(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "dos-widerow", "admin")
 
-	payload := buildXLSXWithWideRow(t, 0, MaxImportCellsPerRow+8, true)
+	// The TEXT-heavy shape, not the cell-heavy one. A row of empty cells is
+	// cheap whether or not the prescan runs (measured 9 MiB either way), so a
+	// peak assertion on it can never fail; this one costs 35 MiB materialised
+	// against 4 MiB scanned.
+	payload := buildXLSXWithWideRow(t, MaxImportCellBytes,
+		(MaxImportRowBytes/MaxImportCellBytes)+8, false)
 
 	req := withUser(postMultipartFile(t, "/api/import/upload", payload), user)
 	var rec *httptest.ResponseRecorder
@@ -1254,12 +1298,13 @@ func TestHandleImportUpload_WideRow_RejectedWithBoundedPeak(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d, want 400; body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), fmt.Sprintf("more than %d cells", MaxImportCellsPerRow)) {
-		t.Errorf("body=%s, want the row-width reason naming %d cells", rec.Body.String(), MaxImportCellsPerRow)
+	if !strings.Contains(rec.Body.String(), fmt.Sprintf("more than %d MiB of text", MaxImportRowBytes>>20)) {
+		t.Errorf("body=%s, want the row-bytes reason naming %d MiB", rec.Body.String(), MaxImportRowBytes>>20)
 	}
-	// Peak live heap: the defect this pins held the whole row at once, so it
-	// shows up here even though it is transient across the request.
-	const budgetMiB = 64
+	// Peak live heap, budgeted at half the row cap: the defect this pins held
+	// the whole row at once. Expressed against the cap rather than as a
+	// literal, so loosening the cap cannot make it vacuous.
+	budgetMiB := uint64(MaxImportRowBytes >> 21)
 	if peakMiB > budgetMiB {
 		t.Errorf("request peaked at %d MiB from a %d-byte upload, want <= %d MiB",
 			peakMiB, len(payload), budgetMiB)
@@ -1348,8 +1393,8 @@ func TestCheckImportArchiveSize_RejectsWraparoundPair(t *testing.T) {
 		t.Fatalf("declared sizes sum to %d, want an exact wrap to 0", wrapped)
 	}
 
-	if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportArchiveTooLarge) {
-		t.Errorf("err=%v, want errImportArchiveTooLarge from a %d-byte archive whose declared sizes wrap to zero",
+	if err := checkImportArchiveSize(buf.Bytes()); !errors.Is(err, errImportPartTooLarge) {
+		t.Errorf("err=%v, want the size refusal from a %d-byte archive whose declared sizes wrap to zero",
 			err, buf.Len())
 	}
 }
@@ -1739,4 +1784,195 @@ func TestPrescanImportWorkbook_AcceptsRowWhoseCellsSumPastTheCellLimit(t *testin
 		t.Errorf("prescan refused a row of %d ordinary cells totalling %d bytes, none of them near the %d-byte cell limit: %v",
 			columns, columns*bytesPerCell, MaxImportCellBytes, err)
 	}
+}
+
+// --- round 6: testing the layers that only matter when another one fails ---
+
+// TestOpenImportWorkbook_BoundsDecompressionWithoutTheArchiveCheck is the test
+// the second layer never had.
+//
+// checkImportArchiveSize rejects an oversized archive before openImportWorkbook
+// runs, and it is well pinned — which is exactly why the Unzip options behind
+// it were not. Both were deleted from the call site and all nine packages
+// stayed green, while a 1,049,793-byte upload driven through the real handler
+// with the first layer also removed peaked at 5,126 MiB and returned 200.
+//
+// A backstop cannot be tested through the path its front layer guards. This
+// calls openImportWorkbook directly, which is the whole reason that function
+// was extracted from an inline options literal.
+func TestOpenImportWorkbook_BoundsDecompressionWithoutTheArchiveCheck(t *testing.T) {
+	payload := buildXLSXWithPaddingEntry(t, MaxImportUnzippedBytes+(8<<20))
+
+	// The premise: this payload never reaches openImportWorkbook in production
+	// because the archive check refuses it first. Assert that, so the test
+	// cannot quietly become a duplicate of the archive-check test.
+	if err := checkImportArchiveSize(payload); err == nil {
+		t.Fatal("the archive check no longer refuses this payload; the second layer is not what is under test")
+	}
+
+	var (
+		f   *excelize.File
+		err error
+	)
+	peakMiB := peakHeapDuringMiB(func() { f, err = openImportWorkbook(payload) })
+	if err == nil {
+		f.Close()
+		t.Fatal("openImportWorkbook accepted a zip bomb; its Unzip limits are not being applied")
+	}
+
+	// Peak is asserted against the archive cap rather than a literal, so
+	// loosening that cap cannot silently make this vacuous.
+	budgetMiB := uint64(MaxImportUnzippedBytes >> 20)
+	if peakMiB > budgetMiB {
+		t.Errorf("peaked at %d MiB opening a %d-byte bomb, want <= %d MiB",
+			peakMiB, len(payload), budgetMiB)
+	}
+}
+
+// TestCheckImportArchiveSize_RejectsOversizedSinglePart pins the per-part
+// bound, which is what makes the prescan's own peak statable.
+//
+// The prescan reads one XML text node whole to measure it, and encoding/xml
+// grows its buffer by doubling before handing back a copy, so a part of size P
+// costs about 2P. Measured before this bound existed: a 100 MiB <si> in a
+// 107,818-byte upload peaked at 227 MiB, against a comment claiming 128 MiB.
+// Bounding the archive TOTAL cannot fix that, because one part may be the
+// whole total — which is why an earlier per-entry bound using the total's own
+// limit was correctly deleted as dead, and this stricter one is not.
+func TestCheckImportArchiveSize_RejectsOversizedSinglePart(t *testing.T) {
+	if MaxImportPartBytes >= MaxImportUnzippedBytes {
+		t.Fatalf("MaxImportPartBytes (%d) must be stricter than the archive total (%d) or it is dead code",
+			MaxImportPartBytes, MaxImportUnzippedBytes)
+	}
+	// One part over the part bound but comfortably under the archive total, so
+	// only the per-part check can refuse it.
+	payload := buildXLSXWithPaddingEntry(t, MaxImportPartBytes+(8<<20))
+	if err := checkImportArchiveSize(payload); !errors.Is(err, errImportPartTooLarge) {
+		t.Errorf("err=%v, want errImportPartTooLarge", err)
+	}
+}
+
+// TestPrescanSharedStrings_RejectsTooManyItems pins the count guard on the
+// shared-string table, which bounds this scan's OWN allocation: the returned
+// slice holds one int per item whether or not any cell references it.
+func TestPrescanSharedStrings_RejectsTooManyItems(t *testing.T) {
+	// The shortest legal item, because the table has to hold more entries than
+	// the cell budget while staying under MaxImportPartBytes — at 17 bytes an
+	// item it would trip the part bound first and test that instead.
+	const item = `<si><t/></si>`
+	var sst strings.Builder
+	sst.Grow((MaxImportSheetCells + 32) * len(item))
+	sst.WriteString(`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+		`<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">`)
+	for i := 0; i <= MaxImportSheetCells+16; i++ {
+		sst.WriteString(item)
+	}
+	sst.WriteString(`</sst>`)
+	if sst.Len() >= MaxImportPartBytes {
+		t.Fatalf("shared-string table is %d bytes, which trips MaxImportPartBytes (%d) before the count guard",
+			sst.Len(), MaxImportPartBytes)
+	}
+
+	payload := buildXLSXWithParts(t, map[string]string{
+		"xl/sharedStrings.xml": sst.String(),
+		"xl/worksheets/sheet1.xml": `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>` +
+			`<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">` +
+			`<sheetData>` + headerRow(1) + `</sheetData></worksheet>`,
+	})
+
+	// Neither size bound may be what refuses it, or the count guard is
+	// untested.
+	if err := checkImportArchiveSize(payload); err != nil {
+		t.Fatalf("a size bound refused the payload (%v); the count guard is untested", err)
+	}
+	if err := prescanImportWorkbook(payload); !errors.Is(err, errImportTooManySharedStrings) {
+		t.Errorf("err=%v, want errImportTooManySharedStrings", err)
+	}
+}
+
+// TestHandleImportUpload_OLEWorkbook_RejectedEndToEnd covers the non-zip
+// refusal through the real handler rather than only at the function that
+// implements it.
+//
+// The unit test alone is thin cover for this one: the consequence of the
+// refusal being bypassed is not a large allocation but a runtime
+// out-of-memory abort, which chi's Recoverer cannot catch, so the process dies
+// rather than returning 500. A handler-level test is cheap insurance that the
+// refusal is actually wired into the request path.
+func TestHandleImportUpload_OLEWorkbook_RejectedEndToEnd(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "ole", "admin")
+
+	// OLE/CFB magic, which excelize sniffs and routes to its decryption path
+	// ahead of any zip reader.
+	payload := append([]byte{0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1},
+		bytes.Repeat([]byte{0}, 8696)...)
+
+	req := withUser(postMultipartFile(t, "/api/import/upload", payload), user)
+	rec := uploadWithin(t, h, req, 30*time.Second)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not a readable .xlsx workbook") {
+		t.Errorf("body=%s, want the non-zip refusal", rec.Body.String())
+	}
+}
+
+// buildXLSXWithParts returns a valid workbook with the named parts replaced by
+// the supplied bodies. Unlike buildXLSXWithRawSheet it can rewrite several
+// parts at once, which the shared-string tests need.
+func buildXLSXWithParts(t *testing.T, parts map[string]string) []byte {
+	t.Helper()
+
+	f := excelize.NewFile()
+	if err := f.SetCellValue(f.GetSheetName(0), "A1", "seed"); err != nil {
+		t.Fatalf("seed cell: %v", err)
+	}
+	var base bytes.Buffer
+	if err := f.Write(&base); err != nil {
+		t.Fatalf("write base workbook: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close base workbook: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(base.Bytes()), int64(base.Len()))
+	if err != nil {
+		t.Fatalf("open base workbook: %v", err)
+	}
+
+	var out bytes.Buffer
+	zw := zip.NewWriter(&out)
+	for _, zf := range zr.File {
+		if _, replaced := parts[zf.Name]; replaced {
+			continue
+		}
+		w, err := zw.Create(zf.Name)
+		if err != nil {
+			t.Fatalf("create zip entry %q: %v", zf.Name, err)
+		}
+		rc, err := zf.Open()
+		if err != nil {
+			t.Fatalf("open zip entry %q: %v", zf.Name, err)
+		}
+		if _, err := io.Copy(w, rc); err != nil {
+			t.Fatalf("copy zip entry %q: %v", zf.Name, err)
+		}
+		rc.Close()
+	}
+	for name, body := range parts {
+		w, err := zw.Create(name)
+		if err != nil {
+			t.Fatalf("create %q: %v", name, err)
+		}
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Fatalf("write %q: %v", name, err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatalf("finish zip: %v", err)
+	}
+	return out.Bytes()
 }

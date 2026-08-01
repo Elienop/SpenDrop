@@ -483,6 +483,12 @@ var (
 	errImportRowTooLarge = fmt.Errorf(
 		"a single row holds more than %d MiB of text; split the sheet into smaller files",
 		MaxImportRowBytes>>20)
+	errImportTooManySharedStrings = fmt.Errorf(
+		"spreadsheet declares more than %d distinct text values, which is more than its own cells could reference; re-save it from a spreadsheet application",
+		MaxImportSheetCells)
+	errImportPartTooLarge = fmt.Errorf(
+		"one part of the spreadsheet expands to more than %d MiB on its own; split the sheet into smaller files",
+		MaxImportPartBytes>>20)
 	errImportNotAZipArchive = errors.New(
 		"file is not a readable .xlsx workbook; export it as .xlsx (not .xls, and not password-protected) and try again")
 	errImportSheetTooManyBytes = fmt.Errorf(
@@ -549,28 +555,75 @@ func checkImportArchiveSize(data []byte) error {
 		// parser off every byte sequence we have not bounded.
 		return errImportNotAZipArchive
 	}
-	// Two properties make this sum safe, and BOTH are load-bearing.
+	// The PER-ENTRY bound is what makes a declared size safe to act on, and it
+	// has to come before the addition.
 	//
-	// Unsigned: UncompressedSize64 is a uint64 that archive/zip copies out of
-	// the zip64 extra field unchecked, and FileInfo().Size() converts to int64
-	// without a range check, so an entry declaring 1<<63 reports a negative
-	// size and a signed total goes so far negative nothing recovers it.
+	// archive/zip copies UncompressedSize64 out of the zip64 extra field
+	// unchecked, and FileInfo().Size() converts it to int64 without a range
+	// check, so an entry declaring 1<<63 reports a NEGATIVE size. Left to
+	// accumulate, one such entry drags a signed running total so far down that
+	// nothing later recovers it, and two of them sum to exactly 2^64 and wrap
+	// an unsigned one to zero. Bounding each entry first removes both: no
+	// value large enough to misbehave ever reaches the sum.
 	//
-	// Checked INSIDE the loop rather than after it: two entries of 1<<63 sum
-	// to exactly 2^64 and wrap to zero. Testing per iteration means the total
-	// is at or below the limit entering each one, so the first oversized entry
-	// is caught while the sum is still meaningful and no addition can wrap.
+	// Note what is NOT load-bearing here, because an earlier version of this
+	// comment claimed it was. total's unsignedness is not: uint64(int64(x))
+	// round-trips the same bits, so the per-entry check refuses a 1<<63
+	// declaration by VALUE whichever type it is read through, and with every
+	// addend bounded the sum cannot wrap either way. uint64 is simply the type
+	// the field already has.
 	//
-	// A per-entry bound before the addition would be dead code — it can never
-	// fire that this does not — so there is deliberately none.
+	// The per-entry bound is NOT redundant with the total, even though an
+	// earlier version of it was and was deleted as dead code. That one used
+	// the same limit as the total, so the total always caught it first. This
+	// one is stricter, and it exists for a reason the total cannot serve: the
+	// prescan reads one XML text node whole to measure it, and encoding/xml
+	// grows its buffer by doubling before handing back a copy, so a part of
+	// size P costs about 2P. Bounding the largest PART is what makes the
+	// prescan's own peak statable; bounding only their sum does not, because
+	// one part may be the whole sum.
 	var total uint64
 	for _, entry := range zr.File {
+		if entry.UncompressedSize64 > MaxImportPartBytes {
+			return errImportPartTooLarge
+		}
 		total += entry.UncompressedSize64
 		if total > MaxImportUnzippedBytes {
 			return errImportArchiveTooLarge
 		}
 	}
 	return nil
+}
+
+// openImportWorkbook opens an uploaded workbook with the options this
+// importer requires.
+//
+// It is a named function rather than an inline literal at the call site
+// specifically so the options can be tested. They are a SECOND layer —
+// checkImportArchiveSize rejects an oversized archive before this runs — and a
+// backstop is invisible to every test for as long as the layer in front of it
+// works. Deleting both options once left all nine packages green while a
+// 1,049,793-byte upload peaked at 5,126 MiB and returned 200, so the claim that
+// this call site stays bounded on its own needs a test that exercises it on its
+// own. TestOpenImportWorkbook_BoundsDecompressionWithoutTheArchiveCheck is it.
+//
+// RawCellValue:true tells excelize to skip number-format rendering when
+// returning cell values. Without it, a date cell with number format "mm-dd-yy"
+// renders as "07-21-25", which matches none of the fallback text formats in
+// parseImportDate and silently drops the row. With RawCellValue:true, date
+// cells return their underlying Excel serial number (e.g. "45859"), which
+// parseImportDate converts via excelize.ExcelDateToTime — format-agnostic.
+//
+// UnzipSizeLimit defaults to 16 GB, which is what made a zip bomb reachable
+// here in the first place. UnzipXMLSizeLimit is the temp-file staging
+// threshold, pinned to our own constant so a change to excelize's default
+// cannot silently alter how much of a worksheet is held in memory.
+func openImportWorkbook(data []byte) (*excelize.File, error) {
+	return excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		RawCellValue:      true,
+		UnzipSizeLimit:    MaxImportUnzippedBytes,
+		UnzipXMLSizeLimit: MaxImportUnzippedPartBytes,
+	})
 }
 
 // prescanImportWorkbook bounds how large a single Rows.Columns() call can get,
@@ -629,13 +682,17 @@ func prescanImportWorkbook(data []byte) error {
 // shared-string table, indexed as the sheets reference them. An <si> may be
 // split across several <r> runs, so the lengths accumulate until the item ends.
 //
-// It deliberately does NOT reject an over-long item here, even though that
+// It deliberately does NOT reject an over-LONG item here, even though that
 // looks like the natural place for it. An entry costs memory only when a cell
 // references it, and prescanSheet adds its length at every reference — so an
 // item long enough to matter is refused there, and one nothing references
-// costs nothing beyond the archive-bounded load that already happened. A
-// rejection here would be unreachable in any way that matters: removing it
-// changed no test, which is how it was found.
+// costs nothing beyond the archive-bounded load that already happened.
+//
+// It DOES reject an over-MANY table, because that cost is this function's own:
+// the returned slice holds one int per item whether or not any cell refers to
+// it. The two are not inconsistent, though they look it — one bounds a cost
+// paid elsewhere and so not paid here, the other bounds a cost paid right
+// here. Both are tested.
 func prescanSharedStrings(zr *zip.Reader) ([]int, error) {
 	var entry *zip.File
 	for _, zf := range zr.File {
@@ -682,9 +739,7 @@ func prescanSharedStrings(zr *zip.Reader) ([]int, error) {
 				inItem = false
 				lengths = append(lengths, current)
 				if len(lengths) > MaxImportSheetCells {
-					// More distinct strings than the cell budget could ever
-					// reference, so the workbook is unimportable regardless.
-					return nil, errImportSheetTooManyCells
+					return nil, errImportTooManySharedStrings
 				}
 			}
 		}
@@ -922,27 +977,8 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// RawCellValue:true tells excelize to skip number-format rendering when
-	// returning cell values. Without it, a date cell with number format
-	// "mm-dd-yy" renders as "07-21-25", which matches none of the fallback
-	// text formats in parseImportDate and silently drops the row. With
-	// RawCellValue:true, date cells return their underlying Excel serial
-	// number (e.g. "45859"), which parseImportDate converts via
-	// excelize.ExcelDateToTime — format-agnostic.
-	//
-	// The two Unzip limits are passed explicitly rather than left at their
-	// defaults. UnzipSizeLimit defaults to 16 GB, which is what made the zip
-	// bomb above reachable in the first place; it is set here as a second
-	// layer behind checkImportArchiveSize so that this call site stays bounded
-	// even if that check is ever moved or refactored away. UnzipXMLSizeLimit
-	// is the temp-file staging threshold, pinned to our own constant so a
-	// change to excelize's default cannot silently alter how much of a
-	// worksheet is held in memory.
-	f, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{
-		RawCellValue:      true,
-		UnzipSizeLimit:    MaxImportUnzippedBytes,
-		UnzipXMLSizeLimit: MaxImportUnzippedPartBytes,
-	})
+	// Options, and why each one is required, live on openImportWorkbook.
+	f, err := openImportWorkbook(data)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse xlsx file")
 		return
