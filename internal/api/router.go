@@ -242,6 +242,13 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Patch("/import/{importID}/rows/{rowID}", h.handleImportPatchRow)
 		r.Get("/import/{importID}", h.handleImportGetSession)
 
+		// Running release, for the UI's version display. Inside the authed
+		// group for consistency with every other /api route, not to keep
+		// the version secret — the same string is stamped into the frontend
+		// bundle, which is served unauthenticated so the login page can
+		// render. See handleVersion for the measurement.
+		r.Get("/version", h.handleVersion)
+
 		// Settings
 		r.Get("/settings/default-budget", h.handleDefaultBudget)
 		r.Put("/settings/default-budget", h.handleDefaultBudget)

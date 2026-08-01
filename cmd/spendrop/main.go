@@ -23,6 +23,16 @@ import (
 )
 
 func main() {
+	// `spendrop -version` prints the linked release and exits. Handled ahead
+	// of config.Load() on purpose: asking a binary what version it is must
+	// work on a deployment whose configuration is broken — that is often
+	// exactly when someone needs to know which release is running. It opens
+	// nothing and registers no defer, so it also satisfies the ordering
+	// invariant documented on dispatchSubcommand below.
+	if handleVersionFlag(os.Args[1:], os.Stdout) {
+		os.Exit(0)
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("load config: %v", err)

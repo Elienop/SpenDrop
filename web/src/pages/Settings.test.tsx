@@ -2,6 +2,8 @@ import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 
 vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
@@ -41,11 +43,25 @@ const mockedToast = vi.mocked(toast);
 // routed import errors through `importSession.error` → Alert instead, so
 // the test-side binding is dead but the module mock is still live.
 
+/**
+ * Fresh QueryClient per render, matching what `main.tsx` provides in
+ * production. Settings renders `<AppVersion />`, whose `useServerVersion`
+ * hook is a `useQuery` — without a provider the whole page throws on mount.
+ * `retry: false` keeps a rejected fetch from re-firing between assertions.
+ */
+function withQueryClient({ children }: { children: ReactNode }) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
 function renderSettings() {
   return render(
     <MemoryRouter>
       <Settings />
     </MemoryRouter>,
+    { wrapper: withQueryClient },
   );
 }
 
@@ -123,6 +139,16 @@ describe('Settings', () => {
       expect(
         screen.getByRole('heading', { level: 1, name: /settings/i }),
       ).toBeInTheDocument();
+    });
+
+    test('stamps the running bundle version below the tabs', async () => {
+      renderSettings();
+
+      // Outside the Tabs, so it is present whichever panel is open — the
+      // build is a property of the app, not of a settings section.
+      const stamp = await screen.findByTestId('app-version');
+      expect(stamp).toHaveTextContent(/SpenDrop dev/);
+      expect(stamp.closest('[role="tabpanel"]')).toBeNull();
     });
 
     test('renders tab navigation', () => {
@@ -317,6 +343,7 @@ describe('Settings', () => {
         <MemoryRouter initialEntries={[path]}>
           <Settings />
         </MemoryRouter>,
+        { wrapper: withQueryClient },
       );
     }
 

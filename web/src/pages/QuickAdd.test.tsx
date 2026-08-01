@@ -552,6 +552,33 @@ describe('QuickAdd — Freeform preview placeholder', () => {
   });
 });
 
+describe('QuickAdd — build stamp', () => {
+  test('shows which bundle this device is running', async () => {
+    // The phone is where staleness bites: the service worker serves the
+    // previously-cached shell for one launch after a deploy, and without this
+    // line there is no way to tell which build you are looking at.
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+
+    expect(await screen.findByTestId('app-version')).toHaveTextContent(
+      /SpenDrop dev/,
+    );
+  });
+
+  test('keeps the stamp out of the sticky footer', async () => {
+    // Placement is the whole point of the choice, not a detail: the footer
+    // holds the Add button against the on-screen keyboard and sonner stacks
+    // its toasts over that same corner. The stamp belongs in the scrolling
+    // content.
+    renderQuickAdd();
+
+    const stamp = await screen.findByTestId('app-version');
+    expect(stamp.closest('footer')).toBeNull();
+    expect(stamp.closest('main')).not.toBeNull();
+  });
+});
+
 describe('QuickAdd — category states', () => {
   test('shows an error with a Retry button when categories fail to load', async () => {
     apiGet.mockImplementation((path: string) => {

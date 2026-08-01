@@ -11,6 +11,7 @@ import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArrowUpRight, CheckCircle2, LogIn, WifiOff } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AppVersion } from '@/components/AppVersion';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Input } from '@/components/ui/input';
@@ -779,6 +780,14 @@ export function QuickAdd() {
             refreshKey={recentRefreshKey}
           />
         )}
+
+        {/* End of the scrolling content, NOT the sticky footer below. The
+            footer holds the Add button at a fixed height that the on-screen
+            keyboard pushes against, and sonner stacks its toasts over that
+            same corner — a permanent line there would eat touch-target room
+            and sit under the save toasts. Here it scrolls away and interferes
+            with nothing. */}
+        <AppVersion className="justify-center pt-2" />
       </main>
 
       <footer className="sticky bottom-0 flex flex-col gap-2 border-t border-border bg-background px-4 py-4 pb-[env(safe-area-inset-bottom)]">

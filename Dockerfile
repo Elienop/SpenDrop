@@ -1,3 +1,14 @@
+# The release this image is being built for, WITH its leading "v" (e.g.
+# v0.35.0). The release workflow passes the tag it has just computed; every
+# other build — docker-compose.dev.yml, a local `docker build`, the CI image
+# gate — passes nothing and gets "dev".
+#
+# Declared once here, ahead of every FROM, and consumed by both builder
+# stages below. That is what makes it impossible for one image to carry two
+# different version strings: the Go binary and the JS bundle are stamped from
+# this single value inside a single build.
+ARG APP_VERSION=dev
+
 # Build Go backend
 FROM golang:1.26-alpine AS go-builder
 RUN apk add --no-cache gcc musl-dev
@@ -6,7 +17,21 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
-RUN CGO_ENABLED=1 go build -o spendrop ./cmd/spendrop
+# Re-declared to pull the global ARG into this stage's scope (it inherits the
+# global default). Kept as late as possible: an ARG invalidates the cache for
+# every layer after it and this value changes on every single release, so
+# declaring it above `go mod download` would re-download the module cache each
+# time.
+ARG APP_VERSION
+# -X bakes the version into the binary at link time, so the running server
+# needs no env var, config file, or mounted file to know its own release. The
+# symbol path is plain text with nothing to typo-check it — a wrong path
+# builds cleanly and silently ships "dev" — so
+# TestDockerfileStampsTheLinkedVersionVar pins this line against the Go
+# source.
+RUN CGO_ENABLED=1 go build \
+    -ldflags "-X github.com/elienop/spendrop/internal/version.version=${APP_VERSION}" \
+    -o spendrop ./cmd/spendrop
 
 # Build React frontend
 FROM node:20-alpine AS web-builder
@@ -14,6 +39,13 @@ WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
 COPY web/ .
+# Same value, second artifact. Vite inlines VITE_-prefixed env vars into the
+# bundle at build time, so the frontend reads it as
+# import.meta.env.VITE_APP_VERSION. Declared after `npm ci` for the same cache
+# reason as the Go stage. This ENV belongs to the builder stage only and does
+# not reach the final image.
+ARG APP_VERSION
+ENV VITE_APP_VERSION=${APP_VERSION}
 RUN npm run build
 
 # Final image
