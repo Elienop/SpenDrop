@@ -1,9 +1,23 @@
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { useImportSession } from './useImportSession';
+import {
+  useImportSession,
+  type ImportCategoryDecisions,
+} from './useImportSession';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 const originalFetch = globalThis.fetch;
+
+/**
+ * "The user has decided nothing." Correct for every preview in this file,
+ * because none of them carry `unresolved_categories` — a file whose
+ * categories all match needs no decisions, and that is the shape these
+ * tests are about.
+ */
+const NO_CATEGORY_DECISIONS: ImportCategoryDecisions = {
+  categoryMap: {},
+  defaultCategoryId: null,
+};
 
 interface MockResponseSpec {
   ok?: boolean;
@@ -81,6 +95,14 @@ function freshPreviewBody(importID: string) {
     // wholesale, so a missing key lands as `undefined` and silently
     // clears every flag while confirm keeps refusing the import.
     field_errors: [] as { row_id: number; field: string; message: string }[],
+    // Same contract as field_errors above: emitted on every preview the
+    // backend produces, so a fixture that omits it models the vanishing
+    // -flag bug rather than the fixed behaviour.
+    unresolved_categories: [] as {
+      name: string;
+      reason: 'unmapped' | 'missing';
+      row_ids: number[];
+    }[],
     expires_at: '2099-01-01T00:00:00Z',
   };
 }
@@ -113,7 +135,7 @@ describe('useImportSession', () => {
 
   it('uploadFile sets preview and writes importId to localStorage', async () => {
     installFetchQueue([{ body: freshPreviewBody('abc') }]);
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await act(async () => {
       await result.current.uploadFile(new File(['x'], 'test.xlsx'));
@@ -128,7 +150,7 @@ describe('useImportSession', () => {
     localStorage.setItem(STORAGE_KEYS.importId, 'stored-id');
     const fetchMock = installFetchQueue([{ body: freshPreviewBody('stored-id') }]);
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await waitFor(() => {
       expect(result.current.preview?.import_id).toBe('stored-id');
@@ -154,7 +176,7 @@ describe('useImportSession', () => {
       },
     ]);
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await waitFor(() => {
       expect(localStorage.getItem(STORAGE_KEYS.importId)).toBeNull();
@@ -196,7 +218,7 @@ describe('useImportSession', () => {
     fetchMock.mockResolvedValueOnce(okResponse(freshPreviewBody('abc')));
     globalThis.fetch = fetchMock;
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await act(async () => {
       await result.current.uploadFile(new File(['x'], 'test.xlsx'));
@@ -246,7 +268,7 @@ describe('useImportSession', () => {
       { body: freshPreviewBody('abc') }, // PATCH 2: good date
     ]);
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await act(async () => {
       await result.current.uploadFile(new File(['x'], 'test.xlsx'));
@@ -327,7 +349,7 @@ describe('useImportSession', () => {
       },                                 // 3. confirm → 409
     ]);
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await act(async () => {
       await result.current.uploadFile(new File(['x'], 'test.xlsx'));
@@ -412,7 +434,7 @@ describe('useImportSession', () => {
       { body: afterSkip1 },    // PATCH row 1 skip=true
     ]);
 
-    const { result } = renderHook(() => useImportSession());
+    const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
 
     await act(async () => {
       await result.current.uploadFile(new File(['x'], 'test.xlsx'));
@@ -469,7 +491,7 @@ describe('useImportSession', () => {
 
     async function uploadWith(body: unknown) {
       installFetchQueue([{ body }]);
-      const { result } = renderHook(() => useImportSession());
+      const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
       await act(async () => {
         await result.current.uploadFile(new File(['x'], 'test.xlsx'));
       });
@@ -609,7 +631,7 @@ describe('useImportSession', () => {
           body: { error: 'description cannot be empty' },
         },
       ]);
-      const { result } = renderHook(() => useImportSession());
+      const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
       await act(async () => {
         await result.current.uploadFile(new File(['x'], 'test.xlsx'));
       });
@@ -636,7 +658,7 @@ describe('useImportSession', () => {
         { body: bodyWithFieldErrors([{ row_id: 0, field: 'description' }]) },
         { body: cleaned },
       ]);
-      const { result } = renderHook(() => useImportSession());
+      const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
       await act(async () => {
         await result.current.uploadFile(new File(['x'], 'test.xlsx'));
       });
@@ -673,7 +695,7 @@ describe('useImportSession', () => {
           },
         },
       ]);
-      const { result } = renderHook(() => useImportSession());
+      const { result } = renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
       await act(async () => {
         await result.current.uploadFile(new File(['x'], 'test.xlsx'));
       });
@@ -695,6 +717,146 @@ describe('useImportSession', () => {
       // what gives the user somewhere to perform the fix.
       expect(result.current.importStep).toBe('preview');
       // Rows survive the 409: only the field_errors slice is replaced.
+      expect(result.current.preview?.rows).toHaveLength(2);
+    });
+  });
+
+  describe('unresolved categories', () => {
+    /** A preview whose only problem is a category value nothing matches. */
+    function previewWithUnmapped(importID = 'cat-1') {
+      return {
+        ...freshPreviewBody(importID),
+        unresolved_categories: [
+          { name: 'Grocries', reason: 'unmapped' as const, row_ids: [0, 1] },
+        ],
+      };
+    }
+
+    it('blocks import straight off the upload response', async () => {
+      installFetchQueue([{ body: previewWithUnmapped() }]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+
+      // No confirm round-trip was needed to learn the server would refuse
+      // this. The 409 is the backstop, not the experience.
+      expect(result.current.unresolvedCategoryCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+    });
+
+    it('a mapping for the name clears the block', async () => {
+      installFetchQueue([{ body: previewWithUnmapped() }]);
+      const { result, rerender } = renderHook(
+        (decisions: ImportCategoryDecisions) => useImportSession(decisions),
+        { initialProps: NO_CATEGORY_DECISIONS },
+      );
+
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      expect(result.current.canImport).toBe(false);
+
+      rerender({ categoryMap: { Grocries: '3' }, defaultCategoryId: null });
+
+      expect(result.current.unresolvedCategoryCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    // The heart of it. Choosing a default because some rows have an empty
+    // Category cell is not agreeing that a misspelt name should be filed
+    // under it — and that fallback is exactly what used to re-home rows
+    // silently.
+    it('a default does NOT resolve an unmapped name', async () => {
+      installFetchQueue([{ body: previewWithUnmapped() }]);
+      const { result, rerender } = renderHook(
+        (decisions: ImportCategoryDecisions) => useImportSession(decisions),
+        { initialProps: NO_CATEGORY_DECISIONS },
+      );
+
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+
+      rerender({ categoryMap: {}, defaultCategoryId: 3 });
+
+      expect(result.current.unresolvedCategoryCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+    });
+
+    // An empty cell has no name to decide about, so the default IS the
+    // decision — the one place the fallback stays legitimate.
+    it('a default DOES resolve rows with an empty category cell', async () => {
+      installFetchQueue([
+        {
+          body: {
+            ...freshPreviewBody('cat-2'),
+            unresolved_categories: [
+              { name: '', reason: 'missing' as const, row_ids: [0] },
+            ],
+          },
+        },
+      ]);
+      const { result, rerender } = renderHook(
+        (decisions: ImportCategoryDecisions) => useImportSession(decisions),
+        { initialProps: NO_CATEGORY_DECISIONS },
+      );
+
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      expect(result.current.canImport).toBe(false);
+
+      rerender({ categoryMap: {}, defaultCategoryId: 3 });
+
+      expect(result.current.unresolvedCategoryCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('409 UNRESOLVED_CATEGORIES refreshes the list and stays on the preview', async () => {
+      installFetchQueue([
+        { body: freshPreviewBody('cat-3') },
+        {
+          ok: false,
+          status: 409,
+          body: {
+            code: 'UNRESOLVED_CATEGORIES',
+            unresolved_categories: [
+              { name: 'Grocries', reason: 'unmapped', row_ids: [0] },
+            ],
+          },
+        },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      // The upload said nothing needed deciding, so the client let the
+      // confirm through — which is precisely when the server's gate has
+      // to be the one that holds.
+      expect(result.current.canImport).toBe(true);
+
+      await act(async () => {
+        await result.current.confirmImport({}, null);
+      });
+
+      expect(result.current.preview?.unresolved_categories).toEqual([
+        { name: 'Grocries', reason: 'unmapped', row_ids: [0] },
+      ]);
+      expect(result.current.unresolvedCategoryCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+      expect(result.current.error).toBe(
+        'Some categories have no destination — choose one for each, or skip those rows',
+      );
+      // Staying on the preview is what gives the user somewhere to fix it.
+      expect(result.current.importStep).toBe('preview');
+      // Rows survive the 409: only the unresolved slice is replaced.
       expect(result.current.preview?.rows).toHaveLength(2);
     });
   });

@@ -48,6 +48,7 @@ function makePreview(overrides: Partial<ImportPreview> = {}): ImportPreview {
 const noopProps = {
   cellErrors: {},
   unresolvedCount: 0,
+  unresolvedCategoryCount: 0,
   canImport: true,
   pendingPatchCount: 0,
   onPatchRow: vi.fn(),
@@ -253,6 +254,7 @@ describe('ImportPreviewTable — over-length fields', () => {
         })}
         {...noopProps}
         unresolvedCount={1}
+        unresolvedCategoryCount={0}
         canImport={false}
       />,
     );
@@ -278,6 +280,7 @@ describe('ImportPreviewTable — over-length fields', () => {
         })}
         {...noopProps}
         unresolvedCount={1}
+        unresolvedCategoryCount={0}
         canImport={false}
       />,
     );
@@ -485,6 +488,7 @@ describe('ImportPreviewTable', () => {
         preview={preview}
         cellErrors={{}}
         unresolvedCount={3}
+        unresolvedCategoryCount={0}
         canImport={false}
         pendingPatchCount={0}
         onPatchRow={vi.fn()}
@@ -502,6 +506,7 @@ describe('ImportPreviewTable', () => {
         preview={preview}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={vi.fn()}
@@ -517,6 +522,7 @@ describe('ImportPreviewTable', () => {
         preview={preview}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={2}
         onPatchRow={vi.fn()}
@@ -531,6 +537,7 @@ describe('ImportPreviewTable', () => {
         preview={preview}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={vi.fn()}
@@ -550,6 +557,7 @@ describe('ImportPreviewTable', () => {
         preview={makePreview()}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={onPatchRow}
@@ -578,6 +586,7 @@ describe('ImportPreviewTable', () => {
         preview={makePreview()}
         cellErrors={{ '0:description': { field: 'description', message: 'INVALID_DESCRIPTION' } }}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={onPatchRow}
@@ -602,6 +611,7 @@ describe('ImportPreviewTable', () => {
         preview={makePreview()}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={onPatchRow}
@@ -657,6 +667,7 @@ describe('ImportPreviewTable', () => {
         preview={preview}
         cellErrors={{}}
         unresolvedCount={0}
+        unresolvedCategoryCount={0}
         canImport={true}
         pendingPatchCount={0}
         onPatchRow={onPatchRow}
@@ -694,6 +705,7 @@ describe('ImportPreviewTable', () => {
         })}
         cellErrors={{}}
         unresolvedCount={3}
+        unresolvedCategoryCount={0}
         canImport={false}
         pendingPatchCount={0}
         onPatchRow={onPatchRow}
@@ -716,5 +728,66 @@ describe('ImportPreviewTable', () => {
     expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'skip', true);
     expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'skip', true);
     expect(onPatchRow).toHaveBeenNthCalledWith(3, 2, 'skip', true);
+  });
+});
+
+describe('ImportPreviewTable — unresolved categories', () => {
+  it('names the blocker and points at where it is fixed', () => {
+    render(
+      <ImportPreviewTable
+        preview={makePreview()}
+        {...noopProps}
+        unresolvedCategoryCount={2}
+        canImport={false}
+      />,
+    );
+
+    // "Fix or skip" would point at the table; the remedy is the mapping
+    // panel below it, so this blocker carries its own verb.
+    expect(
+      screen.getByText(/2 category choices still needed below/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Import 3$/ })).toBeDisabled();
+  });
+
+  it('composes with the row-level blockers rather than replacing them', () => {
+    render(
+      <ImportPreviewTable
+        preview={makePreview({ field_errors: [fieldError(1, 'notes')] })}
+        {...noopProps}
+        unresolvedCount={1}
+        unresolvedCategoryCount={1}
+        canImport={false}
+      />,
+    );
+
+    // All three at once. Naming only one would send the user to fix a
+    // third of the problem and watch the button stay disabled.
+    const status = screen.getByText(/Fix or skip 1 collision and 1 too-long row/);
+    expect(status.textContent).toMatch(
+      /1 category choice still needed below/,
+    );
+  });
+
+  it('reports ready only when the category blocker is clear too', () => {
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={makePreview()}
+        {...noopProps}
+        unresolvedCategoryCount={1}
+        canImport={false}
+      />,
+    );
+    expect(screen.queryByText(/Ready to import/)).toBeNull();
+
+    rerender(
+      <ImportPreviewTable
+        preview={makePreview()}
+        {...noopProps}
+        unresolvedCategoryCount={0}
+        canImport
+      />,
+    );
+    expect(screen.getByText(/Ready to import 3 rows/)).toBeInTheDocument();
   });
 });

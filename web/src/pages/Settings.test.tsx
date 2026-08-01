@@ -803,8 +803,17 @@ describe('Settings', () => {
       });
     });
 
-    test('shows default category dropdown in preview step', async () => {
-      mockedApi.upload.mockResolvedValue(mockPreview);
+    // The default category control appears when it has a job to do, and
+    // not otherwise: rows with an empty Category cell need it, a file whose
+    // categories all match does not. Asking for a decision that changes
+    // nothing is how a control ends up ignored.
+    test('shows default category dropdown when rows have an empty category', async () => {
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        unresolved_categories: [
+          { name: '', reason: 'missing' as const, row_ids: [2] },
+        ],
+      });
       mockedApi.get.mockImplementation((path: string) => {
         if (path === 'categories') return Promise.resolve(mockCategories);
         if (path.includes('budget')) return Promise.resolve([]);
@@ -817,6 +826,27 @@ describe('Settings', () => {
       await waitFor(() => {
         expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
       });
+    });
+
+    test('hides the default category dropdown when nothing needs one', async () => {
+      mockedApi.upload.mockResolvedValue({
+        ...mockPreview,
+        unresolved_categories: [],
+      });
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'categories') return Promise.resolve(mockCategories);
+        return Promise.resolve([]);
+      });
+
+      const user = await goToDataTab();
+      await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^import \d+$/i }),
+        ).toBeEnabled();
+      });
+      expect(screen.queryByLabelText(/default category/i)).toBeNull();
     });
 
     test('shows import and cancel buttons in preview step', async () => {
@@ -859,10 +889,17 @@ describe('Settings', () => {
       // dialog → click "Confirm and Import") is gone.
       await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
 
+      // A run that did not land every row leads with what did not land.
+      // The old flat "4 imported, 1 skipped" sentence read identically
+      // whether one row or four hundred had been dropped.
       await waitFor(() => {
-        expect(screen.getByText(/4 imported/i)).toBeInTheDocument();
-        expect(screen.getByText(/1 skipped/i)).toBeInTheDocument();
+        expect(
+          screen.getByText(/1 of 5 rows were not imported/i),
+        ).toBeInTheDocument();
       });
+      expect(
+        screen.getByText(/4 rows were added to your ledger/i),
+      ).toBeInTheDocument();
     });
 
     test('shows "Import Another" button after successful import', async () => {
@@ -1035,6 +1072,227 @@ describe('Settings', () => {
         import_id: string;
       };
       expect(parsedBody.import_id).toBe('abc-123');
+    });
+
+    // End-to-end through Settings -> ImportCard -> ImportPreviewStep ->
+    // ImportPreviewTable, deliberately not through the hook in isolation.
+    // The hook's gate and the panel's controls are each correct on their
+    // own; what these pin is that the page WIRES them together — the
+    // failure shape where a control is right in isolation and the caller
+    // hands it the weaker variant has shipped in this repo before.
+    describe('unresolved categories', () => {
+      const previewWithUnmapped: ImportPreview = {
+        ...mockPreview,
+        unresolved_categories: [
+          { name: 'Grocries', reason: 'unmapped', row_ids: [0, 2] },
+        ],
+      };
+
+      function stubCategoriesFetch() {
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+      }
+
+      test('a category matching nothing blocks Import on the real page', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeDisabled();
+        });
+        expect(
+          screen.getByText(/1 category choice still needed below/),
+        ).toBeInTheDocument();
+        // How many rows the decision covers is the difference between
+        // "one typo" and "half my ledger".
+        expect(screen.getByText('2 rows')).toBeInTheDocument();
+        expect(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        ).toBeInTheDocument();
+      });
+
+      test('mapping the name through the panel enables Import', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).toBeInTheDocument();
+        });
+
+        await user.click(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        );
+        await user.click(screen.getByRole('option', { name: 'Transport' }));
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+      });
+
+      // Accepting the default for a name that matched nothing is allowed —
+      // it just has to be something the user DID, not something that
+      // happened to them because they picked a default for empty cells.
+      test('choosing a default alone does not unblock an unmatched name', async () => {
+        mockedApi.upload.mockResolvedValue({
+          ...previewWithUnmapped,
+          unresolved_categories: [
+            { name: 'Grocries', reason: 'unmapped' as const, row_ids: [0, 2] },
+            { name: '', reason: 'missing' as const, row_ids: [1] },
+          ],
+        });
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
+        });
+
+        // Two decisions outstanding: the typo'd name, and the empty cells.
+        expect(
+          screen.getByText(/2 category choices still needed below/),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByLabelText(/default category/i));
+        await user.click(screen.getByRole('option', { name: 'Food' }));
+
+        // The default settled the empty cells and ONLY the empty cells —
+        // two down to one, not two down to zero. Asserting the button is
+        // still disabled would pass vacuously, since it was disabled
+        // before the click too.
+        await waitFor(() => {
+          expect(
+            screen.getByText(/1 category choice still needed below/),
+          ).toBeInTheDocument();
+        });
+        expect(
+          screen.getByRole('button', { name: /^Import \d+$/ }),
+        ).toBeDisabled();
+      });
+
+      test('the bulk control files every remaining name under the default in one click', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+        const fetchMock = mockConfirmFetch({ body: mockImportResult });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
+        });
+
+        // Nothing to apply until there is a default to apply.
+        expect(
+          screen.getByRole('button', {
+            name: /Pick a default below to fill these at once/i,
+          }),
+        ).toBeDisabled();
+
+        await user.click(screen.getByLabelText(/default category/i));
+        await user.click(screen.getByRole('option', { name: 'Food' }));
+        await user.click(
+          screen.getByRole('button', { name: /Use Food for the remaining 1/i }),
+        );
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+
+        await user.click(screen.getByRole('button', { name: /^Import \d+$/ }));
+
+        // The decision travels as an explicit mapping, not as a fallback
+        // the server has to infer. That is what makes it auditable in the
+        // request and visible in every control afterwards.
+        await waitFor(() => {
+          expect(fetchMock).toHaveBeenCalled();
+        });
+        const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+        const parsedBody = JSON.parse(init.body as string) as {
+          category_map: Record<string, number>;
+        };
+        expect(parsedBody.category_map.Grocries).toBe(1);
+      });
+    });
+
+    describe('import result', () => {
+      test('leads with what did not land, itemised', async () => {
+        mockedApi.upload.mockResolvedValue(mockPreview);
+        mockConfirmFetch({
+          body: {
+            imported: 12,
+            skipped: 488,
+            total: 500,
+            skipped_reasons: { duplicate: 400, user_skipped: 88 },
+          },
+        });
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^import \d+$/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
+
+        await waitFor(() => {
+          expect(
+            screen.getByText(/488 of 500 rows were not imported/i),
+          ).toBeInTheDocument();
+        });
+        // A bare count is something the user can neither trust nor act on.
+        expect(
+          screen.getByText(/400 already in your ledger/i),
+        ).toBeInTheDocument();
+        expect(screen.getByText(/88 you skipped/i)).toBeInTheDocument();
+      });
+
+      test('a clean run says so without an alarm', async () => {
+        mockedApi.upload.mockResolvedValue(mockPreview);
+        mockConfirmFetch({
+          body: { imported: 5, skipped: 0, total: 5, skipped_reasons: {} },
+        });
+        mockedApi.get.mockImplementation((path: string) => {
+          if (path === 'categories') return Promise.resolve(mockCategories);
+          return Promise.resolve([]);
+        });
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^import \d+$/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('button', { name: /^import \d+$/i }));
+
+        await waitFor(() => {
+          expect(screen.getByText(/Imported all 5 rows/i)).toBeInTheDocument();
+        });
+        expect(screen.queryByText(/were not imported/i)).toBeNull();
+      });
     });
   });
 });

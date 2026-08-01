@@ -159,6 +159,13 @@ export interface ImportPreviewTableProps {
   preview: ImportPreview;
   cellErrors: Record<string, CellError>;
   unresolvedCount: number;
+  /**
+   * Distinct category values still awaiting a decision. Passed in rather
+   * than derived here, because resolving one is an act performed in the
+   * mapping panel BELOW this table — the table can see the server's list
+   * but not the user's answers to it.
+   */
+  unresolvedCategoryCount: number;
   canImport: boolean;
   pendingPatchCount: number;
   onPatchRow: (
@@ -182,6 +189,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     preview,
     cellErrors,
     unresolvedCount,
+    unresolvedCategoryCount,
     canImport,
     pendingPatchCount,
     onPatchRow,
@@ -500,12 +508,30 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
       `${fieldErrorRowCount} too-long ${fieldErrorRowCount === 1 ? 'row' : 'rows'}`,
     );
   }
-  const statusText =
+  // Named separately from the other two because the remedy is somewhere
+  // else — the mapping panel below the table, not a cell in it. "Fix or
+  // skip" would point at the wrong thing, so this blocker carries its own
+  // verb and the sentence composes the two halves.
+  //
+  // "choices", not "unmatched names": the count covers both a name that
+  // matches nothing AND rows with an empty Category cell, and only the
+  // panel below knows which is which. Wording that named one of the two
+  // would be wrong for the other half of the time.
+  const categoryBlocker =
+    unresolvedCategoryCount > 0
+      ? `${unresolvedCategoryCount} category ${unresolvedCategoryCount === 1 ? 'choice' : 'choices'} still needed below`
+      : '';
+  const rowBlockerText =
     blockers.length > 0
       ? `Fix or skip ${blockers.join(' and ')} to enable import`
-      : `Ready to import ${keepCount} rows`;
+      : '';
+  const statusText =
+    [rowBlockerText, categoryBlocker].filter(Boolean).join('. ') ||
+    `Ready to import ${keepCount} rows`;
   const statusColor =
-    blockers.length > 0 ? 'text-amber-500' : 'text-emerald-500';
+    blockers.length > 0 || unresolvedCategoryCount > 0
+      ? 'text-amber-500'
+      : 'text-emerald-500';
 
   return (
     <div className="flex flex-col gap-3">

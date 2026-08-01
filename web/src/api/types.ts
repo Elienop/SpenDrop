@@ -286,6 +286,36 @@ export interface ImportFieldError {
   message?: string;
 }
 
+/**
+ * Why a category value on an uploaded row has no decision behind it yet.
+ * - `unmapped`: the cell names a category the household does not have.
+ *   Remedy: pick a target for that name.
+ * - `missing`: the cell is empty. Remedy: pick a default category.
+ *
+ * The two are separate because their remedies are separate controls, and a
+ * single "unresolved" label would point the user at the wrong one.
+ */
+export type UnresolvedCategoryReason = 'unmapped' | 'missing';
+
+/**
+ * One distinct category value in the upload that nothing resolves. `name` is
+ * `''` for the missing-cell case; `row_ids` is every non-skipped row carrying
+ * it, which is what turns "one category needs mapping" into "…and it covers
+ * 312 of your 400 rows".
+ *
+ * Emitted on every preview response computed as if the user had decided
+ * NOTHING — so the list is stable and the client marks each entry resolved
+ * against its own mapping state. Rows the backend would reject before ever
+ * consulting their category (unparseable date, empty description, zero
+ * amount) are excluded, which is what stops a trailing "TOTAL" row from
+ * demanding a category it will never use.
+ */
+export interface UnresolvedCategory {
+  name: string;
+  reason: UnresolvedCategoryReason;
+  row_ids: number[];
+}
+
 export interface ImportPreview {
   import_id: string;
   row_count: number;
@@ -313,6 +343,17 @@ export interface ImportPreview {
    * `undefined` as "none".
    */
   field_errors?: ImportFieldError[];
+  /**
+   * Every category value in the upload that no decision covers. Recomputed
+   * by the backend alongside `collision_groups`, so skipping the last row
+   * carrying an undecided name drops the entry on the PATCH response and
+   * the gate clears with no client-side bookkeeping.
+   *
+   * Optional for the same reason `field_errors` is: a preview built before
+   * the Go side emitted it would type-check while being `undefined` at
+   * runtime. Every read treats `undefined` as "nothing to decide".
+   */
+  unresolved_categories?: UnresolvedCategory[];
   /**
    * ISO-8601 timestamp (UTC) at which the backend will evict this
    * session from the in-memory importStore. The frontend reads this
@@ -353,6 +394,19 @@ export interface ImportResult {
   imported: number;
   skipped: number;
   total: number;
+  /**
+   * `skipped` split by cause, counts keyed by reason. A bare "488 skipped"
+   * is a number the user cannot act on and cannot distinguish from a broken
+   * import; this is what makes it explicable.
+   *
+   * Keys are the backend's own reason strings — `duplicate`,
+   * `unparseable_date`, `empty_description`, `zero_amount`,
+   * `missing_category`, `field_too_long` — plus `user_skipped` (rows the
+   * user skipped in the preview) and `error`. Only non-zero causes appear,
+   * so a consumer must render whatever keys arrive rather than a fixed list,
+   * and the counts sum to `skipped`.
+   */
+  skipped_reasons?: Record<string, number>;
 }
 
 // Reports

@@ -24,6 +24,7 @@ import type {
   CreateTokenResponse,
   Currency,
   ImportPreview,
+  ImportResult,
   ListTokensResponse,
   NotificationSettings,
   PatchRowRequest,
@@ -1531,6 +1532,7 @@ interface ImportPreviewStepProps {
   preview: ImportPreview;
   cellErrors: Record<string, CellError>;
   unresolvedCount: number;
+  unresolvedCategoryCount: number;
   canImport: boolean;
   pendingPatchCount: number;
   patchRow: (
@@ -1551,6 +1553,7 @@ function ImportPreviewStep({
   preview,
   cellErrors,
   unresolvedCount,
+  unresolvedCategoryCount,
   canImport,
   pendingPatchCount,
   patchRow,
@@ -1567,27 +1570,64 @@ function ImportPreviewStep({
     [preview.unique_categories],
   );
 
-  const { matched, unmatched } = useMemo(() => {
-    const m: { name: string; target: string }[] = [];
-    const u: string[] = [];
-    for (const catName of uniqueImportCategories) {
-      const mappedId = categoryMap[catName];
-      if (mappedId) {
-        const target = categories.find((c) => String(c.id) === mappedId);
-        m.push({ name: catName, target: target?.name ?? mappedId });
-      } else {
-        u.push(catName);
-      }
-    }
-    return { matched: m, unmatched: u };
-  }, [uniqueImportCategories, categoryMap, categories]);
-
-  const rowsWithoutCategory = useMemo(
-    () => preview.rows.filter((r) => !r.category).length,
-    [preview.rows],
+  // Which names need a decision is the SERVER's answer, not a client-side
+  // re-derivation of it. The backend knows which rows are actually eligible
+  // — it excludes skipped rows and rows it would drop for an unparseable
+  // date before their category ever mattered — and reproducing that here
+  // would mean parsing dates in the browser to decide what to ask about.
+  const unresolvedCategories = useMemo(
+    () => preview.unresolved_categories ?? [],
+    [preview.unresolved_categories],
+  );
+  const unmatched = useMemo(
+    () => unresolvedCategories.filter((u) => u.reason === 'unmapped'),
+    [unresolvedCategories],
+  );
+  const missingCategoryRows = useMemo(
+    () =>
+      unresolvedCategories.find((u) => u.reason === 'missing')?.row_ids.length ??
+      0,
+    [unresolvedCategories],
   );
 
-  const needsDefaultCategory = unmatched.length > 0 || rowsWithoutCategory > 0;
+  // "Matched automatically" means the household already has a category by
+  // that name — which is exactly the set the server did NOT list as needing
+  // a decision. Deriving it from the local map instead would let a name the
+  // user mapped by hand count as automatic.
+  const matched = useMemo(() => {
+    const needsDecision = new Set(unmatched.map((u) => u.name));
+    return uniqueImportCategories.filter((name) => !needsDecision.has(name));
+  }, [uniqueImportCategories, unmatched]);
+
+  const unmappedNames = useMemo(
+    () => unmatched.filter((u) => !categoryMap[u.name]).map((u) => u.name),
+    [unmatched, categoryMap],
+  );
+
+  const defaultCategoryName = useMemo(
+    () => categories.find((c) => c.id === defaultCategoryId)?.name ?? '',
+    [categories, defaultCategoryId],
+  );
+
+  // The default is offered whenever it has a job to do: filling empty
+  // Category cells, or serving as the source for the bulk-apply below.
+  const needsDefaultCategory = unmatched.length > 0 || missingCategoryRows > 0;
+
+  // One click that files every still-unmapped name under the chosen default.
+  // This is what keeps "I know, put them all in Miscellaneous" cheap without
+  // making it something that happens to the user: it writes real map
+  // entries, so the decision is visible in every control afterwards and
+  // travels to the server as an explicit mapping rather than as a fallback.
+  function applyDefaultToUnmapped() {
+    if (defaultCategoryId === null) return;
+    setCategoryMap((prev) => {
+      const next = { ...prev };
+      for (const name of unmappedNames) {
+        next[name] = String(defaultCategoryId);
+      }
+      return next;
+    });
+  }
 
   return (
     <div className="flex flex-col gap-4">
@@ -1604,6 +1644,7 @@ function ImportPreviewStep({
         preview={preview}
         cellErrors={cellErrors}
         unresolvedCount={unresolvedCount}
+        unresolvedCategoryCount={unresolvedCategoryCount}
         canImport={canImport}
         pendingPatchCount={pendingPatchCount}
         onPatchRow={patchRow}
@@ -1627,12 +1668,8 @@ function ImportPreviewStep({
                 </span>
               </div>
               <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-                {matched.map((m) => (
-                  <span key={m.name}>
-                    {m.name === m.target
-                      ? m.name
-                      : `${m.name} \u2192 ${m.target}`}
-                  </span>
+                {matched.map((name) => (
+                  <span key={name}>{name}</span>
                 ))}
               </div>
             </div>
@@ -1644,22 +1681,41 @@ function ImportPreviewStep({
               <div className="flex items-center gap-2 text-sm">
                 <CircleAlert className="h-4 w-4 text-yellow-500" />
                 <span>
-                  {unmatched.length} {unmatched.length === 1 ? 'category needs' : 'categories need'} mapping
+                  {unmatched.length}{' '}
+                  {unmatched.length === 1
+                    ? 'category in this file matches nothing you have'
+                    : 'categories in this file match nothing you have'}
+                  . Nothing is imported until each has a destination.
                 </span>
               </div>
-              {unmatched.map((catName) => (
-                <div key={catName} className="flex max-w-sm items-center gap-3">
-                  <Label className="w-32 shrink-0 text-sm">{catName}</Label>
+              {unmatched.map((entry) => (
+                <div
+                  key={entry.name}
+                  className="flex max-w-sm items-center gap-3"
+                >
+                  {/* The row count is the difference between "one typo" and
+                      "half my ledger" \u2014 without it the user cannot tell
+                      whether this decision matters. */}
+                  <Label className="w-32 shrink-0 text-sm">
+                    <span className="block truncate" title={entry.name}>
+                      {entry.name}
+                    </span>
+                    <span className="text-xs font-normal text-muted-foreground">
+                      {entry.row_ids.length === 1
+                        ? '1 row'
+                        : `${entry.row_ids.length} rows`}
+                    </span>
+                  </Label>
                   <Select
-                    value={categoryMap[catName] ?? undefined}
+                    value={categoryMap[entry.name] ?? undefined}
                     onValueChange={(v) =>
                       setCategoryMap((prev) => ({
                         ...prev,
-                        [catName]: v,
+                        [entry.name]: v,
                       }))
                     }
                   >
-                    <SelectTrigger aria-label={`Map category ${catName}`}>
+                    <SelectTrigger aria-label={`Map category ${entry.name}`}>
                       <SelectValue placeholder="Select category..." />
                     </SelectTrigger>
                     <SelectContent>
@@ -1674,6 +1730,20 @@ function ImportPreviewStep({
                   </Select>
                 </div>
               ))}
+              {unmappedNames.length > 0 && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="w-fit"
+                  disabled={defaultCategoryId === null}
+                  onClick={applyDefaultToUnmapped}
+                >
+                  {defaultCategoryId === null
+                    ? 'Pick a default below to fill these at once'
+                    : `Use ${defaultCategoryName} for the remaining ${unmappedNames.length}`}
+                </Button>
+              )}
             </div>
           )}
         </div>
@@ -1685,7 +1755,9 @@ function ImportPreviewStep({
           <Label htmlFor="default-category">
             Default Category
             <span className="ml-1 text-xs font-normal text-muted-foreground">
-              (for unmapped or missing categories)
+              {missingCategoryRows > 0
+                ? `(for the ${missingCategoryRows === 1 ? '1 row' : `${missingCategoryRows} rows`} with an empty Category cell)`
+                : '(for rows with an empty Category cell)'}
             </span>
           </Label>
           <Select
@@ -1708,6 +1780,77 @@ function ImportPreviewStep({
         </div>
       )}
     </div>
+  );
+}
+
+/* ---------- Import result ---------- */
+
+/**
+ * Human phrasing for the backend's skip reasons. Anything not listed falls
+ * back to the raw key rather than being dropped: a reason the backend adds
+ * later must still show up in the total the user is reading, and a silently
+ * omitted line would make the counts stop adding up.
+ */
+const IMPORT_SKIP_REASON_LABELS: Record<string, string> = {
+  user_skipped: 'you skipped',
+  duplicate: 'already in your ledger',
+  unparseable_date: 'no readable date',
+  empty_description: 'no description',
+  zero_amount: 'no amount',
+  missing_category: 'no category',
+  field_too_long: 'too long to store',
+  error: 'could not be saved',
+};
+
+/**
+ * Outcome of a finished import.
+ *
+ * A run that lands 12 of 500 rows is not a success, and reporting it in the
+ * same flat sentence as a clean run is how "my import worked" and "my import
+ * dropped 488 rows" came to look identical. When anything did not land, the
+ * count leads and the reasons are itemised — a bare number is something the
+ * user can neither trust nor act on.
+ */
+function ImportResultSummary({ result }: { result: ImportResult }) {
+  const reasons = Object.entries(result.skipped_reasons ?? {})
+    .filter(([, count]) => count > 0)
+    .sort(([, a], [, b]) => b - a);
+
+  if (result.skipped === 0) {
+    return (
+      <p className="text-sm font-medium">
+        {result.imported === 1
+          ? 'Imported 1 row.'
+          : `Imported all ${result.imported} rows.`}
+      </p>
+    );
+  }
+
+  return (
+    <Alert>
+      <AlertTriangle className="h-4 w-4 text-amber-500" />
+      <AlertTitle>
+        {`${result.skipped} of ${result.total} rows were not imported`}
+      </AlertTitle>
+      <AlertDescription>
+        <div className="flex flex-col gap-1">
+          <span>
+            {result.imported === 1
+              ? '1 row was added to your ledger.'
+              : `${result.imported} rows were added to your ledger.`}
+          </span>
+          {reasons.length > 0 && (
+            <ul className="list-disc pl-4">
+              {reasons.map(([reason, count]) => (
+                <li key={reason}>
+                  {`${count} ${IMPORT_SKIP_REASON_LABELS[reason] ?? reason}`}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </AlertDescription>
+    </Alert>
   );
 }
 
@@ -1734,14 +1877,22 @@ function ImportCard() {
   // Import wizard state — preview / importStep / result are owned by the
   // hook now; destructure them so the rest of the function reads identically
   // to the old local-state version.
-  const importSession = useImportSession();
-  const { preview, importStep, result, error: importError } = importSession;
-
   const [defaultCategoryId, setDefaultCategoryId] = useState<number | null>(
     null,
   );
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoryMap, setCategoryMap] = useState<Record<string, string>>({});
+
+  // The gate needs the category decisions, so they are passed in rather than
+  // read back out. Memoised because the hook derives `unresolvedCategoryCount`
+  // from this object — a fresh literal every render would recompute it every
+  // render for no reason.
+  const categoryDecisions = useMemo(
+    () => ({ categoryMap, defaultCategoryId }),
+    [categoryMap, defaultCategoryId],
+  );
+  const importSession = useImportSession(categoryDecisions);
+  const { preview, importStep, result, error: importError } = importSession;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   // Tracks the import_id we last auto-mapped categories for. Resets to null
   // on cancel / startOver so the next upload (or a re-upload) re-runs the
@@ -1894,6 +2045,7 @@ function ImportCard() {
             preview={preview}
             cellErrors={importSession.cellErrors}
             unresolvedCount={importSession.unresolvedCount}
+            unresolvedCategoryCount={importSession.unresolvedCategoryCount}
             canImport={importSession.canImport}
             pendingPatchCount={importSession.pendingPatchCount}
             patchRow={importSession.patchRow}
@@ -1909,9 +2061,7 @@ function ImportCard() {
 
         {importStep === 'done' && result && (
           <div className="flex flex-col gap-4">
-            <p className="text-sm font-medium">
-              {`${result.imported} imported, ${result.skipped} skipped out of ${result.total} total rows.`}
-            </p>
+            <ImportResultSummary result={result} />
             <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
               Import Another
             </Button>

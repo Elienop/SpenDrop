@@ -6,6 +6,7 @@ import type {
   ImportResult,
   ImportRow,
   PatchRowRequest,
+  UnresolvedCategory,
 } from '../api/types';
 import {
   uploadImport,
@@ -15,6 +16,7 @@ import {
   cancelImport as cancelImportAPI,
   FieldTooLongError,
   NotFoundError,
+  UnresolvedCategoriesError,
   UnresolvedCollisionsError,
 } from '../api/import';
 import {
@@ -28,6 +30,53 @@ export type ImportStep = 'upload' | 'preview' | 'done';
 export interface CellError {
   field: PatchRowRequest['field'];
   message: string;
+}
+
+/**
+ * The category decisions the user has made so far, as the gate needs to see
+ * them. Passed IN rather than owned here because the controls that produce
+ * them live in the import card next to the preview table.
+ *
+ * It is a required argument, not an optional one with an empty default. A
+ * default would mean "nothing decided", which reads as "everything blocked"
+ * — a caller that forgot to thread its state through would get a permanently
+ * disabled Import button and no indication why.
+ */
+export interface ImportCategoryDecisions {
+  /** Spreadsheet category name → category id, as the confirm body sends it. */
+  categoryMap: Record<string, string>;
+  /** Category for rows whose Category cell is empty; null if unchosen. */
+  defaultCategoryId: number | null;
+}
+
+/**
+ * The entries in `unresolved_categories` that the user's choices do NOT yet
+ * cover. The server's list is computed as if nothing had been decided, so
+ * this is where the local decisions are applied:
+ *
+ *   - `unmapped` — resolved by an explicit entry in `categoryMap`. NOT by
+ *     having chosen a default: picking a default because some rows have an
+ *     empty Category cell is not agreeing that a misspelt category name
+ *     should be filed under it. The import card offers a one-click "apply
+ *     the default to all of these", which fills the map — so accepting the
+ *     default stays cheap while remaining something the user did.
+ *   - `missing` — resolved by choosing a default. There is no name to decide
+ *     about, so the default IS the decision, and the control says so.
+ *
+ * Exported because the gate (this hook) and the wording the card renders have
+ * to agree on what "unresolved" means; deriving it twice is how the button
+ * ends up disabled against something nothing on screen is asking for.
+ */
+export function unresolvedCategoryDecisions(
+  unresolved: UnresolvedCategory[] | undefined,
+  decisions: ImportCategoryDecisions,
+): UnresolvedCategory[] {
+  if (!unresolved || unresolved.length === 0) return [];
+  return unresolved.filter((entry) =>
+    entry.reason === 'missing'
+      ? decisions.defaultCategoryId === null
+      : !decisions.categoryMap[entry.name],
+  );
 }
 
 export interface UseImportSessionResult {
@@ -49,6 +98,12 @@ export interface UseImportSessionResult {
    * off the upload response rather than only after a failed confirm.
    */
   fieldErrorRowCount: number;
+  /**
+   * Distinct category values still awaiting a decision. Blocks `canImport`
+   * on its own so the button is disabled straight off the upload response,
+   * rather than only after the confirm comes back 409.
+   */
+  unresolvedCategoryCount: number;
   canImport: boolean;
 
   // Actions
@@ -120,7 +175,9 @@ function computeUnresolvedCount(
   return unresolved;
 }
 
-export function useImportSession(): UseImportSessionResult {
+export function useImportSession(
+  decisions: ImportCategoryDecisions,
+): UseImportSessionResult {
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [importStep, setImportStep] = useState<ImportStep>('upload');
   const [result, setResult] = useState<ImportResult | null>(null);
@@ -252,10 +309,20 @@ export function useImportSession(): UseImportSessionResult {
     return { ...merged, ...patchCellErrors };
   }, [preview, patchCellErrors]);
 
+  // Category decisions the user has not made yet. The 409 the server returns
+  // for these is the backstop, not the experience — whatever confirm would
+  // refuse, this has already disabled the button for.
+  const unresolvedCategoryCount = useMemo(() => {
+    if (!preview) return 0;
+    return unresolvedCategoryDecisions(preview.unresolved_categories, decisions)
+      .length;
+  }, [preview, decisions]);
+
   const canImport =
     preview !== null &&
     unresolvedCount === 0 &&
     fieldErrorRowCount === 0 &&
+    unresolvedCategoryCount === 0 &&
     pendingPatchCount === 0;
 
   // ---- row merge helpers ----
@@ -403,6 +470,23 @@ export function useImportSession(): UseImportSessionResult {
           );
           return;
         }
+        if (err instanceof UnresolvedCategoriesError) {
+          // Same shape as the two branches around it: replace only the
+          // slice the server just recomputed, leaving rows / row_count /
+          // columns / unique_categories untouched. Refreshing from the
+          // server rather than trusting what we had matters when the two
+          // disagree — a row skipped in another tab changes which category
+          // values are still in play.
+          setPreview((prev) =>
+            prev
+              ? { ...prev, unresolved_categories: err.unresolved_categories }
+              : prev,
+          );
+          setError(
+            'Some categories have no destination — choose one for each, or skip those rows',
+          );
+          return;
+        }
         if (err instanceof FieldTooLongError) {
           // Same shape as the collisions branch above: replace only the
           // field_errors slice, leaving rows / row_count / columns /
@@ -461,6 +545,7 @@ export function useImportSession(): UseImportSessionResult {
     cellErrors,
     unresolvedCount,
     fieldErrorRowCount,
+    unresolvedCategoryCount,
     canImport,
     uploadFile,
     patchRow,

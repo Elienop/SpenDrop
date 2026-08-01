@@ -1395,6 +1395,14 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		"unique_categories": uniqueCategories,
 		"collision_groups":  groups,
 		"field_errors":      checkImportRowLengths(parsedRows),
+		// Computed with nil/0 for the same reason collision_groups is:
+		// the user has chosen nothing yet. So this is the full list of
+		// names the file contains that nothing in the household matches
+		// — precisely what the mapping UI has to ask about. The frontend
+		// marks each entry resolved against its own local choices, which
+		// is how its gate stays the same shape as the confirm gate
+		// without reimplementing which rows are eligible.
+		"unresolved_categories": unresolvedImportCategories(parsedRows, nil, catNameToID, 0),
 	})
 }
 
@@ -1594,6 +1602,50 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+
+	// An id the categories table does not have cannot be a choice the user
+	// made. Left alone, every row it covers lands in processImportRows'
+	// Errored bucket and is folded into `skipped` with nothing saying why —
+	// a whole import reported as "0 imported, 500 skipped". Rejected here
+	// with the offending ids named instead.
+	if unknown := unknownCategoryIDs(req, catIDToName); len(unknown) > 0 {
+		entry.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"code":                 "UNKNOWN_CATEGORY",
+			"unknown_category_ids": unknown,
+			"error":                fmt.Sprintf("no such category: %v", unknown),
+		})
+		return
+	}
+
+	// The category gate. This is the gate, in the same sense the length
+	// check above is: the preview lists what needs deciding as a courtesy,
+	// but a client can POST straight here, and a preview is only a preview.
+	//
+	// It sits AFTER length and BEFORE collisions, and neither position is
+	// incidental.
+	//
+	// Length stays first for the reason it always has: it is the only check
+	// whose remedy is an edit to a row's content, and being told to shorten
+	// a description only after editing it to resolve something else is the
+	// round trip that ordering avoids.
+	//
+	// Collisions come last because the collision view is a FUNCTION of the
+	// resolved category — the content hash is computed from the canonical
+	// category name, and a row whose category does not resolve is dropped
+	// from grouping entirely. Reporting collisions computed against
+	// categories the user has not chosen would name rows that stop
+	// colliding once the mapping lands, and stay silent about rows that
+	// start. The user would resolve a collision that was never real.
+	if unresolved := unresolvedImportCategories(entry.Rows, req.CategoryMap, catNameToID, req.DefaultCategoryID); len(unresolved) > 0 {
+		entry.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":                  "UNRESOLVED_CATEGORIES",
+			"unresolved_categories": unresolved,
+		})
+		return
+	}
+
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -1645,6 +1697,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		filteredRows = append(filteredRows, row)
 	}
 	totalRowCount := len(entry.Rows)
+	userSkippedCount := totalRowCount - len(filteredRows)
 	entry.mu.Unlock()
 
 	// Start a database transaction for all inserts
@@ -1741,12 +1794,44 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	//   not_inserted = total - inserted
 	//                = user_skipped + (processed - inserted)
 	//                = user_skipped + processor_skipped + errored
+	//
+	// `skipped` alone is a number the user cannot act on. A run that reports
+	// "12 imported, 488 skipped" is indistinguishable from a broken import
+	// unless the response says what happened to the 488, so the same three
+	// buckets are also emitted split by reason. Keys are the importSkipReason
+	// values, plus two the processor has no name for because they never reach
+	// it: rows the user skipped in the preview, and rows that errored.
+	//
+	// Only non-zero reasons appear. The map is a description of what
+	// happened, and a wall of zeroes describes nothing.
+	skippedReasons := make(map[string]int, 4)
+	for _, s := range result.Skipped {
+		skippedReasons[string(s.Reason)]++
+	}
+	if len(result.Errored) > 0 {
+		skippedReasons[importOutcomeError] = len(result.Errored)
+	}
+	if userSkippedCount > 0 {
+		skippedReasons[importOutcomeUserSkipped] = userSkippedCount
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"imported": len(result.Inserted),
-		"skipped":  totalRowCount - len(result.Inserted),
-		"total":    totalRowCount,
+		"imported":        len(result.Inserted),
+		"skipped":         totalRowCount - len(result.Inserted),
+		"total":           totalRowCount,
+		"skipped_reasons": skippedReasons,
 	})
 }
+
+// Wire-only outcome keys for the confirm response's skipped_reasons rollup.
+// They are deliberately NOT importSkipReason values: that type is the closed
+// set the property tests assert over result.Skipped, and neither of these
+// ever reaches processImportRows — a user-skipped row is filtered out before
+// the batch, and an errored row lands in result.Errored.
+const (
+	importOutcomeUserSkipped = "user_skipped"
+	importOutcomeError       = "error"
+)
 
 // handleImportCancel removes a pending import entry from memory so the
 // per-user slot is freed immediately (instead of waiting for TTL expiry).
@@ -1946,6 +2031,12 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
 		"field_errors":      checkImportRowLengths(entry.Rows),
+		// Recomputed on every PATCH, like every other derived field on
+		// this response. That is what makes a skip toggle resolve a
+		// category entry: skipped rows are excluded, so skipping the
+		// last row carrying an undecided name drops the entry, and the
+		// frontend's gate clears with no client-side bookkeeping.
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
 	})
 }
 
@@ -2043,6 +2134,10 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		"unique_categories": uniqueCats,
 		"collision_groups":  groups,
 		"field_errors":      checkImportRowLengths(entry.Rows),
+		// Present on the resume path for the same reason field_errors is:
+		// without it, reloading the page during an import clears every
+		// flag the preview was asking the user to act on.
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
 	})
 }
 
@@ -2093,76 +2188,20 @@ func processImportRows(
 	var minDate time.Time
 
 	for i, row := range in.Rows {
-		// Parse date first — every other check below depends on having
-		// a valid time.Time to feed into the hash formula, and an
-		// unparseable date is the single most common real-world input
-		// bug (stray header rows, footer totals, blank rows). Ordering
-		// matters for which reason "wins" on a row with multiple
-		// defects; the order here matches the pre-refactor behaviour
-		// so no existing test changes its outcome label.
-		//
-		// Phase 3.5 introduced the realistic household ledger window
-		// [1900-01-01, 2100-12-31] as a caller-side guard after
-		// parseImportDate returned. Phase 3.7 pushed that check into
-		// parseImportDate itself (see validateImportYear) so the
-		// [1900, 2100] contract is enforced in one place and every
-		// future caller — including the fuzz target — inherits it for
-		// free. An out-of-window date now returns an error from the
-		// parser and routes here as skipReasonUnparseableDate via the
-		// dateErr branch. Property test `TestImportProperty_DateSanity`
-		// asserts every inserted row lands in this window.
-		date, dateErr := parseImportDate(row.Date)
-		if dateErr != nil {
+		// Everything that rejects a row without ever consulting its
+		// category, in one place — see preCategorySkipReason for why the
+		// order matters and why it is shared rather than inlined here.
+		// The parsed date travels out of the check so the hash formula
+		// below does not re-parse what was just validated.
+		date, reason, blocked := preCategorySkipReason(row)
+		if blocked {
 			result.Skipped = append(result.Skipped, importSkipped{
 				RowIndex: i,
-				Reason:   skipReasonUnparseableDate,
+				Reason:   reason,
 			})
 			continue
 		}
-
-		// Required fields. Description is compared to "" not whitespace —
-		// the parsing path already runs strings.TrimSpace before it lands
-		// here, so an all-whitespace cell arrives as "". Amount uses
-		// math.Abs because negative values in spreadsheets (refunds,
-		// credits) are legitimate and get flipped positive at insert
-		// time; the policy is "expense/income is determined by category,
-		// not amount sign".
-		if row.Description == "" {
-			result.Skipped = append(result.Skipped, importSkipped{
-				RowIndex: i,
-				Reason:   skipReasonEmptyDescription,
-			})
-			continue
-		}
-
-		// A floor, and one that should never fire: handleImportConfirm refuses
-		// the whole batch with 409 FIELD_TOO_LONG before reaching this loop, so
-		// by the time a row is here its fields are already within the caps.
-		// It exists because this loop is the last thing between a preview row
-		// and the ledger, and because the property tests in
-		// import_handlers_property_test.go require every skipped row to name a
-		// declared reason — a silent drop here would be a row that vanished
-		// between preview and ledger with nothing recording why.
-		//
-		// It is also the reason the gate above cannot be quietly deleted: doing
-		// so would not let over-long rows through, it would move the rejection
-		// from a preview the user can act on to a count they cannot explain.
-		if len(checkImportRowLengths([]importRow{row})) > 0 {
-			result.Skipped = append(result.Skipped, importSkipped{
-				RowIndex: i,
-				Reason:   skipReasonFieldTooLong,
-			})
-			continue
-		}
-
 		amount := math.Abs(row.Amount)
-		if amount == 0 {
-			result.Skipped = append(result.Skipped, importSkipped{
-				RowIndex: i,
-				Reason:   skipReasonZeroAmount,
-			})
-			continue
-		}
 
 		categoryID := resolveCategoryID(row.Category, in.CategoryMap, in.CatNameToID, in.DefaultCategoryID)
 		if categoryID == 0 {
@@ -2285,6 +2324,54 @@ func processImportRows(
 	}
 
 	return result, minDate
+}
+
+// preCategorySkipReason reports whether a row is rejected before its category
+// is consulted at all, and returns the parsed date so the caller does not
+// re-parse it.
+//
+// Date first: every later check depends on having a valid time.Time for the
+// hash formula, and an unparseable date is the single most common real-world
+// input bug (stray header rows, footer totals, blank rows). The order decides
+// which reason "wins" on a row with several defects, and it is the order
+// processImportRows has always used — no existing outcome label changes.
+//
+// Description is compared to "" not whitespace: the parsing path already runs
+// strings.TrimSpace before a row lands here, so an all-whitespace cell arrives
+// as "". Amount uses math.Abs because negative values in spreadsheets
+// (refunds, credits) are legitimate and get flipped positive at insert time —
+// the policy is "expense/income is determined by category, not amount sign".
+//
+// The length check is a floor that should never fire from the HTTP path:
+// handleImportConfirm refuses the whole batch with 409 FIELD_TOO_LONG first.
+// It exists because this is the last thing between a preview row and the
+// ledger, and because the property tests require every skipped row to name a
+// declared reason — a silent drop here would be a row that vanished with
+// nothing recording why. It is also why the confirm-time gate cannot be
+// quietly deleted: doing so would not let over-long rows through, it would
+// move the rejection from a preview the user can act on to a count they
+// cannot explain.
+//
+// Shared with unresolvedImportCategories rather than inlined, because the
+// category gate must flag exactly the rows whose ONLY obstacle is the
+// category. Two copies of this list would drift, and the drift would show up
+// as a file the preview refuses to import for a decision that could not
+// change its outcome.
+func preCategorySkipReason(row importRow) (time.Time, importSkipReason, bool) {
+	date, err := parseImportDate(row.Date)
+	if err != nil {
+		return time.Time{}, skipReasonUnparseableDate, true
+	}
+	if row.Description == "" {
+		return time.Time{}, skipReasonEmptyDescription, true
+	}
+	if len(checkImportRowLengths([]importRow{row})) > 0 {
+		return time.Time{}, skipReasonFieldTooLong, true
+	}
+	if math.Abs(row.Amount) == 0 {
+		return time.Time{}, skipReasonZeroAmount, true
+	}
+	return date, "", false
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
@@ -2448,24 +2535,171 @@ func validateImportYear(t time.Time, raw string) (time.Time, error) {
 }
 
 // resolveCategoryID determines the category ID for an imported row.
-// Priority: explicit category_map > name match against existing categories > default.
+// Priority: explicit category_map > name match against existing categories,
+// and the default applies ONLY to a row whose Category cell is empty.
+//
+// A non-empty name that matches neither the user's map nor an existing
+// category resolves to 0 — never to the default. Falling back would file the
+// row under a category the user never chose for it, and would do so with
+// nothing to notice: the row lands in the ledger, the confirm response counts
+// it as imported, and only the ledger itself records that "Grocries" became
+// whatever the default happened to be. The name is a decision, and
+// handleImportConfirm refuses the batch with 409 UNRESOLVED_CATEGORIES until
+// the user makes it.
+//
+// The default IS honoured for an empty cell, because there is no name to
+// decide about — choosing "Default Category" in the preview is itself the
+// decision for those rows, and the control says so.
+//
+// Returning 0 needs no new handling in either caller: buildCollisionGroups
+// already drops a 0 row from grouping and processImportRows already records
+// it as skipReasonMissingCategory. So even with the 409 gate removed, an
+// unmatched name costs a counted skip rather than a silent re-home.
+//
+// Map keys are matched EXACTLY (after trimming), not case-insensitively.
+// The preview's unresolved_categories list is keyed the same way, so every
+// distinct spelling the sheet contains gets its own control and its own key
+// — the client never has to guess which casing the server will look up.
 func resolveCategoryID(categoryName string, categoryMap map[string]int64, catNameToID map[string]int64, defaultID int64) int64 {
 	name := strings.TrimSpace(categoryName)
 
-	// 1. Explicit mapping from the confirm request
-	if name != "" && categoryMap != nil {
+	// 1. No name to decide about — the user's default is the decision.
+	if name == "" {
+		return defaultID
+	}
+
+	// 2. Explicit mapping from the confirm request
+	if categoryMap != nil {
 		if id, found := categoryMap[name]; found {
 			return id
 		}
 	}
 
-	// 2. Case-insensitive match against existing categories
-	if name != "" {
-		if id, found := catNameToID[strings.ToLower(name)]; found {
-			return id
-		}
+	// 3. Case-insensitive match against existing categories
+	if id, found := catNameToID[strings.ToLower(name)]; found {
+		return id
 	}
 
-	// 3. Fall back to default
-	return defaultID
+	// 4. Undecided. NOT the default — see the doc comment.
+	return 0
+}
+
+// Reasons an import row's category is unresolved, as they appear on the wire.
+//
+//	unmapped — the cell names a category that matches nothing the household
+//	           has and nothing the user mapped. Remedy: map that name.
+//	missing  — the cell is empty. Remedy: choose a default category.
+//
+// The two are named separately because their remedies are different controls
+// in the preview, and a single "unresolved" label would point the user at
+// the wrong one.
+const (
+	unresolvedCategoryUnmapped = "unmapped"
+	unresolvedCategoryMissing  = "missing"
+)
+
+// unresolvedCategory names one distinct spreadsheet category value that no
+// decision covers yet, with the preview rows carrying it. Name is "" for the
+// missing-cell case; RowIDs lets the frontend say how much of the file each
+// undecided name accounts for, which is the difference between "one typo"
+// and "half my ledger".
+type unresolvedCategory struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+	RowIDs []int  `json:"row_ids"`
+}
+
+// unresolvedImportCategories lists every category value among `rows` that
+// resolveCategoryID cannot turn into an id under the given choices. It is
+// the shared definition behind three surfaces:
+//
+//  1. the preview responses (upload / PATCH / GET), called with a nil map
+//     and a zero default — i.e. "what would need deciding if you decided
+//     nothing", which is exactly the list the mapping UI renders;
+//  2. handleImportConfirm's 409 gate, called with the user's actual choices;
+//  3. nothing else — the frontend's own gate consumes (1) and marks entries
+//     resolved against local state, so the two can disagree only about
+//     choices the user has made since the last preview response.
+//
+// Rows the user marked Skip are excluded, mirroring the collision gate: a
+// row that is not going to be inserted needs no category.
+//
+// Rows that would be rejected BEFORE their category is ever consulted are
+// excluded too, via preCategorySkipReason. This is what keeps the gate from
+// being an obstacle for real files: a trailing "TOTAL 5,000" footer row has
+// no date and no category, and demanding a category decision for a row that
+// is going to be dropped as unparseable either way would block a file that
+// has nothing wrong with it.
+//
+// Grouping is by exact trimmed name, and entries come back in
+// first-appearance order — no sort, because the sheet's own order is what
+// the user is looking at.
+func unresolvedImportCategories(
+	rows []importRow,
+	categoryMap map[string]int64,
+	catNameToID map[string]int64,
+	defaultCategoryID int64,
+) []unresolvedCategory {
+	byName := make(map[string]*unresolvedCategory)
+	order := make([]*unresolvedCategory, 0, 4)
+
+	for _, row := range rows {
+		if row.Skip {
+			continue
+		}
+		if _, _, blocked := preCategorySkipReason(row); blocked {
+			continue
+		}
+		if resolveCategoryID(row.Category, categoryMap, catNameToID, defaultCategoryID) != 0 {
+			continue
+		}
+
+		name := strings.TrimSpace(row.Category)
+		entry, seen := byName[name]
+		if !seen {
+			reason := unresolvedCategoryUnmapped
+			if name == "" {
+				reason = unresolvedCategoryMissing
+			}
+			entry = &unresolvedCategory{Name: name, Reason: reason, RowIDs: []int{}}
+			byName[name] = entry
+			order = append(order, entry)
+		}
+		entry.RowIDs = append(entry.RowIDs, row.RowID)
+	}
+
+	out := make([]unresolvedCategory, 0, len(order))
+	for _, entry := range order {
+		out = append(out, *entry)
+	}
+	return out
+}
+
+// unknownCategoryIDs returns the ids in the confirm request that name no
+// live category, sorted. A stale id is a client bug or a category deleted
+// between preview and confirm; either way the rows it covers would land in
+// processImportRows' Errored bucket and be folded into an unexplained
+// `skipped` count. Naming the ids up front turns that into a message.
+func unknownCategoryIDs(req importConfirmRequest, catIDToName map[int64]string) []int64 {
+	seen := map[int64]struct{}{}
+	var unknown []int64
+	check := func(id int64) {
+		if id == 0 {
+			return
+		}
+		if _, ok := catIDToName[id]; ok {
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		unknown = append(unknown, id)
+	}
+	check(req.DefaultCategoryID)
+	for _, id := range req.CategoryMap {
+		check(id)
+	}
+	sort.Slice(unknown, func(i, j int) bool { return unknown[i] < unknown[j] })
+	return unknown
 }

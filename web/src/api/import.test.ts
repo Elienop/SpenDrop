@@ -5,6 +5,7 @@ import {
   patchImportRow,
   FieldTooLongError,
   NotFoundError,
+  UnresolvedCategoriesError,
   UnresolvedCollisionsError,
 } from './import';
 
@@ -179,6 +180,43 @@ describe('api/import', () => {
     }
   });
 
+  it('confirmImport throws UnresolvedCategoriesError on 409 UNRESOLVED_CATEGORIES', async () => {
+    mockFetch([
+      {
+        ok: false,
+        status: 409,
+        body: {
+          code: 'UNRESOLVED_CATEGORIES',
+          unresolved_categories: [
+            { name: 'Grocries', reason: 'unmapped', row_ids: [0, 4] },
+            { name: '', reason: 'missing', row_ids: [7] },
+          ],
+        },
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      await confirmImport({ import_id: 'abc', category_map: {} });
+      throw new Error('expected confirmImport to reject');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(UnresolvedCategoriesError);
+    // Distinct from both siblings — the hook branches on type, so an
+    // error that also satisfied one of the others would take the wrong
+    // branch and wipe the slice that branch owns.
+    expect(caught).not.toBeInstanceOf(FieldTooLongError);
+    expect(caught).not.toBeInstanceOf(UnresolvedCollisionsError);
+    if (caught instanceof UnresolvedCategoriesError) {
+      expect(caught.unresolved_categories).toEqual([
+        { name: 'Grocries', reason: 'unmapped', row_ids: [0, 4] },
+        { name: '', reason: 'missing', row_ids: [7] },
+      ]);
+    }
+  });
+
   it('confirmImport falls through to the generic error for an unrecognised 409 code', async () => {
     // A 409 the client does not model carries no payload it can act on.
     // Treating it as either typed error would look to the hook like "the
@@ -201,6 +239,7 @@ describe('api/import', () => {
 
     expect(caught).not.toBeInstanceOf(FieldTooLongError);
     expect(caught).not.toBeInstanceOf(UnresolvedCollisionsError);
+    expect(caught).not.toBeInstanceOf(UnresolvedCategoriesError);
     expect((caught as Error).message).toBe('session already consumed');
   });
 

@@ -6,6 +6,7 @@ import type {
   ImportResult,
   PatchRowRequest,
   PatchRowResponse,
+  UnresolvedCategory,
 } from './types';
 
 /**
@@ -82,6 +83,29 @@ export class FieldTooLongError extends Error {
     Object.setPrototypeOf(this, FieldTooLongError.prototype);
     this.name = 'FieldTooLongError';
     this.field_errors = field_errors;
+  }
+}
+
+/**
+ * Thrown when `POST /api/import/confirm` returns 409 UNRESOLVED_CATEGORIES —
+ * at least one row the user asked to import carries a category value no
+ * decision covers. Carries the server's full list so the hook can refresh
+ * what the mapping UI is asking about without a second round-trip.
+ *
+ * A sibling of `UnresolvedCollisionsError` and `FieldTooLongError` by design:
+ * all three are 409s meaning "your selection is not importable yet, here is
+ * exactly what to fix", and all three resolve through the preview. Keeping
+ * the shapes parallel is what let this case extend the hook's existing 409
+ * handling rather than adding a second mechanism.
+ */
+export class UnresolvedCategoriesError extends Error {
+  readonly unresolved_categories: UnresolvedCategory[];
+
+  constructor(unresolved_categories: UnresolvedCategory[]) {
+    super('Import has categories that are not resolved');
+    Object.setPrototypeOf(this, UnresolvedCategoriesError.prototype);
+    this.name = 'UnresolvedCategoriesError';
+    this.unresolved_categories = unresolved_categories;
   }
 }
 
@@ -186,6 +210,7 @@ export async function confirmImport(payload: {
           code?: string;
           collision_groups?: CollisionGroup[];
           field_errors?: ImportFieldError[];
+          unresolved_categories?: UnresolvedCategory[];
           error?: string;
         }
       | null;
@@ -201,6 +226,9 @@ export async function confirmImport(payload: {
     }
     if (body?.code === 'FIELD_TOO_LONG') {
       throw new FieldTooLongError(body.field_errors ?? []);
+    }
+    if (body?.code === 'UNRESOLVED_CATEGORIES') {
+      throw new UnresolvedCategoriesError(body.unresolved_categories ?? []);
     }
     throw new Error(body?.error || `HTTP 409`);
   }
