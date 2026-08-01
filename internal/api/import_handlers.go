@@ -1519,6 +1519,13 @@ func processImportRows(
 		// identity computed above. The partial unique index guarantees
 		// the insert fails loudly if the dup check above raced a parallel
 		// import of the same row — there is no silent double-insert path.
+		//
+		// idempotency_key stays NULL here, deliberately: an imported row is
+		// identified by what it CONTAINS, and content_hash already makes a
+		// repeated import of the same spreadsheet idempotent. Keys identify a
+		// submission attempt and belong to the single-create endpoint, whose
+		// retry-double-post problem content_hash cannot solve. See migration
+		// 017 and handleCreateTransaction.
 		params := database.CreateTransactionParams{
 			UserID:      in.UserID,
 			Date:        date,

@@ -921,3 +921,80 @@ ALTER TABLE notification_settings ADD COLUMN quiet_allow_over_budget INTEGER NOT
 ALTER TABLE notification_settings ADD COLUMN last_digest_at DATETIME;
 ````
 
+## 017_transactions_idempotency_key.sql
+
+````sql
+-- Client-minted idempotency keys for single-transaction creation.
+--
+-- The problem this solves is NOT import dedupe (content_hash already owns
+-- that) but the retry double-post: the PWA quick-add fires POST
+-- /api/transactions, the response is lost on a flaky connection after the
+-- server has already committed, and the user taps Retry. The second POST
+-- is byte-identical to the first and creates a second row.
+--
+-- content_hash cannot answer this question and must not be asked to. Its
+-- digest covers (date, amount_cents, description, category_name) with no
+-- user_id and no time-of-day, and the FIRST row to claim a digest anchors
+-- it household-wide. Two people share this ledger and both type by hand,
+-- so one member's ordinary lunch collides with the other's — see the
+-- header of internal/api/duplicate_of_test.go for the full account of why
+-- the content-hash-derived `duplicate_of` verdict was removed. Only a key
+-- minted per SUBMISSION ATTEMPT distinguishes "I sent this twice" from
+-- "we both bought lunch".
+--
+-- Three deliberate divergences from migration 008's content_hash index:
+--
+-- 1. NO `deleted_at IS NULL` in the partial index predicate. 008 needs the
+--    tombstone filter so a trashed row stops blocking a re-import of the
+--    same content. This index needs the OPPOSITE: a retry whose original
+--    row has since been soft-deleted must still collide, so the replay is
+--    recognised and nothing is created. Resurrecting the row would be
+--    wrong too — the create and the later delete were two separate user
+--    intents, and the delete is the newer one. Dropping the filter is what
+--    makes the tombstone keep claiming its key forever. Note the
+--    consequence: a hard delete releases the key, so a replay arriving
+--    after an admin emptied the trash would insert again. Purging is a
+--    deliberate admin HTTP action (DELETE /transactions/{id}/purge or
+--    /transactions/trash — there is no timed purge worker), so that is a
+--    person choosing to destroy the row, not a window elapsing.
+--
+-- 2. NO backfill. 008 backfills because a content_hash is a property of
+--    the row's CONTENT, which every historic row has. An idempotency key
+--    is a property of the SUBMISSION ATTEMPT that created the row, and a
+--    row written before this column existed has no such attempt to record.
+--    NULL is the correct and permanent value for every pre-existing row —
+--    there is nothing to compute. The partial index ignores NULLs, so any
+--    number of them coexist.
+--
+-- 3. Scoped PER USER, on (user_id, idempotency_key). 008 is global because
+--    content is content: if alice already imported this quarter's
+--    statement, bob's import of the same file should dedupe against her
+--    rows rather than double them. A key is not content. It names one
+--    user's submission attempt, and a retry is always the same user
+--    retrying their own submission — a lost response does not change who
+--    is logged in. So per-user scoping cannot weaken the retry guarantee
+--    the index exists to provide.
+--
+--    A global namespace, on the other hand, creates an authorization
+--    boundary nobody asked for: a create bearing a key another user
+--    already claimed collides, and the handler answers with THAT user's
+--    row while silently discarding the caller's write — no row, no audit
+--    trail, and a 201 saying it worked. Keys are UUIDs so this is not a
+--    likely accident, but the namespace should not be shared at all when
+--    nothing gains from sharing it.
+--
+--    Consequence, intended: two users may hold the same key value, each
+--    anchoring their own row, and each replays only against their own.
+--
+-- The column is nullable and the wire field is optional, forever: a stale
+-- PWA bundle cached by a service worker will keep posting without a key
+-- long after this ships, and those creates must behave exactly as they do
+-- today. Absent key = no idempotency protection, same as before.
+
+ALTER TABLE transactions ADD COLUMN idempotency_key TEXT;
+
+CREATE UNIQUE INDEX idx_transactions_idempotency_key
+    ON transactions(user_id, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+````
+

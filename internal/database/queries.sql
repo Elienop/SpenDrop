@@ -185,6 +185,12 @@ ON CONFLICT(code) DO UPDATE SET
 --   * CountTransactionsByUser: handleDeleteUser's guard must see tombstoned
 --     rows too — they are recoverable ledger history that ON DELETE CASCADE
 --     would destroy just as permanently as a live row.
+--   * GetTransactionByIdempotencyKey: a retried submission must resolve to
+--     the row its first attempt created even if that row has since been
+--     trashed, so the retry creates nothing. Filtering tombstones here would
+--     let the replay fall through to an INSERT and resurrect content the user
+--     has already deleted. See migration 017 for why the unique index behind
+--     this lookup also omits the deleted_at predicate that 008's carries.
 -- When adding a new transactions read, place it in queries.sql (not raw
 -- SQL in a handler) and add AND t.deleted_at IS NULL by default.
 --
@@ -208,8 +214,17 @@ ON CONFLICT(code) DO UPDATE SET
 -- idempotent imports. Manual entries and test fixtures may pass
 -- sql.NullString{} — the index ignores NULL rows, so they coexist with
 -- hashed import rows without collision.
-INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+--
+-- idempotency_key is likewise nullable and answers a different question:
+-- content_hash asks "is this the same CONTENT as an existing row" (import
+-- dedupe), idempotency_key asks "is this the same SUBMISSION ATTEMPT"
+-- (retry protection). Only the single-create handler supplies one; batch,
+-- import and every test fixture pass sql.NullString{}. Both partial unique
+-- indexes can fire on the same INSERT, so the caller must be able to tell
+-- them apart — see IsContentHashUniqueViolation and
+-- IsIdempotencyKeyUniqueViolation, which each match one index by name.
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: CountTransactionsSince :one
@@ -351,6 +366,36 @@ SELECT COUNT(*) FROM transactions WHERE user_id = ?;
 SELECT t.id, t.date, t.amount_cents, t.description, t.category_id, t.content_hash
 FROM transactions t
 WHERE t.content_hash = ? AND t.deleted_at IS NULL;
+
+-- name: GetTransactionByIdempotencyKey :one
+-- Resolves a replayed submission to the row its first attempt created.
+-- Called only after an INSERT has already failed on
+-- idx_transactions_idempotency_key, so a row is expected to exist; the
+-- lookup is what turns that collision into a normal success response
+-- carrying the original row.
+--
+-- Scoped by user_id, matching the composite index. The key namespace is
+-- per-user (see migration 017): a retry is always the same user retrying
+-- their own submission, and one user must never be handed another's row
+-- because they happened to mint the same key. Dropping user_id here would
+-- reintroduce that even with the composite index in place — the lookup
+-- would be free to return the wrong owner's row after a collision.
+--
+-- Deliberately NOT filtered on deleted_at — the inverse of
+-- GetTransactionByContentHash, and the whole point of the divergence.
+-- A retry that arrives after the user has trashed the original must still
+-- find it and create nothing: the create completed, and the delete was a
+-- separate, later intent that the retry has no business undoing. Add the
+-- filter and the replay falls through to an INSERT that resurrects
+-- deleted content under a new id.
+--
+-- The partial unique index guarantees at most one row per (user, key)
+-- across live AND tombstoned rows, so :one is safe.
+--
+-- Returns the full row because the handler answers the replay with the
+-- standard transaction DTO, which is built from every column.
+SELECT t.* FROM transactions t
+WHERE t.user_id = ? AND t.idempotency_key = ?;
 
 -- name: ListTransactionsForHashBackfill :many
 -- Phase 3.4 startup backfill. Returns a bounded page of rows whose

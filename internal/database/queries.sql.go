@@ -327,9 +327,9 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 
 const createTransaction = `-- name: CreateTransaction :one
 
-INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, date, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash, idempotency_key
 `
 
 type CreateTransactionParams struct {
@@ -343,6 +343,7 @@ type CreateTransactionParams struct {
 	Tags                sql.NullString `json:"tags"`
 	Notes               sql.NullString `json:"notes"`
 	ContentHash         sql.NullString `json:"content_hash"`
+	IdempotencyKey      sql.NullString `json:"idempotency_key"`
 }
 
 // Transactions
@@ -367,6 +368,15 @@ type CreateTransactionParams struct {
 // over the normalized row (database.ComputeContentHash); manual-entry
 // handlers and tests pass sql.NullString{} and the partial unique index
 // ignores them.
+//
+// idempotency_key is likewise nullable and answers a different question:
+// content_hash asks "is this the same CONTENT as an existing row" (import
+// dedupe), idempotency_key asks "is this the same SUBMISSION ATTEMPT"
+// (retry protection). Only the single-create handler supplies one; batch,
+// import and every test fixture pass sql.NullString{}. Both partial unique
+// indexes can fire on the same INSERT, so the caller must be able to tell
+// them apart — see IsContentHashUniqueViolation and
+// IsIdempotencyKeyUniqueViolation, which each match one index by name.
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
@@ -379,6 +389,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.Tags,
 		arg.Notes,
 		arg.ContentHash,
+		arg.IdempotencyKey,
 	)
 	var i Transaction
 	err := row.Scan(
@@ -396,6 +407,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.AmountCents,
 		&i.OriginalAmountCents,
 		&i.ContentHash,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -715,6 +727,65 @@ func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransact
 		&i.AmountCents,
 		&i.OriginalAmountCents,
 		&i.CategoryType,
+	)
+	return i, err
+}
+
+const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, t.content_hash, t.idempotency_key FROM transactions t
+WHERE t.user_id = ? AND t.idempotency_key = ?
+`
+
+type GetTransactionByIdempotencyKeyParams struct {
+	UserID         int64          `json:"user_id"`
+	IdempotencyKey sql.NullString `json:"idempotency_key"`
+}
+
+// Resolves a replayed submission to the row its first attempt created.
+// Called only after an INSERT has already failed on
+// idx_transactions_idempotency_key, so a row is expected to exist; the
+// lookup is what turns that collision into a normal success response
+// carrying the original row.
+//
+// Scoped by user_id, matching the composite index. The key namespace is
+// per-user (see migration 017): a retry is always the same user retrying
+// their own submission, and one user must never be handed another's row
+// because they happened to mint the same key. Dropping user_id here would
+// reintroduce that even with the composite index in place — the lookup
+// would be free to return the wrong owner's row after a collision.
+//
+// Deliberately NOT filtered on deleted_at — the inverse of
+// GetTransactionByContentHash, and the whole point of the divergence.
+// A retry that arrives after the user has trashed the original must still
+// find it and create nothing: the create completed, and the delete was a
+// separate, later intent that the retry has no business undoing. Add the
+// filter and the replay falls through to an INSERT that resurrects
+// deleted content under a new id.
+//
+// The partial unique index guarantees at most one row per (user, key)
+// across live AND tombstoned rows, so :one is safe.
+//
+// Returns the full row because the handler answers the replay with the
+// standard transaction DTO, which is built from every column.
+func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, arg GetTransactionByIdempotencyKeyParams) (Transaction, error) {
+	row := q.db.QueryRowContext(ctx, getTransactionByIdempotencyKey, arg.UserID, arg.IdempotencyKey)
+	var i Transaction
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.Date,
+		&i.OriginalCurrency,
+		&i.Description,
+		&i.CategoryID,
+		&i.Tags,
+		&i.Notes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+		&i.AmountCents,
+		&i.OriginalAmountCents,
+		&i.ContentHash,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }

@@ -49,8 +49,14 @@ export interface UseQuickAddResult {
  * not refuse it, because real households enter genuine duplicates (see
  * `contentHashForManualEntry`). It also does not REPORT the collision: the
  * digest carries no user and no time, so "identical to an existing row" and
- * "you submitted this twice" are different questions. Dup-safety therefore
- * lives entirely in the enqueue gate above.
+ * "you submitted this twice" are different questions.
+ *
+ * The answer to the second question is the `client_key` the caller mints into
+ * the payload (see `newClientKey`): it identifies one submission, so re-sending
+ * that same payload resolves to the row it already created. `create` passes the
+ * payload through untouched — it never mints, rewrites, or strips the key —
+ * which is what lets the online POST, the offline capture, and a retry of any
+ * of them stay one intent.
  */
 export function useQuickAdd(): UseQuickAddResult {
   const { user } = useAuth();

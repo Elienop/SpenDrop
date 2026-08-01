@@ -5,11 +5,11 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
 } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
 import { ArrowUpRight, CheckCircle2, LogIn, WifiOff } from 'lucide-react';
-import { ApiError } from '@/api/client';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Toaster } from '@/components/ui/sonner';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -29,6 +29,12 @@ import { useQuickAdd, type QuickAddOutcome } from '@/hooks/useQuickAdd';
 import { useOfflineQueue } from '@/hooks/useOfflineQueue';
 import { useAuth } from '@/hooks/useAuth';
 import { parseQuickEntry } from '@/lib/quick-parse';
+import { newClientKey } from '@/lib/client-key';
+import {
+  isRetryableSaveFailure,
+  noRateMessage,
+  saveFailureMessage,
+} from '@/lib/save-failure';
 import { toCreatePayload } from '@/lib/currency';
 import { cn } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
@@ -40,6 +46,31 @@ import type { Category } from '@/api/types';
 
 type QuickMode = 'freeform' | 'tap';
 type EntryKind = 'income' | 'expense';
+
+/**
+ * One user intent, built once. `payload` already carries the `client_key`
+ * minted when it was assembled, so re-sending THIS object — rather than
+ * rebuilding it from the form — is what makes a retry after an ambiguous
+ * failure land on the same row instead of creating a second one.
+ */
+interface QuickSubmission {
+  payload: CreateTransactionInput;
+  /** Currency the user typed in, kept for the sticky last-used value. */
+  currency: string;
+  /**
+   * Toast slot for this submission — the failure, the "Retrying…" spinner and
+   * the eventual result all render into it, so one intent never stacks three
+   * toasts. Shares the client key's value: one intent, one identity.
+   */
+  toastId: string;
+  /**
+   * What the form held when this was built. A retry can be tapped minutes
+   * later, by which time the screen may hold a different draft; comparing
+   * against this tells the success path whether clearing the form would throw
+   * away work the user has since done.
+   */
+  formSnapshot: string;
+}
 
 function todayIso(): string {
   return formatYYYYMMDD(new Date());
@@ -184,9 +215,11 @@ export function QuickAdd() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const tapAmountRef = useRef<HTMLInputElement>(null);
-  // Latest submit, so the error toast's Retry action can re-run it without
-  // making `submit` depend on itself.
-  const submitRef = useRef<() => void>(() => {});
+  // Latest send, so the error toast's Retry action can re-run it without
+  // making `send` depend on itself.
+  const sendRef = useRef<
+    (submission: QuickSubmission, isRetry?: boolean) => void
+  >(() => {});
 
   // Switch mode + persist the toggle. Defer focus so the target input is
   // mounted (mirrors the reset-focus idiom in `resetForNext`).
@@ -229,6 +262,21 @@ export function QuickAdd() {
           categoryId: pickedCategoryId,
         };
 
+  // Identity of the entry currently on screen. A retry that lands long after
+  // the failure compares against this to decide whether clearing the form
+  // would discard a draft the user has started in the meantime.
+  const formSnapshot = JSON.stringify([
+    effective.amount,
+    effective.currency,
+    effective.description,
+    effective.categoryId ?? '',
+    effective.tags ?? '',
+  ]);
+  const formSnapshotRef = useRef(formSnapshot);
+  useEffect(() => {
+    formSnapshotRef.current = formSnapshot;
+  }, [formSnapshot]);
+
   const hasNoRate =
     !currenciesLoading &&
     effective.currency !== baseCode &&
@@ -268,8 +316,106 @@ export function QuickAdd() {
     }, 0);
   }, [mode]);
 
+  // Sends an already-built submission: the online POST, the offline capture
+  // (both inside `create`), and every retry of that same intent go through
+  // here. It deliberately takes the payload rather than reading the form, so
+  // no path can rebuild — and therefore re-key — a submission the server may
+  // already have accepted.
+  const send = useCallback(
+    async (submission: QuickSubmission, isRetry = false) => {
+      const { payload, currency, toastId, formSnapshot } = submission;
+      let outcome: QuickAddOutcome;
+      try {
+        outcome = await create(payload);
+      } catch (err) {
+        // We only auto-queue when navigator reports the device is offline (see
+        // useQuickAdd) — there the request never leaves the device, so replay is
+        // dup-safe. A throw here means either the server was reached and rejected
+        // the write (ApiError) or the fetch failed while the browser still thinks
+        // it is online (ambiguous: the write may have landed). Neither is safe to
+        // silently queue, so prompt a retry instead.
+        toast.error(saveFailureMessage(err), {
+          id: toastId,
+          // Never auto-dismiss. This toast holds the only path that cannot
+          // duplicate the entry; the Add button beside it mints a fresh key and
+          // never expires. A window that closes on its own would quietly demote
+          // the safe option to the risky one, so the user closes it themselves.
+          duration: Infinity,
+          closeButton: true,
+          // The form is preserved on failure; Retry re-sends this exact
+          // submission so the user doesn't have to guess that re-tapping Add is
+          // the way back. Re-sending the built payload (not rebuilding it from
+          // the form) keeps the client_key stable, which is what lets a failure
+          // that actually landed resolve to the existing row instead of a
+          // duplicate. Offered only where sending again could change the answer.
+          action: isRetryableSaveFailure(err)
+            ? {
+                label: 'Retry',
+                onClick: (event: MouseEvent<HTMLButtonElement>) => {
+                  // sonner dismisses a toast after its action runs unless the
+                  // event is default-prevented. Keep it, and reuse the slot so
+                  // the spinner replaces the error where the user is looking.
+                  event.preventDefault();
+                  toast.loading('Retrying…', { id: toastId });
+                  sendRef.current(submission, true);
+                },
+              }
+            : undefined,
+        });
+        return;
+      }
+
+      // Sticky last-used values for the next entry (whether saved or queued).
+      // Read off the submission, not the live form: a retry may arrive after
+      // the user has started typing something else.
+      localStorage.setItem(
+        STORAGE_KEYS.lastTransactionCategory,
+        String(payload.category_id),
+      );
+      localStorage.setItem(STORAGE_KEYS.lastTransactionDate, payload.date);
+      localStorage.setItem(STORAGE_KEYS.lastTransactionCurrency, currency);
+
+      // Capture this outcome in the toast's own closure so rapid successive
+      // saves each undo their own entry — the server row, or the queued row by
+      // its queue id if it has not synced yet.
+      const undoThis = outcome;
+      toast.success(
+        undoThis.status === 'queued'
+          ? 'Saved offline — will sync when you’re back online'
+          : 'Transaction saved',
+        {
+          // Same slot as the failure it replaces, so a retry resolves where the
+          // user is already looking instead of stacking a third toast.
+          id: toastId,
+          duration: 4000,
+          action: {
+            label: 'Undo',
+            onClick: () =>
+              void undo(undoThis).catch(() => toast.error('Could not undo')),
+          },
+        },
+      );
+
+      setRecentRefreshKey((k) => k + 1);
+      // A retry can succeed long after the failure, by which time the screen
+      // may hold a different entry the user has started. Clearing it then would
+      // destroy work to tidy up after a save they already believe happened. The
+      // entry itself is still saved either way — only the form is spared.
+      if (!isRetry || formSnapshot === formSnapshotRef.current) {
+        resetForNext();
+      }
+    },
+    // formSnapshotRef is a stable ref; listed because the compiler infers it
+    // as a dependency of the draft check and refuses to memoize otherwise.
+    [create, undo, resetForNext, formSnapshotRef],
+  );
+
+  // Builds the payload for what the form currently holds — one intent, one
+  // `client_key`, minted here and nowhere else. Editing the form and adding
+  // again therefore mints a new key, which is correct: that is a new intent.
   const submit = useCallback(async () => {
     if (!canSubmit || effective.categoryId == null) return;
+    const clientKey = newClientKey();
     let payload: CreateTransactionInput;
     try {
       payload = toCreatePayload(
@@ -280,69 +426,24 @@ export function QuickAdd() {
           description: effective.description,
           category_id: effective.categoryId,
           tags: effective.tags,
+          client_key: clientKey,
         },
         baseCode,
         rateFor,
       ) as CreateTransactionInput;
     } catch {
-      toast.error('Failed to save transaction');
+      // Nothing was built and nothing was sent, so there is no Retry to offer —
+      // and a generic "failed to save" would send the user looking for a
+      // network problem. Name the missing rate instead.
+      toast.error(noRateMessage(effective.currency));
       return;
     }
-
-    let outcome: QuickAddOutcome;
-    try {
-      outcome = await create(payload);
-    } catch (err) {
-      // We only auto-queue when navigator reports the device is offline (see
-      // useQuickAdd) — there the request never leaves the device, so replay is
-      // dup-safe. A throw here means either the server was reached and rejected
-      // the write (ApiError) or the fetch failed while the browser still thinks
-      // it is online (ambiguous: the write may have landed). Neither is safe to
-      // silently queue, so prompt a retry instead.
-      toast.error(
-        err instanceof ApiError
-          ? err.message || 'Failed to save transaction'
-          : 'Couldn’t reach the server. Check your connection and try again.',
-        {
-          // The form is preserved on failure; Retry re-submits it so the user
-          // doesn't have to guess that re-tapping Add is the way back.
-          action: { label: 'Retry', onClick: () => submitRef.current() },
-        },
-      );
-      return;
-    }
-
-    // Sticky last-used values for the next entry (whether saved or queued).
-    localStorage.setItem(
-      STORAGE_KEYS.lastTransactionCategory,
-      String(effective.categoryId),
-    );
-    localStorage.setItem(STORAGE_KEYS.lastTransactionDate, payload.date);
-    localStorage.setItem(
-      STORAGE_KEYS.lastTransactionCurrency,
-      effective.currency,
-    );
-
-    // Capture this outcome in the toast's own closure so rapid successive saves
-    // each undo their own entry — the server row, or the queued row by its
-    // queue id if it has not synced yet.
-    const undoThis = outcome;
-    toast.success(
-      undoThis.status === 'queued'
-        ? 'Saved offline — will sync when you’re back online'
-        : 'Transaction saved',
-      {
-        duration: 4000,
-        action: {
-          label: 'Undo',
-          onClick: () =>
-            void undo(undoThis).catch(() => toast.error('Could not undo')),
-        },
-      },
-    );
-
-    setRecentRefreshKey((k) => k + 1);
-    resetForNext();
+    await send({
+      payload,
+      currency: effective.currency,
+      toastId: clientKey,
+      formSnapshot,
+    });
   }, [
     canSubmit,
     effective.amount,
@@ -350,11 +451,10 @@ export function QuickAdd() {
     effective.description,
     effective.categoryId,
     effective.tags,
+    formSnapshot,
     baseCode,
     rateFor,
-    create,
-    undo,
-    resetForNext,
+    send,
   ]);
 
   // Show the past-descriptions chip strip only while the user is still
@@ -414,10 +514,12 @@ export function QuickAdd() {
     [submit, firstSuggestion, onPickSuggestion],
   );
 
-  // Keep the error toast's Retry handler pointed at the current submit closure.
+  // Keep the error toast's Retry handler pointed at the current send closure.
+  // Only the closure is refreshed — the submission it is handed is the one
+  // captured when that toast was raised.
   useEffect(() => {
-    submitRef.current = () => void submit();
-  }, [submit]);
+    sendRef.current = (submission, isRetry) => void send(submission, isRetry);
+  }, [send]);
 
   const descriptionSuggestions = useMemo(
     () => activeCategories.map((c) => c.name),

@@ -31,8 +31,15 @@ const Toaster = ({ ...props }: ToasterProps) => {
           toast:
             "group toast group-[.toaster]:bg-background group-[.toaster]:text-foreground group-[.toaster]:border-border group-[.toaster]:shadow-lg",
           description: "group-[.toast]:text-muted-foreground",
+          // sonner sizes [data-button] at 24px, which is half a touch target
+          // on a screen where the toast also owns swipe-to-dismiss — a miss
+          // dismisses the toast instead of running the action, and for a
+          // failed save that action is the only path that cannot duplicate.
+          // The `group-[.toast]:` prefix is load-bearing: it compiles to
+          // `.toast .…` (two classes) and so outranks sonner's own
+          // `[data-button]` rule regardless of stylesheet order.
           actionButton:
-            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground",
+            "group-[.toast]:bg-primary group-[.toast]:text-primary-foreground group-[.toast]:h-10 group-[.toast]:px-4 group-[.toast]:text-sm group-[.toast]:font-medium",
           cancelButton:
             "group-[.toast]:bg-muted group-[.toast]:text-muted-foreground",
         },

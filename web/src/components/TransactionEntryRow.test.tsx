@@ -4,7 +4,7 @@ import {
   waitFor,
   type RenderOptions,
 } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
+import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import {
   describe,
@@ -17,6 +17,7 @@ import {
 } from 'vitest';
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { TransactionEntryRow } from './TransactionEntryRow';
+import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category, Transaction } from '../api/types';
 
 // Each render gets a fresh QueryClient so the `useCurrencies` cache is isolated
@@ -36,11 +37,43 @@ vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
     error: vi.fn(),
+    loading: vi.fn(),
   },
   Toaster: () => null,
 }));
 
-vi.mock('@/api/client', () => ({
+/** The options object the component hands sonner, as far as tests read it. */
+type ToastOpts = {
+  id?: string | number;
+  duration?: number;
+  closeButton?: boolean;
+  action?: {
+    label: string;
+    onClick: (event: { preventDefault: () => void }) => void;
+  };
+};
+
+/**
+ * Invoke a toast action the way sonner does — with an event whose
+ * `preventDefault` decides whether sonner keeps the toast open.
+ */
+function tapAction(opts: ToastOpts): { preventDefault: ReturnType<typeof vi.fn> } {
+  const event = { preventDefault: vi.fn() };
+  opts.action?.onClick(event);
+  return event;
+}
+
+/** The options the last toast.error call carried. */
+function lastErrorOpts(): ToastOpts {
+  const calls = (toast.error as Mock).mock.calls;
+  return calls[calls.length - 1][1] as ToastOpts;
+}
+
+// Keep the real ApiError class: `saveFailureMessage` / `isRetryableSaveFailure`
+// discriminate on `instanceof ApiError`, so a mock that omits it turns every
+// failure path into a TypeError rather than exercising the branch.
+vi.mock('@/api/client', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/client')>()),
   api: {
     get: vi.fn(async (path: string) => {
       if (path === 'currencies') {
@@ -60,6 +93,19 @@ vi.mock('@/api/client', () => ({
 
 // Import after the mock so we get the mocked version
 import { toast } from 'sonner';
+import { ApiError } from '@/api/client';
+
+/** Fill the row's required fields (amount, description, category). */
+async function fillRow(
+  user: UserEvent,
+  { amount, description }: { amount: string; description: string },
+) {
+  await user.clear(screen.getByLabelText(/amount/i));
+  await user.type(screen.getByLabelText(/amount/i), amount);
+  await user.type(screen.getByLabelText(/description/i), description);
+  await user.click(screen.getByRole('button', { name: /select category/i }));
+  await user.click(await screen.findByRole('option', { name: /groceries/i }));
+}
 
 const mockCategories: Category[] = [
   {
@@ -117,6 +163,7 @@ describe('TransactionEntryRow', () => {
     onDelete = vi.fn().mockResolvedValue(undefined);
     (toast.success as Mock).mockClear();
     (toast.error as Mock).mockClear();
+    (toast.loading as Mock).mockClear();
     localStorage.clear();
   });
 
@@ -181,7 +228,299 @@ describe('TransactionEntryRow', () => {
       description: 'Whole Foods',
       category_id: 1,
       tags: 'food',
+      // Idempotency key for this submit — asserted exactly (not via
+      // toMatchObject) so a future field can't join the wire unnoticed.
+      client_key: expect.any(String),
     });
+  });
+
+  // A save that reached the server and committed, but whose response was lost,
+  // is indistinguishable from one that never arrived. Retry re-sends the same
+  // submission so the server can recognize it; rebuilding the payload here
+  // would mint a second identity and create a second row.
+  it('Retry re-sends the identical payload, key included', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '12');
+    await user.type(screen.getByLabelText(/description/i), 'Eggs');
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    const opts = lastErrorOpts();
+    expect(opts.action?.label).toMatch(/retry/i);
+
+    tapAction(opts);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    const first = onSubmit.mock.calls[0][0] as CreateTransactionInput;
+    const second = onSubmit.mock.calls[1][0] as CreateTransactionInput;
+    expect(first.client_key).toEqual(expect.any(String));
+    expect(second.client_key).toBe(first.client_key);
+    // Byte-identical on the wire, not merely equal in the fields we happened
+    // to think of.
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    // The retry succeeded, so the row behaves like any other save.
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+  });
+
+  it('the failure toast never expires and can be dismissed by hand', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    const opts = lastErrorOpts();
+    // The Add button beside it mints a fresh key and never expires; a toast
+    // that timed out would quietly leave only the duplicating path.
+    expect(opts.duration).toBe(Infinity);
+    expect(opts.closeButton).toBe(true);
+  });
+
+  it('offers no Retry on a 4xx, but does on a 5xx', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new ApiError('bad request', 400));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    // Re-sending the identical body would be refused identically, so a Retry
+    // button here would only teach the user that it does nothing. The server's
+    // own message is shown instead of a generic one.
+    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/bad request/i);
+    expect(lastErrorOpts().action).toBeUndefined();
+
+    // A 5xx is the server breaking rather than judging — worth another try.
+    onSubmit.mockRejectedValueOnce(new ApiError('server error', 500));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(2));
+    expect(lastErrorOpts().action?.label).toMatch(/retry/i);
+  });
+
+  it('Retry swaps the toast in place instead of stacking a new one', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+    const errorOpts = lastErrorOpts();
+    const slot = errorOpts.id;
+    expect(slot).toEqual(expect.any(String));
+
+    const event = tapAction(errorOpts);
+    // sonner would otherwise dismiss the toast the moment the action runs.
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(toast.loading).toHaveBeenCalledWith(
+      expect.stringMatching(/retrying/i),
+      expect.objectContaining({ id: slot }),
+    );
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    const [, successOpts] = (toast.success as Mock).mock.calls[0] as [
+      string,
+      ToastOpts,
+    ];
+    expect(successOpts.id).toBe(slot);
+  });
+
+  it('a retry that succeeds does not wipe a draft typed since the failure', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+
+    // The user gives up waiting and starts the next entry in the row.
+    await user.clear(screen.getByLabelText(/description/i));
+    await user.type(screen.getByLabelText(/description/i), 'Milk');
+
+    // ...then the earlier failure's Retry finally goes through.
+    tapAction(lastErrorOpts());
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    // The rescued entry saved under its own description, and the draft in the
+    // row survived — resetting it would have destroyed work as a side effect.
+    expect(
+      (onSubmit.mock.calls[1][0] as CreateTransactionInput).description,
+    ).toBe('Eggs');
+    expect(screen.getByLabelText(/description/i)).toHaveValue('Milk');
+  });
+
+  it('a retry on an untouched row still clears it for the next entry', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
+
+    tapAction(lastErrorOpts());
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByLabelText(/description/i)).toHaveValue(''),
+    );
+  });
+
+  // The weak flank of the whole feature: a second click while the first save is
+  // still in flight builds a NEW payload with a NEW key, so the server has no
+  // way to recognize it as the same entry. That is a real duplicate, not a
+  // replay.
+  it('disables Add while a save is in flight', async () => {
+    const user = userEvent.setup();
+    let release!: (tx: Transaction) => void;
+    onSubmit.mockImplementationOnce(
+      () =>
+        new Promise<Transaction>((resolve) => {
+          release = resolve;
+        }),
+    );
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await fillRow(user, { amount: '12', description: 'Eggs' });
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    const button = await screen.findByRole('button', { name: /saving/i });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('aria-busy', 'true');
+
+    release(savedTransaction);
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled(),
+    );
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+  });
+
+  it('a save after editing the failed row mints a NEW key', async () => {
+    const user = userEvent.setup();
+    onSubmit.mockRejectedValueOnce(new Error('network down'));
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '12');
+    await user.type(screen.getByLabelText(/description/i), 'Eggs');
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    // The form survives the failure, so correcting the amount and pressing
+    // Save is a DIFFERENT intent — it must not inherit the failed key, or the
+    // server would answer with the old row and drop the correction.
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '20');
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+    const first = onSubmit.mock.calls[0][0] as CreateTransactionInput;
+    const second = onSubmit.mock.calls[1][0] as CreateTransactionInput;
+    expect(second.amount).toBe(20);
+    expect(second.client_key).not.toBe(first.client_key);
+  });
+
+  // A create that reaches the server but whose response is lost would otherwise
+  // be indistinguishable from one that never arrived. The key is what lets the
+  // server recognize the second send as the same submission.
+  it('carries a client_key per submit, and a different one for the next entry', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '10');
+    await user.type(screen.getByLabelText(/description/i), 'Coffee');
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    // Category and date survive the reset, so the next entry only needs an
+    // amount and a description.
+    await user.type(screen.getByLabelText(/amount/i), '4');
+    await user.type(screen.getByLabelText(/description/i), 'Bus');
+    await user.click(screen.getByRole('button', { name: /add/i }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
+
+    const first = onSubmit.mock.calls[0][0] as { client_key?: string };
+    const second = onSubmit.mock.calls[1][0] as { client_key?: string };
+    expect(first.client_key).toBeTruthy();
+    expect(second.client_key).toBeTruthy();
+    // Two separate intents must never share a key, or the server would answer
+    // the second entry with the first one's row and silently drop it.
+    expect(second.client_key).not.toBe(first.client_key);
   });
 
   it('sends an empty tags string when no tags were added', async () => {
@@ -579,7 +918,11 @@ describe('TransactionEntryRow', () => {
     await waitFor(() => {
       expect(toast.error).toHaveBeenCalledTimes(1);
     });
-    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/failed to save/i);
+    // An unanswered request has an UNKNOWN outcome — the copy says so, and
+    // says that Retry cannot duplicate, because otherwise the honest response
+    // is to go and check the ledger first.
+    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/confirm the save/i);
+    expect((toast.error as Mock).mock.calls[0][0]).toMatch(/duplicate/i);
     // Success toast must NOT fire on rejection
     expect(toast.success).not.toHaveBeenCalled();
     // Form is not reset — user can retry

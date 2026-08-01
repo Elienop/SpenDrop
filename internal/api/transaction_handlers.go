@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,6 +88,37 @@ type transactionRequest struct {
 	// nil          -> leave the stored note unchanged (update) / no note (create)
 	// pointer to "" -> explicitly clear the note
 	Notes *string `json:"notes"`
+}
+
+// createTransactionRequest is the single-create wire shape: everything
+// transactionRequest carries, plus the optional client-minted idempotency key.
+//
+// The key lives on its own type rather than on transactionRequest because it is
+// meaningful on exactly one endpoint. PUT /transactions/{id} is an edit of a row
+// that already exists, and the batch endpoint takes a []transactionRequest whose
+// items are deliberately keyless (see handleBatchCreateTransactions).
+//
+// To be clear about what the split does and does not buy: it does NOT make a
+// misplaced key fail loudly. decodeJSON never sets DisallowUnknownFields, here
+// or anywhere in this package, so a client that posts client_key to the update
+// or batch endpoint gets a silent 2xx with the field discarded — the same as any
+// other unknown key. What the split buys is that no handler can accidentally
+// READ the field: on those endpoints it does not exist in Go, so a future edit
+// cannot start honouring a key on a path that has no idempotency semantics.
+// Making the misplaced case loud would take a package-wide decoder change, which
+// is a separate decision affecting every endpoint.
+type createTransactionRequest struct {
+	transactionRequest
+	// ClientKey identifies the SUBMISSION ATTEMPT, not the content. A client
+	// mints one value (crypto.randomUUID()) when the user hits Save and reuses
+	// it for every retry of that same submission, so a response lost on a flaky
+	// connection cannot become a second row.
+	//
+	// Optional forever. A service worker can serve a cached bundle predating
+	// this field for a long time, and those creates must keep behaving exactly
+	// as they did — absent or empty key means no idempotency protection, which
+	// is today's behaviour, not a new failure mode.
+	ClientKey string `json:"client_key"`
 }
 
 // transactionResponse is the JSON output for a single transaction including
@@ -360,20 +392,26 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var req transactionRequest
+	var req createTransactionRequest
 	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if err := validateTransactionRequest(req, noStoredDate); err != nil {
+	if err := validateTransactionRequest(req.transactionRequest, noStoredDate); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	clientKey, err := validateClientKey(req.ClientKey)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	date, _ := time.Parse("2006-01-02", req.Date) // already validated
 
-	amount, origAmt, origCur, err := resolveCurrency(r.Context(), h.queries, req)
+	amount, origAmt, origCur, err := resolveCurrency(r.Context(), h.queries, req.transactionRequest)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -395,6 +433,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		Tags:                nullStringFromPtr(req.Tags),
 		Notes:               nullStringFromPtr(req.Notes),
 		ContentHash:         contentHash,
+		IdempotencyKey:      clientKey,
 	}
 	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
 	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
@@ -412,6 +451,74 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	if err != nil && database.IsContentHashUniqueViolation(err) {
 		params.ContentHash = sql.NullString{}
 		txn, err = h.txnStore.Create(r.Context(), user.ID, params)
+	}
+	// Replay: this submission already created a row, so return that row and
+	// create nothing. Catching the UNIQUE violation is the mechanism, not an
+	// optimisation over a SELECT-then-INSERT pre-check — a pre-check reopens
+	// the very race it would be checking for, and two devices draining the
+	// same offline queue at once would both see "key free" and both insert.
+	// The index is the only thing that can decide a winner atomically.
+	//
+	// It also keeps key probing honest, which a pre-check would not. A key that
+	// does NOT match falls through to a real INSERT: the caller gets a visible
+	// ledger row plus an audit row for every wrong guess. Nobody can ask "does
+	// this key exist" for free. Short-circuiting the miss case — returning 404
+	// or "not found" before writing — would turn this endpoint into a silent
+	// oracle over another member's submission history. Do not add that.
+	//
+	// Re-tested AFTER the content-hash recovery above, not instead of it: a
+	// retry of the same submission carries the same key AND the same content,
+	// so the INSERT violates both partial indexes and SQLite picks which one
+	// to name. If it named content_hash, the recovery above already retried
+	// with a NULL hash and that retry surfaces the key violation here.
+	//
+	// Known limitation, deliberate for now: the replayed BODY is not checked
+	// against the original row. A client that reuses one key for genuinely
+	// different content is answered with the first row and its second
+	// transaction is silently dropped. Every client mints a fresh key per
+	// submission (web/src/lib/client-key.ts), so this is unreachable today; the
+	// stricter alternative is to store a request fingerprint and answer a
+	// mismatch with 409 rather than a fake success.
+	if err != nil && database.IsIdempotencyKeyUniqueViolation(err) {
+		existing, lookupErr := h.queries.GetTransactionByIdempotencyKey(r.Context(),
+			database.GetTransactionByIdempotencyKeyParams{
+				// Scoped to the caller. The index is per-user, so the row that
+				// blocked this INSERT is by construction one of theirs — but the
+				// lookup states the ownership rather than relying on the index to
+				// imply it, so widening the index later cannot quietly start
+				// handing one member another member's row.
+				UserID:         user.ID,
+				IdempotencyKey: clientKey,
+			})
+		if lookupErr != nil {
+			// The row that owned this key vanished between the failed INSERT and
+			// this read. Only a hard delete does that, and the only hard deletes
+			// are the admin-only purge endpoints in trash_handlers.go — there is
+			// no timed purge worker — so this needs an admin emptying the trash in
+			// the same instant. Nothing was written, so report the failure rather
+			// than inventing a success.
+			writeError(w, http.StatusInternalServerError, "failed to create transaction")
+			return
+		}
+		// The original row may be TOMBSTONED, and it is still the right answer.
+		// The first attempt did complete; the user then deleted the row, which
+		// is a separate and later intent. A retry has no business undoing it,
+		// so the delete stands and the replay reports the row it created. The
+		// unique index deliberately omits the deleted_at predicate that
+		// content_hash's carries so this collision still happens — see
+		// migration 017.
+		//
+		// 201 Created, byte-identical in shape to a first-time success, so a
+		// client cannot distinguish a replay from a fresh create. That is the
+		// point: the caller retried because it does not KNOW whether the first
+		// attempt landed, and any distinguishable status invites it to branch
+		// on a difference it must not care about. Nothing below this line runs
+		// — no checkpoint reverify, no budget-alert evaluation, no push, no
+		// live-update broadcast — because no row changed. Firing the activity
+		// push here would notify the household a second time about a
+		// transaction that was added once.
+		writeJSON(w, http.StatusCreated, toTransactionResponse(existing))
+		return
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create transaction")
@@ -741,6 +848,17 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
 		)
 
+		// No idempotency key on this path, deliberately. A key identifies one
+		// submission attempt of one row; a batch is a single request carrying N
+		// rows, so a per-request key cannot express "row 7 already landed" and a
+		// per-item key would need the wire shape to become a keyed envelope for
+		// a surface that has no retry story. This endpoint exists for bulk entry
+		// and import-adjacent tooling, where content_hash is already the dedup
+		// mechanism and is the right one: those rows are identified by what they
+		// contain, not by which attempt sent them. The retry double-post this
+		// guards against arrives at the SINGLE-create endpoint — the mobile
+		// quick-add and the offline-queue drain both post there, and nothing
+		// under web/src calls /api/transactions/batch at all.
 		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
 			UserID:              user.ID,
 			Date:                date,
@@ -948,6 +1066,42 @@ func validateTransactionRequest(req transactionRequest, storedDate string) error
 		return fmt.Errorf("original_amount exceeds maximum allowed value")
 	}
 	return nil
+}
+
+// clientKeyPattern is the accepted shape of an idempotency key: URL/header-safe
+// ASCII, long enough not to be a degenerate constant. It is deliberately a
+// charset rather than a UUID grammar — the server compares keys, it never
+// parses them, so demanding UUID structure would break the API-token surface
+// for callers with a perfectly good scheme of their own while making no key
+// more unique. What it does exclude is the values that are not keys at all:
+// whitespace of every kind (including tabs and NBSP), NUL and other control
+// characters, and the "undefined"/"null"/"0" a caller emits when its key
+// generator silently failed.
+var clientKeyPattern = regexp.MustCompile(
+	fmt.Sprintf(`^[A-Za-z0-9_.:-]{%d,%d}$`, MinClientKeyLength, MaxClientKeyLength))
+
+// validateClientKey lifts the optional client_key wire field into its stored
+// form. An absent key and an empty one are the same thing — no idempotency
+// protection, the pre-existing behaviour — and both store NULL, which the
+// partial unique index ignores, so any number of keyless rows coexist.
+//
+// Anything non-empty must be a real key. Rejecting at the boundary rather than
+// storing whatever arrived matters because a key CLAIMS a name in the caller's
+// namespace: once a degenerate value like "0" anchors a row, every later
+// submission carrying it replays against that row and is discarded as a retry,
+// so the caller's ledger silently stops recording. Per-user scoping bounds the
+// blast radius to the caller's own data (migration 017) but does not remove it
+// — a script reusing one constant swallows its own writes.
+func validateClientKey(key string) (sql.NullString, error) {
+	if key == "" {
+		return sql.NullString{}, nil
+	}
+	if !clientKeyPattern.MatchString(key) {
+		return sql.NullString{}, fmt.Errorf(
+			"client_key must be %d-%d characters of A-Z, a-z, 0-9, or _.:-",
+			MinClientKeyLength, MaxClientKeyLength)
+	}
+	return sql.NullString{String: key, Valid: true}, nil
 }
 
 // patchRequest is the JSON wire shape for the bulk-edit `patch` field.

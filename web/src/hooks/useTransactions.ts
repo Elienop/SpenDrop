@@ -51,6 +51,15 @@ export interface CreateTransactionInput {
   original_currency?: string;
   tags?: string;
   notes?: string;
+  /**
+   * Client-minted idempotency key for one create (see `newClientKey`). The
+   * server returns the row already created under this key instead of making a
+   * second one, so re-sending a submission whose response was lost is safe.
+   * Optional: rows queued offline before this field existed replay without it,
+   * and the server treats a missing key as "no replay protection", exactly as
+   * before.
+   */
+  client_key?: string;
 }
 
 export interface UpdateTransactionInput extends CreateTransactionInput {

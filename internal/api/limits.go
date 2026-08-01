@@ -106,6 +106,27 @@ const (
 	MaxFilterJSONLength     = 10000
 )
 
+// Bounds on the client-supplied idempotency key for POST /api/transactions.
+// Clients mint crypto.randomUUID(), which is 36 characters; 64 leaves room for
+// a prefixed or otherwise-structured key from the API-token surface without
+// letting an unbounded string reach an indexed column.
+//
+// The 16-character floor exists to keep degenerate values out of the key
+// namespace. A key is a claim, and a short one is a claim somebody else's
+// script will make too: "0", "1", "undefined" and "null" are what a caller
+// emits when its key generator silently failed, and every submission after
+// that would replay against the first one and be discarded as a retry. The
+// floor makes an accidental key too short to be accepted at all, so the caller
+// gets a 400 instead of a ledger that quietly stops recording. It cannot break
+// a real client — a UUID is 36 characters and any deliberate scheme clears 16.
+//
+// The bounds are in bytes, which equals characters here because the charset
+// (see clientKeyPattern) is ASCII-only.
+const (
+	MinClientKeyLength = 16
+	MaxClientKeyLength = 64
+)
+
 // Query result caps for read endpoints that don't expose pagination.
 const (
 	DefaultTopMerchantsLimit   = 10
