@@ -116,7 +116,7 @@ Tabbed settings page covering account and system configuration. Monthly Budgets,
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Users** -- Admin user management (create, edit roles, delete, and reset a member's password)
 - **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Use them to authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session — see [Using API tokens](#using-api-tokens) for curl and Homepage examples.
-- **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads.
+- **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads. Importing is **admin only**; export is available to every member, so a member sees this tab titled just **Export**, holding the export controls alone. `?tab=data` resolves for both roles.
 
 ![Settings](docs/screenshots/08-settings.png)
 
@@ -293,7 +293,7 @@ Most deployments only need the first handful of variables. Everything below is a
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `MAX_JSON_BYTES` | `1048576` (1 MiB) | Maximum size of a JSON request body |
-| `MAX_UPLOAD_BYTES` | `10485760` (10 MiB) | Maximum size of a multipart file upload (xlsx import) |
+| `MAX_UPLOAD_BYTES` | `10485760` (10 MiB) | Maximum size of a multipart file upload (xlsx import). Bounds the compressed file only — the workbook's decompressed-size, row and cell limits are fixed, not tunable, and are described under [Import](#import-admin-only) |
 | `SQLITE_BUSY_TIMEOUT` | `5s` | SQLite busy timeout. Raise this if you see `database is locked` errors under heavy concurrent writes |
 | `BACKUP_ENABLED` | `true` | Enable the in-process scheduled backup loop. Set `false` to disable it entirely; no other `BACKUP_*` variables are validated when disabled |
 | `BACKUP_INTERVAL` | `24h` | How often the scheduler runs a backup. Must be at least `1h` |
@@ -931,7 +931,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
-| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. `schema_version` (the newest applied migration filename) is a deployment fingerprint and is exposed on purpose: the release tag is a sharper fingerprint and is already unauthenticated in the frontend bundle, and the migration filenames ship inside the published image anyway, so authenticating this field would cost you the ability to alert on schema drift from an external scraper while making nothing actually secret. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
 | GET | `/api/version` | The release the running server was built from — `{"version":"v0.35.0"}`, carrying the leading `v`. A build that was not stamped with a release (a local `go build`, `docker-compose.dev.yml`, an image built without `--build-arg APP_VERSION`) reports exactly `dev`; the value is never empty. The string is baked into the binary at link time, so it needs no environment variable and cannot be changed without rebuilding, and the same build arg stamps the frontend bundle, so the UI and the API of one image always agree. **Auth required**, unlike `/api/health`, for consistency with the rest of `/api` rather than to keep the release secret — the same string is stamped into the frontend bundle, which is served unauthenticated so the login page can render, so anyone who can reach the app can already read it. Treat your version as public information. |
 | GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 
@@ -1016,7 +1016,11 @@ See the [Homepage integration](#homepage-integration) section below for the `ser
 | GET | `/api/export/monthly/{year}/{month}` | Export monthly report |
 | GET | `/api/export/yearly/{year}` | Export yearly report |
 
-### Import
+### Import (admin only)
+Import is the only endpoint that hands an untrusted binary file to a third-party parser, and the only write path that can create thousands of ledger rows from one request, so the whole surface is restricted to admins. Members get a 403; export is unaffected and stays open to everyone.
+
+An uploaded workbook is also bounded by its shape, not only by `MAX_UPLOAD_BYTES` — that cap limits the *compressed* xlsx, and a few kilobytes of it can describe an arbitrarily large sheet. An archive that expands past 128 MiB is refused before it is decompressed; a sheet that extends past row 1,048,576 (Excel's own maximum, so only a malformed file reaches it) or that exceeds 4,000,000 cells once each row is padded out to its rightmost value is refused with a 400 naming the limit rather than truncated. Note that padding is what counts toward the cell limit: a single value in a far-right column costs that row its full 16,384-cell width. `MaxImportRows` still caps the parsed rows at 10,000.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/import/upload` | Upload Excel file and open a preview session (returns `import_id`, parsed rows, and any content-hash collision groups) |

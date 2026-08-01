@@ -45,6 +45,37 @@ type healthzDataResponse struct {
 	// schema than the binary expects, and for "which release is
 	// deployed" dashboards. Empty string if migrations have never run
 	// (fresh container).
+	//
+	// DELIBERATELY UNAUTHENTICATED, reviewed 2026-08-01 and kept. A
+	// security pass flagged it as a deployment fingerprint, which it is —
+	// the question is whether hiding it would remove one, and it would
+	// not. Three facts, each verified rather than assumed:
+	//
+	//  1. A strictly SHARPER fingerprint is already public at the same
+	//     network position. The release tag is stamped into the frontend
+	//     bundle, which is served unauthenticated so the login page can
+	//     render; README documents it as public information. Anyone who
+	//     can reach this endpoint can already read the exact release,
+	//     which pins the build far more precisely than "the newest
+	//     migration is 017_transactions_idempotency_key.sql".
+	//  2. The migration FILENAMES are not secret either. migrate.go
+	//     embeds migrations/*.sql with go:embed, so every name ships
+	//     verbatim inside the binary, and the published container image
+	//     is anonymously pullable. Gating the endpoint would not make the
+	//     string unknowable; it would only make it unknowable to a
+	//     monitoring scraper.
+	//  3. Gating it would cost real signal. The value's whole job is to
+	//     let an operator alert on "the DB is on an older schema than the
+	//     binary expects" — a check that has to run from outside the app,
+	//     from a scraper that has no session. (The Docker HEALTHCHECK is
+	//     not the consumer at risk: it scrapes /api/health, not this
+	//     endpoint. External monitoring is.)
+	//
+	// So the honest reason to leave it open is that authenticating it
+	// would be secrecy theatre — the same false rationale the version
+	// stamp work already had to remove from four places once. If this app
+	// ever ships a multi-tenant build, or the image stops being public,
+	// revisit fact 2 and this whole calculus changes.
 	SchemaVersion string `json:"schema_version"`
 
 	// TransactionsLive is the count of rows with deleted_at IS NULL.
