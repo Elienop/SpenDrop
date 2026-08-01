@@ -505,15 +505,33 @@ func exportTxnHeaders(baseCurrency string) []any {
 // NULL currency/tags/notes columns were already rendered.
 func writeExportTxnRows(sw *excelize.StreamWriter, sheet string, startRow int, txns []exportTxnRow, x *exportTruncations) error {
 	row := startRow
-	// Reused across iterations: SetRow consumes the slice synchronously.
-	vals := make([]any, 9)
+	// Reused across iterations: SetRow consumes the slice synchronously
+	// (stream.go, SetRow writes each value into its own buffer and returns), so
+	// no row can retain a reference to it.
+	//
+	// Sized from the header row and cleared IN FULL each iteration, both
+	// deliberately. The previous version made this []any{} nine long by hand and
+	// reset only vals[5..8] — the four nullable columns — as an index literal.
+	// That was correct and completely unguarded: deleting the reset left the
+	// whole internal/api suite green while a bare row silently inherited the
+	// previous transaction's currency, tags and notes, with its own date and
+	// amount intact so the workbook still reconciled. Adding a tenth header
+	// likewise stayed green, with the header row one column wider than the data.
+	//
+	// Neither drift is possible now: the width follows exportTxnHeaders, and a
+	// new nullable column is cleared without anyone remembering to extend a
+	// tuple. Keep it that way — an index literal here is a correctness
+	// invariant maintained by discipline, and the discipline had no test.
+	vals := make([]any, len(exportTxnHeaders("")))
 	for _, t := range txns {
+		for i := range vals {
+			vals[i] = nil
+		}
 		vals[0] = t.date.Format("2006-01-02")
 		vals[1] = x.text(sheet, "Description", 2, row, t.desc)
 		vals[2] = x.text(sheet, "Category", 3, row, t.catName)
 		vals[3] = t.catType
 		vals[4] = centsToDollars(t.amountCents)
-		vals[5], vals[6], vals[7], vals[8] = nil, nil, nil, nil
 		if t.origAmtCents.Valid {
 			vals[5] = centsToDollars(t.origAmtCents.Int64)
 		}
