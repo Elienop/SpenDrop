@@ -1,12 +1,16 @@
 package api
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -441,6 +445,434 @@ func uniqueCategoriesFromRows(rows []importRow) []string {
 	return out
 }
 
+// Compile-time assertion that our row cap stays at or below excelize's own
+// TotalRows limit. readImportSheetRows reports the library's ErrMaxRows using
+// our row-cap message, which is only truthful while a sheet that trips the
+// library's limit has necessarily passed ours. Raise MaxImportSheetRows above
+// Excel's maximum row and this stops compiling rather than silently making
+// that message a lie.
+const _ = uint(excelize.TotalRows - MaxImportSheetRows)
+
+// Sentinel errors for the workbook-shape caps. All three are surfaced to the
+// caller verbatim as a 400 body, so they are written as advice rather than as
+// diagnostics — a user who hits one needs to know what to change about the
+// file. None interpolates any part of the upload.
+//
+// The wording of each has to describe what is actually counted, which is not
+// always what a user would count. The row cap counts row SLOTS and the cell
+// cap counts cells AFTER padding, so phrasing either in terms of visible
+// content would send someone hunting for data that is not there. See the
+// limits.go comment for why the counters are right and the naive phrasings
+// were wrong.
+var (
+	errImportSheetTooManyRows = fmt.Errorf(
+		"spreadsheet extends past row %d, which is beyond Excel's own maximum, so the file is malformed rather than merely large; re-save it from a spreadsheet application, or split it",
+		MaxImportSheetRows)
+	errImportSheetTooManyCells = fmt.Errorf(
+		"spreadsheet is too wide once each row is padded out to its rightmost value (limit %d cells); a single value in a far-right column costs that row its full width, so clear anything to the right of your data, then split the file if it is still too large",
+		MaxImportSheetCells)
+	errImportArchiveTooLarge = fmt.Errorf(
+		"spreadsheet expands to more than %d MiB when decompressed; split it into smaller files",
+		MaxImportUnzippedBytes>>20)
+	errImportCellTooLong = fmt.Errorf(
+		"a single cell holds more than %d KiB of text, which is beyond what any spreadsheet cell can contain, so the file is malformed rather than merely large; re-save it from a spreadsheet application",
+		MaxImportCellBytes>>10)
+	errImportRowTooWide = fmt.Errorf(
+		"a row declares more than %d cells, which is beyond what any spreadsheet can hold; re-save the file from a spreadsheet application",
+		MaxImportCellsPerRow)
+	errImportRowTooLarge = fmt.Errorf(
+		"a single row holds more than %d MiB of text; split the sheet into smaller files",
+		MaxImportRowBytes>>20)
+	errImportNotAZipArchive = errors.New(
+		"file is not a readable .xlsx workbook; export it as .xlsx (not .xls, and not password-protected) and try again")
+	errImportSheetTooManyBytes = fmt.Errorf(
+		"spreadsheet holds more than %d MiB of cell text; split it into smaller files",
+		MaxImportSheetBytes>>20)
+)
+
+// checkImportArchiveSize rejects a workbook whose zip directory declares more
+// decompressed bytes than MaxImportUnzippedBytes, BEFORE any of it is
+// decompressed.
+//
+// This runs ahead of excelize.OpenReader because OpenReader inflates the whole
+// archive up front — every entry, including parts the importer never reads —
+// so by the time any of our other caps could look at the data, the allocation
+// has already happened. Measured: a 2.00 MiB upload drove +10,244 MiB inside
+// OpenReader alone.
+//
+// Reading the zip directory is cheap and does not decompress anything: the
+// sizes are metadata.
+//
+// Acting on a declared size is safe in the direction that matters here.
+// OVER-declaring is the dangerous direction, because excelize preallocates a
+// buffer from the declared size before reading (lib.go, readFile), so a large
+// declaration costs memory whether or not the entry can deliver it — which is
+// exactly what this rejects. Under-declaring buys an attacker nothing, because
+// Go's archive/zip stops a reader the moment it returns more bytes than its
+// entry declared (reader.go, checksumReader.Read).
+//
+// The sizes are summed as uint64 and every entry is bounded individually,
+// which is load-bearing rather than stylistic. UncompressedSize64 is a uint64
+// that archive/zip copies out of the zip64 extra field without a range check,
+// and FileInfo().Size() converts it to int64 unguarded. An entry declaring
+// 1<<63 therefore reports a NEGATIVE size, and a signed running total goes so
+// far negative that no later entry can bring it back over any limit: a
+// 161-byte archive defeated the signed version of this check entirely, and
+// prefixing that entry to 200 MiB of honestly-declared parts defeated it too.
+// Summing unsigned removes the sign question, and rejecting any single entry
+// above the limit before adding it means the running total can never wrap.
+//
+// Note that excelize's own UnzipSizeLimit — passed at the call site as a
+// second layer — computes the same signed sum internally and has the same
+// blind spot, so it does not back this check up for this input. It reaches
+// make([]byte, 0, negative) and panics instead. That is another reason this
+// check must be correct on its own rather than treated as belt-and-braces.
+func checkImportArchiveSize(data []byte) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		// Refuse anything that is not a zip, rather than passing it through
+		// for excelize to diagnose.
+		//
+		// This used to return nil on the reasoning that both sides call
+		// archive/zip over the same bytes, so a reader we cannot open is one
+		// excelize cannot open either. That is false, and dangerously so:
+		// excelize sniffs an 8-byte OLE/CFB header first and, on a match,
+		// runs its decryption path BEFORE any zip reader — where extractPart
+		// does make([]byte, entry.Size) from an unvalidated CFB directory
+		// field. An 8,704-byte upload declaring an 8 GiB stream allocated
+		// 8,448 MiB; declaring 64 GiB aborted the process with a runtime
+		// out-of-memory, which chi's Recoverer cannot catch. Neither this
+		// check nor UnzipSizeLimit sees that path at all.
+		//
+		// A plain .xlsx is a zip. Encrypted and legacy .xls workbooks are not
+		// supported input, so refusing them here costs nothing and keeps the
+		// parser off every byte sequence we have not bounded.
+		return errImportNotAZipArchive
+	}
+	// Two properties make this sum safe, and BOTH are load-bearing.
+	//
+	// Unsigned: UncompressedSize64 is a uint64 that archive/zip copies out of
+	// the zip64 extra field unchecked, and FileInfo().Size() converts to int64
+	// without a range check, so an entry declaring 1<<63 reports a negative
+	// size and a signed total goes so far negative nothing recovers it.
+	//
+	// Checked INSIDE the loop rather than after it: two entries of 1<<63 sum
+	// to exactly 2^64 and wrap to zero. Testing per iteration means the total
+	// is at or below the limit entering each one, so the first oversized entry
+	// is caught while the sum is still meaningful and no addition can wrap.
+	//
+	// A per-entry bound before the addition would be dead code — it can never
+	// fire that this does not — so there is deliberately none.
+	var total uint64
+	for _, entry := range zr.File {
+		total += entry.UncompressedSize64
+		if total > MaxImportUnzippedBytes {
+			return errImportArchiveTooLarge
+		}
+	}
+	return nil
+}
+
+// prescanImportWorkbook bounds how large a single Rows.Columns() call can get,
+// and does it before excelize materialises anything.
+//
+// This exists because every other cap in this file is evaluated on the slice
+// Columns() already returned, and so can only report an allocation rather than
+// prevent one. Columns() builds a whole row at once, and the row's cost is the
+// sum over its cells of the string each one resolves to. excelize bounds
+// neither factor: a cell without an `r` attribute never reaches
+// CellNameToCoordinates, so cells-per-row is unbounded, and a shared string is
+// rebuilt per referencing cell at whatever length the table declares.
+//
+// WHY THIS SUMS PER ROW RATHER THAN CAPPING COLUMNS. The obvious cheaper design
+// — cap cells-per-row, cap bytes-per-cell, call the product the peak — was
+// implemented first and is wrong for this application. It forces the two caps
+// low enough that their product is acceptable, and a cells-per-row cap low
+// enough to matter (1,024 at a 32 KiB cell) refuses files real spreadsheet
+// applications produce: Google Sheets allows 18,278 columns and 50,000
+// characters per cell, and this household imports Google Sheets exports every
+// month. Summing the row's actual projected bytes bounds exactly the quantity
+// that allocates, so the individual limits can each sit far above anything a
+// spreadsheet can emit while the peak stays bounded. False rejections here cost
+// a working workflow; tightness buys nothing beyond the bound.
+//
+// Resolving shared-string references is what makes that possible, so this is
+// not purely structural: it reads the shared-string table's lengths (not its
+// contents) and adds the right one per reference. It still builds no rows,
+// keeps no strings, and interprets no values — a cell's TYPE only selects which
+// length to add.
+//
+// Cost is one extra streaming decompression of the shared-string table and each
+// worksheet, plus one int per distinct shared string. Measured at 0 MiB of
+// allocation rejecting payloads that drove excelize to 1,258 MiB.
+func prescanImportWorkbook(data []byte) error {
+	zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return errImportNotAZipArchive
+	}
+
+	sharedLens, err := prescanSharedStrings(zr)
+	if err != nil {
+		return err
+	}
+	for _, zf := range zr.File {
+		if strings.HasPrefix(strings.ToLower(zf.Name), "xl/worksheets/sheet") {
+			if err := prescanSheet(zf, sharedLens); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// prescanSharedStrings returns the text length of every <si> in the workbook's
+// shared-string table, indexed as the sheets reference them. An <si> may be
+// split across several <r> runs, so the lengths accumulate until the item ends.
+//
+// It deliberately does NOT reject an over-long item here, even though that
+// looks like the natural place for it. An entry costs memory only when a cell
+// references it, and prescanSheet adds its length at every reference — so an
+// item long enough to matter is refused there, and one nothing references
+// costs nothing beyond the archive-bounded load that already happened. A
+// rejection here would be unreachable in any way that matters: removing it
+// changed no test, which is how it was found.
+func prescanSharedStrings(zr *zip.Reader) ([]int, error) {
+	var entry *zip.File
+	for _, zf := range zr.File {
+		if strings.EqualFold(zf.Name, "xl/sharedStrings.xml") {
+			entry = zf
+			break
+		}
+	}
+	if entry == nil {
+		return nil, nil // inline-strings-only workbook
+	}
+	rc, err := entry.Open()
+	if err != nil {
+		return nil, nil // let excelize report it
+	}
+	defer rc.Close()
+
+	lengths := []int{}
+	decoder := xml.NewDecoder(rc)
+	current, inItem, inText := 0, false, false
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			// EOF, or malformed XML which is excelize's to report.
+			return lengths, nil
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "si":
+				current, inItem = 0, true
+			case "t":
+				inText = true
+			}
+		case xml.CharData:
+			if inItem && inText {
+				current += len(element)
+			}
+		case xml.EndElement:
+			switch element.Name.Local {
+			case "t":
+				inText = false
+			case "si":
+				inItem = false
+				lengths = append(lengths, current)
+				if len(lengths) > MaxImportSheetCells {
+					// More distinct strings than the cell budget could ever
+					// reference, so the workbook is unimportable regardless.
+					return nil, errImportSheetTooManyCells
+				}
+			}
+		}
+	}
+}
+
+// prescanSheet walks one worksheet and rejects any row whose cells would
+// together materialise more than MaxImportRowBytes, or which declares more
+// cells than MaxImportCellsPerRow.
+//
+// The cell count is bounded separately from the bytes because empty cells cost
+// nothing in text but still cost a slice slot: excelize pads a row out to the
+// column index of its rightmost value, so a run of empty cells followed by one
+// value allocates a header per skipped column.
+func prescanSheet(zf *zip.File, sharedLens []int) error {
+	rc, err := zf.Open()
+	if err != nil {
+		return nil // let excelize report it
+	}
+	defer rc.Close()
+
+	decoder := xml.NewDecoder(rc)
+	var (
+		rowBytes, cellsThisRow int
+		cellIsShared, inValue  bool
+		cellBytes              int
+	)
+	addCellBytes := func(n int) error {
+		cellBytes += n
+		if cellBytes > MaxImportCellBytes {
+			return errImportCellTooLong
+		}
+		rowBytes += n
+		if rowBytes > MaxImportRowBytes {
+			return errImportRowTooLarge
+		}
+		return nil
+	}
+
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil // EOF, or malformed XML for excelize to report
+		}
+		switch element := token.(type) {
+		case xml.StartElement:
+			switch element.Name.Local {
+			case "row":
+				rowBytes, cellsThisRow = 0, 0
+			case "c":
+				cellBytes = 0
+				cellIsShared = false
+				for _, attr := range element.Attr {
+					if attr.Name.Local == "t" && attr.Value == "s" {
+						cellIsShared = true
+					}
+				}
+				cellsThisRow++
+				if cellsThisRow > MaxImportCellsPerRow {
+					return errImportRowTooWide
+				}
+			case "v", "t":
+				inValue = true
+			}
+		case xml.CharData:
+			if !inValue {
+				continue
+			}
+			if cellIsShared {
+				// A shared reference costs the length of the item it points
+				// at, once per reference. An unparseable or out-of-range
+				// index is excelize's to reject; it cannot cost memory here.
+				index, convErr := strconv.Atoi(strings.TrimSpace(string(element)))
+				if convErr != nil || index < 0 || index >= len(sharedLens) {
+					continue
+				}
+				if err := addCellBytes(sharedLens[index]); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := addCellBytes(len(element)); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			if element.Name.Local == "v" || element.Name.Local == "t" {
+				inValue = false
+			}
+		}
+	}
+}
+
+// readImportSheetRows reads a worksheet into the same [][]string shape that
+// excelize's File.GetRows returns, but stops at MaxImportSheetRows scanned row
+// slots and MaxImportSheetCells materialised cells. It replaces the GetRows
+// call this handler used to make, which is unbounded on both axes and lets a
+// few KB of upload direct the parser into an indefinite CPU spin or a
+// multi-gigabyte allocation. See the cap declarations in limits.go for the
+// measurements and for why the upstream v2.11.0 guard does not cover the
+// reachable shape.
+//
+// The body deliberately mirrors GetRows statement for statement — the blank
+// run padding, the trailing `results[:maxVal]` trim, and the break-on-error
+// are all reproduced — so that swapping it in changes only what the caps
+// reject and nothing about how a legitimate file parses. Columns() is called
+// with no options for the same reason: it inherits RawCellValue from the
+// options passed to OpenReader, exactly as GetRows did.
+//
+// The budgets below are checked after Columns() returns, because that is the
+// only place they can be: Columns() materialises a whole row before yielding
+// it. They therefore bound TOTALS, not the peak of any one row — the peak is
+// bounded ahead of them by prescanImportWorkbook, and it has to be, because a
+// single row costs (cells in the row) x (bytes per cell) and both factors are
+// attacker-chosen.
+//
+// This comment used to price a pathological row at "≈262 KB at Excel's
+// 16384-column maximum". That was wrong twice over and is the reason the
+// post-hoc placement looked safe: it counted only the 16-byte string headers
+// and none of the content those headers point at, and 16,384 is not a ceiling
+// on this path at all. Priced properly the same row is 512 MiB, and measured
+// at that shape, 514.4 MiB.
+func readImportSheetRows(f *excelize.File, sheet string) ([][]string, error) {
+	rows, err := f.Rows(sheet)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	results, cur, maxVal, cells, textBytes := make([][]string, 0, 64), 0, 0, 0, 0
+	for rows.Next() {
+		cur++
+		if cur > MaxImportSheetRows {
+			return nil, errImportSheetTooManyRows
+		}
+		row, err := rows.Columns()
+		if err != nil {
+			break
+		}
+		if len(row) > 0 {
+			cells += len(row)
+			if cells > MaxImportSheetCells {
+				return nil, errImportSheetTooManyCells
+			}
+			// Bound the bytes, not only the geometry. Counting cells says
+			// nothing about how much memory they hold, and excelize rebuilds a
+			// shared string per referencing cell, so a handful of cells can
+			// carry gigabytes. Both bounds are needed: the per-cell one
+			// catches a single enormous string, the running total catches many
+			// merely-large ones. See the limits.go comment for the
+			// measurements.
+			// Per-cell and per-row limits are enforced by
+			// prescanImportWorkbook, before this row was built — a check here
+			// could only report a cell that had already been allocated. What
+			// remains here is the SHEET total, which the prescan does not
+			// accumulate because it bounds each row independently.
+			for _, value := range row {
+				textBytes += len(value)
+			}
+			if textBytes > MaxImportSheetBytes {
+				return nil, errImportSheetTooManyBytes
+			}
+			if emptyRows := cur - maxVal - 1; emptyRows > 0 {
+				results = append(results, make([][]string, emptyRows)...)
+			}
+			results = append(results, row)
+			maxVal = cur
+		}
+	}
+	// Read the iterator's deferred error directly instead of via Close().
+	// Close() only reports it when the sheet was parsed in memory; once the
+	// decompressed XML crosses excelize's UnzipXMLSizeLimit the worksheet is
+	// staged in a temp file and Close() returns that file's close error
+	// instead, swallowing ErrMaxRows on precisely the large inputs where it
+	// is most likely to fire.
+	if err := rows.Error(); err != nil {
+		// excelize's own row-limit rejection is the same complaint as ours,
+		// so it gets the same advice rather than a generic parse failure the
+		// user can do nothing with. The two limits are now EQUAL — not ours
+		// below theirs — and the message stays truthful either way, because a
+		// sheet the library refuses has reached the same row number ours names.
+		if errors.Is(err, excelize.ErrMaxRows) {
+			return nil, errImportSheetTooManyRows
+		}
+		return nil, err
+	}
+	return results[:maxVal], nil
+}
+
 // handleImportUpload accepts a multipart xlsx file upload, parses it, stores
 // the rows in memory, and returns a preview.
 func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +892,36 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// Buffer the upload so the archive can be sized before any of it is
+	// decompressed. MaxBytesReader above already bounds this read to
+	// MAX_UPLOAD_BYTES, and excelize.OpenReader does io.ReadAll internally
+	// anyway, so nothing is held that would not have been held regardless.
+	data, err := io.ReadAll(file)
+	if err != nil {
+		// The likely cause is MaxBytesReader tripping, which is the client's
+		// problem, not ours.
+		writeError(w, http.StatusBadRequest, "failed to read uploaded file")
+		return
+	}
+
+	// Bound the decompressed size FIRST. Every other cap in this handler runs
+	// against already-parsed data, and OpenReader inflates the entire archive
+	// before returning, so this is the only place a zip bomb can be caught.
+	if err := checkImportArchiveSize(data); err != nil {
+		log.Printf("import: rejected archive: %v", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	// Bound the peak of a single row before excelize can build one. Everything
+	// after this point only observes allocations; this is the last place they
+	// can still be prevented. See prescanImportWorkbook.
+	if err := prescanImportWorkbook(data); err != nil {
+		log.Printf("import: rejected workbook shape: %v", err)
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// RawCellValue:true tells excelize to skip number-format rendering when
 	// returning cell values. Without it, a date cell with number format
 	// "mm-dd-yy" renders as "07-21-25", which matches none of the fallback
@@ -467,7 +929,20 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	// RawCellValue:true, date cells return their underlying Excel serial
 	// number (e.g. "45859"), which parseImportDate converts via
 	// excelize.ExcelDateToTime — format-agnostic.
-	f, err := excelize.OpenReader(file, excelize.Options{RawCellValue: true})
+	//
+	// The two Unzip limits are passed explicitly rather than left at their
+	// defaults. UnzipSizeLimit defaults to 16 GB, which is what made the zip
+	// bomb above reachable in the first place; it is set here as a second
+	// layer behind checkImportArchiveSize so that this call site stays bounded
+	// even if that check is ever moved or refactored away. UnzipXMLSizeLimit
+	// is the temp-file staging threshold, pinned to our own constant so a
+	// change to excelize's default cannot silently alter how much of a
+	// worksheet is held in memory.
+	f, err := excelize.OpenReader(bytes.NewReader(data), excelize.Options{
+		RawCellValue:      true,
+		UnzipSizeLimit:    MaxImportUnzippedBytes,
+		UnzipXMLSizeLimit: MaxImportUnzippedPartBytes,
+	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "failed to parse xlsx file")
 		return
@@ -485,9 +960,18 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	rows, err := f.GetRows(sheetName)
+	rows, err := readImportSheetRows(f, sheetName)
 	if err != nil {
-		log.Printf("import: failed to read sheet %q: %v", sheetName, err)
+		log.Printf("import: failed to read sheet %q: %v", sanitizeLogValue(sheetName), err)
+		// A file rejected for its shape gets the specific reason, so the
+		// user can act on it. Every other read failure stays generic —
+		// excelize's parse errors quote fragments of the uploaded XML.
+		if errors.Is(err, errImportSheetTooManyRows) ||
+			errors.Is(err, errImportSheetTooManyCells) ||
+			errors.Is(err, errImportSheetTooManyBytes) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadRequest, "failed to read spreadsheet data")
 		return
 	}
@@ -556,7 +1040,24 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	sections = append(sections, currentSection)
 
 	// Parse data rows from all sections
-	parsedRows := make([]importRow, 0, len(rows)-headerIdx-1)
+	// Size the preallocation off what MaxImportRows can actually admit, not off
+	// the sheet's geometry. importRow is 128 bytes, so a bare
+	// len(rows)-headerIdx-1 reserves 128 MiB for a sheet whose last row element
+	// sits at Excel's maximum — from a 2 KB file, on a path that RETURNS 200
+	// and so has no error to push back with. Raising MaxImportSheetRows to
+	// Excel's maximum is what made that reachable; before it, the same file was
+	// refused at slot 100,001. MaxImportRows is not consulted until after this
+	// loop, so the clamp has to happen here.
+	//
+	// Clamping only affects the initial capacity. A sheet with side-by-side
+	// sections can still legitimately produce more rows than it has lines, and
+	// append grows to fit; the over-cap case is rejected a few statements later
+	// regardless.
+	prealloc := len(rows) - headerIdx - 1
+	if prealloc > MaxImportRows {
+		prealloc = MaxImportRows
+	}
+	parsedRows := make([]importRow, 0, prealloc)
 	for _, row := range rows[headerIdx+1:] {
 		for _, sec := range sections {
 			ir := importRow{}

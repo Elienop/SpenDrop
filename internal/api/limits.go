@@ -82,6 +82,187 @@ const (
 	MaxMultiCategoryFilter = 100
 )
 
+// Bounds on the SHAPE of an uploaded workbook, as opposed to MaxImportRows
+// above which bounds the rows we successfully parse. They exist because
+// MAX_UPLOAD_BYTES (10 MiB) bounds the COMPRESSED zip and nothing downstream
+// of it bounds what that zip expands into. A workbook declares its own
+// geometry — entry sizes in the zip directory, row and cell indices in XML
+// attributes — so a few kilobytes of input can direct the parser to do an
+// unbounded amount of work. None of this can live in MaxImportRows, which is
+// only consulted after the whole sheet has already been materialised.
+//
+// The caps are ordered by when the bytes are touched, and each one has to hold
+// on its own because the earlier ones run before the later ones exist:
+//
+//	MaxImportUnzippedBytes      at the zip directory, before decompression
+//	MaxImportUnzippedPartBytes  per XML part, during decompression
+//	MaxImportSheetRows/Cells    while walking the parsed sheet
+//
+// Every number below was measured against excelize v2.11.0, not estimated.
+//
+//   - MaxImportUnzippedBytes stops a zip bomb. excelize decompresses the
+//     WHOLE archive up front, and its UnzipSizeLimit option defaults to
+//     16 GB, so a bomb in any entry — theme, styles, shared strings, an entry
+//     we never read at all — inflates before a single row is examined. A
+//     2.00 MiB upload drove +10,244 MiB of allocation and took 15.4s inside
+//     OpenReader. Summing the zip directory's declared sizes is a sound way
+//     to catch this: Go's archive/zip refuses to hand back more bytes than an
+//     entry declared (reader.go, checksumReader.Read), so an entry cannot lie
+//     small and then inflate.
+//
+//   - MaxImportUnzippedPartBytes is a staging threshold, NOT a rejection.
+//     excelize spills a worksheet or the shared-string table to a temp file
+//     once it exceeds this, which keeps peak in-memory well under the archive
+//     cap for genuinely large sheets. It is set below MaxImportUnzippedBytes
+//     deliberately; raising it to match would keep everything in memory.
+//
+//   - MaxImportSheetRows stops a row-index spin. Rows.Next() returns true
+//     without reading a token whenever the current row index is still ahead of
+//     the seek position, so a row claiming r="9223372036854775807" makes the
+//     iterator report ~9.2e18 consecutive rows: a 5.9 KB upload that was still
+//     burning a core when killed at 20s. Smaller indices are not merely slower
+//     but bounded — they also allocate, because GetRows pads the blank run: at
+//     r=2147483647 the same shape spins 5.6s AND allocates 48 GiB (a
+//     2,147,483,647-length slice at 24 bytes per header), measured. excelize
+//     v2.11.0 added a TotalRows guard, but only inside Rows.Next()'s
+//     token-scanning loop, which this path skips — Rows.Columns() reads ahead
+//     and assigns the huge index itself. The library's guard therefore fires
+//     only when the hostile row is FIRST in the sheet; one ordinary row in
+//     front of it is enough to bypass it, which is why ours is positional.
+//
+//   - MaxImportSheetCells stops a column-padding amplification that no
+//     excelize version bounds. A value in column XFD makes the parser pad that
+//     row to all 16384 entries; 5,000 such rows compress to 31 KB and
+//     allocated 5.68 GiB transient / ~1.4 GB retained, roughly 188,000x.
+//     Counting total cells rather than per-row width bounds the wide-row and
+//     the many-rows axes with one budget.
+//
+// On the values, and on what "headroom" honestly means for each:
+//
+//   - 1,048,576 rows is EXACTLY Excel's own maximum row number, chosen so that
+//     no file Excel can write is ever refused. This matters more than it
+//     sounds: the cap counts row SLOTS, and a <row> element costs a slot even
+//     when it holds nothing, so leftover row formatting far below the data
+//     trips a lower cap. A 6 KB workbook with a 3-column header, one data row
+//     and SetRowHeight(sheet, 150000) scans 150,000 slots — GetRows parses it
+//     fine, and a 100,000 cap refused it. Stray formatting below the data is
+//     the single most common real-world spreadsheet artifact there is, so the
+//     only false-rejection-free ceiling is Excel's own. Scanning a full
+//     1,048,576 slots costs about 3 ms and 25 MB of blank-run padding.
+//
+//   - 4,000,000 cells is 4x a 10,000-row by 100-column sheet, which is already
+//     an unusually wide ledger; a realistic one is 10,000 by 30. But headroom
+//     is the wrong mental model here, because padding counts: a file with a
+//     value in a far-right column on more than ~244 rows (4,000,000 / 16,384)
+//     trips this no matter how few values those rows actually hold. That is
+//     the intended behaviour — padding is what allocates — and it is why the
+//     rejection message talks about padding rather than about content.
+//
+//   - 128 MiB of decompressed archive is 4x the largest LEGITIMATE workbook
+//     the importer can accept, measured rather than reasoned: 10,000 rows
+//     (MaxImportRows) carrying the maximum permitted description, tags and
+//     notes lengths, all distinct so nothing dedupes into the shared-string
+//     table, is 0.47 MiB compressed and 31.31 MiB unzipped. A realistic
+//     full-size ledger is 3.8 MiB unzipped, so this is ~34x that.
+//
+// A file that trips any of these gets a 400 naming the limit, never a silent
+// truncation — dropping rows from a ledger import quietly is worse than
+// refusing the file.
+//
+// GEOMETRY IS NOT BYTES, which is the trap the row and cell caps fell into on
+// their own. excelize rebuilds a shared string on every cell that references
+// it (xlsxSI.String, cell.go), so one <si> of length L referenced by N cells
+// yields N separate L-byte allocations, all retained in the returned rows.
+// Measured against this handler's own reader: a 15,774-byte upload — 1.17 MB
+// unzipped, 1,000 rows, 3,000 cells, under 0.1% of every geometry cap above —
+// retained 3,000 MiB, and the retained figure tracked the summed cell text
+// exactly. It also outlives the request, because the parsed rows are held in
+// the in-memory import session.
+//
+// So two further bounds cover the quantity that actually allocates:
+//
+//   - MaxImportCellBytes bounds one cell. It is a BYTE bound compared against
+//     len(), not a character count, and the name says so on purpose: the
+//     household writes Arabic alongside English, and a character-flavoured
+//     name invites the false claim that a 32,767-character cell always fits.
+//     The honest justification is in bytes — the longest field the product
+//     accepts is MaxNotesLength (2,000 characters), which is at most 8,000
+//     bytes even at UTF-8's 4-byte worst case, so this leaves 4x headroom for
+//     any script.
+//
+//   - MaxImportSheetBytes bounds the total, because a per-cell cap alone does
+//     not: four million cells just under the per-cell limit is still 131 GB.
+//     64 MiB is ~2x the largest legitimate workbook measured below, whose
+//     31.31 MiB unzipped bounds its own text a fortiori.
+//
+// TOTALS ARE NOT PEAKS, and this is the trap those two fell into. Every cap
+// above is evaluated on the slice Rows.Columns() returns, so each can only
+// observe an allocation that has already happened. One Columns() call
+// materialises an entire row, and cells-per-row is not bounded by excelize at
+// all: rowXMLHandler consults CellNameToCoordinates — the thing that enforces
+// MaxColumns — only when the cell carries an `r` attribute, and just does
+// cellCol++ when it does not. Measured end to end through the upload handler:
+// an 8,003-byte upload peaked at 1,258 MiB and a 50,444-byte one at 516 MiB,
+// both correctly answered 400 by the totals above, long after the damage.
+//
+// MaxImportRowBytes is what makes the peak statable, and prescanImportWorkbook
+// enforces it BEFORE excelize materialises anything, because no cap checked
+// after Columns() can be:
+//
+//	peak per row <= MaxImportRowBytes                    = 32 MiB
+//	plus blank-run padding, at most
+//	  MaxImportCellsPerRow string headers                =  1.6 MiB
+//	peak accumulated <= MaxImportSheetBytes              = 64 MiB
+//	prescan's own worst case, one text node read whole   <= 128 MiB
+//
+// so a single request stays inside MaxImportUnzippedBytes overall. The prescan
+// term is the largest and is worth being honest about: encoding/xml returns a
+// text node as one CharData, so a workbook declaring a single enormous string
+// is read into memory once to be measured and rejected. It is bounded by the
+// archive cap, is not multiplied by anything, and is the price of knowing a
+// string's length before excelize copies it per referencing cell.
+//
+// THE BOUND IS THE ROW'S SUM, NOT A PRODUCT OF TWO CAPS, and that choice is
+// what keeps real files importable. Capping cells-per-row and bytes-per-cell
+// and calling the product the peak was the first design, and it forces both
+// caps low: 1,024 columns at 32 KiB per cell. Real spreadsheet applications
+// exceed both — Google Sheets allows 18,278 columns and 50,000 characters per
+// cell — and this household imports Google Sheets exports regularly, so those
+// numbers would have refused a working workflow to buy a bound that summing
+// gives for free. The two per-item limits below are therefore set above
+// anything the FORMAT can express, and the row sum does the bounding:
+//
+//   - 100,000 cells in a row is ~6x the 16,384 columns SpreadsheetML allows.
+//     No conforming export can reach it — a cell past column XFD cannot even
+//     be named — so it can only be tripped by cells written without an `r`
+//     attribute, which is the unbounded case it exists for. It bounds
+//     blank-run padding, one string header per skipped column, not text.
+//
+//   - 256 KiB in a cell is ~2x the format's own 32,767-character cell maximum
+//     at UTF-8's 4-byte worst case (131,068 bytes), so no conforming cell can
+//     trip it either. It catches a single absurd string early and bounds what
+//     one cell can carry into the ledger.
+//
+// Both are stated against the FORMAT's limits rather than any application's,
+// because that is the claim that can be checked: Google Sheets' own grid is
+// wider and its cells longer than Excel's, but neither survives export.
+//
+// Both are far looser than the previous values ON PURPOSE. A false rejection
+// costs the household a workflow it uses; the residual it buys back requires a
+// deliberately-crafted file AND admin credentials.
+const (
+	MaxImportSheetRows   = 1_048_576
+	MaxImportSheetCells  = 4_000_000
+	MaxImportCellsPerRow = 100_000
+
+	MaxImportUnzippedBytes     = 128 << 20
+	MaxImportUnzippedPartBytes = 16 << 20
+
+	MaxImportSheetBytes = 64 << 20
+	MaxImportRowBytes   = 32 << 20
+	MaxImportCellBytes  = 256 << 10
+)
+
 // MaxTransactionAmount is the largest positive value accepted for a
 // transaction (or budget). Anything above this is almost certainly a
 // currency-entry mistake (e.g. pasting an entire account balance into
