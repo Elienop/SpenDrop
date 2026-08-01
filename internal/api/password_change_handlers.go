@@ -12,6 +12,34 @@ import (
 	"github.com/elienop/spendrop/internal/database"
 )
 
+// passwordTooShortMessage / passwordTooLongMessage are the single source of the
+// wording for the password bounds, shared by handleRegister, handleCreateUser
+// and validateNewPassword so all three password-entry paths say the same thing.
+//
+// They say BYTES, not characters, and that is the honest unit rather than a
+// stylistic choice. bcrypt hashes at most the first 72 bytes of its input and
+// silently discards the rest, so this bound cannot be moved to characters
+// without accepting a password whose tail never reaches the hasher — two
+// distinct passwords agreeing on their first 72 bytes would authenticate the
+// same account. config.Validate refuses a PASSWORD_MAX_LENGTH above 72 for the
+// same reason.
+//
+// Every other user-facing text cap in this app is enforced in characters (see
+// charLen in limits.go). This one cannot be, so it stops claiming to be: a
+// 40-character Arabic password is 80 bytes, and telling that user "72
+// characters or less" would name a limit the server is not applying. The
+// clarifier is on the maximum only, because that is the bound that can refuse
+// text a character count would have admitted.
+func passwordTooShortMessage(minLen int) string {
+	return fmt.Sprintf("password must be at least %d bytes", minLen)
+}
+
+func passwordTooLongMessage(maxLen int) string {
+	return fmt.Sprintf(
+		"password must be %d bytes or less (accented and non-Latin characters use more than one byte each)",
+		maxLen)
+}
+
 // validateNewPassword enforces the runtime-configured min/max byte length on a
 // new password. Returns an error message (empty == valid) so callers can map
 // it straight to a 400 body. Mirrors the bounds checks in handleRegister /
@@ -22,10 +50,10 @@ func validateNewPassword(pw string) string {
 	}
 	minLen, maxLen := getPasswordBounds()
 	if len(pw) < minLen {
-		return fmt.Sprintf("password must be at least %d characters", minLen)
+		return passwordTooShortMessage(minLen)
 	}
 	if len(pw) > maxLen {
-		return fmt.Sprintf("password must be %d characters or less", maxLen)
+		return passwordTooLongMessage(maxLen)
 	}
 	return ""
 }

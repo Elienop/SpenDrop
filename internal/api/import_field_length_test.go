@@ -25,9 +25,16 @@ import (
 // So this asserts agreement directly, on values straddling every boundary,
 // rather than asserting either side in isolation.
 func TestImportFieldLengths_MatchTheWritePath(t *testing.T) {
-	// Multi-byte on purpose: this household writes Arabic, and len() counts
-	// bytes, so these are exactly the values where a rune-based
-	// reimplementation would diverge from the write path.
+	// Multi-byte on purpose: this household writes Arabic, and the two sides
+	// used to disagree on the unit, so these are the values where a
+	// reimplementation of either side diverges from the other. Both are now
+	// character counts (charLen); the cases below straddle that boundary AND
+	// sit inside the old byte boundary, so a half-reverted change — one side
+	// back on len() — shows up here.
+	//
+	// TestCheckImportRowLengths_LimitsAreCharacters is the companion that pins
+	// WHICH unit they agree on, which this test cannot: two byte checks agree
+	// with each other perfectly.
 	arabic := "ب"
 	if len(arabic) != 2 {
 		t.Fatalf("expected a 2-byte rune, got %d bytes", len(arabic))
@@ -39,15 +46,18 @@ func TestImportFieldLengths_MatchTheWritePath(t *testing.T) {
 		value string
 	}{
 		{"description at the limit", importFieldDescription, strings.Repeat("d", MaxDescriptionLength)},
-		{"description one byte over", importFieldDescription, strings.Repeat("d", MaxDescriptionLength+1)},
-		{"description multi-byte at the byte limit", importFieldDescription, strings.Repeat(arabic, MaxDescriptionLength/2)},
-		{"description multi-byte one rune over", importFieldDescription, strings.Repeat(arabic, MaxDescriptionLength/2+1)},
+		{"description one character over", importFieldDescription, strings.Repeat("d", MaxDescriptionLength+1)},
+		{"description multi-byte at the limit", importFieldDescription, strings.Repeat(arabic, MaxDescriptionLength)},
+		{"description multi-byte one character over", importFieldDescription, strings.Repeat(arabic, MaxDescriptionLength+1)},
+		{"description multi-byte inside the limit but over it in bytes", importFieldDescription, strings.Repeat(arabic, MaxDescriptionLength/2+1)},
 		{"tags at the limit", importFieldTags, strings.Repeat("t", MaxTagsLength)},
-		{"tags one byte over", importFieldTags, strings.Repeat("t", MaxTagsLength+1)},
-		{"tags multi-byte one rune over", importFieldTags, strings.Repeat(arabic, MaxTagsLength/2+1)},
+		{"tags one character over", importFieldTags, strings.Repeat("t", MaxTagsLength+1)},
+		{"tags multi-byte at the limit", importFieldTags, strings.Repeat(arabic, MaxTagsLength)},
+		{"tags multi-byte one character over", importFieldTags, strings.Repeat(arabic, MaxTagsLength+1)},
 		{"notes at the limit", importFieldNotes, strings.Repeat("n", MaxNotesLength)},
-		{"notes one byte over", importFieldNotes, strings.Repeat("n", MaxNotesLength+1)},
-		{"notes multi-byte one rune over", importFieldNotes, strings.Repeat(arabic, MaxNotesLength/2+1)},
+		{"notes one character over", importFieldNotes, strings.Repeat("n", MaxNotesLength+1)},
+		{"notes multi-byte at the limit", importFieldNotes, strings.Repeat(arabic, MaxNotesLength)},
+		{"notes multi-byte one character over", importFieldNotes, strings.Repeat(arabic, MaxNotesLength+1)},
 	}
 
 	for _, tc := range cases {
@@ -75,8 +85,8 @@ func TestImportFieldLengths_MatchTheWritePath(t *testing.T) {
 			writeRejects := validateTransactionRequest(req, noStoredDate) != nil
 
 			if previewRejects != writeRejects {
-				t.Errorf("preview rejects=%v but the write path rejects=%v for %d bytes of %s — the import gate and the ledger disagree",
-					previewRejects, writeRejects, len(tc.value), tc.field)
+				t.Errorf("preview rejects=%v but the write path rejects=%v for %d characters (%d bytes) of %s — the import gate and the ledger disagree",
+					previewRejects, writeRejects, charLen(tc.value), len(tc.value), tc.field)
 			}
 		})
 	}
@@ -517,10 +527,11 @@ func firstFieldErrorMessage(t *testing.T, body map[string]any) string {
 
 // TestImportFieldLengthMessages_NameTheLimitNotTheOverage pins the wording rule
 // rather than the exact prose: every message states the limit, and none reports
-// how far over the value is. A count would be wrong in any non-ASCII text,
-// because these caps are byte comparisons — 500 bytes is about 250 Arabic
-// characters — so "you are 43 over" would mislead exactly the household that
-// writes Arabic.
+// how far over the value is. The rule outlived its original reason — these caps
+// were byte comparisons when it was written, so an overage would have been an
+// outright lie in Arabic — and it stands on its own now: an overage is a number
+// the user cannot act on without counting, and naming the limit is the shorter
+// true statement.
 func TestImportFieldLengthMessages_NameTheLimitNotTheOverage(t *testing.T) {
 	for field, limit := range map[string]int{
 		importFieldDescription: MaxDescriptionLength,
@@ -548,7 +559,8 @@ func TestImportFieldLengthMessages_NameTheLimitNotTheOverage(t *testing.T) {
 //
 // The two sides agree today for a reason that is easy to lose: the import
 // parser trims every cell at parse time, and the write path measures with no
-// trimming, so the bytes the gate sees are the bytes confirm inserts. Either
+// trimming, so the characters the gate sees are the characters confirm inserts.
+// Either
 // side changing its trimming breaks that without either limit moving —
 // if the parser stopped trimming, a padded value would be flagged that the
 // ledger would have accepted; if the gate started trimming a value the parser
@@ -566,9 +578,9 @@ func TestImportFieldLengths_MeasureTheStoredValueNotTheRawCell(t *testing.T) {
 
 	exact := strings.Repeat("d", MaxDescriptionLength)
 	padded := "   " + exact + "   "
-	if len(padded) <= MaxDescriptionLength {
-		t.Fatalf("padded value is %d bytes; it must exceed the limit (%d) untrimmed for this to test anything",
-			len(padded), MaxDescriptionLength)
+	if charLen(padded) <= MaxDescriptionLength {
+		t.Fatalf("padded value is %d characters; it must exceed the limit (%d) untrimmed for this to test anything",
+			charLen(padded), MaxDescriptionLength)
 	}
 
 	preview := seedFieldLengthUpload(t, h, user, "Description", padded)
@@ -593,8 +605,8 @@ func TestImportFieldLengths_MeasureTheStoredValueNotTheRawCell(t *testing.T) {
 	row, _ := rows[1].(map[string]any)
 	stored, _ := row["description"].(string)
 	if stored != exact {
-		t.Errorf("stored description is %d bytes and %s the limit; the parser is no longer trimming, so the gate is measuring a different value than the ledger stores",
-			len(stored), map[bool]string{true: "exceeds", false: "is within"}[len(stored) > MaxDescriptionLength])
+		t.Errorf("stored description is %d characters and %s the limit; the parser is no longer trimming, so the gate is measuring a different value than the ledger stores",
+			charLen(stored), map[bool]string{true: "exceeds", false: "is within"}[charLen(stored) > MaxDescriptionLength])
 	}
 
 	// The write path agrees on that exact stored value.

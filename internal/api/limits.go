@@ -1,5 +1,7 @@
 package api
 
+import "unicode/utf8"
+
 // Numeric business-logic limits that are invariants of the app, not
 // operator-tunable knobs. Knobs that an operator might reasonably want
 // to adjust at runtime (body caps, rate limits, password bounds, session
@@ -165,6 +167,23 @@ const (
 //     table, is 0.47 MiB compressed and 31.31 MiB unzipped. A realistic
 //     full-size ledger is 3.8 MiB unzipped, so this is ~34x that.
 //
+// THAT 31.31 MiB WAS MEASURED ON ASCII, and the multipliers stated against it
+// shrank when the field caps became CHARACTER counts (charLen, below). The same
+// theoretical maximum written in Arabic is two bytes per character, so it is
+// ~62 MiB rather than 31.31, which makes MaxImportUnzippedBytes ~2x it instead
+// of 4x and MaxImportSheetBytes ~1.03x instead of ~2x. Both still admit it, so
+// nothing here needs to move — but the headroom against that construct is now
+// slim rather than generous, and at UTF-8's 4-byte worst case (~124 MiB) it
+// would trip MaxImportSheetBytes.
+//
+// What keeps that from being a real false-rejection is that the construct is
+// not a file anyone produces: it is 10,000 rows EVERY ONE of which carries a
+// 500-character description, 500 characters of tags and a 2,000-character note.
+// The measured realistic full-size ledger is 3.8 MiB, three orders of magnitude
+// below either cap in any script. If these caps are ever re-derived, derive them
+// in characters times UTF-8's worst case, not in the bytes an ASCII fixture
+// happened to produce.
+//
 // A file that trips any of these gets a 400 naming the limit, never a silent
 // truncation — dropping rows from a ledger import quietly is worse than
 // refusing the file.
@@ -279,9 +298,48 @@ const (
 // the amount field) and would overflow some downstream chart axes.
 const MaxTransactionAmount = 1_000_000_000
 
-// String length caps for user-supplied text fields. These match the
-// SQLite column definitions in migrations/001 and the Zod schemas on
-// the frontend.
+// charLen reports the length of s in CHARACTERS (Unicode code points), which
+// is the unit every cap in the block below is stated in, and the unit every
+// error message about them names.
+//
+// It exists because the obvious spelling — len(s) — counts BYTES, and every one
+// of these caps was compared with len() while telling the user "characters".
+// UTF-8 spends one byte on ASCII but two on Arabic, two on an accented Latin
+// letter and four on an emoji, so a cap advertised as 500 characters refused an
+// Arabic description at about 250. This household writes Arabic alongside
+// English, so the field rejected text well inside its stated limit and then
+// explained the refusal with a number that was not the one being applied.
+//
+// Two other counts in this system agree with this one, which is what makes
+// characters the correct unit here rather than merely a friendlier one:
+//
+//   - SQLite's length() counts CHARACTERS on a TEXT value (it counts bytes only
+//     on a BLOB), so the CHECK(length(name) BETWEEN 1 AND 100) that migration
+//     011 puts on api_tokens.name is already a character constraint. Counting
+//     bytes in Go made the handler stricter than the app's own schema for any
+//     non-ASCII name — the schema would have taken 100 Arabic characters, the
+//     handler stopped at 50.
+//   - The frontend counts code points through charCount() in
+//     web/src/lib/text.ts. JavaScript's String.length would NOT agree: it
+//     counts UTF-16 code units, so an emoji outside the Basic Multilingual
+//     Plane is 2 there and 1 here. Arabic and accented Latin happen to agree in
+//     UTF-16, which is exactly why a naive .length check on the frontend looks
+//     correct in testing and diverges on the first emoji.
+//
+// Not every cap in this file belongs in this unit, and the ones that do not say
+// so where they are enforced: passwords stay byte-bounded because bcrypt
+// truncates its input at 72 bytes, MaxFilterJSONLength bounds a serialized
+// transport payload, and the import SHAPE caps above bound allocation.
+func charLen(s string) int { return utf8.RuneCountInString(s) }
+
+// String length caps for user-supplied text fields, in CHARACTERS — compare
+// with charLen, never len. These match the SQLite column definitions in
+// migrations/001 and the Zod schemas on the frontend (web/src/lib/constants.ts,
+// which validates with charCount for the same reason).
+//
+// MaxFilterJSONLength is the one exception in this block: it bounds a
+// serialized JSON payload rather than prose a human typed, so bytes is the
+// honest unit and its message says bytes.
 const (
 	MaxDescriptionLength    = 500
 	MaxTagsLength           = 500

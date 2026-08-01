@@ -20,6 +20,7 @@ import {
 import { createElement, type ReactElement, type ReactNode } from 'react';
 import { TransactionEntryRow } from './TransactionEntryRow';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
+import { MAX_DESCRIPTION_LENGTH } from '@/lib/constants';
 import type { Category, Transaction } from '../api/types';
 
 // Each render gets a fresh QueryClient so the `useCurrencies` cache is isolated
@@ -1274,5 +1275,81 @@ describe('TransactionEntryRow', () => {
     act(() => amount.focus());
     await user.type(amount, '5{Enter}');
     expect(screen.getByRole('button', { name: /currency: usd/i })).toHaveFocus();
+  });
+
+  // -----------------------------------------------------------------
+  // Description length
+  //
+  // This row used to cap descriptions at 200 while the server, the bulk-edit
+  // dialog and the importer all took 500 — so a description that saved fine
+  // one dialog over failed here, with Zod's bare "Too big" as the only
+  // explanation.
+  //
+  // The emoji case is the one a naive fix gets wrong. Zod's `.max()` and
+  // `String.length` count UTF-16 code units, so 500 astral-plane characters
+  // measure 1,000 there and 500 in Go — a value the server accepts, refused in
+  // the browser. `charCount` counts code points, which is what Go counts.
+  //
+  // `fireEvent.change` rather than `user.type`: typing 500 characters one
+  // keystroke at a time takes tens of seconds and tests nothing extra.
+  // -----------------------------------------------------------------
+
+  /** Fill amount + category, set description directly, save. */
+  async function submitWithDescription(
+    user: UserEvent,
+    description: string,
+  ): Promise<void> {
+    await user.clear(screen.getByLabelText(/amount/i));
+    await user.type(screen.getByLabelText(/amount/i), '12');
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: description },
+    });
+    await user.click(screen.getByRole('button', { name: /select category/i }));
+    await user.click(await screen.findByRole('option', { name: /groceries/i }));
+    await user.click(screen.getByRole('button', { name: /add/i }));
+  }
+
+  it.each([
+    ['plain ASCII', 'd'],
+    ['Arabic', 'ب'],
+    ['an astral-plane emoji', '🧾'],
+  ])(
+    'saves a description of exactly the full limit written in %s',
+    async (_label, unit) => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      const atLimit = unit.repeat(MAX_DESCRIPTION_LENGTH);
+      await submitWithDescription(user, atLimit);
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      expect(
+        (onSubmit.mock.calls[0][0] as CreateTransactionInput).description,
+      ).toBe(atLimit);
+    },
+  );
+
+  it('refuses a description one character over the limit', async () => {
+    const user = userEvent.setup();
+    render(
+      <TransactionEntryRow
+        categories={mockCategories}
+        onSubmit={onSubmit}
+        onDelete={onDelete}
+      />,
+    );
+
+    await submitWithDescription(user, 'ب'.repeat(MAX_DESCRIPTION_LENGTH + 1));
+
+    expect(
+      await screen.findByText(`max ${MAX_DESCRIPTION_LENGTH}`),
+    ).toBeInTheDocument();
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

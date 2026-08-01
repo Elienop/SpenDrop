@@ -126,13 +126,14 @@ const (
 // be dropped with the row or fixed in the source spreadsheet. Telling someone
 // to shorten a note "here" would be an instruction the UI cannot honour.
 //
-// Each message names the LIMIT and never the overage. A count of how far over
-// a value is would be a lie in any non-ASCII text: these caps are compared with
-// len() over bytes, so 500 is about 250 Arabic characters, and reporting "you
-// are 43 characters over" would be wrong for exactly the household that writes
-// Arabic. Naming the limit is true regardless of script. That the label says
-// "characters" at all is inherited from the existing limits and is a separate
-// question from this one.
+// Each message names the LIMIT and never the overage, and that rule now rests
+// on a different reason than it did when it was written. It used to be that the
+// caps were compared with len() over bytes while the messages said
+// "characters", so any overage count would have been a lie in non-ASCII text.
+// The caps are character counts now (charLen, limits.go), so an overage would
+// at least be arithmetically true — but it would still be noise the user cannot
+// act on without counting, and naming the limit is the shorter true statement.
+// Keep it as is.
 func importFieldLengthMessage(field string) string {
 	switch field {
 	case importFieldDescription:
@@ -155,20 +156,21 @@ func importFieldLengthMessage(field string) string {
 // or notes exceed what the ledger stores.
 //
 // THE MEASUREMENT MUST MATCH THE WRITE PATH, and that is the whole risk in this
-// function. validateTransactionRequest bounds these three fields with a bare
-// len() over bytes and no trimming (transaction_handlers.go, plus
-// validateTagsField); the import parser has already trimmed each cell by the
-// time a row reaches here, so len() over the stored value is the same quantity
-// the single-row API would apply. Measure anything else — runes, a trimmed
-// copy, a different cap — and this becomes a gate that passes rows the write
-// path would refuse, which is worse than no gate, because the failure moves
-// from a preview the user can act on to an insert they cannot.
-// TestImportFieldLengths_MatchTheWritePath pins the agreement.
+// function. validateTransactionRequest bounds these three fields with charLen —
+// CHARACTERS, Unicode code points — and no trimming (transaction_handlers.go,
+// plus validateTagsField); the import parser has already trimmed each cell by
+// the time a row reaches here, so charLen over the stored value is the same
+// quantity the single-row API would apply. Measure anything else — len() over
+// bytes, a trimmed copy, a different cap — and this becomes a gate that passes
+// rows the write path would refuse, which is worse than no gate, because the
+// failure moves from a preview the user can act on to an insert they cannot.
+// TestImportFieldLengths_MatchTheWritePath pins the agreement, on values that
+// straddle the boundary in both units.
 //
-// Note what is deliberately NOT decided here: len() means the caps are byte
-// limits wearing a character label, so 500 is roughly 250 Arabic characters.
-// That is a real problem and a separate one — fixing it here would make the two
-// sides disagree, which is exactly the failure this function exists to avoid.
+// Both sides used to be len() over bytes, which made these caps byte limits
+// wearing a character label — 500 was about 250 Arabic characters. They moved
+// to characters TOGETHER, in one change, because moving either alone is exactly
+// the divergence this function exists to prevent.
 //
 // Rows the user has skipped are exempt. Skipping IS the remedy the gate offers,
 // so a skipped row must not keep blocking the confirm it was skipped to unblock.
@@ -187,7 +189,7 @@ func checkImportRowLengths(rows []importRow) []importFieldError {
 			{importFieldTags, row.Tags, MaxTagsLength},
 			{importFieldNotes, row.Notes, MaxNotesLength},
 		} {
-			if len(check.value) > check.limit {
+			if charLen(check.value) > check.limit {
 				fieldErrors = append(fieldErrors, importFieldError{
 					RowID:   row.RowID,
 					Field:   check.field,
@@ -405,7 +407,7 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		if trimmed == "" {
 			return nil, "INVALID_DESCRIPTION", "description cannot be empty"
 		}
-		if len(trimmed) > MaxDescriptionLength {
+		if charLen(trimmed) > MaxDescriptionLength {
 			// Same string the preview's field_errors carry, so an over-long
 			// description reads identically whether the user met it by
 			// uploading, by editing, by resuming, or at confirm.

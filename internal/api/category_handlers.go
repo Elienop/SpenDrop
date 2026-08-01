@@ -122,7 +122,7 @@ func (h *Handler) handleCreateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > MaxCategoryNameLength {
+	if charLen(req.Name) > MaxCategoryNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCategoryNameLength))
 		return
 	}
@@ -179,11 +179,11 @@ func (h *Handler) handleUpdateCategory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
-	if len(req.Name) > MaxCategoryNameLength {
+	if charLen(req.Name) > MaxCategoryNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("name must be %d characters or less", MaxCategoryNameLength))
 		return
 	}
-	if len(req.Icon) > MaxIconNameLength {
+	if charLen(req.Icon) > MaxIconNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("icon must be %d characters or less", MaxIconNameLength))
 		return
 	}

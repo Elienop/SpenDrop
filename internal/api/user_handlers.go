@@ -58,6 +58,19 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
+	// BYTES, and here that is the same number as characters: isValidUsername
+	// below admits only [a-zA-Z0-9_-], every one of which is one byte in UTF-8,
+	// so no username that survives this handler can make the two counts differ.
+	// Converting to charLen would buy nothing and add a unit a reader has to
+	// re-derive.
+	//
+	// The one thing this ordering costs: the length check runs BEFORE the
+	// charset gate, so a rejected non-ASCII username (say 20 Arabic letters, 40
+	// bytes) is answered with the character-count message rather than the
+	// charset one. The input is refused either way — only the explanation is the
+	// less apt of the two. Moving isValidUsername above this check would fix
+	// that and make the ASCII claim hold by construction rather than by reading
+	// ahead; it is deliberately left for a separate decision.
 	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
@@ -70,13 +83,20 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
+	// BYTES, and this one must stay bytes: bcrypt hashes at most the first 72
+	// bytes of its input and silently discards the rest, so a rune-based bound
+	// would accept a password whose tail never reaches the hasher — and two
+	// different passwords agreeing on their first 72 bytes would then
+	// authenticate the same account. len() is the quantity bcrypt actually
+	// consumes. See getPasswordBounds in runtime.go, and the identical bounds in
+	// handleRegister and validateNewPassword.
 	minLen, maxLen := getPasswordBounds()
 	if len(req.Password) < minLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
+		writeError(w, http.StatusBadRequest, passwordTooShortMessage(minLen))
 		return
 	}
 	if len(req.Password) > maxLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
+		writeError(w, http.StatusBadRequest, passwordTooLongMessage(maxLen))
 		return
 	}
 	if req.Role != RoleMember && req.Role != RoleAdmin {
@@ -84,7 +104,7 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.DisplayName) > MaxDisplayNameLength {
+	if charLen(req.DisplayName) > MaxDisplayNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
@@ -146,7 +166,7 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DisplayName != "" && len(req.DisplayName) > MaxDisplayNameLength {
+	if req.DisplayName != "" && charLen(req.DisplayName) > MaxDisplayNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}

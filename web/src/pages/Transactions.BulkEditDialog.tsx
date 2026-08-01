@@ -25,6 +25,8 @@ import {
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 
 import type { Category } from '../api/types';
+import { MAX_DESCRIPTION_LENGTH } from '../lib/constants';
+import { charCount } from '../lib/text';
 import {
   computePatch,
   isPatchEmpty,
@@ -38,7 +40,13 @@ import {
 const bulkEditSchema = z.object({
   setDate: z.boolean(),
   date: z.string(),
-  description: z.string().max(500),
+  // CHARACTERS, counted with charCount rather than Zod's .max() — .max()
+  // measures UTF-16 code units, which disagree with the server on emoji.
+  description: z
+    .string()
+    .refine((value) => charCount(value) <= MAX_DESCRIPTION_LENGTH, {
+      message: `Description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`,
+    }),
   category_id: z.union([
     z.literal('noChange'),
     z.number().int().positive(),
@@ -184,6 +192,15 @@ export function BulkEditDialog({
               placeholder="— Keep same —"
               {...form.register('description')}
             />
+            {/* Without this, an over-long description makes Apply do nothing at
+                all: react-hook-form refuses the submit, no field in this dialog
+                renders an error, and the user is left clicking a button that
+                silently no-ops. */}
+            {form.formState.errors.description && (
+              <p className="text-sm text-destructive" role="alert">
+                {form.formState.errors.description.message}
+              </p>
+            )}
           </div>
 
           {/* --- Category --- */}

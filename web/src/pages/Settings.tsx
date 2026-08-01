@@ -44,6 +44,11 @@ import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import { cn, selectAllOnFocus } from '@/lib/utils';
 import {
+  MAX_API_TOKEN_NAME_LENGTH,
+  MAX_CURRENCY_SYMBOL_LENGTH,
+} from '@/lib/constants';
+import { charCount } from '@/lib/text';
+import {
   Card,
   CardContent,
   CardDescription,
@@ -141,11 +146,17 @@ function computeExpiresAt(choice: ExpiryChoice): string | null {
 }
 
 const createTokenSchema = z.object({
+  // charCount, not Zod's .max(): .max() counts UTF-16 code units, so an emoji
+  // in a token name would count 2 here and 1 in both the Go handler
+  // (apiTokenNameMax, via charLen) and the column's own
+  // CHECK(length(name) BETWEEN 1 AND 100) — SQLite counts characters too.
   name: z
     .string()
     .trim()
     .min(1, 'Name is required')
-    .max(100, 'Name must be 100 characters or fewer'),
+    .refine((value) => charCount(value) <= MAX_API_TOKEN_NAME_LENGTH, {
+      message: `Name must be ${MAX_API_TOKEN_NAME_LENGTH} characters or fewer`,
+    }),
   expires: z.enum(['never', '7d', '30d', '90d', '1y']),
 });
 type CreateTokenValues = z.infer<typeof createTokenSchema>;
@@ -348,9 +359,24 @@ function AccountSection() {
 /* ---------- Currencies Tab ---------- */
 
 const newCurrencySchema = z.object({
+  // `code` stays on Zod's .max(3), and stays measured in UTF-16 code units,
+  // because an ISO 4217 code is three ASCII letters by definition and the
+  // server gates it on /^[A-Z]{3}$/ — bytes, characters and code units are the
+  // same number for every value that can be stored. The `maxLength={3}` on the
+  // input is exact for the same reason.
   code: z.string().min(1, 'Code is required').max(3),
   name: z.string().min(1, 'Name is required'),
-  symbol: z.string().min(1, 'Symbol is required').max(3),
+  // 10 CHARACTERS, matching the server's MaxCurrencySymbolLength. This was 3,
+  // which is not a limit the product states anywhere and is too narrow for real
+  // symbols — the Lebanese pound writes "ل.ل.", four characters, and this
+  // household keeps its ledger in LBP and USD. Counted with charCount so an
+  // astral-plane symbol costs the same 1 here as it does on the server.
+  symbol: z
+    .string()
+    .min(1, 'Symbol is required')
+    .refine((value) => charCount(value) <= MAX_CURRENCY_SYMBOL_LENGTH, {
+      message: `Symbol must be ${MAX_CURRENCY_SYMBOL_LENGTH} characters or fewer`,
+    }),
   rate_to_base: z.number().positive('Rate must be positive'),
 });
 type NewCurrencyValues = z.infer<typeof newCurrencySchema>;
@@ -543,7 +569,19 @@ function CurrenciesSection() {
                   <FormItem>
                     <FormLabel>Symbol</FormLabel>
                     <FormControl>
-                      <Input {...field} placeholder="\u00A3" maxLength={3} />
+                      {/* No maxLength: the HTML attribute counts UTF-16 code
+                          units, so it would stop typing at 5 astral-plane
+                          characters against a 10-character limit. The schema's
+                          charCount check is the gate.
+
+                          The placeholder is a JS expression, not a JSX string
+                          attribute. A JSX attribute value is HTML-like and does
+                          NOT process backslash escapes, so writing the escape
+                          directly in the quotes put those six literal
+                          characters on screen instead of a pound sign. Braces
+                          make it a real string literal, where the escape is
+                          processed. Verified in dist/assets/index-*.js. */}
+                      <Input {...field} placeholder={'\u00A3'} />
                     </FormControl>
                     <FormMessage />
                   </FormItem>

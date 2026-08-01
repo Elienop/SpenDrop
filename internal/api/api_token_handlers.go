@@ -15,6 +15,9 @@ import (
 )
 
 const (
+	// Name bounds in CHARACTERS, matching migration 011's
+	// CHECK(length(name) BETWEEN 1 AND 100) — SQLite's length() counts
+	// characters on TEXT. Enforced with charLen, never len.
 	apiTokenNameMin        = 1
 	apiTokenNameMax        = 100
 	apiTokenMaxExpiryYears = 10
@@ -102,7 +105,12 @@ func (h *Handler) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	name := strings.TrimSpace(req.Name)
-	if len(name) < apiTokenNameMin || len(name) > apiTokenNameMax {
+	// CHARACTERS, because the schema counts characters: migration 011 puts
+	// CHECK(length(name) BETWEEN 1 AND 100) on this column, and SQLite's
+	// length() counts characters on a TEXT value. Bounding with len() over bytes
+	// made the handler stricter than the table it writes to — an Arabic token
+	// name was refused at ~50 characters for a column that would have taken 100.
+	if charLen(name) < apiTokenNameMin || charLen(name) > apiTokenNameMax {
 		writeError(w, http.StatusBadRequest, "invalid name")
 		return
 	}

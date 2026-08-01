@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -32,6 +32,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
+import { MAX_CURRENCY_SYMBOL_LENGTH } from '../lib/constants';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
@@ -310,6 +311,108 @@ describe('Settings', () => {
           }),
         );
       });
+    });
+
+    // The symbol field capped at 3 characters — both in the schema and as a
+    // `maxLength` on the input — while the server allows 10
+    // (MaxCurrencySymbolLength). Real symbols exceed 3: the Lebanese pound is
+    // written "ل.ل.", four characters, and this household keeps its ledger in
+    // LBP and USD. The `maxLength` made it worse than a validation error, since
+    // the browser silently refused the fourth keystroke with nothing to read.
+    // Two cases, doing two different jobs. "ل.ل." is the real one — four
+    // characters, which the old cap of 3 refused outright. The row of
+    // astral-plane characters is the one that discriminates the UNIT: it is
+    // exactly at the limit in characters but twice that in UTF-16 code units,
+    // so `String.length` or Zod's `.max()` would refuse it. Arabic cannot make
+    // that distinction, because it is one UTF-16 unit per character.
+    test('accepts the Lebanese pound symbol, typed keystroke by keystroke', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^code$/i)).toBeInTheDocument();
+      });
+
+      await user.type(screen.getByLabelText(/^code$/i), 'LBP');
+      await user.type(screen.getByLabelText(/^name$/i), 'Lebanese Pound');
+      // user.type, deliberately: it is the only thing that exercises the
+      // input's `maxLength`, and `maxLength={3}` swallowed the fourth
+      // keystroke silently — no message, no way for the user to tell the
+      // field from a broken keyboard. fireEvent would set the value directly
+      // and never notice.
+      await user.type(screen.getByLabelText(/^symbol$/i), 'ل.ل.');
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '90000');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'currencies',
+          expect.objectContaining({ code: 'LBP', symbol: 'ل.ل.' }),
+        );
+      });
+    });
+
+    test('accepts a symbol of exactly the limit in astral-plane characters', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^code$/i)).toBeInTheDocument();
+      });
+
+      const symbol = '𝟙'.repeat(MAX_CURRENCY_SYMBOL_LENGTH);
+      await user.type(screen.getByLabelText(/^code$/i), 'XAA');
+      await user.type(screen.getByLabelText(/^name$/i), 'Test Currency');
+      fireEvent.change(screen.getByLabelText(/^symbol$/i), {
+        target: { value: symbol },
+      });
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '2');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'currencies',
+          expect.objectContaining({ code: 'XAA', symbol }),
+        );
+      });
+    });
+
+    test('refuses a currency symbol one character over the limit', async () => {
+      mockedApi.post.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/^symbol$/i)).toBeInTheDocument();
+      });
+
+      await user.type(screen.getByLabelText(/^code$/i), 'XXX');
+      await user.type(screen.getByLabelText(/^name$/i), 'Too Wide');
+      // fireEvent, because the input no longer carries a maxLength to stop it
+      // and typing 11 characters one at a time proves nothing extra.
+      fireEvent.change(screen.getByLabelText(/^symbol$/i), {
+        target: { value: 'ب'.repeat(MAX_CURRENCY_SYMBOL_LENGTH + 1) },
+      });
+      await user.clear(screen.getByLabelText(/rate to base/i));
+      await user.type(screen.getByLabelText(/rate to base/i), '2');
+
+      await user.click(screen.getByRole('button', { name: /add currency/i }));
+
+      expect(
+        await screen.findByText(
+          `Symbol must be ${MAX_CURRENCY_SYMBOL_LENGTH} characters or fewer`,
+        ),
+      ).toBeInTheDocument();
+      expect(mockedApi.post).not.toHaveBeenCalled();
     });
 
     test('changes user role via PUT (not PATCH)', async () => {

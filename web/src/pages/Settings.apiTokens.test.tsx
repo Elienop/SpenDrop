@@ -1,5 +1,11 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -24,6 +30,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
+import { MAX_API_TOKEN_NAME_LENGTH } from '../lib/constants';
 import type { ApiToken, ListTokensResponse } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
@@ -483,5 +490,73 @@ describe('ApiTokensSection', () => {
     expect(
       screen.getByRole('button', { name: /revoke all/i }),
     ).toBeInTheDocument();
+  });
+
+  // The name cap is a CHARACTER count, matching both the Go handler
+  // (apiTokenNameMax) and the column's own CHECK(length(name) BETWEEN 1 AND
+  // 100) — SQLite's length() counts characters on TEXT. Zod's `.max()` counts
+  // UTF-16 code units, so 100 astral-plane characters measure 200 to it: a name
+  // the server and the schema both accept, refused in the browser.
+  test('accepts a token name of exactly the full limit, emoji included', async () => {
+    const user = userEvent.setup();
+    seedGetMock([]);
+    const atLimit = '🧾'.repeat(MAX_API_TOKEN_NAME_LENGTH);
+    mockedApi.post.mockResolvedValueOnce({
+      id: 8,
+      name: atLimit,
+      token_prefix: 'spdr_aB3xQ9z7kL',
+      created_at: '2026-04-18T14:23:00Z',
+      last_used_at: null,
+      last_used_ip: null,
+      expires_at: null,
+      token: 'spdr_aB3xQ9z7kLmN3pRsTv2wXyZfG9_abc123',
+    });
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /^create token$/i }));
+    // fireEvent rather than user.type: 100 emoji keystrokes is slow and adds
+    // nothing the schema check does not already see.
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: atLimit },
+    });
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
+    await waitFor(() => {
+      expect(mockedApi.post).toHaveBeenCalledWith('api-tokens', {
+        name: atLimit,
+        expires_at: null,
+      });
+    });
+  });
+
+  test('refuses a token name one character over the limit', async () => {
+    const user = userEvent.setup();
+    seedGetMock([]);
+    renderSettingsOnApiTokensTab();
+    await waitFor(() => {
+      expect(screen.getByText(/no api tokens yet/i)).toBeInTheDocument();
+    });
+    await user.click(screen.getByRole('button', { name: /^create token$/i }));
+    fireEvent.change(screen.getByLabelText(/^name$/i), {
+      target: { value: 'ب'.repeat(MAX_API_TOKEN_NAME_LENGTH + 1) },
+    });
+    {
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /^create token$/i }),
+      );
+    }
+    expect(
+      await screen.findByText(
+        `Name must be ${MAX_API_TOKEN_NAME_LENGTH} characters or fewer`,
+      ),
+    ).toBeInTheDocument();
+    expect(mockedApi.post).not.toHaveBeenCalled();
   });
 });

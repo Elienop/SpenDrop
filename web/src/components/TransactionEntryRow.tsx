@@ -40,6 +40,8 @@ import { AmountCurrencyInput } from './AmountCurrencyInput';
 import type { Category, Transaction } from '../api/types';
 import { formatYYYYMMDD } from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import { MAX_DESCRIPTION_LENGTH } from '@/lib/constants';
+import { charCount } from '@/lib/text';
 import { newClientKey } from '@/lib/client-key';
 import {
   isRetryableSaveFailure,
@@ -106,7 +108,24 @@ const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
   amount: z.number().positive('> 0'),
   currency: z.string().regex(/^[A-Z]{3}$/, 'Invalid currency'),
-  description: z.string().min(1, 'required').max(200),
+  // 500 CHARACTERS, matching the server (MaxDescriptionLength) and the bulk-edit
+  // dialog. This field used to cap at 200, which came in with the component in
+  // the design-system v3 PR and was never anything the product claimed: no
+  // comment explained it, no message named it (Zod's default "Too big" was all
+  // the user got), no `maxLength` stopped the typing, and every other way of
+  // writing a description — bulk edit, quick add, import — took 500. So a
+  // description pasted into this row failed at submit while the same text saved
+  // fine one dialog over.
+  //
+  // charCount, not Zod's .max(): .max() counts UTF-16 code units, so an emoji
+  // costs 2 there and 1 on the server, and the two limits would drift apart on
+  // exactly the input that makes them differ.
+  description: z
+    .string()
+    .min(1, 'required')
+    .refine((value) => charCount(value) <= MAX_DESCRIPTION_LENGTH, {
+      message: `max ${MAX_DESCRIPTION_LENGTH}`,
+    }),
   category_id: z.number().int().positive('required'),
   tags: z.string(),
 });

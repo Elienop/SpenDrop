@@ -158,6 +158,10 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
+	// BYTES, which equals characters for every username that can reach the
+	// database: isValidUsername below admits only [a-zA-Z0-9_-], all one-byte in
+	// UTF-8. See the fuller note on the identical check in handleCreateUser,
+	// including what the check-before-charset-gate ordering costs.
 	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
@@ -170,13 +174,15 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "password is required")
 		return
 	}
+	// BYTES, and it must stay bytes — bcrypt truncates at 72. See
+	// passwordTooLongMessage in password_change_handlers.go for the full reason.
 	minLen, maxLen := getPasswordBounds()
 	if len(req.Password) < minLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be at least %d characters", minLen))
+		writeError(w, http.StatusBadRequest, passwordTooShortMessage(minLen))
 		return
 	}
 	if len(req.Password) > maxLen {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("password must be %d characters or less", maxLen))
+		writeError(w, http.StatusBadRequest, passwordTooLongMessage(maxLen))
 		return
 	}
 
@@ -211,7 +217,7 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	// Default display name to username if not provided
 	displayName := req.DisplayName
-	if len(displayName) > MaxDisplayNameLength {
+	if charLen(displayName) > MaxDisplayNameLength {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
 		return
 	}
