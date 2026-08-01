@@ -1694,3 +1694,49 @@ func TestHandleImportUpload_GoogleSheetsExport_StillImports(t *testing.T) {
 		})
 	}
 }
+
+// TestPrescanImportWorkbook_AcceptsRowWhoseCellsSumPastTheCellLimit pins that
+// the per-cell accumulator resets at each cell rather than running on across
+// the row.
+//
+// Without the reset the per-cell bound silently becomes a second, much tighter
+// row bound: a row of ordinary cells that together exceed MaxImportCellBytes
+// is refused even though no single cell comes close. That is a false rejection
+// of a perfectly normal ledger row — several long notes on one transaction is
+// enough — and it is invisible to every other test here, because they all use
+// either short cells or one enormous one.
+func TestPrescanImportWorkbook_AcceptsRowWhoseCellsSumPastTheCellLimit(t *testing.T) {
+	const (
+		columns      = 26
+		bytesPerCell = (MaxImportCellBytes / columns) * 2 // comfortably over when summed
+	)
+	if bytesPerCell >= MaxImportCellBytes {
+		t.Fatalf("bytesPerCell=%d must stay under MaxImportCellBytes (%d)", bytesPerCell, MaxImportCellBytes)
+	}
+	if columns*bytesPerCell <= MaxImportCellBytes {
+		t.Fatalf("the row must SUM past MaxImportCellBytes (%d) for this to test the reset, got %d",
+			MaxImportCellBytes, columns*bytesPerCell)
+	}
+	if columns*bytesPerCell >= MaxImportRowBytes {
+		t.Fatalf("the row must stay under MaxImportRowBytes (%d) so the row bound is not what fires",
+			MaxImportRowBytes)
+	}
+
+	value := strings.Repeat("n", bytesPerCell)
+	var row strings.Builder
+	row.WriteString(`<row r="2">`)
+	for c := 0; c < columns; c++ {
+		ref, err := excelize.CoordinatesToCellName(c+1, 2)
+		if err != nil {
+			t.Fatalf("cell name: %v", err)
+		}
+		row.WriteString(inlineCell(ref, value))
+	}
+	row.WriteString(`</row>`)
+
+	payload := buildXLSXWithRawSheet(t, headerRow(1)+row.String())
+	if err := prescanImportWorkbook(payload); err != nil {
+		t.Errorf("prescan refused a row of %d ordinary cells totalling %d bytes, none of them near the %d-byte cell limit: %v",
+			columns, columns*bytesPerCell, MaxImportCellBytes, err)
+	}
+}
