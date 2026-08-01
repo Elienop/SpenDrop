@@ -58,10 +58,17 @@ type ToastOpts = {
 /**
  * Invoke a toast action the way sonner does — with an event whose
  * `preventDefault` decides whether sonner keeps the toast open.
+ *
+ * act-wrapped and awaited because the handler kicks off an async send whose
+ * state updates would otherwise land outside act and warn.
  */
-function tapAction(opts: ToastOpts): { preventDefault: ReturnType<typeof vi.fn> } {
+async function tapAction(
+  opts: ToastOpts,
+): Promise<{ preventDefault: ReturnType<typeof vi.fn> }> {
   const event = { preventDefault: vi.fn() };
-  opts.action?.onClick(event);
+  await act(async () => {
+    opts.action?.onClick(event);
+  });
   return event;
 }
 
@@ -262,7 +269,7 @@ describe('TransactionEntryRow', () => {
     const opts = lastErrorOpts();
     expect(opts.action?.label).toMatch(/retry/i);
 
-    tapAction(opts);
+    await tapAction(opts);
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(2));
     const first = onSubmit.mock.calls[0][0] as CreateTransactionInput;
@@ -346,7 +353,7 @@ describe('TransactionEntryRow', () => {
     const slot = errorOpts.id;
     expect(slot).toEqual(expect.any(String));
 
-    const event = tapAction(errorOpts);
+    const event = await tapAction(errorOpts);
     // sonner would otherwise dismiss the toast the moment the action runs.
     expect(event.preventDefault).toHaveBeenCalled();
     expect(toast.loading).toHaveBeenCalledWith(
@@ -382,7 +389,7 @@ describe('TransactionEntryRow', () => {
     await user.type(screen.getByLabelText(/description/i), 'Milk');
 
     // ...then the earlier failure's Retry finally goes through.
-    tapAction(lastErrorOpts());
+    await tapAction(lastErrorOpts());
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     // The rescued entry saved under its own description, and the draft in the
@@ -408,7 +415,7 @@ describe('TransactionEntryRow', () => {
     await user.click(screen.getByRole('button', { name: /add/i }));
     await waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1));
 
-    tapAction(lastErrorOpts());
+    await tapAction(lastErrorOpts());
 
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
     await waitFor(() =>
@@ -444,7 +451,9 @@ describe('TransactionEntryRow', () => {
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute('aria-busy', 'true');
 
-    release(savedTransaction);
+    await act(async () => {
+      release(savedTransaction);
+    });
 
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled(),
@@ -481,7 +490,7 @@ describe('TransactionEntryRow', () => {
     await fillRow(user, { amount: '12', description: 'Eggs' });
 
     const amount = screen.getByLabelText(/amount/i);
-    amount.focus();
+    act(() => amount.focus());
     // Deliberately no await between these two: userEvent's keyboard() flushes
     // between presses, which lets the guard's state commit and hides the race.
     fireEvent.keyDown(amount, { key: 'Enter', ctrlKey: true });
@@ -504,7 +513,9 @@ describe('TransactionEntryRow', () => {
     // creates two rows — the failure the whole feature exists to prevent.
     expect(keys.size).toBe(1);
 
-    release(savedTransaction);
+    await act(async () => {
+      release(savedTransaction);
+    });
     await waitFor(() => expect(toast.success).toHaveBeenCalled());
   });
 
@@ -677,7 +688,7 @@ describe('TransactionEntryRow', () => {
     await screen.findByRole('button', { name: /currency: usd/i });
 
     const amount = screen.getByLabelText(/amount/i);
-    amount.focus();
+    act(() => amount.focus());
     await user.type(amount, '50{Enter}');
 
     expect(onSubmit).not.toHaveBeenCalled();
@@ -701,7 +712,7 @@ describe('TransactionEntryRow', () => {
     );
     await user.click(await screen.findByRole('option', { name: /groceries/i }));
 
-    screen.getByLabelText(/amount/i).focus();
+    act(() => screen.getByLabelText(/amount/i).focus());
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     await waitFor(() => {
@@ -734,7 +745,7 @@ describe('TransactionEntryRow', () => {
     // AmountCurrencyInput deliberately ignores incoming `value` while
     // focused, so the post-save reset to 0 was swallowed and "25" stayed in
     // the DOM — ready to concatenate into the next transaction's amount.
-    amount.focus();
+    act(() => amount.focus());
     await user.keyboard('{Control>}{Enter}{/Control}');
 
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
@@ -792,7 +803,7 @@ describe('TransactionEntryRow', () => {
     await user.type(amount, '999');
     await user.type(description, 'Wrong entry');
 
-    description.focus();
+    act(() => description.focus());
     await user.keyboard('{Escape}');
 
     expect(amount.value).toBe('');
@@ -904,7 +915,11 @@ describe('TransactionEntryRow', () => {
     });
     const opts = (toast.success as Mock).mock.calls[0][1];
 
-    await opts.action.onClick();
+    // act-wrapped: undo runs onDelete then form.reset, whose field updates
+    // would otherwise land outside act.
+    await act(async () => {
+      await opts.action.onClick();
+    });
 
     expect(onDelete).toHaveBeenCalledTimes(1);
     expect(onDelete).toHaveBeenCalledWith(42);
@@ -1021,7 +1036,11 @@ describe('TransactionEntryRow', () => {
 
     // First undo attempt: onDelete rejects. Buffer must be restored.
     onDelete.mockRejectedValueOnce(new Error('server error'));
-    await opts.action.onClick();
+    // act-wrapped: undo runs onDelete then form.reset, whose field updates
+    // would otherwise land outside act.
+    await act(async () => {
+      await opts.action.onClick();
+    });
 
     expect(onDelete).toHaveBeenCalledTimes(1);
     expect(toast.error).toHaveBeenCalledTimes(1);
@@ -1032,7 +1051,11 @@ describe('TransactionEntryRow', () => {
     ).toBe('');
 
     // Second undo attempt succeeds because the buffer was restored.
-    await opts.action.onClick();
+    // act-wrapped: undo runs onDelete then form.reset, whose field updates
+    // would otherwise land outside act.
+    await act(async () => {
+      await opts.action.onClick();
+    });
     expect(onDelete).toHaveBeenCalledTimes(2);
     await waitFor(() => {
       expect(
@@ -1248,7 +1271,7 @@ describe('TransactionEntryRow', () => {
     );
     await screen.findByRole('button', { name: /currency: usd/i });
     const amount = screen.getByLabelText(/amount/i);
-    amount.focus();
+    act(() => amount.focus());
     await user.type(amount, '5{Enter}');
     expect(screen.getByRole('button', { name: /currency: usd/i })).toHaveFocus();
   });

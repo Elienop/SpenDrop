@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -50,10 +50,17 @@ type ToastOpts = {
 /**
  * Invoke a toast action the way sonner does — with an event whose
  * `preventDefault` decides whether sonner keeps the toast open.
+ *
+ * act-wrapped and awaited because the handler kicks off an async send whose
+ * state updates would otherwise land outside act and warn.
  */
-function tapAction(opts: ToastOpts): { preventDefault: ReturnType<typeof vi.fn> } {
+async function tapAction(
+  opts: ToastOpts,
+): Promise<{ preventDefault: ReturnType<typeof vi.fn> }> {
   const event = { preventDefault: vi.fn() };
-  opts.action?.onClick(event);
+  await act(async () => {
+    opts.action?.onClick(event);
+  });
   return event;
 }
 
@@ -874,7 +881,7 @@ describe('QuickAdd — one idempotency key per intent', () => {
     const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
     expect(opts.action?.label).toMatch(/retry/i);
 
-    tapAction(opts);
+    await tapAction(opts);
 
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
     const first = postedBody(0);
@@ -900,7 +907,7 @@ describe('QuickAdd — one idempotency key per intent', () => {
     await waitFor(() => expect(toastError).toHaveBeenCalled());
     const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
     expect(opts.action?.label).toMatch(/retry/i);
-    tapAction(opts);
+    await tapAction(opts);
 
     await waitFor(() => expect(apiPost).toHaveBeenCalledTimes(2));
     expect(postedBody(1).client_key).toBe(postedBody(0).client_key);
@@ -956,7 +963,7 @@ describe('QuickAdd — one idempotency key per intent', () => {
     const slot = errorOpts.id;
     expect(slot).toEqual(expect.any(String));
 
-    const event = tapAction(errorOpts);
+    const event = await tapAction(errorOpts);
     // sonner would otherwise dismiss the toast the moment the action runs.
     expect(event.preventDefault).toHaveBeenCalled();
     expect(toastLoading).toHaveBeenCalledWith(
@@ -987,7 +994,7 @@ describe('QuickAdd — one idempotency key per intent', () => {
 
     // ...then the earlier failure's Retry finally goes through.
     const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
-    tapAction(opts);
+    await tapAction(opts);
 
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
     // The rescued entry saved, but clearing the form would have destroyed the
@@ -1008,7 +1015,7 @@ describe('QuickAdd — one idempotency key per intent', () => {
     await waitFor(() => expect(toastError).toHaveBeenCalled());
 
     const [, opts] = toastError.mock.calls[0] as [string, ToastOpts];
-    tapAction(opts);
+    await tapAction(opts);
 
     await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
     await waitFor(() =>
