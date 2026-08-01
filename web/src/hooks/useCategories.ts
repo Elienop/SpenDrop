@@ -21,6 +21,15 @@ export function useCategories(): UseCategoriesResult {
   const query = useQuery({
     queryKey: ['categories'],
     queryFn: () => api.get<Category[]>('categories'),
+    // 'offlineFirst', not the default 'online': the service worker serves
+    // GET /api/categories from `spendrop-api-lists` when the network is gone,
+    // and that cache is the only reason the offline capture screen has
+    // categories to tap. The default would pause the query without ever
+    // issuing the request, so the cache would never be consulted and /quick
+    // would show "no categories yet" with no way to add anything. A genuine
+    // miss (nothing cached) still surfaces as an error with Retry, which is
+    // the honest answer — not an empty list.
+    networkMode: 'offlineFirst',
   });
 
   return {

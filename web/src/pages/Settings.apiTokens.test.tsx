@@ -68,6 +68,7 @@ describe('ApiTokensSection', () => {
         created_at: '2024-01-01',
       },
       loading: false,
+      unverified: false,
       login: vi.fn(),
       register: vi.fn(),
       logout: vi.fn(),

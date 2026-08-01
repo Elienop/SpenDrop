@@ -380,6 +380,10 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	}
 
 	amountCents := dollarsToCents(amount)
+	// Manual entries used to store NULL here, so import dedupe could not see
+	// them and re-imported them as duplicates.
+	contentHash := h.contentHashForManualEntry(
+		r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID)
 	params := database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
@@ -390,10 +394,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		CategoryID:          req.CategoryID,
 		Tags:                nullStringFromPtr(req.Tags),
 		Notes:               nullStringFromPtr(req.Notes),
-		// Manual entries used to store NULL here, so import dedupe could not
-		// see them and re-imported them as duplicates.
-		ContentHash: h.contentHashForManualEntry(
-			r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID),
+		ContentHash:         contentHash,
 	}
 	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
 	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
@@ -719,6 +720,27 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			return
 		}
 
+		// Same dedupe identity the single-create path assigns. Omitting it
+		// stored NULL, so every row added through batch create was invisible to
+		// import dedupe, and re-importing a spreadsheet containing those entries
+		// silently duplicated them. (The mobile quick-add and the offline queue
+		// drain post to the SINGLE-create endpoint, not this one — an earlier
+		// comment here claimed otherwise and misdirected a whole analysis.
+		// Verified: nothing under web/src calls POST /api/transactions/batch.)
+		//
+		// qtx, not h.queries, and that is load-bearing twice over. It is the
+		// transaction-scoped handle, so the uniqueness probe inside sees rows
+		// created earlier in THIS batch: two identical items in one request
+		// anchor the first and store the second with NULL, rather than
+		// colliding on the partial UNIQUE index and rolling back everything
+		// the user entered. And because the pool is SetMaxOpenConns(1), a read
+		// through the outer handle while this transaction holds the single
+		// connection DEADLOCKS — swapping qtx for h.queries hangs the request
+		// until the client gives up.
+		contentHash := h.contentHashForManualEntry(
+			r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
+		)
+
 		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
 			UserID:              user.ID,
 			Date:                date,
@@ -729,24 +751,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 			CategoryID:          req.CategoryID,
 			Tags:                nullStringFromPtr(req.Tags),
 			Notes:               nullStringFromPtr(req.Notes),
-			// Same dedupe identity the single-create path assigns. Omitting it
-			// here stored NULL, so every row added through batch create — which
-			// is what the mobile quick-add and the offline queue drain into —
-			// was invisible to import dedupe, and re-importing a spreadsheet
-			// containing those entries silently duplicated them.
-			//
-			// qtx, not h.queries, and that is load-bearing twice over. It is the
-			// transaction-scoped handle, so the uniqueness probe inside sees rows
-			// created earlier in THIS batch: two identical items in one request
-			// anchor the first and store the second with NULL, rather than
-			// colliding on the partial UNIQUE index and rolling back everything
-			// the user entered. And because the pool is SetMaxOpenConns(1), a read
-			// through the outer handle while this transaction holds the single
-			// connection DEADLOCKS — swapping qtx for h.queries hangs the request
-			// until the client gives up.
-			ContentHash: h.contentHashForManualEntry(
-				r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
-			),
+			ContentHash:         contentHash,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -2381,6 +2386,17 @@ func validateMoneyAmount(d float64, field string) error {
 // stored with NULL and remain fully intact in the ledger. The consequence,
 // deliberately accepted: a later import of that content dedupes against the
 // canonical row only.
+//
+// The probe deliberately does NOT report which row holds the identity. It was
+// briefly wired to the wire as duplicate_of, and that was wrong: the digest has
+// no user_id and no time-of-day, and the anchor is whoever inserted first
+// household-wide, so a second member's genuinely separate same-day entry was
+// reported to them as "you already had this one". Scoping the lookup to the
+// actor does not repair it — when one member's row anchors the digest, the
+// other member's real double-post also resolves to that row, so a same-user
+// filter reports nothing and misses the case the feature existed for. Telling a
+// user they submitted something twice needs a client-supplied idempotency key,
+// not a content hash. Do not re-derive a verdict from this function.
 func (h *Handler) contentHashForManualEntry(ctx context.Context, q *database.Queries, date time.Time, amountCents int64, description string, categoryID int64) sql.NullString {
 	cat, err := q.GetCategoryByID(ctx, categoryID)
 	if err != nil {

@@ -50,6 +50,7 @@ function asAuth(user: User) {
   return {
     user,
     loading: false,
+    unverified: false,
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),

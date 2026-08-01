@@ -3,9 +3,13 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
-// Mock the API client module
-vi.mock('../api/client', () => {
+// Mock the API client module. The real ApiError / NetworkError classes are
+// kept: the whole point of the bootstrap is that it discriminates between
+// them, so a stubbed error class would test nothing.
+vi.mock('../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/client')>();
   return {
+    ...actual,
     api: {
       get: vi.fn(),
       post: vi.fn(),
@@ -17,23 +21,30 @@ vi.mock('../api/client', () => {
 // Logout purges the leaving user's per-user offline queue. Mock the lib so the
 // test asserts the call without touching IndexedDB.
 const purgeQueue = vi.fn();
+const markNeedsSignIn = vi.fn();
+const clearNeedsSignIn = vi.fn();
 vi.mock('@/lib/offline-queue', () => ({
   purgeQueue: (...args: unknown[]) => purgeQueue(...args),
+  markNeedsSignIn: (...args: unknown[]) => markNeedsSignIn(...args),
+  clearNeedsSignIn: (...args: unknown[]) => clearNeedsSignIn(...args),
 }));
 
 // We'll import after mock setup
-import { api } from '../api/client';
+import { api, ApiError, NetworkError } from '../api/client';
 import { AuthProvider, useAuth } from './useAuth';
+import { readRememberedUser, rememberUser } from '@/lib/last-user';
 import { pushTestState, makeSubscription } from '@/test/setup';
 
 const mockedApi = vi.mocked(api);
 
 // Test component that exposes auth context values
 function AuthDisplay() {
-  const { user, loading, login, logout, register } = useAuth();
+  const { user, loading, unverified, login, logout, register } = useAuth();
   return (
     <div>
       <span data-testid="loading">{String(loading)}</span>
+      <span data-testid="unverified">{String(unverified)}</span>
+      <span data-testid="role">{user ? user.role : 'none'}</span>
       <span data-testid="user">{user ? user.display_name : 'null'}</span>
       <button onClick={() => login('alice', 'pass123')}>Login</button>
       <button onClick={() => register('bob', 'pass456', 'Bob')}>
@@ -82,6 +93,7 @@ vi.mock('@/lib/queryClient', () => ({
 describe('useAuth', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    localStorage.clear();
     purgeQueue.mockResolvedValue(undefined);
     cachesDelete.mockResolvedValue(true);
     vi.stubGlobal('caches', { delete: cachesDelete });
@@ -117,8 +129,12 @@ describe('useAuth', () => {
     expect(mockedApi.get).toHaveBeenCalledWith('auth/me');
   });
 
-  test('sets user to null when session check fails', async () => {
-    mockedApi.get.mockRejectedValueOnce(new Error('Unauthorized'));
+  // The bootstrap's two failure modes are NOT the same event and must not be
+  // handled the same way. Previously this was one test rejecting with a bare
+  // `new Error('Unauthorized')` — which passes whether or not the code can
+  // tell them apart, so it pinned the bug instead of catching it.
+  test('signs the user out when the session check gets a real 401', async () => {
+    mockedApi.get.mockRejectedValueOnce(new ApiError('Unauthorized', 401));
 
     renderWithProviders(<AuthDisplay />);
 
@@ -126,6 +142,265 @@ describe('useAuth', () => {
       expect(screen.getByTestId('loading')).toHaveTextContent('false');
     });
     expect(screen.getByTestId('user')).toHaveTextContent('null');
+    expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+  });
+
+  test('does NOT sign the user out when the session check never reached the server', async () => {
+    // Drove out of an underground car park: the request failed in transit, the
+    // server never said anything. Signing out here is the "logged out when I
+    // left the house" bug.
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('false');
+    });
+    expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    expect(screen.getByTestId('unverified')).toHaveTextContent('true');
+  });
+
+  test('a 5xx from /auth/me is not a sign-out either', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(new ApiError('bad gateway', 502));
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('false');
+    });
+    expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    expect(screen.getByTestId('unverified')).toHaveTextContent('true');
+  });
+
+  test('falls back to no user when the request fails and nobody is remembered', async () => {
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('false');
+    });
+    expect(screen.getByTestId('user')).toHaveTextContent('null');
+    expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+  });
+
+  test('an unverified identity carries no elevated role', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+    // Nothing the server has not confirmed may grant admin surface area.
+    expect(screen.getByTestId('role')).toHaveTextContent('member');
+  });
+
+  // Recovery must not be gated behind the state that broke. When signal comes
+  // back the app has to heal by itself — the owner should never have to
+  // force-quit the PWA.
+  test('re-verifies by itself when connectivity returns', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('unverified')).toHaveTextContent('true');
+    });
+
+    mockedApi.get.mockResolvedValueOnce({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+
+    window.dispatchEvent(new Event('online'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+    });
+    expect(screen.getByTestId('role')).toHaveTextContent('admin');
+    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+  });
+
+  test('re-verifies when the app is brought back to the foreground', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('Could not reach the server', 'unreachable'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('unverified')).toHaveTextContent('true');
+    });
+
+    mockedApi.get.mockResolvedValueOnce({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+    });
+  });
+
+  test('a verified session is remembered so the capture screen survives a cold start offline', async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      id: 12,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+    expect(readRememberedUser()).toMatchObject({ id: 12, display_name: 'Alice' });
+    // A confirmed session releases any hold left by an earlier expiry.
+    expect(clearNeedsSignIn).toHaveBeenCalledWith(12);
+  });
+
+  test('a real 401 holds the remembered user\'s queued rows for sign-in instead of purging them', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'member',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(new ApiError('Unauthorized', 401));
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    // Held, never discarded, and never re-filed under whoever signs in next.
+    expect(markNeedsSignIn).toHaveBeenCalledWith(5);
+    expect(purgeQueue).not.toHaveBeenCalled();
+    expect(readRememberedUser()).toBeNull();
+  });
+
+  test('holds the previous person\'s captures when the device turns out to belong to someone else', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'member',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockResolvedValueOnce({
+      id: 6,
+      username: 'bob',
+      display_name: 'Bob',
+      role: 'member',
+      created_at: '2024-01-01',
+    });
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Bob');
+    });
+    // Alice's rows are held, not replayed through Bob's session.
+    expect(markNeedsSignIn).toHaveBeenCalledWith(5);
+    expect(clearNeedsSignIn).toHaveBeenCalledWith(6);
+  });
+
+  test('a transport failure does not hold the queue', async () => {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'member',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('loading')).toHaveTextContent('false');
+    });
+    expect(markNeedsSignIn).not.toHaveBeenCalled();
+  });
+
+  test('logout forgets the remembered identity', async () => {
+    mockedApi.get.mockResolvedValueOnce({
+      id: 42,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.post.mockResolvedValueOnce(undefined);
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('Alice');
+    });
+    await user.click(screen.getByText('Logout'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent('null');
+    });
+    expect(readRememberedUser()).toBeNull();
   });
 
   test('login calls api and sets user state', async () => {

@@ -179,6 +179,15 @@ func TestHandleCreateTransaction_ConcurrentIdenticalCreatesAllSucceed(t *testing
 					round, i, rec.Code, rec.Body.String())
 			}
 		}
+
+		// Wire contract under contention: losing the race is still not something
+		// the server may report. The winner is whoever inserted first, which in
+		// this household is as likely to be the other member as the retrying
+		// one, so a "you already have this one" verdict derived from the digest
+		// accuses the wrong person. See the header of duplicate_of_test.go.
+		for _, rec := range recs {
+			assertNoDuplicateVerdict(t, decodeObject(t, rec))
+		}
 	}
 
 	// Status codes alone are not enough — a 201 whose row had been rolled

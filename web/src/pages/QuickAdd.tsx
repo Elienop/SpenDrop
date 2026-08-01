@@ -8,7 +8,7 @@ import {
 } from 'react';
 import { Link } from 'react-router-dom';
 import { toast } from 'sonner';
-import { ArrowUpRight, CheckCircle2 } from 'lucide-react';
+import { ArrowUpRight, CheckCircle2, LogIn, WifiOff } from 'lucide-react';
 import { ApiError } from '@/api/client';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Toaster } from '@/components/ui/sonner';
@@ -103,8 +103,17 @@ export function QuickAdd() {
   } = useCurrencies();
   const { user } = useAuth();
   const { create, undo, saving } = useQuickAdd();
-  const { pending, count: pendingCount } = useOfflineQueue(user?.id);
-  const historyDescriptions = useDescriptionHistory();
+  const {
+    pending,
+    count: pendingCount,
+    needsSignIn: queueHeld,
+  } = useOfflineQueue(user?.id);
+  const {
+    descriptions: historyDescriptions,
+    failed: historyFailed,
+    waitingForNetwork: historyWaiting,
+    retry: retryHistory,
+  } = useDescriptionHistory();
 
   // Categories for the active kind (income or expense). Surface the sticky
   // last-used category first so the common case is one tap away.
@@ -434,15 +443,30 @@ export function QuickAdd() {
             this confirms the entry is safe rather than flagging a problem.
             aria-live="off" because the success toast already announces each
             save; a live region here would double-narrate to screen readers. */}
-        {pendingCount > 0 && (
-          <Alert role="status" aria-live="off">
-            <CheckCircle2 className="h-4 w-4" />
-            <AlertDescription>
-              {pendingCount} {pendingCount === 1 ? 'entry' : 'entries'} saved on
-              this device · will sync when online
-            </AlertDescription>
-          </Alert>
-        )}
+        {pendingCount > 0 &&
+          (queueHeld ? (
+            /* The server rejected this identity, so these rows will not sync
+               on their own. Say what has to happen instead of repeating a
+               promise that cannot be kept — and never drop the rows. */
+            <Alert role="status" aria-live="off">
+              <LogIn className="h-4 w-4" />
+              <AlertDescription>
+                {pendingCount} {pendingCount === 1 ? 'entry' : 'entries'} saved
+                on this device ·{' '}
+                <Link to="/login" className="font-medium underline">
+                  Sign in to sync
+                </Link>
+              </AlertDescription>
+            </Alert>
+          ) : (
+            <Alert role="status" aria-live="off">
+              <CheckCircle2 className="h-4 w-4" />
+              <AlertDescription>
+                {pendingCount} {pendingCount === 1 ? 'entry' : 'entries'} saved
+                on this device · will sync when online
+              </AlertDescription>
+            </Alert>
+          ))}
 
         {/* Two stacked segmented controls: first WHAT (income vs expense),
             then HOW (freeform vs tap). Each carries a visible Label + an
@@ -487,13 +511,39 @@ export function QuickAdd() {
               className="h-14 text-lg"
             />
 
-            {showSuggestions && (
-              <QuickAddSuggestions
-                suggestions={safeDescriptions}
-                query={parsed.description}
-                onPick={onPickSuggestion}
-              />
-            )}
+            {/* Three distinct outcomes, never collapsed into "no chips":
+                the history broke, the history has not been fetched yet
+                (offline), or there is genuinely nothing to suggest. Mirrors
+                the category panel below, which already separates a load
+                failure from an empty list. */}
+            {showSuggestions &&
+              (historyFailed ? (
+                <div className="flex flex-col items-start gap-2">
+                  <p className="text-sm text-destructive" role="alert">
+                    Couldn’t load your past entries.
+                  </p>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    aria-label="Retry past entries"
+                    onClick={retryHistory}
+                  >
+                    Retry
+                  </Button>
+                </div>
+              ) : historyWaiting ? (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />
+                  You’re offline — past entries will appear when you reconnect.
+                </p>
+              ) : (
+                <QuickAddSuggestions
+                  suggestions={safeDescriptions}
+                  query={parsed.description}
+                  onPick={onPickSuggestion}
+                />
+              ))}
 
             {raw.trim().length > 0 && (
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">

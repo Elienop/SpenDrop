@@ -9,9 +9,12 @@ vi.mock('sonner', () => ({
   toast: Object.assign(() => undefined, { success: (...a: unknown[]) => success(...a) }),
 }));
 
-// The hook only reads `.user`; a mutable variable drives authed vs null cases.
+// The hook reads `.user` and `.unverified`; mutable variables drive the cases.
 let currentUser: { id: number } | null = { id: 1 };
-vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: currentUser }) }));
+let currentUnverified = false;
+vi.mock('@/hooks/useAuth', () => ({
+  useAuth: () => ({ user: currentUser, unverified: currentUnverified }),
+}));
 
 import { useOfflineSync } from './useOfflineSync';
 
@@ -19,6 +22,7 @@ beforeEach(() => {
   drainQueue.mockReset();
   success.mockReset();
   currentUser = { id: 1 };
+  currentUnverified = false;
 });
 
 describe('useOfflineSync', () => {
@@ -50,6 +54,60 @@ describe('useOfflineSync', () => {
     drainQueue.mockResolvedValue({ synced: 0, remaining: 0 });
     renderHook(() => useOfflineSync());
     await waitFor(() => expect(drainQueue).toHaveBeenCalledTimes(1));
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await waitFor(() => expect(drainQueue).toHaveBeenCalledTimes(2));
+  });
+
+  // An identity the server has not confirmed must not post anything. The
+  // server attributes a created row purely from the session cookie, so
+  // replaying under an unconfirmed identity is how a capture lands in the
+  // wrong household member's ledger.
+  test('does NOT drain while the identity is unverified', async () => {
+    currentUnverified = true;
+    drainQueue.mockResolvedValue({ synced: 0, remaining: 1 });
+
+    renderHook(() => useOfflineSync());
+    await new Promise((r) => setTimeout(r, 5));
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    await new Promise((r) => setTimeout(r, 5));
+
+    expect(drainQueue).not.toHaveBeenCalled();
+  });
+
+  test('drains as soon as the server confirms the identity', async () => {
+    currentUnverified = true;
+    drainQueue.mockResolvedValue({ synced: 1, remaining: 0 });
+    const { rerender } = renderHook(() => useOfflineSync());
+    await new Promise((r) => setTimeout(r, 5));
+    expect(drainQueue).not.toHaveBeenCalled();
+
+    // Re-verification succeeded — no reload, no user action.
+    currentUnverified = false;
+    rerender();
+
+    await waitFor(() => expect(drainQueue).toHaveBeenCalledWith(1));
+  });
+
+  test('keeps listening for reconnection even when there is nobody to sync for', async () => {
+    currentUser = null;
+    const { rerender } = renderHook(() => useOfflineSync());
+
+    // A reconnection while signed out must not throw, and must not leave the
+    // hook deaf once a user appears.
+    act(() => {
+      window.dispatchEvent(new Event('online'));
+    });
+    expect(drainQueue).not.toHaveBeenCalled();
+
+    currentUser = { id: 3 };
+    drainQueue.mockResolvedValue({ synced: 0, remaining: 0 });
+    rerender();
+    await waitFor(() => expect(drainQueue).toHaveBeenCalledWith(3));
+
     act(() => {
       window.dispatchEvent(new Event('online'));
     });

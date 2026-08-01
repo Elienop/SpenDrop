@@ -17,6 +17,14 @@ import { ProtectedRoute } from './ProtectedRoute';
 
 const mockedUseAuth = vi.mocked(useAuth);
 
+const alice = {
+  id: 1,
+  username: 'alice',
+  display_name: 'Alice',
+  role: 'admin' as const,
+  created_at: '2024-01-01',
+};
+
 function renderWithRouter(initialRoute: string) {
   return render(
     <MemoryRouter initialEntries={[initialRoute]}>
@@ -27,6 +35,14 @@ function renderWithRouter(initialRoute: string) {
           element={
             <ProtectedRoute>
               <div>Dashboard Content</div>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/quick"
+          element={
+            <ProtectedRoute allowUnverified>
+              <div>Capture Screen</div>
             </ProtectedRoute>
           }
         />
@@ -48,6 +64,7 @@ describe('ProtectedRoute', () => {
     mockedUseAuth.mockReturnValue({
       user: null,
       loading: true,
+      unverified: false,
       login: vi.fn(),
       register: vi.fn(),
       logout: vi.fn(),
@@ -63,6 +80,7 @@ describe('ProtectedRoute', () => {
     mockedUseAuth.mockReturnValue({
       user: null,
       loading: false,
+      unverified: false,
       login: vi.fn(),
       register: vi.fn(),
       logout: vi.fn(),
@@ -78,14 +96,9 @@ describe('ProtectedRoute', () => {
 
   test('renders children when authenticated', () => {
     mockedUseAuth.mockReturnValue({
-      user: {
-        id: 1,
-        username: 'alice',
-        display_name: 'Alice',
-        role: 'admin',
-        created_at: '2024-01-01',
-      },
+      user: alice,
       loading: false,
+      unverified: false,
       login: vi.fn(),
       register: vi.fn(),
       logout: vi.fn(),
@@ -94,5 +107,58 @@ describe('ProtectedRoute', () => {
     renderWithRouter('/dashboard');
 
     expect(screen.getByText('Dashboard Content')).toBeInTheDocument();
+  });
+
+  // An identity the server has not confirmed unlocks capture and NOTHING else.
+  // Household data reads stay exactly as gated as they were.
+  test('redirects an unverified identity away from a normal protected route', async () => {
+    mockedUseAuth.mockReturnValue({
+      user: alice,
+      loading: false,
+      unverified: true,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+    });
+
+    renderWithRouter('/dashboard');
+
+    await waitFor(() => {
+      expect(screen.getByText('Login Page')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Dashboard Content')).not.toBeInTheDocument();
+  });
+
+  test('lets an unverified identity reach a route marked allowUnverified', () => {
+    mockedUseAuth.mockReturnValue({
+      user: alice,
+      loading: false,
+      unverified: true,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+    });
+
+    renderWithRouter('/quick');
+
+    expect(screen.getByText('Capture Screen')).toBeInTheDocument();
+  });
+
+  test('allowUnverified still requires an identity', async () => {
+    mockedUseAuth.mockReturnValue({
+      user: null,
+      loading: false,
+      unverified: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+    });
+
+    renderWithRouter('/quick');
+
+    await waitFor(() => {
+      expect(screen.getByText('Login Page')).toBeInTheDocument();
+    });
+    expect(screen.queryByText('Capture Screen')).not.toBeInTheDocument();
   });
 });

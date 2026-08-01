@@ -75,6 +75,7 @@ function mockAuth(user: User) {
   mockedUseAuth.mockReturnValue({
     user,
     loading: false,
+    unverified: false,
     login: vi.fn(),
     register: vi.fn(),
     logout,

@@ -42,7 +42,15 @@ export interface UseQuickAddResult {
  * guarantees the request never left the device — so replay creates the row
  * exactly once. An online-but-failed fetch is ambiguous (the write may have
  * landed) and is left to throw so the screen can prompt a manual retry rather
- * than risk a duplicate — `POST /api/transactions` has no content-hash dedup.
+ * than risk a silent duplicate.
+ *
+ * `POST /api/transactions` DOES compute a content hash and DOES detect that a
+ * new manual entry is identical to an existing row — but it deliberately does
+ * not refuse it, because real households enter genuine duplicates (see
+ * `contentHashForManualEntry`). It also does not REPORT the collision: the
+ * digest carries no user and no time, so "identical to an existing row" and
+ * "you submitted this twice" are different questions. Dup-safety therefore
+ * lives entirely in the enqueue gate above.
  */
 export function useQuickAdd(): UseQuickAddResult {
   const { user } = useAuth();

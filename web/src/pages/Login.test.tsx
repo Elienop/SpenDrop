@@ -28,10 +28,56 @@ describe('Login', () => {
     mockedUseAuth.mockReturnValue({
       user: null,
       loading: false,
+      unverified: false,
       login: mockLogin,
       register: vi.fn(),
       logout: vi.fn(),
     });
+  });
+
+  // Signing in needs the server. When the server cannot be reached, the login
+  // screen is a dead end — and it is the screen the app lands on precisely
+  // when connectivity is broken, which is when offline capture matters most.
+  describe('with an identity this device remembers but cannot confirm', () => {
+    beforeEach(() => {
+      mockedUseAuth.mockReturnValue({
+        user: {
+          id: 4,
+          username: 'alice',
+          display_name: 'Alice',
+          role: 'member',
+          created_at: '2024-01-01',
+        },
+        loading: false,
+        unverified: true,
+        login: mockLogin,
+        register: vi.fn(),
+        logout: vi.fn(),
+      });
+    });
+
+    test('offers a way through to offline capture', () => {
+      renderLogin();
+      const link = screen.getByRole('link', { name: /continue as alice/i });
+      expect(link).toHaveAttribute('href', '/quick');
+    });
+
+    test('says why signing in is unavailable rather than just failing', () => {
+      renderLogin();
+      expect(screen.getByText(/can’t reach the server/i)).toBeInTheDocument();
+    });
+
+    test('still offers the normal sign-in form', () => {
+      renderLogin();
+      expect(
+        screen.getByRole('button', { name: /log\s*in/i }),
+      ).toBeInTheDocument();
+    });
+  });
+
+  test('does not offer offline capture when there is no remembered identity', () => {
+    renderLogin();
+    expect(screen.queryByRole('link', { name: /continue as/i })).toBeNull();
   });
 
   test('renders login heading', () => {

@@ -22,10 +22,16 @@ function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      {/* The installed PWA's start_url. `allowUnverified` is what makes
+          offline capture reachable with no signal: the app cannot confirm the
+          session, so it falls back to the identity this device last had
+          confirmed rather than bouncing to /login — the one screen that
+          cannot work offline. Capture writes locally only; the queue is not
+          replayed until the server confirms who is signed in. */}
       <Route
         path="/quick"
         element={
-          <ProtectedRoute>
+          <ProtectedRoute allowUnverified>
             <QuickAdd />
           </ProtectedRoute>
         }
