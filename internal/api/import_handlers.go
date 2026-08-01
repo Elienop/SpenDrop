@@ -517,16 +517,28 @@ var (
 // Go's archive/zip stops a reader the moment it returns more bytes than its
 // entry declared (reader.go, checksumReader.Read).
 //
-// The sizes are summed as uint64 and every entry is bounded individually,
-// which is load-bearing rather than stylistic. UncompressedSize64 is a uint64
-// that archive/zip copies out of the zip64 extra field without a range check,
-// and FileInfo().Size() converts it to int64 unguarded. An entry declaring
-// 1<<63 therefore reports a NEGATIVE size, and a signed running total goes so
-// far negative that no later entry can bring it back over any limit: a
-// 161-byte archive defeated the signed version of this check entirely, and
-// prefixing that entry to 200 MiB of honestly-declared parts defeated it too.
-// Summing unsigned removes the sign question, and rejecting any single entry
-// above the limit before adding it means the running total can never wrap.
+// Every size is compared and summed UNSIGNED, and every entry is bounded
+// individually before it is added. archive/zip copies UncompressedSize64 out
+// of the zip64 extra field without a range check, and FileInfo().Size()
+// converts it to int64 unguarded, so an entry declaring 1<<63 reports a
+// NEGATIVE size. A signed comparison then lets it past — and a signed running
+// total goes so far negative that no later entry brings it back over any
+// limit. A 161-byte archive defeated the signed version of this check
+// entirely, and prefixing that entry to 200 MiB of honestly-declared parts
+// defeated it too.
+//
+// Be precise about which half does the work, because the obvious reading is
+// wrong. Reading the uint64 FIELD rather than Size() is NOT what holds:
+// mutating both reads to uint64(entry.FileInfo().Size()) compiles and every
+// test still passes, since uint64(int64(x)) round-trips the same bits. What
+// holds is that the comparison operand is unsigned at all, and that a single
+// oversized entry is rejected BEFORE the addition — which leaves the total at
+// or below the limit on entry to each iteration, so it cannot wrap.
+//
+// That distinction cost three rounds to find: the mutation meant to prove this
+// changed `var total uint64` to int64, which does not compile in a loop adding
+// a uint64, and `FAIL [build failed]` greps identically to a real failure. It
+// was reported as a passing mutation while proving nothing.
 //
 // Note that excelize's own UnzipSizeLimit — passed at the call site as a
 // second layer — computes the same signed sum internally and has the same
