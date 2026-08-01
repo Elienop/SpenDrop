@@ -1675,12 +1675,24 @@ function ImportPreviewStep({
 
 /* ---------- Import / Export Tab ---------- */
 
-function DataSection() {
-  const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
-  const [month, setMonth] = useState(now.getMonth() + 1);
-  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
-
+/**
+ * Excel import wizard. Admin-only: the whole `/api/import/*` route group
+ * sits behind `auth.RequireAdmin`, so every control in this card would
+ * earn a member a 403.
+ *
+ * A separate component rather than an `{admin && …}` block inside
+ * <DataSection> so that none of the import hooks mount for a member. That
+ * is load-bearing, not tidiness: `useImportSession` runs a mount effect
+ * that resumes a stored import id with GET /api/import/{id}, and a member
+ * who had the wizard open before the route was gated still has that id in
+ * localStorage. Sharing <DataSection>'s hooks would let that resume fire
+ * — once, not on every visit, since the effect's catch drops the stored
+ * id before it inspects the error — and a 403 is not the NotFoundError
+ * the catch stays silent for, so it would land as a raw `forbidden`
+ * banner on a tab whose owner can do nothing about it. The `categories`
+ * fetch below is import-only too.
+ */
+function ImportCard() {
   // Import wizard state — preview / importStep / result are owned by the
   // hook now; destructure them so the rest of the function reads identically
   // to the old local-state version.
@@ -1764,6 +1776,129 @@ function DataSection() {
     clearFileInput();
   }
 
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">Import</CardTitle>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        {importError && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{importError}</AlertDescription>
+          </Alert>
+        )}
+
+        {importStep === 'upload' && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm text-muted-foreground">
+              Upload an Excel file with columns: date, description, amount.
+              Optional columns: category, tags, notes, original_amount,
+              original_currency.
+            </p>
+            <Input
+              ref={fileInputRef}
+              id="excel-file"
+              type="file"
+              accept=".xlsx,.xls"
+              aria-label="Excel File"
+              onChange={(e) => void handleFileChange(e)}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.currentTarget.setAttribute('data-drag-over', 'true');
+              }}
+              onDragLeave={(e) => {
+                e.preventDefault();
+                e.currentTarget.removeAttribute('data-drag-over');
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                e.currentTarget.removeAttribute('data-drag-over');
+                const file = e.dataTransfer.files[0];
+                if (file) {
+                  const dt = new DataTransfer();
+                  dt.items.add(file);
+                  if (fileInputRef.current) {
+                    fileInputRef.current.files = dt.files;
+                    fileInputRef.current.dispatchEvent(
+                      new Event('change', { bubbles: true }),
+                    );
+                  }
+                }
+              }}
+              className={cn(
+                'flex max-w-sm flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 px-6 py-8 text-center transition-colors',
+                'hover:border-muted-foreground/50 hover:bg-muted/50',
+                'data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/5',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
+              )}
+            >
+              <Upload className="size-8 text-muted-foreground" />
+              <div className="flex flex-col gap-1">
+                <span className="text-sm font-medium">
+                  Drag & drop your Excel file here, or click to browse
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  .xlsx, .xls
+                </span>
+              </div>
+            </button>
+          </div>
+        )}
+
+        {importStep === 'preview' && preview && (
+          <ImportPreviewStep
+            preview={preview}
+            cellErrors={importSession.cellErrors}
+            unresolvedCount={importSession.unresolvedCount}
+            canImport={importSession.canImport}
+            pendingPatchCount={importSession.pendingPatchCount}
+            patchRow={importSession.patchRow}
+            categories={categories}
+            categoryMap={categoryMap}
+            setCategoryMap={setCategoryMap}
+            defaultCategoryId={defaultCategoryId}
+            setDefaultCategoryId={setDefaultCategoryId}
+            onConfirm={() => void handleConfirmImport()}
+            onCancel={() => void handleCancelImport()}
+          />
+        )}
+
+        {importStep === 'done' && result && (
+          <div className="flex flex-col gap-4">
+            <p className="text-sm font-medium">
+              {`${result.imported} imported, ${result.skipped} skipped out of ${result.total} total rows.`}
+            </p>
+            <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
+              Import Another
+            </Button>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+interface DataSectionProps {
+  // Import is admin-only (see <ImportCard>); export is not — /api/export/*
+  // is registered in the plain authenticated group, so members keep it in
+  // full. The tab's own label follows this flag as well: calling the tab
+  // "Import / Export" for someone who only ever sees the Export card
+  // advertises a capability they do not have.
+  admin: boolean;
+}
+
+function DataSection({ admin }: DataSectionProps) {
+  const now = new Date();
+  const [year, setYear] = useState(now.getFullYear());
+  const [month, setMonth] = useState(now.getMonth() + 1);
+  const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
+
   function handleExportMonthly() {
     window.open(`/api/export/monthly/${year}/${month}`, '_blank');
   }
@@ -1774,111 +1909,7 @@ function DataSection() {
 
   return (
     <div className="flex flex-col gap-6">
-      {/* ---------- Import card ---------- */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Import</CardTitle>
-        </CardHeader>
-        <CardContent className="flex flex-col gap-4">
-          {importError && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{importError}</AlertDescription>
-            </Alert>
-          )}
-
-          {importStep === 'upload' && (
-            <div className="flex flex-col gap-4">
-              <p className="text-sm text-muted-foreground">
-                Upload an Excel file with columns: date, description, amount.
-                Optional columns: category, tags, notes, original_amount,
-                original_currency.
-              </p>
-              <Input
-                ref={fileInputRef}
-                id="excel-file"
-                type="file"
-                accept=".xlsx,.xls"
-                aria-label="Excel File"
-                onChange={(e) => void handleFileChange(e)}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => fileInputRef.current?.click()}
-                onDragOver={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.setAttribute('data-drag-over', 'true');
-                }}
-                onDragLeave={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.removeAttribute('data-drag-over');
-                }}
-                onDrop={(e) => {
-                  e.preventDefault();
-                  e.currentTarget.removeAttribute('data-drag-over');
-                  const file = e.dataTransfer.files[0];
-                  if (file) {
-                    const dt = new DataTransfer();
-                    dt.items.add(file);
-                    if (fileInputRef.current) {
-                      fileInputRef.current.files = dt.files;
-                      fileInputRef.current.dispatchEvent(
-                        new Event('change', { bubbles: true }),
-                      );
-                    }
-                  }
-                }}
-                className={cn(
-                  'flex max-w-sm flex-col items-center gap-2 rounded-lg border-2 border-dashed border-muted-foreground/25 px-6 py-8 text-center transition-colors',
-                  'hover:border-muted-foreground/50 hover:bg-muted/50',
-                  'data-[drag-over=true]:border-primary data-[drag-over=true]:bg-primary/5',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2',
-                )}
-              >
-                <Upload className="size-8 text-muted-foreground" />
-                <div className="flex flex-col gap-1">
-                  <span className="text-sm font-medium">
-                    Drag & drop your Excel file here, or click to browse
-                  </span>
-                  <span className="text-xs text-muted-foreground">
-                    .xlsx, .xls
-                  </span>
-                </div>
-              </button>
-            </div>
-          )}
-
-          {importStep === 'preview' && preview && (
-            <ImportPreviewStep
-              preview={preview}
-              cellErrors={importSession.cellErrors}
-              unresolvedCount={importSession.unresolvedCount}
-              canImport={importSession.canImport}
-              pendingPatchCount={importSession.pendingPatchCount}
-              patchRow={importSession.patchRow}
-              categories={categories}
-              categoryMap={categoryMap}
-              setCategoryMap={setCategoryMap}
-              defaultCategoryId={defaultCategoryId}
-              setDefaultCategoryId={setDefaultCategoryId}
-              onConfirm={() => void handleConfirmImport()}
-              onCancel={() => void handleCancelImport()}
-            />
-          )}
-
-          {importStep === 'done' && result && (
-            <div className="flex flex-col gap-4">
-              <p className="text-sm font-medium">
-                {`${result.imported} imported, ${result.skipped} skipped out of ${result.total} total rows.`}
-              </p>
-              <Button type="button" variant="outline" className="w-fit" onClick={handleImportAnother}>
-                Import Another
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {admin && <ImportCard />}
 
       {/* ---------- Export card ---------- */}
       <Card>
@@ -2432,7 +2463,14 @@ export function Settings() {
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}
           <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
           <TabsTrigger value="notifications">Notifications</TabsTrigger>
-          <TabsTrigger value="data">Import / Export</TabsTrigger>
+          {/* The tab value stays "data" for both roles so existing
+              ?tab=data bookmarks keep resolving; only the visible label
+              narrows. Import is admin-only (see <ImportCard>), and a
+              member whose panel holds nothing but the Export card should
+              not be told the tab offers import. */}
+          <TabsTrigger value="data">
+            {admin ? 'Import / Export' : 'Export'}
+          </TabsTrigger>
         </TabsList>
         <TabsContent value="account" className="mt-6">
           <AccountSection />
@@ -2452,7 +2490,7 @@ export function Settings() {
           <NotificationsSection />
         </TabsContent>
         <TabsContent value="data" className="mt-6">
-          <DataSection />
+          <DataSection admin={admin} />
         </TabsContent>
       </Tabs>
       {/* Outside the Tabs on purpose: "which build am I on" is a property of

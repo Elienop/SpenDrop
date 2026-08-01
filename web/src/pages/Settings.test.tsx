@@ -32,6 +32,7 @@ import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
+import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
 const mockedUseAuth = vi.mocked(useAuth);
@@ -418,6 +419,8 @@ describe('Settings', () => {
   });
 
   describe('as member', () => {
+    const originalFetch = globalThis.fetch;
+
     beforeEach(() => {
       mockedUseAuth.mockReturnValue({
         user: {
@@ -435,6 +438,10 @@ describe('Settings', () => {
       });
     });
 
+    afterEach(() => {
+      globalThis.fetch = originalFetch;
+    });
+
     test('hides users tab for non-admin', () => {
       renderSettings();
       expect(
@@ -442,12 +449,78 @@ describe('Settings', () => {
       ).not.toBeInTheDocument();
     });
 
-    test('still shows account, currencies, api-tokens, and data tabs', () => {
+    test('still shows account, currencies, api-tokens, and export tabs', () => {
       renderSettings();
       expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /currencies/i })).toBeInTheDocument();
       expect(screen.getByRole('tab', { name: /api tokens/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /import \/ export/i })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: /^export$/i })).toBeInTheDocument();
+    });
+
+    // /api/import/* is behind auth.RequireAdmin, so the tab a member sees
+    // holds only the Export card. Naming it "Import / Export" would have
+    // the container promise a capability the panel cannot deliver, which
+    // is the half a card-only gate leaves behind.
+    test('labels the data tab "Export", never "Import / Export"', () => {
+      renderSettings();
+      expect(
+        screen.queryByRole('tab', { name: /import/i }),
+      ).not.toBeInTheDocument();
+    });
+
+    test('data tab keeps export but drops the import card', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /^export$/i }));
+
+      await waitFor(() => {
+        // Export stays fully available — it is not admin-gated server-side.
+        expect(
+          screen.getByRole('button', { name: /^export$/i }),
+        ).toBeInTheDocument();
+      });
+      // CardTitle renders as a <div>, so the card is matched by text.
+      expect(screen.queryByText(/^import$/i)).not.toBeInTheDocument();
+      expect(screen.queryByLabelText(/excel file/i)).not.toBeInTheDocument();
+    });
+
+    // The import hooks must not mount for a member at all, not merely
+    // render nothing: useImportSession's mount effect resumes a stored
+    // import id with GET /api/import/{id} (raw fetch, not the mocked api
+    // client), and a member who had a wizard open before the route was
+    // gated still has that id in localStorage. Gating only the card's JSX
+    // would leave that request firing and 403ing. Once, not repeatedly —
+    // the effect's catch drops the stored id before inspecting the error
+    // — but that one 403 is not the NotFoundError the catch stays silent
+    // for, so it surfaces as a raw `forbidden` banner to a member who
+    // cannot act on it.
+    test('does not resume a stored import session', async () => {
+      localStorage.setItem(STORAGE_KEYS.importId, 'stale-import-id');
+      // Stubbed as the 403 the gated route actually returns to a member,
+      // so that if the gate regresses this test fails on the assertion
+      // below rather than on some incidental crash inside the hook.
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({ error: 'admin access required' }),
+      } as Response);
+      globalThis.fetch = fetchMock;
+
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+      await user.click(screen.getByRole('tab', { name: /^export$/i }));
+
+      await waitFor(() => {
+        expect(
+          screen.getByRole('button', { name: /^export$/i }),
+        ).toBeInTheDocument();
+      });
+
+      const importCalls = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/import/'),
+      );
+      expect(importCalls).toHaveLength(0);
     });
   });
 

@@ -235,12 +235,32 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Put("/filters/{id}", h.handleUpdateSavedFilter)
 		r.Delete("/filters/{id}", h.handleDeleteSavedFilter)
 
-		// Import
-		r.Post("/import/upload", h.handleImportUpload)
-		r.Post("/import/confirm", h.handleImportConfirm)
-		r.Delete("/import/{importID}", h.handleImportCancel)
-		r.Patch("/import/{importID}/rows/{rowID}", h.handleImportPatchRow)
-		r.Get("/import/{importID}", h.handleImportGetSession)
+		// Import (admin only). This is the app's only endpoint that hands
+		// an untrusted binary file to a third-party parser, and its only
+		// write path that can create thousands of ledger rows from one
+		// request. Restricting it to admins shrinks who can reach both.
+		//
+		// Note what this gate is and is not. It is blast-radius reduction,
+		// not the fix for the worksheet-shape denial of service — that fix
+		// is the MaxImportSheetRows / MaxImportSheetCells pair enforced in
+		// readImportSheetRows, and it has to hold on its own, because an
+		// admin session is not a trusted input source: an admin can be
+		// handed a malicious spreadsheet by someone else. Do not treat the
+		// caps as redundant because of this line.
+		//
+		// Every route is gated, not just /upload. The other four already
+		// refuse to act on a session the caller does not own (see
+		// loadImportEntryForUser), so gating them changes no outcome today;
+		// they are here so the whole surface moves as one if that ownership
+		// check is ever loosened.
+		r.Route("/import", func(r chi.Router) {
+			r.Use(auth.RequireAdmin)
+			r.Post("/upload", h.handleImportUpload)
+			r.Post("/confirm", h.handleImportConfirm)
+			r.Delete("/{importID}", h.handleImportCancel)
+			r.Patch("/{importID}/rows/{rowID}", h.handleImportPatchRow)
+			r.Get("/{importID}", h.handleImportGetSession)
+		})
 
 		// Running release, for the UI's version display. Inside the authed
 		// group for consistency with every other /api route, not to keep
