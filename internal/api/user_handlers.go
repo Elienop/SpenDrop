@@ -58,25 +58,28 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	// BYTES, and here that is the same number as characters: isValidUsername
-	// below admits only [a-zA-Z0-9_-], every one of which is one byte in UTF-8,
-	// so no username that survives this handler can make the two counts differ.
-	// Converting to charLen would buy nothing and add a unit a reader has to
-	// re-derive.
+	// CHARSET GATE FIRST, and the order is load-bearing rather than stylistic.
+	// isValidUsername admits only [a-zA-Z0-9_-], every one of which is one byte
+	// in UTF-8, so once a value is past this line its byte count and its
+	// character count are the same number — which is what lets the bound below
+	// stay len() while its message says characters.
 	//
-	// The one thing this ordering costs: the length check runs BEFORE the
-	// charset gate, so a rejected non-ASCII username (say 20 Arabic letters, 40
-	// bytes) is answered with the character-count message rather than the
-	// charset one. The input is refused either way — only the explanation is the
-	// less apt of the two. Moving isValidUsername above this check would fix
-	// that and make the ASCII claim hold by construction rather than by reading
-	// ahead; it is deliberately left for a separate decision.
-	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
-		return
-	}
+	// Running the length check first made that equivalence something a reader
+	// had to establish by looking ahead, and it also mislabelled the refusal: 20
+	// Arabic letters are 40 bytes, so a non-ASCII username was answered with
+	// "must be between 3 and 32 characters" — a count it did not violate — when
+	// the charset message is the apt one. Both are fixed by asking the question
+	// in this order. The empty case is already answered above, so this gate
+	// never sees "".
 	if !isValidUsername(req.Username) {
 		writeError(w, http.StatusBadRequest, "username may only contain letters, numbers, hyphens, and underscores")
+		return
+	}
+	// BYTES, which is the same number as characters by construction — see the
+	// charset gate immediately above. Converting to charLen would buy nothing
+	// and add a unit a reader has to re-derive.
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if req.Password == "" {

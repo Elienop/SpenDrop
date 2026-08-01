@@ -545,11 +545,28 @@ const (
 	// The widest ledger the product claims to accept: MaxImportRows rows at
 	// 100 columns. A realistic one is nearer 30 columns.
 	cellsRealFilesNeed = MaxImportRows * 100
-	// The largest legitimate workbook measured: MaxImportRows rows carrying
-	// the maximum permitted description, tags and notes, all distinct, is
-	// 31.31 MiB unzipped, of which 28.8 MiB is cell text.
-	unzippedBytesRealFilesNeed = 32 << 20
-	sheetBytesRealFilesNeed    = 32 << 20
+	// The largest legitimate workbook, measured IN ARABIC — MaxImportRows rows
+	// carrying the maximum permitted description, tags and notes, every string
+	// distinct so nothing dedupes into the shared-string table:
+	//
+	//	unzipped total  59.72 MiB
+	//	largest part    57.59 MiB  (xl/sharedStrings.xml)
+	//	cell text       57.27 MiB
+	//
+	// The same construct in ASCII is 31.31 / 29.18 / 28.86, and these floors
+	// used to be sized off that. They were wrong from the moment the field caps
+	// became CHARACTER counts: the same maximum in a two-byte script is twice
+	// the bytes, so a 32 MiB floor was licensing a cut to roughly half what a
+	// real file can need. TestImportShapeCaps_AdmitTheMaximalLedger rebuilds the
+	// workbook and re-measures it, so these numbers cannot go stale again in
+	// silence.
+	//
+	// Rounded up from the measurement to the next whole MiB, and no further:
+	// margin is the caps' business, not the floor's. The floor's only job is to
+	// say what a real file needs.
+	unzippedBytesRealFilesNeed = 60 << 20
+	partBytesRealFilesNeed     = 58 << 20
+	sheetBytesRealFilesNeed    = 58 << 20
 	// The longest field the product accepts is MaxNotesLength CHARACTERS, and
 	// the per-cell bound is in BYTES, so the requirement has to allow for
 	// UTF-8's worst case. The household writes Arabic as well as English.
@@ -618,10 +635,130 @@ func TestImportShapeCaps_ClearRealWorldRequirements(t *testing.T) {
 		t.Errorf("MaxImportPartBytes=%d MiB doubles to %d MiB, past MaxImportUnzippedBytes=%d MiB",
 			MaxImportPartBytes>>20, (2*MaxImportPartBytes)>>20, MaxImportUnzippedBytes>>20)
 	}
-	if MaxImportPartBytes < unzippedBytesRealFilesNeed {
-		t.Errorf("MaxImportPartBytes=%d MiB is below the largest legitimate workbook measured (%d MiB), so one part of a real file could exceed it",
-			MaxImportPartBytes>>20, unzippedBytesRealFilesNeed>>20)
+	// Sized off the largest PART of the maximal workbook, not off its archive
+	// total. A part cannot exceed the total, so the total was a safe stand-in
+	// while both floors were one number; now that all three are measured
+	// separately, the assertion names the quantity the cap actually bounds.
+	if MaxImportPartBytes < partBytesRealFilesNeed {
+		t.Errorf("MaxImportPartBytes=%d MiB is below the largest part of the largest legitimate workbook measured (%d MiB), so one part of a real file could exceed it",
+			MaxImportPartBytes>>20, partBytesRealFilesNeed>>20)
 	}
+}
+
+// TestImportShapeCaps_AdmitTheMaximalLedger is the measurement the floors above
+// are transcribed from, run as a test rather than written down once.
+//
+// The floors were stale for exactly one reason: they were measured on an ASCII
+// fixture, the field caps later became CHARACTER counts, and nothing re-ran the
+// measurement. A number in a comment cannot notice that. This test rebuilds the
+// workbook FROM the caps themselves — MaxImportRows rows at MaxDescriptionLength
+// / MaxTagsLength / MaxNotesLength — so widening any of them, or a future change
+// to how excelize serialises a sheet, moves the measurement here rather than
+// silently invalidating a constant.
+//
+// It asserts two different things, and both matter:
+//
+//   - The shape caps ADMIT this workbook, end to end through the upload handler.
+//     This is the false-rejection guard: it is the largest file the product's own
+//     limits say a user may legitimately produce.
+//   - The floor constants above are not below what it just measured. That is what
+//     keeps them honest — a floor that drifts under the real requirement licenses
+//     a cap cut that would refuse a real ledger.
+//
+// ARABIC, not ASCII, and that is the entire point of the rebuild. The household
+// writes Arabic alongside English, Arabic is two bytes per character in UTF-8,
+// and the caps under test are byte bounds while the field caps are character
+// bounds. An ASCII fixture measures the wrong workbook by a factor of two.
+func TestImportShapeCaps_AdmitTheMaximalLedger(t *testing.T) {
+	payload := maximalLedgerXLSX(t)
+
+	total, largest := archivePartSizes(t, payload)
+	t.Logf("maximal Arabic ledger: %.2f MiB compressed, %.2f MiB unzipped, %.2f MiB largest part",
+		float64(len(payload))/(1<<20), float64(total)/(1<<20), float64(largest)/(1<<20))
+
+	if total > unzippedBytesRealFilesNeed {
+		t.Errorf("the maximal legitimate workbook is %.2f MiB unzipped, above unzippedBytesRealFilesNeed=%d MiB — re-measure and raise the floor, or the floor is licensing a cap that would refuse it",
+			float64(total)/(1<<20), unzippedBytesRealFilesNeed>>20)
+	}
+	if largest > partBytesRealFilesNeed {
+		t.Errorf("its largest part is %.2f MiB, above partBytesRealFilesNeed=%d MiB — re-measure and raise the floor",
+			float64(largest)/(1<<20), partBytesRealFilesNeed>>20)
+	}
+
+	// The caps themselves, in the order the bytes are touched. Each is checked
+	// separately so a failure names the gate that refused the file rather than
+	// leaving a 400 to be traced back.
+	if err := checkImportArchiveSize(payload); err != nil {
+		t.Fatalf("checkImportArchiveSize refused the largest legitimate workbook: %v", err)
+	}
+	if err := prescanImportWorkbook(payload); err != nil {
+		t.Fatalf("prescanImportWorkbook refused the largest legitimate workbook: %v", err)
+	}
+
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "maximal-ledger", "admin")
+	req := withUser(postMultipartFile(t, "/api/import/upload", payload), user)
+	rec := uploadWithin(t, h, req, 120*time.Second)
+	if rec.Code != http.StatusOK {
+		body := rec.Body.String()
+		if len(body) > 400 {
+			body = body[:400] + "…"
+		}
+		t.Fatalf("upload status=%d, want 200 — the largest workbook the product's own field caps allow must import; body=%s",
+			rec.Code, body)
+	}
+}
+
+// maximalLedgerXLSX builds MaxImportRows rows carrying the maximum permitted
+// description, tags and notes in Arabic, every string distinct.
+//
+// THE PER-FIELD MARKER IS LOAD-BEARING. Without it the description and the tags
+// on a given row are byte-identical, excelize folds them into one shared string,
+// and the shared-string table comes out a third smaller than a real file's would
+// — which measures a workbook nobody could produce and understates the
+// requirement. The marker is ASCII so it costs one byte and cannot change the
+// character count the field caps bound.
+func maximalLedgerXLSX(t *testing.T) []byte {
+	t.Helper()
+	const arabic = "ب" // 2 bytes in UTF-8, 1 character
+	rows := make([][]string, 0, MaxImportRows)
+	for i := 0; i < MaxImportRows; i++ {
+		fill := func(field string, chars int) string {
+			marker := fmt.Sprintf("%s%06d", field, i)
+			return marker + strings.Repeat(arabic, chars-len(marker))
+		}
+		rows = append(rows, []string{
+			fmt.Sprintf("2026-%02d-%02d", i%12+1, i%28+1),
+			fill("d", MaxDescriptionLength),
+			fmt.Sprintf("%d.%02d", i%5000, i%100),
+			"Groceries",
+			fill("t", MaxTagsLength),
+			fill("n", MaxNotesLength),
+		})
+	}
+	return createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Tags", "Notes"}, rows)
+}
+
+// archivePartSizes returns the summed declared uncompressed size of every zip
+// entry and the largest single one — the two quantities MaxImportUnzippedBytes
+// and MaxImportPartBytes bound, read the same way checkImportArchiveSize reads
+// them.
+func archivePartSizes(t *testing.T, payload []byte) (total, largest uint64) {
+	t.Helper()
+	zr, err := zip.NewReader(bytes.NewReader(payload), int64(len(payload)))
+	if err != nil {
+		t.Fatalf("open workbook as zip: %v", err)
+	}
+	for _, entry := range zr.File {
+		total += entry.UncompressedSize64
+		if entry.UncompressedSize64 > largest {
+			largest = entry.UncompressedSize64
+		}
+	}
+	return total, largest
 }
 
 // TestHandleImportUpload_AtCapBoundaries_StillAccepted is the accept side of

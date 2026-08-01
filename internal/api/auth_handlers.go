@@ -158,16 +158,18 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username is required")
 		return
 	}
-	// BYTES, which equals characters for every username that can reach the
-	// database: isValidUsername below admits only [a-zA-Z0-9_-], all one-byte in
-	// UTF-8. See the fuller note on the identical check in handleCreateUser,
-	// including what the check-before-charset-gate ordering costs.
-	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
-		return
-	}
+	// CHARSET GATE FIRST, then the length bound — the same order as the
+	// identical pair in handleCreateUser, where the fuller note lives. It is
+	// what makes the len() bound below a character count by construction
+	// (isValidUsername admits only one-byte ASCII) instead of by reading ahead,
+	// and it answers a non-ASCII username with the charset message rather than a
+	// character count the input did not violate.
 	if !isValidUsername(req.Username) {
 		writeError(w, http.StatusBadRequest, "username may only contain letters, numbers, hyphens, and underscores")
+		return
+	}
+	if len(req.Username) < MinUsernameLength || len(req.Username) > MaxUsernameLength {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("username must be between %d and %d characters", MinUsernameLength, MaxUsernameLength))
 		return
 	}
 	if req.Password == "" {

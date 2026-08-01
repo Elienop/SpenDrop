@@ -16,22 +16,32 @@ import (
 // wording for the password bounds, shared by handleRegister, handleCreateUser
 // and validateNewPassword so all three password-entry paths say the same thing.
 //
-// They say BYTES, not characters, and that is the honest unit rather than a
-// stylistic choice. bcrypt hashes at most the first 72 bytes of its input and
-// silently discards the rest, so this bound cannot be moved to characters
-// without accepting a password whose tail never reaches the hasher — two
-// distinct passwords agreeing on their first 72 bytes would authenticate the
-// same account. config.Validate refuses a PASSWORD_MAX_LENGTH above 72 for the
-// same reason.
+// THE TWO MESSAGES NAME DIFFERENT UNITS ON PURPOSE — maximum in bytes, minimum
+// in characters. That reads as an inconsistency and is not one; do not
+// "fix" it to match without reading the next two paragraphs.
 //
-// Every other user-facing text cap in this app is enforced in characters (see
-// charLen in limits.go). This one cannot be, so it stops claiming to be: a
-// 40-character Arabic password is 80 bytes, and telling that user "72
-// characters or less" would name a limit the server is not applying. The
-// clarifier is on the maximum only, because that is the bound that can refuse
-// text a character count would have admitted.
+// Both bounds are ENFORCED in bytes, and the maximum has to be: bcrypt hashes
+// at most the first 72 bytes of its input and silently discards the rest, so a
+// character bound would accept a password whose tail never reaches the hasher,
+// and two distinct passwords agreeing on their first 72 bytes would then
+// authenticate the same account. config.Validate refuses a PASSWORD_MAX_LENGTH
+// above 72 for the same reason. Every other user-facing text cap in this app is
+// a character count (see charLen in limits.go), so the maximum says bytes and
+// carries a clarifier: it is the bound that can REFUSE text a character count
+// would have admitted, and a 40-character Arabic password is 80 bytes. Telling
+// that user "72 characters or less" would name a limit the server is not
+// applying.
+//
+// The minimum says characters because naming bytes there buys no accuracy and
+// costs clarity. For every ASCII password the two counts are the same number,
+// so the message is identical either way; for non-ASCII input a byte minimum is
+// LOOSER than a character minimum, so the mismatch can only err toward
+// accepting a password the message implied was too short — never toward
+// refusing one it implied was long enough. It also matches what the frontend
+// says (web/src/pages/Settings.tsx), and "at least 12 bytes" is jargon in a
+// field where nobody is counting bytes.
 func passwordTooShortMessage(minLen int) string {
-	return fmt.Sprintf("password must be at least %d bytes", minLen)
+	return fmt.Sprintf("password must be at least %d characters", minLen)
 }
 
 func passwordTooLongMessage(maxLen int) string {

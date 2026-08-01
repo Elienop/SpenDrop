@@ -160,29 +160,62 @@ const (
 //     the intended behaviour — padding is what allocates — and it is why the
 //     rejection message talks about padding rather than about content.
 //
-//   - 128 MiB of decompressed archive is 4x the largest LEGITIMATE workbook
-//     the importer can accept, measured rather than reasoned: 10,000 rows
-//     (MaxImportRows) carrying the maximum permitted description, tags and
-//     notes lengths, all distinct so nothing dedupes into the shared-string
-//     table, is 0.47 MiB compressed and 31.31 MiB unzipped. A realistic
-//     full-size ledger is 3.8 MiB unzipped, so this is ~34x that.
+//   - 128 MiB of decompressed archive is sized against the largest LEGITIMATE
+//     workbook the importer can accept, measured rather than reasoned. See the
+//     table below for what that workbook actually costs.
 //
-// THAT 31.31 MiB WAS MEASURED ON ASCII, and the multipliers stated against it
-// shrank when the field caps became CHARACTER counts (charLen, below). The same
-// theoretical maximum written in Arabic is two bytes per character, so it is
-// ~62 MiB rather than 31.31, which makes MaxImportUnzippedBytes ~2x it instead
-// of 4x and MaxImportSheetBytes ~1.03x instead of ~2x. Both still admit it, so
-// nothing here needs to move — but the headroom against that construct is now
-// slim rather than generous, and at UTF-8's 4-byte worst case (~124 MiB) it
-// would trip MaxImportSheetBytes.
+// THE MULTIPLIERS DEPEND ON THE SCRIPT, and stating them against ASCII was how
+// this table went wrong. The field caps are CHARACTER counts (charLen, below)
+// and these are BYTE bounds, so the same maximal workbook costs twice as much
+// in Arabic and four times as much at UTF-8's worst case. Two workbooks, both
+// MaxImportRows rows, measured against excelize v2.11.0. The maximal Arabic row
+// is the one TestImportShapeCaps_AdmitTheMaximalLedger rebuilds and re-measures
+// on every run; the other three were measured the same way but are recorded
+// here rather than asserted, because it is the maximal one that binds:
 //
-// What keeps that from being a real false-rejection is that the construct is
-// not a file anyone produces: it is 10,000 rows EVERY ONE of which carries a
-// 500-character description, 500 characters of tags and a 2,000-character note.
-// The measured realistic full-size ledger is 3.8 MiB, three orders of magnitude
-// below either cap in any script. If these caps are ever re-derived, derive them
-// in characters times UTF-8's worst case, not in the bytes an ASCII fixture
-// happened to produce.
+//	                                unzipped   largest part   cell text
+//	maximal, ASCII                   31.31        29.18         28.86 MiB
+//	maximal, Arabic (2 B/char)       59.72        57.59         57.27 MiB
+//	realistic full-size, English      3.19         2.08          1.07 MiB
+//	realistic full-size, Arabic       3.59         2.08          1.55 MiB
+//
+// "Maximal" means every one of 10,000 rows carrying a 500-character
+// description, 500 characters of tags AND a 2,000-character note, all distinct
+// so nothing dedupes into the shared-string table. "Realistic" is the same row
+// count filled with ordinary household entries.
+//
+// Against the maximal Arabic workbook the caps are 2.14x / 1.11x / 1.12x —
+// slim, and nothing like the 4x and 2x this comment used to claim. Against a
+// realistic full-size Arabic ledger they are 35.6x / 30.7x / 41.3x. The second
+// set is the one that decides false rejection, because the first workbook is
+// not a file anyone produces.
+//
+// THE CAPS ARE DELIBERATELY NOT RAISED to restore a round multiplier on the
+// maximal construct, and the reason is measured too. Doubling them
+// (MaxImportPartBytes 128 MiB, MaxImportUnzippedBytes 256 MiB,
+// MaxImportSheetBytes 128 MiB) admits the same construct written at UTF-8's
+// 4-byte worst case: 116.54 MiB unzipped, 114.41 MiB in one part, and an upload
+// that peaks at 529 MiB of heap. The container runs with GOMEMLIMIT=768MiB
+// under mem_limit: 1g (both compose files), and export is budgeted at 150 MiB
+// on top of that (exportPeakBudgetBytes) with no cap on how many members run
+// one at once. Two concurrent imports at 529 MiB each exceed the container
+// limit outright, and one beside a couple of exports is already past
+// GOMEMLIMIT. The headroom would be bought in the only currency this
+// deployment cannot spend, to protect a file that does not exist.
+//
+// At the caps as they stand the same upload peaks at 293 MiB, which the budget
+// absorbs.
+//
+// Where the real edge sits, also measured: the maximal Arabic workbook plus six
+// extra 50-character columns is 63.71 MiB in its largest part and still
+// admitted; ten such columns, or six of 100 characters, is refused by
+// MaxImportPartBytes. So the cliff is roughly 500 extra characters per row past
+// a workbook that is already every field at every cap.
+//
+// If these caps are ever re-derived, derive them in characters times UTF-8's
+// worst case, not in the bytes an ASCII fixture happened to produce — and
+// re-measure the upload peak in the same change, because that is the constraint
+// that actually binds.
 //
 // A file that trips any of these gets a 400 naming the limit, never a silent
 // truncation — dropping rows from a ledger import quietly is worse than
@@ -211,8 +244,8 @@ const (
 //
 //   - MaxImportSheetBytes bounds the total, because a per-cell cap alone does
 //     not: four million cells just under the per-cell limit is still 1,048 GB.
-//     64 MiB is ~2x the largest legitimate workbook measured below, whose
-//     31.31 MiB unzipped bounds its own text a fortiori.
+//     64 MiB is 1.12x the cell text of the maximal Arabic workbook in the table
+//     above (57.27 MiB) and 41x a realistic full-size Arabic ledger (1.55 MiB).
 //
 // TOTALS ARE NOT PEAKS, and this is the trap those two fell into. Every cap
 // above is evaluated on the slice Rows.Columns() returns, so each can only
@@ -231,6 +264,13 @@ const (
 //	prescan, largest part admitted (2 x MaxImportPartBytes)   114 MiB measured
 //	parse, worst row every cap admits                          35 MiB measured
 //	parse, worst sheet every cap admits                       118 MiB measured
+//
+// Those three are adversarial: the worst input each cap admits. The LEGITIMATE
+// worst case is separate and larger, because a real file exercises every cap at
+// once rather than one at a time — the maximal Arabic workbook in the table
+// above takes 67 MiB through the prescan and 293 MiB through the whole upload
+// handler. That 293 MiB, not any of the three above, is what sits against
+// GOMEMLIMIT=768MiB, and it is why these caps are not raised.
 //
 // EVERY FIGURE HERE IS MEASURED END TO END, and the multipliers are why. An
 // earlier version of this table derived them instead, stating the prescan term
@@ -330,6 +370,17 @@ const MaxTransactionAmount = 1_000_000_000
 // so where they are enforced: passwords stay byte-bounded because bcrypt
 // truncates its input at 72 bytes, MaxFilterJSONLength bounds a serialized
 // transport payload, and the import SHAPE caps above bound allocation.
+//
+// DO NOT MERGE THIS WITH utf16Len / truncateUTF16 in export_handlers.go. They
+// have the same shape and look like duplicates, and they are not: this one
+// counts CODE POINTS because that is the unit the caps below are stated in and
+// the unit SQLite's length() and the frontend's charCount() agree on. Those
+// count UTF-16 CODE UNITS because that is the unit the xlsx cell limit is
+// defined in, and they match excelize's own countUTF16String so a value this
+// package accepts is one excelize will not silently shorten. The two agree on
+// Arabic and on accented Latin and diverge on any emoji outside the Basic
+// Multilingual Plane, so collapsing them would look correct in testing and
+// break one of the two on the first astral character.
 func charLen(s string) int { return utf8.RuneCountInString(s) }
 
 // String length caps for user-supplied text fields, in CHARACTERS — compare
@@ -384,9 +435,31 @@ const (
 	TagSuggestionLimit         = 1000
 )
 
-// MaxExportRows is the upper bound on rows included in a single
-// spreadsheet export. Higher values would blow up memory in excelize's
-// in-memory sheet buffer before the download could finish streaming.
+// MaxExportRows is the upper bound on rows included in a single spreadsheet
+// export.
+//
+// IT NO LONGER BOUNDS THE SHEET BUFFER. The export handlers assemble every
+// sheet through excelize's StreamWriter, which serialises each row and spills
+// past a chunk threshold instead of holding a live cell tree until WriteTo, so
+// the workbook is not the term that grows with this constant.
+//
+// What it bounds now is the DRAIN. handleExportTransactions and
+// handleExportMonthly consume the cursor fully into a []exportTxnRow before
+// writing anything, because production pins the pool to one connection and
+// building while the cursor is open would block every other request — see the
+// type comment on exportTxnRow. That slice stays resident for the whole build,
+// so raising this constant raises the peak linearly in rows. The per-row term
+// is NOT capped alongside it: the API bounds description/tags/notes, but the
+// importer wrote them unvalidated until recently, so a legacy ledger can hold
+// longer values and the drain is O(total text).
+//
+// TestExportPeakMemory_StaysWithinBudget (export_memory_measure_test.go) is
+// what enforces the outcome — it runs a full MaxExportRows export through the
+// handler and fails past exportPeakBudgetBytes. Anyone raising this value
+// should expect that test to be what objects, and should re-measure rather than
+// reason. The figures are deliberately not copied here: they live next to the
+// measurement that produced them, which is the only place they can be kept
+// honest.
 const MaxExportRows = 50_000
 
 // MaxSubscriptionsPerUser caps how many browser push subscriptions one user
