@@ -345,6 +345,18 @@ volumes:
   spendrop-data:        # Persistent storage for SQLite database
 ```
 
+### Which version is running?
+
+Every released image knows its own release tag — the same tag is baked into the Go binary at link time and into the frontend bundle at build time, from one value in a single `docker build`, so the API and the UI can never disagree about which version they are.
+
+```bash
+docker exec spendrop ./spendrop -version
+```
+
+Prints the bare tag (e.g. `v0.35.0`) and exits, so it drops straight into a script or a health check. It reads the value the running server reads, needs no environment or database, and works even when the deployment's configuration is broken — which is often exactly when you need to know what is deployed. Use `docker exec` as shown (or `docker run --entrypoint /app/spendrop <image> -version` against a stopped image) — a plain `docker run <image> -version` does not work, because the entrypoint would try to execute `-version` as the container command.
+
+The same string is available over HTTP at [`GET /api/version`](#health-and-monitoring) (auth required) and in the UI. An image built outside the release pipeline — a local `docker build`, `docker-compose.dev.yml`, or a plain `go build` — reports `dev`.
+
 ### Upgrading from an earlier version
 
 Before this release SpenDrop marked the session cookie `Secure` by default unless you set the old `SPENDROP_INSECURE=true`. The new default `COOKIE_SECURE=auto` detects the scheme from the incoming request instead.
@@ -920,6 +932,7 @@ Deleted transactions are retained as tombstones and surfaced through admin-only 
 |--------|----------|-------------|
 | GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
 | GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/api/version` | The release the running server was built from — `{"version":"v0.35.0"}`, carrying the leading `v`. A build that was not stamped with a release (a local `go build`, `docker-compose.dev.yml`, an image built without `--build-arg APP_VERSION`) reports exactly `dev`; the value is never empty. The string is baked into the binary at link time, so it needs no environment variable and cannot be changed without rebuilding, and the same build arg stamps the frontend bundle, so the UI and the API of one image always agree. **Auth required**, unlike `/api/health`, for consistency with the rest of `/api` rather than to keep the release secret — the same string is stamped into the frontend bundle, which is served unauthenticated so the login page can render, so anyone who can reach the app can already read it. Treat your version as public information. |
 | GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 
 ### Users (admin only)

@@ -2,6 +2,8 @@ import { describe, test, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import type { ReactNode } from 'react';
 
 vi.mock('../hooks/useAuth', () => ({ useAuth: vi.fn() }));
 vi.mock('../api/client', () => ({
@@ -47,11 +49,24 @@ function seedGetMock(apiTokens: ApiToken[] = []) {
   });
 }
 
+/**
+ * Fresh QueryClient per render, matching what `main.tsx` provides in
+ * production. Settings renders `<AppVersion />`, whose `useServerVersion`
+ * hook is a `useQuery` — without a provider the whole page throws on mount.
+ */
+function withQueryClient({ children }: { children: ReactNode }) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
+}
+
 function renderSettingsOnApiTokensTab() {
   return render(
     <MemoryRouter initialEntries={['/settings?tab=api-tokens']}>
       <Settings />
     </MemoryRouter>,
+    { wrapper: withQueryClient },
   );
 }
 

@@ -50,19 +50,78 @@ jobs:
           tag_prefix: v
           dry_run: true
 
-      # 2. Build with the computed tag.
+      # 2. Build with the computed tag. APP_VERSION stamps that same tag into
+      #    BOTH artifacts inside this one build — the Go binary via -ldflags
+      #    -X and the Vite bundle via VITE_APP_VERSION (see the Dockerfile) —
+      #    so a published image cannot report one version in its API and a
+      #    different one in its UI. It is deliberately the dry-run step's
+      #    output, the same value step 4 recreates as the real git tag, and
+      #    not a second computation that could drift from it.
+      #
+      #    The tag is passed through `env:` rather than interpolated into the
+      #    script body. A ${{ }} expression is pasted in as TEXT before bash
+      #    ever sees it, so its content is script, not data; via `env:` it is
+      #    a variable bash reads at runtime and quoting actually applies.
       - name: Build the Docker image
+        env:
+          APP_VERSION: ${{ steps.version.outputs.new_tag }}
         run: |
+          # Refuse anything that does not look like a plain
+          # v<major>.<minor>.<patch>. Two guards, because each catches what
+          # the other misses: the charset guard rejects whitespace and
+          # metacharacters, the shape guard rejects well-formed-but-wrong
+          # values like "v.." that the charset guard would happily pass.
+          # The shape glob's trailing * is unanchored, so digits-and-dots
+          # tails ("v1.2.3.4") still pass — the charset guard is the
+          # injection barrier; the shape guard is a sanity check, not an
+          # exact-format promise.
+          #
+          # Whitespace is the one that matters. `go build -ldflags "<value>"`
+          # splits its argument into a LIST of linker flags, so a tag
+          # containing a space injects extra flags — and -extldflags reaches
+          # the system linker. Shell quoting alone does NOT close that: the
+          # split happens inside go build, long after the value has travelled
+          # through docker as a single, correctly quoted build arg.
+          #
+          # Validating here, at the one place the value is produced, is what
+          # lets every later step treat it as trusted.
+          case "$APP_VERSION" in
+            *[!0-9v.]*)
+              echo "::error::Refusing to build: computed tag '$APP_VERSION' contains characters outside [0-9v.]. Only a plain v<major>.<minor>.<patch> tag is accepted — if prerelease tags are ever adopted, widen this guard deliberately rather than removing it."
+              exit 1 ;;
+          esac
+          case "$APP_VERSION" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::Refusing to build: computed tag '$APP_VERSION' is not a v<major>.<minor>.<patch> tag."
+              exit 1 ;;
+          esac
+
           docker build . --file Dockerfile \
-            --tag ghcr.io/elienop/spendrop:${{ steps.version.outputs.new_tag }} \
+            --build-arg "APP_VERSION=$APP_VERSION" \
+            --tag "ghcr.io/elienop/spendrop:$APP_VERSION" \
             --tag ghcr.io/elienop/spendrop:latest
 
       # 3. Push. If THIS fails, no git tag and no release exist yet, so the next
       #    push retries cleanly from the prior good tag (no skipped version).
+      #
+      #    Same env: treatment as the build step. The token especially: as a
+      #    ${{ }} expression it was pasted into the script text, so the secret
+      #    itself formed part of the command line; via env: it stays a
+      #    variable. `printf '%s'` rather than `echo` because echo mangles a
+      #    value that happens to begin with -n or contain a backslash.
+      #
+      #    No re-validation of APP_VERSION here: steps run in order and the
+      #    build step above exits non-zero on a malformed tag, so reaching
+      #    this step means the value already passed both guards.
       - name: Push the Docker image to GitHub Container Registry
+        env:
+          APP_VERSION: ${{ steps.version.outputs.new_tag }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo ${{ secrets.GITHUB_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          docker push ghcr.io/elienop/spendrop:${{ steps.version.outputs.new_tag }}
+          printf '%s' "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+          docker push "ghcr.io/elienop/spendrop:$APP_VERSION"
           docker push ghcr.io/elienop/spendrop:latest
 
       # 4. Image is live → NOW create + push the real git tag. No commits land

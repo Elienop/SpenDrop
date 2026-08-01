@@ -32,6 +32,7 @@ import type {
   RevokeOneResponse,
   User,
 } from '../api/types';
+import { AppVersion } from '@/components/AppVersion';
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
 import { useWebPush } from '@/hooks/useWebPush';
@@ -2454,6 +2455,10 @@ export function Settings() {
           <DataSection />
         </TabsContent>
       </Tabs>
+      {/* Outside the Tabs on purpose: "which build am I on" is a property of
+          the app, not of a tab, so it stays put wherever the user has
+          navigated rather than hiding on five of the six panels. */}
+      <AppVersion className="pt-2" />
     </div>
   );
 }

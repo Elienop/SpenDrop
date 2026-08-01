@@ -83,5 +83,61 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      # Built WITH a version stamp so every PR exercises the same build shape
+      # the release uses. vCI-0.0.0-ci is a throwaway sentinel, deliberately
+      # shaped to be unmistakable: the bundle half of the check below is a
+      # substring grep over minified JS, and a short value like "vCI" could
+      # one day appear inside a hash, a chunk name, or a dependency's string
+      # table and pass by coincidence. It also must not look like a real
+      # release, so nobody mistakes a CI image for a published one.
+      #
+      # It intentionally does NOT satisfy the v<major>.<minor>.<patch> guard
+      # in main.yml — that guard exists because the release path feeds a real
+      # tag into -ldflags, and it is scoped to that workflow. This value never
+      # reaches it.
       - name: Build image
-        run: docker build -t spendrop:ci .
+        run: docker build --build-arg APP_VERSION=vCI-0.0.0-ci -t spendrop:ci .
+
+      # Passing --build-arg is not by itself worth much: a build with no arg
+      # already runs the same ARG -> -ldflags plumbing, just with the value
+      # "dev". What this asserts is the part no other test can reach — that a
+      # real image, built the way a release is built, actually carries the
+      # version it was handed.
+      #
+      # The failure mode being guarded is silent by construction. Renaming the
+      # Dockerfile ARG, or typoing the -X symbol path, produces a successful
+      # build and a working image that reports "dev" for every release; Docker
+      # only *warns* about a build-arg nothing consumed, it does not fail. The
+      # Go tests pin the Dockerfile's text, so this is the end-to-end backstop
+      # for a break that somehow satisfies them.
+      #
+      # Both artifacts are checked separately so a failure names which one
+      # drifted. "Binary has it, bundle does not" is the exact shape of the
+      # no-drift invariant breaking, and a combined check would report it as
+      # an indistinguishable red.
+      #
+      # The binary is checked by RUNNING it, not by grepping it. Grepping is
+      # actively misleading here: Go embeds the full -ldflags string as a build
+      # setting inside every binary (that is what `go version -m` reads back),
+      # so the version text is present in the file whether or not the linker
+      # patched the variable. A grep passes on a binary whose -X symbol path is
+      # typo'd — precisely the regression this step exists to catch. Only
+      # executing the binary reads the variable the server itself reads.
+      #
+      # --entrypoint /app/spendrop bypasses entrypoint.sh, which would
+      # otherwise chown the data dir and drop privileges first; none of that is
+      # needed to print a string. The bundle has no equivalent of an executable
+      # self-report, so it stays a grep — sound there, because Vite inlines the
+      # value into the emitted JS as a literal and nothing else in the image
+      # would contain it.
+      - name: Image reports the version it was built with
+        run: |
+          reported="$(docker run --rm --entrypoint /app/spendrop spendrop:ci -version)"
+          if [ "$reported" != "vCI-0.0.0-ci" ]; then
+            echo "::error::The Go binary reports its version as '$reported', expected 'vCI-0.0.0-ci'. The build arg reached the go build command line but the linker did not patch the variable — check the -ldflags -X symbol path in the Dockerfile against the package path and variable name in internal/version, and that the ARG is still named APP_VERSION."
+            exit 1
+          fi
+          if ! docker run --rm --entrypoint sh spendrop:ci -c 'grep -rq vCI-0.0.0-ci /app/web/dist'; then
+            echo '::error::The frontend bundle does not carry its APP_VERSION while the binary does — the two artifacts in this image disagree about what version they are. Check that the web-builder stage still sets ENV VITE_APP_VERSION=${APP_VERSION} and that the frontend still reads import.meta.env.VITE_APP_VERSION (Vite only inlines VITE_-prefixed vars, and only where the value is actually referenced).'
+            exit 1
+          fi
