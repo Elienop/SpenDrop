@@ -1240,3 +1240,107 @@ func TestNewRouter_TrashEndpoints_AsAdmin_RoutesResolve(t *testing.T) {
 		t.Errorf("empty trash Total=%d, want 0", body.Total)
 	}
 }
+
+// --- member scoping (B5) ---
+
+func TestHandleListDeletedTransactions_MemberSeesOnlyOwnRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	// The admin's tombstoned row carries the 999 leak-canary amount: if it
+	// shows up in the member's trash, the assertion below names it.
+	adminRow := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 999.0, "admins deleted row")
+	memberRow := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members deleted row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp deletedTransactionListResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Total != 1 {
+		t.Errorf("Total=%d, want 1 (member-scoped count)", resp.Total)
+	}
+	if len(resp.Transactions) != 1 {
+		t.Fatalf("len(Transactions)=%d, want 1", len(resp.Transactions))
+	}
+	if resp.Transactions[0].ID != memberRow.ID {
+		t.Errorf("returned id=%d, want member's row %d", resp.Transactions[0].ID, memberRow.ID)
+	}
+	for _, tr := range resp.Transactions {
+		if tr.ID == adminRow.ID {
+			t.Errorf("admin's tombstoned row %d leaked into the member's trash", adminRow.ID)
+		}
+	}
+}
+
+func TestHandleListDeletedTransactions_AdminStillSeesAllRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "admins row")
+	seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 20.0, "members row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp deletedTransactionListResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Total != 2 {
+		t.Errorf("Total=%d, want 2 (admin sees the whole household's trash)", resp.Total)
+	}
+}
+
+// Money wire-edge discipline: decode into maps so a renamed/missing dollar
+// field cannot hide behind a typed struct's zero-fill, and assert no
+// *_cents column leaks.
+func TestHandleListDeletedTransactions_MemberList_DollarFieldNoCentsLeak(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+	seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members deleted row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	rows, ok := resp["transactions"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("transactions=%v, want 1-element array", resp["transactions"])
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok {
+		t.Fatalf("row is %T, want map", rows[0])
+	}
+	amount, ok := row["amount"].(float64)
+	if !ok {
+		t.Fatalf("amount missing or not a number: %v", row["amount"])
+	}
+	if amount != 42.0 {
+		t.Errorf("amount=%v, want 42 (dollars, not cents)", amount)
+	}
+	for k := range row {
+		if strings.Contains(k, "_cents") {
+			t.Errorf("raw cents column %q leaked onto the wire", k)
+		}
+	}
+}

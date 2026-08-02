@@ -51,7 +51,8 @@ type deletedTransactionListResponse struct {
 }
 
 // handleListDeletedTransactions serves GET /api/transactions/deleted for
-// admin users. It returns a paginated list of tombstoned transactions
+// any authenticated user (members see only their own rows; admins see
+// all). It returns a paginated list of tombstoned transactions
 // ordered by deleted_at DESC so the most-recent accident is at the top —
 // the common recovery use case is "I just nuked the wrong filter, give
 // me back the last thing I did."
@@ -66,7 +67,8 @@ type deletedTransactionListResponse struct {
 // trash view can reuse the same pager component — page + per_page
 // query params, MaxPerPage cap, Total count from a separate query.
 func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.Request) {
-	if _, ok := auth.GetUser(r); !ok {
+	user, ok := auth.GetUser(r)
+	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
@@ -94,21 +96,39 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 
 	ctx := r.Context()
 
-	// CountDeletedTransactions is :one and returns a bare int64. It is
-	// deliberately a separate query from ListDeletedTransactions so
-	// the Total shown in the pager reflects the full trash, not just
-	// the current page's window.
-	total, err := h.queries.CountDeletedTransactions(ctx)
+	// Members see only their own tombstoned rows; admins see the whole
+	// household's trash. Ownership is the only predicate the admin bypass
+	// loosens — same split as every other transaction path. Total is the
+	// scoped count so the pager (and the sidebar badge, which reuses this
+	// endpoint with per_page=1) is per-role for free.
+	isAdminUser := user.Role == RoleAdmin
+
+	var total int64
+	var err error
+	if isAdminUser {
+		total, err = h.queries.CountDeletedTransactions(ctx)
+	} else {
+		total, err = h.queries.CountDeletedTransactionsByUser(ctx, user.ID)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to count deleted transactions")
 		return
 	}
 
 	offset := (page - 1) * perPage
-	rows, err := h.queries.ListDeletedTransactions(ctx, database.ListDeletedTransactionsParams{
-		Limit:  int64(perPage),
-		Offset: int64(offset),
-	})
+	var rows []database.ListDeletedTransactionsRow
+	if isAdminUser {
+		rows, err = h.queries.ListDeletedTransactions(ctx, database.ListDeletedTransactionsParams{
+			Limit:  int64(perPage),
+			Offset: int64(offset),
+		})
+	} else {
+		rows, err = h.queries.ListDeletedTransactionsByUser(ctx, database.ListDeletedTransactionsByUserParams{
+			UserID: user.ID,
+			Limit:  int64(perPage),
+			Offset: int64(offset),
+		})
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query deleted transactions")
 		return
