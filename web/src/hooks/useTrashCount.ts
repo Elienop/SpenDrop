@@ -3,8 +3,8 @@ import { api } from '../api/client';
 
 /**
  * Shape of GET /api/transactions/deleted — only `total` is read here,
- * the rest is realistic noise. The backend handler is admin-only, so
- * the query only fires when `enabled` is true.
+ * the rest is realistic noise. The backend scopes the total per-role,
+ * so the query only fires when `enabled` is true.
  */
 interface DeletedListResponse {
   total: number;
@@ -18,9 +18,9 @@ interface DeletedListResponse {
  * bespoke `TRASH_CHANGED_EVENT` window-event bus and manual `focus` listener
  * are retired in favour of those two paths.)
  *
- * Gated on `enabled` (typically `isAdmin(user)`) so non-admin sessions don't
- * issue a 403 the network panel would surface as a spurious red flag. When
- * disabled the query is parked (`enabled: false`) and `count` reports 0.
+ * Gated on `enabled` (user present) — the endpoint serves every authenticated
+ * role since B5 and returns a member-scoped total for members. When disabled
+ * the query is parked (`enabled: false`) and `count` reports 0.
  *
  * Reuses GET /api/transactions/deleted with per_page=1 — the response
  * envelope already includes a `total` that mirrors `CountDeletedTransactions`,
@@ -42,8 +42,8 @@ export function useTrashCount(enabled: boolean) {
 
   return {
     // `query.data` is undefined while disabled or before the first resolve,
-    // and we never want a stale admin count to bleed into a non-admin
-    // re-mount — coalesce to 0.
+    // and we never want a stale count to bleed into a re-mount where
+    // `enabled` has just gone false (e.g. logout) — coalesce to 0.
     count: enabled ? query.data ?? 0 : 0,
     loading: query.isLoading,
     refetch: () => {

@@ -191,7 +191,7 @@ describe('Sidebar', () => {
       expect(mockedUseTrashCount).toHaveBeenCalledWith(true);
     });
 
-    test('passes enabled=false to useTrashCount for non-admin users', () => {
+    test('passes enabled=true to useTrashCount for member users too (B5: no longer admin-gated)', () => {
       mockedUseAuth.mockReturnValue({
         user: { ...mockUser, role: 'member' },
         loading: false,
@@ -201,10 +201,10 @@ describe('Sidebar', () => {
         logout: mockLogout,
       });
       renderSidebar();
-      expect(mockedUseTrashCount).toHaveBeenCalledWith(false);
+      expect(mockedUseTrashCount).toHaveBeenCalledWith(true);
     });
 
-    test('does not render the Trash link for non-admin users (regression check)', () => {
+    test('renders the Trash link for non-admin users too (B5: no longer admin-gated)', () => {
       mockedUseAuth.mockReturnValue({
         user: { ...mockUser, role: 'member' },
         loading: false,
@@ -213,8 +213,6 @@ describe('Sidebar', () => {
         register: vi.fn(),
         logout: mockLogout,
       });
-      // Even if the hook returned a positive count for some reason,
-      // a non-admin must not see the link.
       mockedUseTrashCount.mockReturnValue({
         count: 99,
         loading: false,
@@ -222,8 +220,8 @@ describe('Sidebar', () => {
       });
       renderSidebar();
       expect(
-        screen.queryByRole('link', { name: /trash/i }),
-      ).not.toBeInTheDocument();
+        screen.getByRole('link', { name: /trash/i }),
+      ).toBeInTheDocument();
     });
 
     test('hides the badge text in the collapsed sidebar even when count > 0', () => {
@@ -359,9 +357,27 @@ describe('Sidebar', () => {
     });
   });
 
+  test('renders the Trash link with badge for a member', () => {
+    mockedUseAuth.mockReturnValue({
+      user: { ...mockUser, id: 2, role: 'member' as const },
+      loading: false,
+      unverified: false,
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: mockLogout,
+    });
+    mockedUseTrashCount.mockReturnValue({
+      count: 3,
+      loading: false,
+      refetch: vi.fn(),
+    });
+    renderSidebar();
+    expect(screen.getByRole('link', { name: /Trash/ })).toBeInTheDocument();
+  });
+
   describe('layout', () => {
     test('renders a Separator between the nav sections', () => {
-      // Separator divides the top section (nav + admin) from the
+      // Separator divides the top section (nav + Trash) from the
       // bottom section (Settings + Logout). Shadcn's Separator
       // renders role="none" (decorative) by default — query by the
       // primitive's data-orientation attribute instead.

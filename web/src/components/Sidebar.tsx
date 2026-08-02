@@ -15,7 +15,6 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { useTrashCount } from '../hooks/useTrashCount';
-import { isAdmin } from '@/lib/roles';
 import { Logo } from '@/components/Logo';
 import { LogoWordmark } from '@/components/LogoWordmark';
 import { Separator } from '@/components/ui/separator';
@@ -37,8 +36,6 @@ interface MenuItem {
   label: string;
   icon: React.ElementType;
   end?: boolean;
-  /** When true, the item is only rendered for admin users. */
-  adminOnly?: boolean;
   /**
    * Optional numeric badge rendered next to the label (expanded
    * sidebar only). When undefined or 0, no badge is drawn — the
@@ -74,42 +71,33 @@ const bottomItems: MenuItem[] = [
 
 export function Sidebar() {
   const { user, logout } = useAuth();
-  const admin = isAdmin(user);
-  // Tombstoned-transaction count for the Trash badge. Gated on
-  // `admin` so non-admin sessions don't issue a 403. The hook is
-  // safe to call unconditionally — it bails internally when
-  // `enabled` is false.
-  const { count: trashCount } = useTrashCount(admin);
+  // Tombstoned-transaction count for the Trash badge. The backend scopes
+  // the total to the caller's own rows for members (household-wide for
+  // admins), so the badge is per-role for free. Enabled whenever a user
+  // is present — the endpoint stopped being admin-only in B5.
+  const { count: trashCount } = useTrashCount(user != null);
 
-  // Admin-only recovery surface. Kept in its own group below the main
-  // menu so it sits visually adjacent to Settings — both are operator
-  // tools — rather than mixing it into the day-to-day navigation and
-  // cluttering the sidebar for members who never see it.
+  // Recovery surface, visible to every role since B5 (members see and
+  // restore only their own rows; admins keep purge). Kept in its own
+  // group below the main menu so it sits visually adjacent to Settings —
+  // both are housekeeping rather than day-to-day navigation.
   //
   // Computed inside the component (vs module scope) because the Trash
   // badge needs the live `trashCount` from the hook. `useMemo` keeps
   // the array reference stable across renders that don't change the
   // count — guards against a future `React.memo` on `SidebarLink`
   // silently busting on a fresh-each-render `item` prop.
-  const adminItems: MenuItem[] = useMemo(
+  const trashItems: MenuItem[] = useMemo(
     () => [
       {
         path: '/trash',
         label: 'Trash',
         icon: Trash2,
-        adminOnly: true,
         badge: trashCount,
       },
     ],
     [trashCount],
   );
-  // Hide the admin section entirely for non-admins so a member never
-  // even has the link rendered in the DOM. The backend still enforces
-  // 403 on the underlying routes — this is purely UX cleanup. Every
-  // item in `adminItems` is currently admin-only, so the `adminOnly`
-  // flag on `MenuItem` is kept as a forward-compatible hook in case a
-  // future entry in this section should be visible to members.
-  const visibleAdminItems = admin ? adminItems : [];
   const [expanded, setExpanded] = useState(
     () => localStorage.getItem(STORAGE_KEYS.sidebar) === 'true',
   );
@@ -187,11 +175,11 @@ export function Sidebar() {
         >
           {/*
             Top section — flat list of all primary nav items plus the
-            admin-only Trash entry (rendered inline; no section title or
-            separate group). The previous Menu/Admin/General grouping
-            hid its section titles in collapsed mode but still consumed
-            vertical rhythm, making the icon column look uneven across
-            states.
+            Trash entry, visible to every role since B5 (rendered inline;
+            no section title or separate group). The previous
+            Menu/Admin/General grouping hid its section titles in
+            collapsed mode but still consumed vertical rhythm, making the
+            icon column look uneven across states.
           */}
           {/*
             `pt-4` above the first nav item so the space below the header
@@ -209,7 +197,7 @@ export function Sidebar() {
             {menuItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
-            {visibleAdminItems.map((item) => (
+            {trashItems.map((item) => (
               <SidebarLink key={item.path} item={item} expanded={expanded} />
             ))}
           </div>
