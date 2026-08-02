@@ -65,7 +65,7 @@ Each save shows an **Undo** toast, remembers your last category/currency for the
 
 **Works offline.** With no connection, a captured expense is saved on your device (you see a *"saved on this device"* note) and syncs automatically the moment you're back online -- and on the next app launch -- so a dead spot in a parking garage or basement never costs you an entry. The category and currency lists are cached for offline use, and an entry only ever creates one transaction (no duplicates on reconnect).
 
-A **Recently added** list on the capture screen shows your last few entries (still-syncing and saved), newest-entered first -- so a just-logged transaction always appears at the top even if you back-dated it, and income shows with a green `+`. Delete a wrong one in a tap and re-enter it, no need to open the full app to fix a slip. Deleting a saved entry moves it to Trash (recoverable); a still-offline entry can be undone on the spot.
+A **Recently added** list on the capture screen shows your last few entries (still-syncing and saved), newest-entered first -- so a just-logged transaction always appears at the top even if you back-dated it, and income shows with a green `+`. Delete a wrong one in a tap and re-enter it, no need to open the full app to fix a slip. Deleting a saved entry moves it to Trash (undoable from the toast, recoverable in Trash); a still-offline entry can be undone on the spot.
 
 **Installing it on your phone.** Open SpenDrop over **HTTPS** in your phone's browser, then add it to the home screen -- on **iOS** via Safari → Share → *Add to Home Screen* (it must be Safari), on **Android** via Chrome's install prompt or ⋮ → *Install app*. The icon launches straight into `/quick`. Note that home-screen install, the service worker, and offline capture only activate over a **secure origin** (HTTPS, or `localhost` for local testing) -- over plain `http://<lan-ip>` you still get the full web app online, just without install or offline. The [Caddy reverse proxy](#caddy-reverse-proxy) below provides that HTTPS automatically via Let's Encrypt.
 
@@ -130,7 +130,7 @@ Simple username/password auth with bcrypt hashing and HTTP-only session cookies.
 ### Additional Features
 
 - **Dark and light themes** with system preference detection, toggle in sidebar
-- **Collapsible sidebar** with pin toggle, state persisted in localStorage. A small counter next to **Trash** shows how many transactions are waiting to be restored or purged (a colored dot in collapsed mode), tinted to the user's chosen accent theme
+- **Collapsible sidebar** with pin toggle, state persisted in localStorage. A small counter next to **Trash** shows how many transactions are waiting to be restored or purged (a colored dot in collapsed mode), tinted to the user's chosen accent theme (members are counted only on their own deletions)
 - **Color theme picker** in the sidebar (Violet, Yellow, Blue, ...) -- the chosen accent flows through buttons, the active sidebar row, and the Trash counter so the whole app stays in palette
 - **Responsive layout** with max-width 1400px for wide-screen readability
 - **Saved filters** -- save and recall transaction filter presets
@@ -949,17 +949,17 @@ Tokens are also revoked atomically when you change your password — if the pass
 | PUT | `/api/transactions/{id}` | Update a transaction. Full replace, with two exceptions: `notes` and `tags` are optional — **omit the key to leave the stored value unchanged**, or send `""` to clear it. Every other field is overwritten by what you send. Any update that moves a dedupe-identity input (`date`, `amount`, `description`, `category_id`) clears the row's `content_hash`; it is re-anchored to the row's current content by the startup backfill. |
 | DELETE | `/api/transactions/{id}` | Soft-delete a transaction (flips `deleted_at`; the row is hidden from every user-facing read but recoverable via the trash endpoints below) |
 
-#### Trash view (admin only)
-Deleted transactions are retained as tombstones and surfaced through admin-only endpoints so the "undo the last nuke" recovery story is in-band rather than a DB shell visit.
+#### Trash view
+Deleted transactions are retained as tombstones and surfaced through the endpoints below so the "undo the last nuke" recovery story is in-band rather than a DB shell visit. List, single restore, and batch restore are available to every authenticated user — members see and restore only rows they created, admins see the whole household. Restore-all, purge, and empty-trash remain admin-only.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/transactions/deleted` | Paginated list of tombstoned transactions, newest first |
 | POST | `/api/transactions/{id}/restore` | Restore a single tombstoned row (clears `deleted_at`, emits a `restore` audit row) |
 | POST | `/api/transactions/restore-batch` | Restore up to 500 rows in one request; already-live or missing IDs are silently skipped |
-| POST | `/api/transactions/restore-all` | Restore every tombstoned row in one shot. Snapshots IDs first, then iterates inside a single SQL transaction so each restore still emits its own `restore` audit row. Returns `{"restored": N}`. |
-| DELETE | `/api/transactions/{id}/purge` | Hard-delete a tombstoned row (the only code path that physically removes a transaction) |
-| DELETE | `/api/transactions/trash` | Hard-delete every tombstoned row in one SQL statement. Returns `{"purged": N}`. Writes no audit rows — purge is intentionally unaudited because the target rows are already tombstones and the audit schema's `FOREIGN KEY(transaction_id)` has no way to reference a row that no longer exists. |
+| POST | `/api/transactions/restore-all` | **(admin only)** Restore every tombstoned row in one shot. Snapshots IDs first, then iterates inside a single SQL transaction so each restore still emits its own `restore` audit row. Returns `{"restored": N}`. |
+| DELETE | `/api/transactions/{id}/purge` | **(admin only)** Hard-delete a tombstoned row (the only code path that physically removes a transaction) |
+| DELETE | `/api/transactions/trash` | **(admin only)** Hard-delete every tombstoned row in one SQL statement. Returns `{"purged": N}`. Writes no audit rows — purge is intentionally unaudited because the target rows are already tombstones and the audit schema's `FOREIGN KEY(transaction_id)` has no way to reference a row that no longer exists. |
 
 ### Health and monitoring
 | Method | Endpoint | Description |
