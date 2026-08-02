@@ -181,11 +181,12 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 }
 
 // handleRestoreTransaction serves POST /api/transactions/{id}/restore
-// for admin users. It clears the tombstone (deleted_at → NULL) on a
-// previously soft-deleted row and writes a "restore" audit row inside
-// the same SQL transaction. A restore of a row that is already live,
-// or of a non-existent row, returns 404: from the UX perspective both
-// cases mean "the id you asked to restore is not in the trash."
+// for any authenticated user (owner-or-admin). It clears the tombstone
+// (deleted_at → NULL) on a previously soft-deleted row and writes a
+// "restore" audit row inside the same SQL transaction. A restore of a
+// row that is already live, or of a non-existent row, returns 404:
+// from the UX perspective both cases mean "the id you asked to
+// restore is not in the trash."
 func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Request) {
 	user, ok := auth.GetUser(r)
 	if !ok {
@@ -217,6 +218,15 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 	}
 	if !existing.DeletedAt.Valid {
 		writeError(w, http.StatusNotFound, "transaction not found")
+		return
+	}
+
+	// Ownership: members may only pull their own rows out of the trash;
+	// admins bypass — the same owner-or-admin predicate as
+	// handleDeleteTransaction. Deciding on this pre-tx read is race-free
+	// because user_id is immutable: no mutation path re-homes a row.
+	if user.Role != RoleAdmin && existing.UserID != user.ID {
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 

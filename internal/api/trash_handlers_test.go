@@ -360,6 +360,71 @@ func TestHandleRestoreTransaction_InvalidID_Returns400(t *testing.T) {
 	}
 }
 
+func TestHandleRestoreTransaction_MemberCannotRestoreOthersRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 999.0, "not the members row")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, member, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The row must STAY tombstoned — a status-only assertion would pass
+	// even if the handler restored the row before rejecting.
+	got, err := q.GetTransactionByID(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if !got.DeletedAt.Valid {
+		t.Error("row was restored despite the 403")
+	}
+}
+
+func TestHandleRestoreTransaction_MemberRestoresOwnRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members own row")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, member, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetTransactionByID(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if got.DeletedAt.Valid {
+		t.Error("row is still tombstoned after a 200 restore")
+	}
+}
+
+func TestHandleRestoreTransaction_AdminRestoresMembersRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-03", 7.0, "members row, admin restore")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, admin, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 (admin bypass); body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 // --- content_hash collision on restore (TRASH-RESTORE-HASH-001) ---
 //
 // A tombstoned row keeps its content_hash, but the partial unique index
