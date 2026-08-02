@@ -221,12 +221,15 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Ownership: members may only pull their own rows out of the trash;
-	// admins bypass — the same owner-or-admin predicate as
-	// handleDeleteTransaction. Deciding on this pre-tx read is race-free
-	// because user_id is immutable: no mutation path re-homes a row.
+	// Ownership: a row in another user's trash is, from this member's
+	// perspective, not in the trash at all — same answer the scoped list
+	// gives. 404 rather than 403 so the endpoint is not an id oracle over
+	// tombstones the member cannot otherwise see (admins bypass).
+	//
+	// Deciding on this pre-tx read is race-free because user_id is
+	// immutable: no mutation path re-homes a row.
 	if user.Role != RoleAdmin && existing.UserID != user.ID {
-		writeError(w, http.StatusForbidden, "forbidden")
+		writeError(w, http.StatusNotFound, "transaction not found")
 		return
 	}
 
@@ -239,10 +242,13 @@ func (h *Handler) handleRestoreTransaction(w http.ResponseWriter, r *http.Reques
 			// A newer live row was re-imported with identical content while
 			// this row sat in the trash; flipping deleted_at back to NULL
 			// re-enters the partial unique index and collides. Surface an
-			// actionable 409 instead of an opaque 500 — the user can purge
-			// this trashed copy or edit the live copy to distinguish them,
-			// then retry. Nothing changed, so skip checkpoint reverification.
-			writeError(w, http.StatusConflict, "cannot restore: a newer transaction with identical date, amount, description, and category already exists. Purge this trashed copy or edit the existing one, then retry.")
+			// actionable 409 instead of an opaque 500. Both remedies named
+			// in the copy have to be reachable by whoever reads it: restore
+			// is member-open, but purge is admin-only, so a member is told
+			// to change the live row (which she can do) or to ask an admin
+			// to purge the trashed copy — not to purge it herself.
+			// Nothing changed, so skip checkpoint reverification.
+			writeError(w, http.StatusConflict, "cannot restore: a newer transaction with identical date, amount, description, and category already exists. Change the existing transaction so they differ, or ask an admin to purge this trashed copy, then retry.")
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "failed to restore transaction")
@@ -346,9 +352,22 @@ type batchRestoreRequest struct {
 // the frontend can surface "restored N, M could not be restored (a newer
 // copy already exists)". The field is additive JSON — older clients that
 // don't read it are unaffected.
+//
+// Skipped counts ids a MEMBER submitted that the ownership check refused
+// to attribute to her — someone else's row, or an id that is not in the
+// table at all. Those are the two outcomes a member cannot distinguish by
+// looking (the scoped trash list shows neither), so the count is what
+// lets the frontend say "restored N, M were not yours to restore" instead
+// of silently returning a smaller number than the selection. The
+// already-live skip further down the loop stays uncounted: it is the
+// pre-existing straggler-tolerance contract shared with delete-batch, and
+// folding it in here would conflate "you could not restore this" with
+// "this was already restored". Additive JSON — older clients that don't
+// read it are unaffected.
 type batchRestoreResponse struct {
 	Restored   int `json:"restored"`
 	Conflicted int `json:"conflicted"`
+	Skipped    int `json:"skipped"`
 }
 
 // handleBatchRestoreTransactions serves POST /api/transactions/restore-batch.
@@ -411,16 +430,35 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	isAdminUser := user.Role == RoleAdmin
 	restored := 0
 	conflicted := 0
+	skipped := 0
 	for _, id := range req.IDs {
 		existing, loadErr := qtx.GetTransactionByID(r.Context(), id)
 
 		// Members restore only rows whose ownership this in-tx read
-		// positively confirmed; any other outcome — read error, missing
-		// row, someone else's row — is skipped without counting, the
-		// same silent-skip contract batch-delete uses. Defaults closed:
-		// never restore a row we could not attribute.
-		if !isAdminUser && (loadErr != nil || existing.UserID != user.ID) {
-			continue
+		// positively confirmed. Defaults closed: never restore a row we
+		// could not attribute — but "could not attribute" splits in two,
+		// and the halves get different answers.
+		//
+		// A real DB fault (anything that is not sql.ErrNoRows) means the
+		// ownership check did not run at all, so the whole batch aborts
+		// with 500. Silently skipping there would let a failing database
+		// masquerade as "none of those rows were yours" and return 200
+		// with nothing restored.
+		//
+		// A genuinely missing row (sql.ErrNoRows) or someone else's row
+		// is a silent skip that keeps the rest of the batch going — the
+		// same straggler-tolerance contract batch-delete uses — and is
+		// counted in Skipped so the caller can tell a refused id from a
+		// restored one.
+		if !isAdminUser {
+			if loadErr != nil && !errors.Is(loadErr, sql.ErrNoRows) {
+				writeError(w, http.StatusInternalServerError, "failed to restore transactions")
+				return
+			}
+			if loadErr != nil || existing.UserID != user.ID {
+				skipped++
+				continue
+			}
 		}
 
 		err := h.txnStore.RestoreTx(r.Context(), tx, user.ID, id)
@@ -459,12 +497,20 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Phase 3.3: batch restore doesn't pre-load row dates (the IDs arrive
-	// straight from the UI list and adding a per-row GetTransactionByID
-	// would double the query count for no forensic benefit), so pass a
-	// zero time.Time to reverify every checkpoint. This is conservative
-	// but correct — restoring a row always re-adds cents to the live SUM,
-	// so every red/green state is potentially affected.
+	// Phase 3.3: pass a zero time.Time so every checkpoint is re-verified.
+	// This is a deliberate CONSERVATIVE choice, not a data-availability
+	// constraint — the loop above already reads each row (that read builds
+	// cellSet and carries the member ownership check), so existing.Date is
+	// in hand for most ids and a bounded minDate could be accumulated from
+	// it. What stops that today is the admin path: the ownership check is
+	// gated on !isAdminUser, so an admin's id whose GetTransactionByID
+	// failed is still handed to RestoreTx and can restore with no date
+	// available. A bounded floor would need a fallback for exactly that
+	// case (fall back to zero for the whole batch, or refuse the read
+	// failure), and getting the fallback wrong silently under-verifies.
+	// Zero is correct meanwhile: restoring a row always re-adds cents to
+	// the live SUM, so every red/green state is potentially affected.
+	// Tracked as a bounded-walk follow-up in docs/BACKLOG.md.
 	if restored > 0 {
 		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
 	}
@@ -487,7 +533,7 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		h.publishInvalidate("trash", "transactions", "dashboard", "reports", "budgets")
 	}
 
-	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored, Conflicted: conflicted})
+	writeJSON(w, http.StatusOK, batchRestoreResponse{Restored: restored, Conflicted: conflicted, Skipped: skipped})
 }
 
 // restoreAllResponse is the JSON output for POST /api/transactions/restore-all.
@@ -598,8 +644,14 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Phase 3.3: same rationale as batch-restore — the per-id snapshot
-	// doesn't pre-load dates, so re-verify every checkpoint.
+	// Phase 3.3: same rationale as batch-restore. The zero floor re-verifies
+	// every checkpoint by choice, not because no date is available — the
+	// loop above reads each row for cellSet, so existing.Date is there for
+	// every id whose read succeeded. Bounding the walk with an accumulated
+	// minDate would still need a fallback for ids that restore despite a
+	// failed read (loadErr != nil does not stop RestoreTx here either), so
+	// the unbounded walk stands until that fallback is designed. Tracked as
+	// a follow-up in docs/BACKLOG.md.
 	if restored > 0 {
 		h.verifyAffectedCheckpoints(ctx, time.Time{})
 	}

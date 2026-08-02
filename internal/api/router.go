@@ -220,7 +220,7 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		r.Post("/transactions/{id}/restore", h.handleRestoreTransaction)
 
 		// Trash destruction and household-wide restore (admin only).
-		// Purge is the only hard delete in the system and restore-all's
+		// Purge is the only hard delete in the ledger and restore-all's
 		// blast radius is every user's trash, so both keep the
 		// route-level gate.
 		r.Group(func(r chi.Router) {
