@@ -388,6 +388,11 @@ export function Transactions() {
   );
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
+  // Focus anchor for after a row delete: the deleted <TransactionRow> (and
+  // whatever Radix trigger inside it had auto-refocus) unmounts, which would
+  // otherwise drop keyboard/SR focus onto <body> with no context. Mirrors
+  // RecentlyAdded's headingRef/restoreFocus pattern.
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   const queryClient = useQueryClient();
 
   // Single-row delete with an undo window. The delete is the same
@@ -404,6 +409,7 @@ export function Transactions() {
         toast.error(err instanceof Error ? err.message : 'Delete failed');
         return;
       }
+      pageHeadingRef.current?.focus();
       toast.success('Moved to Trash', {
         duration: UNDO_TOAST_MS,
         action: {
@@ -412,10 +418,17 @@ export function Transactions() {
             void api
               .post(`transactions/${id}/restore`, {})
               .then(() => {
+                // Explicit invalidations (rather than waiting on the SSE
+                // round-trip) so the ACTING tab — the one where Undo was
+                // clicked — gets an immediate badge/list refresh. Other
+                // open tabs/devices are covered by the SSE invalidate the
+                // backend already publishes on restore
+                // (h.publishInvalidate("trash", "transactions", ...)).
                 void queryClient.invalidateQueries({
                   queryKey: ['transactions'],
                 });
                 void queryClient.invalidateQueries({ queryKey: ['trash'] });
+                toast.success('Restored');
               })
               .catch((err: unknown) => {
                 toast.error(
@@ -532,6 +545,12 @@ export function Transactions() {
         deleted = res.deleted;
         refetch();
       }
+      // No per-toast Undo here (unlike the single-row delete above):
+      // delete-by-filter doesn't return the ids it deleted, and a bulk
+      // operation can span thousands of rows, so a single-toast Undo
+      // wouldn't be meaningful anyway. Bulk recovery deliberately relies
+      // on the Trash page instead — spec decision, recorded so it isn't
+      // re-raised.
       toast.success(
         `Moved ${deleted} transaction${deleted !== 1 ? 's' : ''} to Trash`,
       );
@@ -736,7 +755,13 @@ export function Transactions() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <h1
+          ref={pageHeadingRef}
+          tabIndex={-1}
+          className="text-2xl font-semibold tracking-tight outline-none"
+        >
+          Transactions
+        </h1>
         <Button variant="outline" size="sm" onClick={handleExport}>
           Export Excel
         </Button>
@@ -864,6 +889,16 @@ export function Transactions() {
         across open/close.
       */}
       <div className={showEntry ? undefined : 'hidden'}>
+        {/*
+          Raw deleteTransaction, NOT handleRowDelete: the entry row has its
+          own save-undo (⌘Z) whose catch requires onDelete to REJECT on
+          failure so it can restore the undo buffer and show "Could not
+          undo" (see undoLastSave in TransactionEntryRow). handleRowDelete
+          swallows the error into a toast instead of rejecting, and would
+          also stack a second toast on top of the entry row's own
+          save-toast. The table row below keeps handleRowDelete — it has
+          no save-undo of its own to protect.
+        */}
         <TransactionEntryRow
           categories={categories}
           onSubmit={async (v) => {
@@ -871,7 +906,7 @@ export function Transactions() {
             setSuggestionsKey((k) => k + 1);
             return tx;
           }}
-          onDelete={handleRowDelete}
+          onDelete={deleteTransaction}
           onClose={() => setShowEntry(false)}
           descriptionSuggestions={suggestions.descriptions}
           tagSuggestions={suggestions.tags}

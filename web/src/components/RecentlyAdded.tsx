@@ -160,6 +160,7 @@ export function RecentlyAdded({
                 void api
                   .post(`transactions/${savedId}/restore`, {})
                   .then(() => refetch())
+                  .then(() => toast.success('Restored'))
                   // Surface the server's message: the content-hash 409's
                   // copy is written for users and says how to recover.
                   .catch((err: unknown) =>
@@ -170,7 +171,9 @@ export function RecentlyAdded({
             },
           });
         })
-        .catch(() => toast.error('Could not delete'));
+        .catch((err: unknown) =>
+          toast.error(err instanceof Error ? err.message : 'Could not delete'),
+        );
     }
     restoreFocus();
   };

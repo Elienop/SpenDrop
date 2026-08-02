@@ -372,7 +372,11 @@ describe('Sidebar', () => {
       refetch: vi.fn(),
     });
     renderSidebar();
-    expect(screen.getByRole('link', { name: /Trash/ })).toBeInTheDocument();
+    // Assert the count itself (not just that a Trash link exists) — the
+    // aria-label is `${label}, ${badge} item${badge === 1 ? '' : 's'}`.
+    expect(
+      screen.getByRole('link', { name: 'Trash, 3 items' }),
+    ).toBeInTheDocument();
   });
 
   describe('layout', () => {

@@ -551,13 +551,19 @@ export function Trash() {
     const ids = [...selectedIds];
     setBatchRestoring(true);
     try {
-      const resp = await api.post<{ restored: number }>(
+      const resp = await api.post<{ restored: number; conflicted: number }>(
         'transactions/restore-batch',
         { ids },
       );
-      toast.success(
-        `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
-      );
+      if (resp.conflicted > 0) {
+        toast.success(
+          `Restored ${resp.restored} — ${resp.conflicted} could not be restored (a newer copy already exists)`,
+        );
+      } else {
+        toast.success(
+          `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
+        );
+      }
       setSelectedIds(new Set());
       await fetchTrash();
     } catch (err) {
@@ -575,12 +581,18 @@ export function Trash() {
   const handleRestoreAll = useCallback(async () => {
     setRestoringAll(true);
     try {
-      const resp = await api.post<{ restored: number }>(
+      const resp = await api.post<{ restored: number; conflicted: number }>(
         'transactions/restore-all',
       );
-      toast.success(
-        `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
-      );
+      if (resp.conflicted > 0) {
+        toast.success(
+          `Restored ${resp.restored} — ${resp.conflicted} could not be restored (a newer copy already exists)`,
+        );
+      } else {
+        toast.success(
+          `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
+        );
+      }
       // Drop any row-level selection state; the rows it pointed at are
       // about to disappear from the list anyway.
       setSelectedIds(new Set());

@@ -292,6 +292,11 @@ describe('RecentlyAdded', () => {
     );
     // The undo refetch brings the row back.
     await waitFor(() => expect(screen.getByText('sdsaved')).toBeInTheDocument());
+    // And the success toast (previously silent) fires once the restore
+    // resolves — matches Trash.tsx's own restore feedback.
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith('Restored'),
+    );
   });
 
   test('deleting a pending (un-synced) row drops it locally without a network delete', async () => {
@@ -378,7 +383,9 @@ describe('RecentlyAdded', () => {
 
     await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
 
-    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    // The rejection's own message is surfaced (same ternary as the undo
+    // catch two lines above it in the component), not a generic fallback.
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('500'));
   });
 
   test('bumping refreshKey re-pulls the saved list', async () => {

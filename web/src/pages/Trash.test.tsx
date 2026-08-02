@@ -41,10 +41,12 @@ vi.mock('sonner', () => ({
 
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Trash } from './Trash';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -428,6 +430,29 @@ describe('Trash', () => {
       });
     });
 
+    test('batch restore with conflicted ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select april salary/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /restore 2/i }));
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 could not be restored (a newer copy already exists)',
+        );
+      });
+    });
+
     test('clicking the select-all checkbox selects every row on the page', async () => {
       const user = userEvent.setup();
       renderTrash();
@@ -522,6 +547,25 @@ describe('Trash', () => {
       // Initial load + refetch after restore-all = 2 gets
       await waitFor(() => {
         expect(mockedApi.get).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    test('"Restore all" with conflicted ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /restore all 2/i }),
+      );
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 could not be restored (a newer copy already exists)',
+        );
       });
     });
 
@@ -639,11 +683,13 @@ describe('Trash', () => {
       expect(
         screen.getByRole('status', { name: /loading/i }),
       ).toBeInTheDocument();
-      // Heading must not appear yet — we haven't confirmed admin
+      // Heading must not appear yet — the page is member-reachable (no
+      // admin gate since B5), but it still waits on the auth probe so a
+      // hard reload doesn't flash the page before `user` resolves.
       expect(
         screen.queryByRole('heading', { level: 1, name: /trash/i }),
       ).not.toBeInTheDocument();
-      // And we must not fetch the trash list until admin is confirmed
+      // And we must not fetch the trash list until the `!user` gate clears
       expect(mockedApi.get).not.toHaveBeenCalled();
     });
   });

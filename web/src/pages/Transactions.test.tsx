@@ -106,6 +106,25 @@ vi.mock('../hooks/useSavedFilters', () => ({
   }),
 }));
 
+// Captures the props TransactionEntryRow is actually rendered with, so the
+// "entry row gets the raw deleteTransaction, not handleRowDelete" wiring
+// (item 1 of the B5 fix wave) can be pinned by identity rather than by
+// behavior. The entry row is always mounted (just CSS-hidden via the
+// `showEntry` toggle), so replacing it with a null-rendering stub here
+// doesn't affect any other test in this file — none of them interact with
+// the entry row's own fields.
+import type { TransactionEntryRowProps } from '../components/TransactionEntryRow';
+
+const capturedEntryRowProps: { current: TransactionEntryRowProps | null } = {
+  current: null,
+};
+vi.mock('../components/TransactionEntryRow', () => ({
+  TransactionEntryRow: (props: TransactionEntryRowProps) => {
+    capturedEntryRowProps.current = props;
+    return null;
+  },
+}));
+
 import { Transactions } from './Transactions';
 import { api } from '../api/client';
 
@@ -151,6 +170,7 @@ describe('Transactions page', () => {
     // Default: no service worker registration, so the mount effect's
     // notification-cleanup short-circuits to a no-op in every other test.
     mockGetReadyRegistration.mockResolvedValue(null);
+    capturedEntryRowProps.current = null;
   });
 
   describe('toolbar', () => {
@@ -1121,7 +1141,7 @@ describe('Transactions page', () => {
       );
     });
 
-    it('Undo calls the restore endpoint', async () => {
+    it('Undo calls the restore endpoint and shows a Restored toast', async () => {
       const deleteTransaction = vi.fn().mockResolvedValue(undefined);
       mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
       const user = userEvent.setup();
@@ -1138,6 +1158,8 @@ describe('Transactions page', () => {
       await waitFor(() =>
         expect(api.post).toHaveBeenCalledWith('transactions/1/restore', {}),
       );
+      // Previously silent — the restore resolved with no feedback at all.
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalledWith('Restored'));
     });
 
     it('a failed delete shows an error toast instead of vanishing silently', async () => {
@@ -1150,6 +1172,34 @@ describe('Transactions page', () => {
 
       await waitFor(() => expect(toastError).toHaveBeenCalledWith('boom'));
       expect(toastSuccess).not.toHaveBeenCalled();
+    });
+
+    it('moves focus to the page heading after a successful delete, so keyboard/SR users are not dropped on <body>', async () => {
+      const deleteTransaction = vi.fn().mockResolvedValue(undefined);
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await deleteFirstRow(user);
+
+      await waitFor(() =>
+        expect(document.activeElement).toBe(
+          screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+        ),
+      );
+    });
+  });
+
+  describe('entry-row delete wiring (item 1)', () => {
+    it('passes the raw deleteTransaction to TransactionEntryRow, not the handleRowDelete wrapper', () => {
+      const deleteTransaction = vi.fn().mockResolvedValue(undefined);
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      render(<Transactions />);
+
+      // Identity, not just behavior: handleRowDelete is a distinct closure
+      // that swallows a rejection into a toast, which would break the entry
+      // row's own ⌘Z undo (its catch needs onDelete to REJECT).
+      expect(capturedEntryRowProps.current?.onDelete).toBe(deleteTransaction);
     });
   });
 
