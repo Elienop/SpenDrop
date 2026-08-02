@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import {
@@ -16,6 +17,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
+import { UNDO_TOAST_MS } from '../lib/undo';
 import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { SortColumn } from '../hooks/useTransactions';
@@ -386,6 +388,46 @@ export function Transactions() {
   );
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
+  const queryClient = useQueryClient();
+
+  // Single-row delete with an undo window. The delete is the same
+  // soft-delete as before; the toast makes the Trash detour visible and
+  // Undo calls the restore endpoint members can reach since B5. The catch
+  // also gives a FAILED delete feedback — previously the rejection from
+  // the row's fire-and-forget onDelete was unhandled and the row just
+  // stayed put with no explanation.
+  const handleRowDelete = useCallback(
+    async (id: number) => {
+      try {
+        await deleteTransaction(id);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Delete failed');
+        return;
+      }
+      toast.success('Moved to Trash', {
+        duration: UNDO_TOAST_MS,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            void api
+              .post(`transactions/${id}/restore`, {})
+              .then(() => {
+                void queryClient.invalidateQueries({
+                  queryKey: ['transactions'],
+                });
+                void queryClient.invalidateQueries({ queryKey: ['trash'] });
+              })
+              .catch((err: unknown) => {
+                toast.error(
+                  err instanceof Error ? err.message : 'Could not restore',
+                );
+              });
+          },
+        },
+      });
+    },
+    [deleteTransaction, queryClient],
+  );
 
   const handlePageChange = useCallback(
     (newPage: number) => {
@@ -829,7 +871,7 @@ export function Transactions() {
             setSuggestionsKey((k) => k + 1);
             return tx;
           }}
-          onDelete={deleteTransaction}
+          onDelete={handleRowDelete}
           onClose={() => setShowEntry(false)}
           descriptionSuggestions={suggestions.descriptions}
           tagSuggestions={suggestions.tags}
@@ -985,7 +1027,7 @@ export function Transactions() {
                       setSuggestionsKey((k) => k + 1);
                     }
                   }}
-                  onDelete={deleteTransaction}
+                  onDelete={handleRowDelete}
                   onError={setRowError}
                   descriptionSuggestions={suggestions.descriptions}
                   tagSuggestions={suggestions.tags}

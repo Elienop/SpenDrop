@@ -70,6 +70,15 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+const toastSuccess = vi.fn();
+const toastError = vi.fn();
+vi.mock('sonner', () => ({
+  toast: {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: (...args: unknown[]) => toastError(...args),
+  },
+}));
+
 vi.mock('@/lib/push-sw', () => ({
   getReadyRegistration: () => mockGetReadyRegistration(),
 }));
@@ -98,6 +107,7 @@ vi.mock('../hooks/useSavedFilters', () => ({
 }));
 
 import { Transactions } from './Transactions';
+import { api } from '../api/client';
 
 const mockSetPage = vi.fn();
 const mockSetPerPage = vi.fn();
@@ -1083,6 +1093,63 @@ describe('Transactions page', () => {
       // Registration present but without the Notifications API surface.
       mockGetReadyRegistration.mockResolvedValue({});
       expect(() => render(<Transactions />)).not.toThrow();
+    });
+  });
+
+  describe('single-row delete undo', () => {
+    async function deleteFirstRow(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(
+        screen.getByRole('button', { name: 'Actions for Groceries' }),
+      );
+      await user.click(await screen.findByRole('menuitem', { name: 'Delete' }));
+    }
+
+    it('shows a Moved to Trash toast with an Undo action after a delete', async () => {
+      const deleteTransaction = vi.fn().mockResolvedValue(undefined);
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await deleteFirstRow(user);
+
+      await waitFor(() => expect(deleteTransaction).toHaveBeenCalledWith(1));
+      expect(toastSuccess).toHaveBeenCalledWith(
+        'Moved to Trash',
+        expect.objectContaining({
+          action: expect.objectContaining({ label: 'Undo' }),
+        }),
+      );
+    });
+
+    it('Undo calls the restore endpoint', async () => {
+      const deleteTransaction = vi.fn().mockResolvedValue(undefined);
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await deleteFirstRow(user);
+      await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+
+      const options = toastSuccess.mock.calls[0][1] as {
+        action: { label: string; onClick: () => void };
+      };
+      options.action.onClick();
+
+      await waitFor(() =>
+        expect(api.post).toHaveBeenCalledWith('transactions/1/restore', {}),
+      );
+    });
+
+    it('a failed delete shows an error toast instead of vanishing silently', async () => {
+      const deleteTransaction = vi.fn().mockRejectedValue(new Error('boom'));
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await deleteFirstRow(user);
+
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith('boom'));
+      expect(toastSuccess).not.toHaveBeenCalled();
     });
   });
 });
