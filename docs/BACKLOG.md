@@ -207,11 +207,25 @@ condition *and* move the predicate, believing one was safe because the other was
   NOT fixed by this commit — verified at HEAD. What the guard could have introduced, and does
   not, is a stored base value matching neither the request nor the row the tx just read.
   **Step 2 (snapshot the rate per row) is still open**, folded into B10.
-  **Two owner decisions outstanding:** whether a visible "re-price at the current rate" action
-  should exist (the freeze is one-way — a mistyped rate cannot be undone except by changing the
-  foreign amount and changing it back), and the `≈ $x` preview in the edit form, which is
-  computed at today's rate and will now disagree with what saving does. See
+  **Decision 1 — a "re-price at the current rate" action: DEFERRED to step 2, 2026-08-02.** With
+  no per-row rate recorded, such an action could only mean "recalculate everything at today's
+  number" and could not show which rows it would touch or what they were booked at — which is the
+  rejected effective-dated rate table triggered by hand. Once step 2 lands it becomes honest.
+  The gap meanwhile: a mistyped rate is only recoverable by undiscoverable folklore, now
+  documented in the code beside the rule that causes it. See
   [[foreign-row-booked-rate-is-unrecorded]].
+  **Decision 2 — the `≈ $x` preview: FIXED** on `fix/edit-preview-shows-what-saving-stores`
+  (stacked on this PR). It showed today's conversion in the edit form, which after this commit
+  disagrees with what saving stores. It now shows the stored value with an `(as recorded)`
+  qualifier when the two differ, and switches to a live conversion the moment the amount is
+  actually edited. Browser-verified end to end: rate moved 89,000 → 100,000, preview held at
+  `≈ $16.85 (as recorded)` rather than $15.00, typing 2,000,000 switched it to `≈ $20.00`, and a
+  description-only save stored $16.85.
+  **Follow-up found while fixing it, NOT done:** Save is still disabled and `toCreatePayload`
+  still throws when a row's currency has no rate (`TransactionRow.tsx:305`, `currency.ts:72`).
+  After the freeze, a description-only edit of a foreign row needs no rate at all — the server
+  carries the value forward — so such a row is uneditable for a reason the server no longer
+  shares. Small, and worth doing.
 
 - **B11 — a save waited on the other phone's notification** (`032ba40`, 2026-08-02, unreleased).
   Push delivery moved off the request path. The gates (type toggle, quiet hours, over-budget

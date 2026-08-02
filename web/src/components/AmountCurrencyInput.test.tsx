@@ -198,6 +198,99 @@ describe('AmountCurrencyInput', () => {
     expect(screen.getByText(/no rate configured/i)).toBeInTheDocument();
   });
 
+  // The `≈` preview promises what saving will store. On a NEW transaction that
+  // is today's rate. On an EDIT that leaves the foreign money alone it is not:
+  // the server carries the row's stored base value forward untouched, so after
+  // a rate change the live conversion is a figure the save will not produce.
+  //
+  // Fixture throughout: 1,500,000 LBP booked at 89,000/USD => $16.85 stored.
+  // The `currencies` list above puts today's LBP rate at 90,000, so a live
+  // conversion of the same amount reads $16.67 — a different string, which is
+  // what makes these assertions able to fail.
+  describe('editing an existing row', () => {
+    const storedLbp = {
+      amount: 16.85,
+      original_amount: 1500000,
+      original_currency: 'LBP',
+    };
+
+    it('_UntouchedForeignMoneyPreviewsTheStoredValue: shows what the save keeps, not today s rate', () => {
+      renderInput({
+        value: 1500000,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbp,
+      });
+      const preview = screen.getByText(/≈/);
+      expect(preview).toHaveTextContent(/\$16\.85/);
+      expect(preview).not.toHaveTextContent(/\$16\.67/);
+    });
+
+    it('_EditedAmountPreviewsTodaysRate: touching the money re-prices, so the preview follows', () => {
+      // 1,600,000 / 90,000 = 17.777... The server re-prices a corrected
+      // foreign amount at today's rate, so the stored $16.85 is now the wrong
+      // promise and the live conversion is the right one.
+      renderInput({
+        value: 1600000,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbp,
+      });
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$17\.78/);
+    });
+
+    it('_SwitchedCurrencyPreviewsTodaysRate: a different currency re-prices too', () => {
+      // Same number of units, now called EUR: 1,500,000 / 0.9.
+      renderInput({
+        value: 1500000,
+        currency: 'EUR',
+        baseCode: 'USD',
+        storedMoney: storedLbp,
+      });
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$1,666,666\.67/);
+    });
+
+    it('_QualifiesTheFrozenFigureWhenTheRateHasMoved: says the number came from the row', () => {
+      // Without this, the figure reads as a bug against the rate the user set
+      // in Settings, and the obvious "fix" — retyping the amount — is the one
+      // action that re-prices the row and destroys the value being preserved.
+      renderInput({
+        value: 1500000,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbp,
+      });
+      // Whole rendered string, not just the presence of the words: the
+      // qualifier lives in a nested span and `toHaveTextContent` normalizes
+      // whitespace, so this also pins the space that keeps it off the figure.
+      expect(screen.getByText(/≈/)).toHaveTextContent('≈ $16.85 (as recorded)');
+    });
+
+    it('_SilentWhenTheRateHasNotMoved: no qualifier when both figures agree', () => {
+      // Stored $16.67 is exactly 1,500,000 / 90,000 to the cent, so the
+      // frozen figure and today's conversion are indistinguishable on screen
+      // and there is nothing to explain.
+      renderInput({
+        value: 1500000,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: { ...storedLbp, amount: 16.67 },
+      });
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$16\.67/);
+      expect(screen.queryByText(/as recorded/i)).not.toBeInTheDocument();
+    });
+
+    it('_CreateSurfaceStillPreviewsTodaysRate: no storedMoney means no freeze', () => {
+      // The create surfaces (TransactionEntryRow, QuickAdd) pass no
+      // storedMoney. Same amount and currency as the frozen case above; the
+      // absence of the prop is the whole difference.
+      renderInput({ value: 1500000, currency: 'LBP', baseCode: 'USD' });
+      const preview = screen.getByText(/≈/);
+      expect(preview).toHaveTextContent(/\$16\.67/);
+      expect(screen.queryByText(/as recorded/i)).not.toBeInTheDocument();
+    });
+  });
+
   it('Enter inside the Command list selects and does NOT submit a parent form', async () => {
     const user = userEvent.setup();
     const onCurrencyChange = vi.fn();
