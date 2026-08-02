@@ -21,6 +21,45 @@ top items. Production figures in this file come from the owner's live database o
 
 ## Next up
 
+*Numbers are discovery order, not priority. Current priority order: B11, B1, B2, B5.*
+
+### B11 — Saving a transaction waits for the other phone's notification
+**Verified: read** (every step traced in code; the stall itself not reproduced against a real
+dead gateway). **Confirmed live by the owner 2026-08-02: push is enabled in production and both
+household members receive notifications.** This was previously filed as a question; it is now a
+real defect on the most-used action in the app.
+
+**What happens.** A save commits the row, and *then* — still inside the same HTTP request,
+before the response is written — the handler notifies every subscribed device in sequence
+(`transaction_handlers.go:552-556`, response at `:563`). Each device gets its own 30-second
+timeout (`internal/push/sender.go:24`). The server abandons the whole request at 60 seconds
+(`config.go:235`).
+
+**So:** one unreachable device = a 30-second spinner, then the save succeeds. Two = the request
+exceeds the server's write timeout and the save *appears to fail*, though the row is already
+committed. Push gateways (Google's, Mozilla's) being unreachable is ordinary on Lebanese
+connectivity — this does not need a bug anywhere else to fire.
+
+**Blast radius is wider than one device.** Activity notifications skip the actor's own devices,
+so a normal save only waits on the *other* person's phone. But an over-budget alert passes
+`excludeUserID = 0` (`budget_alert.go:149`, `:275`) — it deliberately notifies everyone — so a
+save that crosses a budget threshold waits on **every device in the household**, including the
+saver's own. That is the case most likely to exceed 60s.
+
+**Where to fix it.** 17 call sites feed this (`h.notifyTxn*` / `h.evaluateBudgetAlerts` across
+`transaction_handlers.go`, `import_handlers.go`, `trash_handlers.go`), so the fix belongs at the
+single chokepoint in `fanOutPush` (`budget_alert.go:416`), not at the callers.
+
+**The invariant:** a user's save must never wait on a network call to a third-party push
+service. Two constraints that make this less trivial than it looks — the goroutine cannot hold
+`r.Context()` (it is cancelled the moment the response is written, which would abort the very
+sends being moved off the path), and the existing fan-out tests assert on sends synchronously,
+so they need a deterministic way to wait rather than a sleep.
+
+**Effort:** small-to-medium. **Do first.**
+
+---
+
 ### B1 — Editing an LBP transaction re-prices it at today's rate
 **Verified: reproduced.** Created a 1,500,000 LBP transaction at rate 89,000, changed the rate,
 edited *only the description* — the stored value moved **$16.85 → $15.00** while the LBP figure
@@ -109,7 +148,11 @@ afterwards. Descriptions feed import duplicate-detection, so it propagates.
 item below Edit, with no prompt and no "moved to trash" feedback. The phone surface *does*
 confirm; desktop does not. Trash routes are admin-only (`internal/api/router.go:217-225`), so a
 member's misclick is unrecoverable without an admin.
-**Effort:** small. **Check first:** whether the second household account is admin or member.
+**Effort:** small. **Confirmed by the owner 2026-08-02: the second household account is a
+member.** So the worst case is live, not hypothetical — she can delete a row with one
+mis-tap on desktop, gets no confirmation and no "moved to trash" message, and cannot reach
+Trash to undo it. The row is recoverable, but only by asking the admin. This raises B5 above
+the rest of the small work.
 
 ### B6 — Cheap batch
 All **reported**, none independently verified. Grouped because they are individually trivial:
@@ -197,11 +240,8 @@ case, six frontend sites. Expect one immediate visible break: a negative expense
 
 ## Needs a decision or a fact from the owner
 
-- **Is the second household account admin or member?** Decides how sharp B5 is — a member has no
-  Trash and therefore no undo.
-- **Is push enabled in production?** Off by default. If on, a push-gateway outage (plausible on
-  Lebanese connectivity) makes every transaction save hang up to 30s per subscribed device and
-  then fail, even though the row was already saved. Worth checking regardless of B7.
+- ~~Is push enabled in production?~~ **Answered 2026-08-02: yes, and both members receive
+  notifications.** Promoted to B11 — it is a live defect, not a question.
 - **Does anything already monitor the box from outside?** If yes, B7 shrinks considerably.
 - **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
   back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
