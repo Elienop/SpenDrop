@@ -1,5 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
-import { toCreatePayload, toEditDefaults, PREVIEW_DECIMALS } from './currency';
+import {
+  toCreatePayload,
+  toEditDefaults,
+  foreignMoneyUnchanged,
+  dollarsToCents,
+  PREVIEW_DECIMALS,
+  type StoredMoney,
+} from './currency';
 import type { Transaction } from '@/api/types';
 
 function makeTx(overrides: Partial<Transaction> = {}): Transaction {
@@ -230,5 +237,120 @@ describe('toEditDefaults', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+});
+
+describe('dollarsToCents', () => {
+  it('_RoundsAtTheWireEdge: matches math.Round(d * 100) on the binary-float cases', () => {
+    // 16.85 * 100 is 1684.9999999999998 in IEEE 754. Truncating instead of
+    // rounding would book this row a cent light, and every comparison against
+    // a stored `original_amount_cents` would then be off by one.
+    expect(dollarsToCents(16.85)).toBe(1685);
+    expect(dollarsToCents(1500000)).toBe(150000000);
+    expect(dollarsToCents(0.005)).toBe(1);
+    expect(dollarsToCents(0)).toBe(0);
+  });
+});
+
+describe('foreignMoneyUnchanged', () => {
+  // A 1,500,000 LBP row booked at 89,000/USD. Today's rate is 90,000, so a
+  // live conversion would say $16.67 — this row still holds, and will keep
+  // holding, $16.85.
+  const storedLbp: StoredMoney = {
+    amount: 16.85,
+    original_amount: 1500000,
+    original_currency: 'LBP',
+  };
+
+  it('_RestatedForeignMoneyIsUnchanged: same code, same amount', () => {
+    expect(
+      foreignMoneyUnchanged(storedLbp, { amount: 1500000, currency: 'LBP' }, 'USD'),
+    ).toBe(true);
+  });
+
+  it('_CorrectedAmountIsAChange: the user moved the money, so it re-prices', () => {
+    expect(
+      foreignMoneyUnchanged(storedLbp, { amount: 1600000, currency: 'LBP' }, 'USD'),
+    ).toBe(false);
+  });
+
+  it('_SwitchedCurrencyIsAChange: same number, different currency', () => {
+    expect(
+      foreignMoneyUnchanged(storedLbp, { amount: 1500000, currency: 'EUR' }, 'USD'),
+    ).toBe(false);
+  });
+
+  it('_SwitchToBaseIsAChange: a base-currency save carries no original_* to freeze against', () => {
+    // The base-changed / corrupted shape: the row's own original_currency IS
+    // the household base. `toCreatePayload` collapses this edit to a bare
+    // `{ amount }`, so the server sees no original_* on the request and never
+    // freezes — the code and cents comparisons below would both pass, which
+    // is exactly why the baseCode guard has to come first.
+    const storedInBase: StoredMoney = {
+      amount: 25.5,
+      original_amount: 25.5,
+      original_currency: 'USD',
+    };
+    expect(
+      foreignMoneyUnchanged(storedInBase, { amount: 25.5, currency: 'USD' }, 'USD'),
+    ).toBe(false);
+  });
+
+  it('_BaseCurrencyRowIsNeverFrozen: a row with no original_* has nothing to carry forward', () => {
+    const storedBaseRow: StoredMoney = {
+      amount: 25.5,
+      original_amount: null,
+      original_currency: null,
+    };
+    expect(
+      foreignMoneyUnchanged(storedBaseRow, { amount: 1500000, currency: 'LBP' }, 'USD'),
+    ).toBe(false);
+  });
+
+  it('_PartialOriginalFieldsAreNotFrozen: the half-null corruption shape re-prices', () => {
+    // Not mutation-killable on its own — with either guard removed, the code
+    // comparison against `null` already fails. Asserted for the behaviour,
+    // not recorded as coverage. Same honesty as the Valid checks in the Go
+    // predicate this mirrors.
+    expect(
+      foreignMoneyUnchanged(
+        { amount: 16.85, original_amount: 1500000, original_currency: null },
+        { amount: 1500000, currency: 'LBP' },
+        'USD',
+      ),
+    ).toBe(false);
+    expect(
+      foreignMoneyUnchanged(
+        { amount: 16.85, original_amount: null, original_currency: 'LBP' },
+        { amount: 1500000, currency: 'LBP' },
+        'USD',
+      ),
+    ).toBe(false);
+  });
+
+  it('_SubCentDifferenceIsTheSameMoney: the server compares cents, not floats', () => {
+    // Both round to 150,000,000 cents, so the server sees one and the same
+    // foreign amount. A float `===` here would claim a re-price the server
+    // does not perform.
+    expect(
+      foreignMoneyUnchanged(storedLbp, { amount: 1500000.004, currency: 'LBP' }, 'USD'),
+    ).toBe(true);
+  });
+
+  it('_CentDifferenceIsAChange: one cent is enough to move the money', () => {
+    expect(
+      foreignMoneyUnchanged(storedLbp, { amount: 1500000.01, currency: 'LBP' }, 'USD'),
+    ).toBe(false);
+  });
+
+  it('_CurrencyCodeCaseIsSignificant: mirrors the exact comparison the server makes', () => {
+    // The import path stores whatever the spreadsheet's currency column says,
+    // so a row can be recorded as "lbp". The server compares the code
+    // byte-for-byte and re-prices such a row on every save; case-folding here
+    // would promise a freeze that never happens.
+    const lowercased: StoredMoney = { ...storedLbp, original_currency: 'lbp' };
+    expect(
+      foreignMoneyUnchanged(lowercased, { amount: 1500000, currency: 'LBP' }, 'USD'),
+    ).toBe(false);
   });
 });

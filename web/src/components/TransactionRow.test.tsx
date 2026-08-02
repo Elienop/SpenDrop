@@ -522,3 +522,76 @@ describe('TransactionRow — keyboard shortcuts', () => {
     expect(onUpdate).not.toHaveBeenCalled();
   });
 });
+
+describe('TransactionRow edit — preview after a rate change', () => {
+  // The mocked currencies list prices LBP at 90,000/USD today. This row was
+  // booked at 89,000, so it stores $16.85 for its 1,500,000 LBP — and it keeps
+  // storing $16.85 through any edit that does not touch the foreign money
+  // (internal/database/store.go, foreignMoneyUnchanged). A live conversion
+  // would say $16.67, which is the figure the editor must not promise.
+  function makeRepricedRow() {
+    return makeTx({
+      amount: 16.85,
+      original_amount: 1500000,
+      original_currency: 'LBP',
+    });
+  }
+
+  it('_PreviewShowsWhatSavingStores: opening the editor previews the stored value, not today s rate', async () => {
+    renderRow(makeRepricedRow());
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    await screen.findByRole('button', { name: /currency: lbp/i });
+
+    const preview = await screen.findByText(/≈/);
+    expect(preview).toHaveTextContent(/\$16\.85/);
+    expect(preview).not.toHaveTextContent(/\$16\.67/);
+    expect(screen.getByText(/as recorded/i)).toBeInTheDocument();
+  });
+
+  it('_PreviewFollowsTheSaveOnceTheAmountIsEdited: a corrected amount re-prices at today s rate', async () => {
+    // The server re-prices whenever the foreign amount moves, so from the
+    // first keystroke the stored value stops being the right promise. 1,600,000
+    // / 90,000 = $17.78. The qualifier goes with it — nothing is frozen now.
+    renderRow(makeRepricedRow());
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    await screen.findByRole('button', { name: /currency: lbp/i });
+
+    const amountInput = screen.getByRole('spinbutton');
+    await user.clear(amountInput);
+    await user.type(amountInput, '1600000');
+
+    await waitFor(() => {
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$17\.78/);
+    });
+    expect(screen.queryByText(/as recorded/i)).not.toBeInTheDocument();
+  });
+
+  it('_PreviewMatchesTheSavedRow: the previewed figure is the one the payload carries', async () => {
+    // Ties the two halves together. The payload's `amount` is the frontend's
+    // live conversion ($16.67) and the server overrides it with the stored
+    // $16.85 — so the preview agreeing with the payload would be the bug.
+    // What must hold is that the preview shows the value the ROW keeps, while
+    // original_amount / original_currency go out unchanged, which is the exact
+    // condition the server freezes on.
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    renderRow(makeRepricedRow(), onUpdate);
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    await screen.findByRole('button', { name: /currency: lbp/i });
+
+    expect(await screen.findByText(/≈/)).toHaveTextContent(/\$16\.85/);
+
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => {
+      expect(onUpdate).toHaveBeenCalledTimes(1);
+    });
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({
+      original_amount: 1500000,
+      original_currency: 'LBP',
+    });
+  });
+});

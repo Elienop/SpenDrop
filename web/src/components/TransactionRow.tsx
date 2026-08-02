@@ -264,6 +264,18 @@ export function TransactionRow({
             hideInactive={false}
             rateFor={rateFor}
             loading={currenciesLoading}
+            // The money this row already stores. Saving an edit that merely
+            // restates the same foreign amount in the same currency keeps that
+            // stored value instead of re-pricing at today's rate, so the `≈`
+            // preview needs it to promise the number the save will produce.
+            // This is the only edit surface — the other two consumers of this
+            // component (TransactionEntryRow, QuickAdd) create rows, and a new
+            // row genuinely is priced at today's rate.
+            storedMoney={{
+              amount: transaction.amount,
+              original_amount: transaction.original_amount,
+              original_currency: transaction.original_currency,
+            }}
             error={
               editCurrency !== baseCode && rateFor(editCurrency) == null
                 ? 'No rate configured for this currency. Set one in Settings.'

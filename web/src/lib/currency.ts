@@ -13,6 +13,25 @@ function roundToPreview(n: number): number {
 }
 
 /**
+ * Rounds a dollar figure to integer cents exactly the way the wire edge does
+ * (`dollarsToCents` in `internal/api/cents.go` stores `math.Round(d * 100)`).
+ *
+ * Two dollar figures that land on the same cents are the same money as far as
+ * the database is concerned, so this is the granularity at which the frontend
+ * has to compare money against a stored row — the wire carries dollars, the
+ * server compares cents.
+ *
+ * One documented divergence, unreachable here: `Math.round` sends a negative
+ * half toward +Infinity (`-0.5` -> `-0`) where Go's `math.Round` sends it away
+ * from zero (`-1`). Every amount that reaches this function has been through
+ * `validateMoneyAmount`, which rejects anything <= 0, so the two never see a
+ * negative half. Revisit if signed amounts ever land (backlog: refunds).
+ */
+export function dollarsToCents(dollars: number): number {
+  return Math.round(dollars * 100);
+}
+
+/**
  * Transforms entry-form values into the wire payload for
  * `POST /api/transactions`. Collapses `currency === baseCode` to a bare
  * `{ amount }` (no `original_*`). Otherwise divides the typed amount by
@@ -66,6 +85,13 @@ export function toCreatePayload<
   };
 }
 
+/** The money an edit surface currently holds: the amount as typed, in
+ *  whatever currency the picker is set to. */
+export interface EditedMoney {
+  amount: number;
+  currency: string;
+}
+
 /**
  * Derives initial form values from a saved `Transaction` for the edit
  * surface. When the transaction carries both `original_amount` and
@@ -78,10 +104,7 @@ export function toCreatePayload<
  * A `console.warn` surfaces the offending row id so future debugging
  * can trace which transaction tripped the partial-null branch.
  */
-export function toEditDefaults(
-  tx: Transaction,
-  baseCode: string,
-): { amount: number; currency: string } {
+export function toEditDefaults(tx: Transaction, baseCode: string): EditedMoney {
   if (tx.original_amount != null && tx.original_currency != null) {
     return { amount: tx.original_amount, currency: tx.original_currency };
   }
@@ -92,4 +115,59 @@ export function toEditDefaults(
     );
   }
   return { amount: tx.amount, currency: baseCode };
+}
+
+/**
+ * The money a saved transaction already carries — the base-currency value
+ * stored on the row, plus the foreign amount and code it was recorded in
+ * (both `null` on a base-currency row).
+ */
+export interface StoredMoney {
+  /** Base-currency value stored on the row, in dollars. */
+  amount: number;
+  original_amount: number | null;
+  original_currency: string | null;
+}
+
+/**
+ * Mirror of `foreignMoneyUnchanged` in `internal/database/store.go`. Reports
+ * whether saving this edit would merely restate the foreign money the row
+ * already carries — same currency code, same original amount to the cent.
+ *
+ * The server carries the row's stored base value forward VERBATIM in that
+ * case instead of re-deriving it from today's rate, because saving an edit
+ * must never move money the user did not touch. So anything that wants to
+ * show what a save will store must not divide by the rate here — after the
+ * rate moves, the live conversion is a number the save will not produce.
+ * Changing the foreign amount, changing the currency, or switching to or
+ * from the base currency all still re-price, because each of those IS the
+ * user changing the money.
+ *
+ * Three details are deliberately copied from the Go predicate, and each one
+ * would make the preview promise a number the save contradicts if it drifted:
+ *
+ *   - `currency === baseCode` returns false. `toCreatePayload` collapses a
+ *     base-currency edit to a bare `{ amount }` with no `original_*`, and the
+ *     server's freeze requires them on the request, so a base-currency save is
+ *     never frozen however the row was stored.
+ *   - The currency code is compared EXACTLY. No writer normalizes its case —
+ *     the import path stores whatever the spreadsheet's currency column says,
+ *     verbatim — so a row recorded as "lbp" can never match "LBP" and every
+ *     save of it re-prices. Case-folding here alone would claim a freeze the
+ *     server does not honour.
+ *   - Amounts are compared as integer cents, because the server compares
+ *     `original_amount_cents`. The wire carries dollars, so a typed
+ *     1500000.004 and a stored 1500000 are one and the same row to it.
+ */
+export function foreignMoneyUnchanged(
+  stored: StoredMoney,
+  edited: EditedMoney,
+  baseCode: string,
+): boolean {
+  if (edited.currency === baseCode) return false;
+  if (stored.original_amount == null || stored.original_currency == null) {
+    return false;
+  }
+  if (edited.currency !== stored.original_currency) return false;
+  return dollarsToCents(edited.amount) === dollarsToCents(stored.original_amount);
 }

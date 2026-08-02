@@ -17,6 +17,11 @@ import { Loader2 } from 'lucide-react';
 import type { Currency } from '@/api/types';
 import { selectAllOnFocus } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
+import {
+  dollarsToCents,
+  foreignMoneyUnchanged,
+  type StoredMoney,
+} from '@/lib/currency';
 
 /**
  * Composed amount + currency picker. **The amount `<Input>` is not self-labeled** —
@@ -38,6 +43,13 @@ export interface AmountCurrencyInputProps {
   disabled?: boolean;
   inputRef?: Ref<HTMLInputElement>;
   dataEntryField?: string;
+  /**
+   * The money already stored on the transaction being edited. Omit it on the
+   * create surfaces — its absence is what keeps their `≈` preview on the live
+   * conversion, which is the right number for a row that does not exist yet.
+   * See the preview derivation below for what it changes when present.
+   */
+  storedMoney?: StoredMoney | null;
   /** Optional DOM id to apply to the inner amount `<input>`. When composed
    *  inside a shadcn `FormControl`, Radix `Slot` injects `id={formItemId}`
    *  onto this component; forwarding that id to the actual input is what
@@ -70,6 +82,7 @@ export function AmountCurrencyInput({
   disabled = false,
   inputRef,
   dataEntryField,
+  storedMoney = null,
   id,
 }: AmountCurrencyInputProps) {
   const [open, setOpen] = useState(false);
@@ -109,7 +122,38 @@ export function AmountCurrencyInput({
 
   const rate = rateFor(currency);
   const showPreview = currency !== baseCode && rate != null && rate > 0;
-  const previewValue = showPreview && rate ? value / rate : 0;
+
+  // What today's rate makes this worth. Correct for a NEW transaction — a row
+  // that does not exist yet really is priced at today's rate.
+  const liveValue = showPreview && rate ? value / rate : 0;
+
+  // ...and wrong for an edit that leaves the foreign money alone. Saving one
+  // of those does not re-price the row: the server carries the stored base
+  // value forward untouched (database.foreignMoneyUnchanged), so once the rate
+  // has moved, the live conversion is a number the save will not produce. The
+  // preview's whole job is to say what saving will store, and a confident wrong
+  // figure is worse than none, so it shows the stored value instead.
+  //
+  // `storedMoney` reads from the live transaction rather than a snapshot taken
+  // when the editor opened, so a refetch landing mid-edit moves this with the
+  // row the server will actually compare against.
+  const frozen =
+    storedMoney != null &&
+    foreignMoneyUnchanged(storedMoney, { amount: value, currency }, baseCode);
+  const previewValue = frozen ? storedMoney.amount : liveValue;
+
+  // The two figures disagree only when the rate moved since the row was
+  // recorded, and that is the one case where a bare correct number reads as a
+  // bug: the user knows the rate they set in Settings, the arithmetic does not
+  // check out, and the obvious "fix" is to retype the amount — the single
+  // action that re-prices the row and destroys the value being preserved. So
+  // the qualifier appears exactly when there is something to say, and never on
+  // the ordinary path. Compared in cents because that is the precision the
+  // figure is rendered at; a sub-cent gap nobody can see does not earn words.
+  const rateHasMoved =
+    frozen &&
+    showPreview &&
+    dollarsToCents(previewValue) !== dollarsToCents(liveValue);
 
   return (
     // Preview/error render in normal flow below the input row, NOT absolutely
@@ -232,6 +276,21 @@ export function AmountCurrencyInput({
       {showPreview && (
         <span className="pointer-events-none mt-1 text-xs text-muted-foreground">
           &asymp; {formatCurrency(previewValue, baseCode)}
+          {rateHasMoved && (
+            // `pointer-events-auto` re-enables hover on this span alone: the
+            // parent switches pointer events off so the preview cannot swallow
+            // a click aimed at the input, and that also suppresses the native
+            // `title` tooltip. The visible text is already true without the
+            // tooltip — the tooltip only carries the "why", which does not fit
+            // in a table cell.
+            <span
+              className="pointer-events-auto"
+              title="The exchange rate has changed since this was recorded. Saving keeps the recorded value; changing the amount or the currency re-prices it at today's rate."
+            >
+              {' '}
+              (as recorded)
+            </span>
+          )}
         </span>
       )}
       {error && (
