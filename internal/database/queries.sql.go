@@ -1233,6 +1233,76 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 	return items, nil
 }
 
+const listDeletedTransactionsByUser = `-- name: ListDeletedTransactionsByUser :many
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.deleted_at IS NOT NULL AND t.user_id = ?
+ORDER BY t.deleted_at DESC, t.id DESC
+LIMIT ? OFFSET ?
+`
+
+type ListDeletedTransactionsByUserParams struct {
+	UserID int64 `json:"user_id"`
+	Limit  int64 `json:"limit"`
+	Offset int64 `json:"offset"`
+}
+
+// ListDeletedTransactionsByUser is the member-scoped twin of
+// ListDeletedTransactions. It reuses ListDeletedTransactionsRow instead of
+// the ...ByUserRow twin sqlc would emit: this file is hand-maintained
+// (codegen is broken) and a twin struct would only duplicate the same 15
+// fields, forcing the trash handler to carry two identical mapping loops.
+func (q *Queries) ListDeletedTransactionsByUser(ctx context.Context, arg ListDeletedTransactionsByUserParams) ([]ListDeletedTransactionsRow, error) {
+	rows, err := q.db.QueryContext(ctx, listDeletedTransactionsByUser, arg.UserID, arg.Limit, arg.Offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListDeletedTransactionsRow{}
+	for rows.Next() {
+		var i ListDeletedTransactionsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Date,
+			&i.OriginalCurrency,
+			&i.Description,
+			&i.CategoryID,
+			&i.Tags,
+			&i.Notes,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+			&i.AmountCents,
+			&i.OriginalAmountCents,
+			&i.CategoryName,
+			&i.CategoryType,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const countDeletedTransactionsByUser = `-- name: CountDeletedTransactionsByUser :one
+SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL AND user_id = ?
+`
+
+func (q *Queries) CountDeletedTransactionsByUser(ctx context.Context, userID int64) (int64, error) {
+	row := q.db.QueryRowContext(ctx, countDeletedTransactionsByUser, userID)
+	var count int64
+	err := row.Scan(&count)
+	return count, err
+}
+
 const listRecentTransactionAudit = `-- name: ListRecentTransactionAudit :many
 SELECT id, transaction_id, "action", actor_user_id, occurred_at, before_json, after_json FROM transaction_audit
 WHERE occurred_at >= CAST(?1 AS TEXT)
