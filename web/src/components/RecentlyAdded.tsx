@@ -18,15 +18,12 @@ import {
   TYPE_INCOME,
   type TransactionType,
 } from '@/lib/transaction-types';
+import { UNDO_TOAST_MS } from '@/lib/undo';
 import type { Category } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
 const RECENT_LIMIT = 5;
 const MAX_ROWS = 6;
-// Undo is the ONLY way back for a pending (local-only) delete, so give it a
-// longer-than-default window. A saved delete is recoverable from Trash, so it
-// needs no Undo button.
-const PENDING_UNDO_MS = 10000;
 
 interface RecentRow {
   key: string;
@@ -64,8 +61,9 @@ interface RecentlyAddedProps {
  * pending-sync and saved, each with a one-tap delete so a wrong entry can be
  * removed and re-added (no edit — delete + re-add covers it). Deleting a
  * pending row drops it locally (Undo re-queues it); deleting a saved row
- * soft-deletes it on the server (recoverable in Trash). Offline, only pending
- * rows show (saved history lives on the server) plus an offline note.
+ * soft-deletes it on the server (undoable from the toast, recoverable in
+ * Trash). Offline, only pending rows show (saved history lives on the
+ * server) plus an offline note.
  */
 export function RecentlyAdded({
   userId,
@@ -133,7 +131,7 @@ export function RecentlyAdded({
       void removeQueued(userId, row.refId)
         .then(() => {
           toast.success('Removed', {
-            duration: PENDING_UNDO_MS,
+            duration: UNDO_TOAST_MS,
             action: payload
               ? {
                   label: 'Undo',
@@ -147,11 +145,30 @@ export function RecentlyAdded({
         })
         .catch(() => toast.error('Could not remove'));
     } else {
+      const savedId = row.refId;
       void api
-        .del(`transactions/${row.refId}`)
+        .del(`transactions/${savedId}`)
         .then(() => {
           refetch();
-          toast.success('Moved to Trash');
+          // Undo restores the row in place; past the toast window the row
+          // is still recoverable from Trash (own rows, both roles).
+          toast.success('Moved to Trash', {
+            duration: UNDO_TOAST_MS,
+            action: {
+              label: 'Undo',
+              onClick: () =>
+                void api
+                  .post(`transactions/${savedId}/restore`, {})
+                  .then(() => refetch())
+                  // Surface the server's message: the content-hash 409's
+                  // copy is written for users and says how to recover.
+                  .catch((err: unknown) =>
+                    toast.error(
+                      err instanceof Error ? err.message : 'Could not restore',
+                    ),
+                  ),
+            },
+          });
         })
         .catch(() => toast.error('Could not delete'));
     }
