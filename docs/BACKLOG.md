@@ -21,106 +21,9 @@ top items. Production figures in this file come from the owner's live database o
 
 ## Next up
 
-*Numbers are discovery order, not priority. Current priority order: B11, B1, B2, B5.*
-
-### B11 — Saving a transaction waits for the other phone's notification
-**Verified: read** (every step traced in code; the stall itself not reproduced against a real
-dead gateway). **Confirmed live by the owner 2026-08-02: push is enabled in production and both
-household members receive notifications.** This was previously filed as a question; it is now a
-real defect on the most-used action in the app.
-
-**What happens.** A save commits the row, and *then* — still inside the same HTTP request,
-before the response is written — the handler notifies every subscribed device in sequence
-(`transaction_handlers.go:552-556`, response at `:563`). Each device gets its own 30-second
-timeout (`internal/push/sender.go:24`). The server abandons the whole request at 60 seconds
-(`config.go:235`).
-
-**So:** one unreachable device = a 30-second spinner, then the save succeeds. Two = the request
-exceeds the server's write timeout and the save *appears to fail*, though the row is already
-committed. Push gateways (Google's, Mozilla's) being unreachable is ordinary on Lebanese
-connectivity — this does not need a bug anywhere else to fire.
-
-**Blast radius is wider than one device.** Activity notifications skip the actor's own devices,
-so a normal save only waits on the *other* person's phone. But an over-budget alert passes
-`excludeUserID = 0` (`budget_alert.go:149`, `:275`) — it deliberately notifies everyone — so a
-save that crosses a budget threshold waits on **every device in the household**, including the
-saver's own. That is the case most likely to exceed 60s.
-
-**Where to fix it.** 17 call sites feed this (`h.notifyTxn*` / `h.evaluateBudgetAlerts` across
-`transaction_handlers.go`, `import_handlers.go`, `trash_handlers.go`), so the fix belongs at the
-single chokepoint in `fanOutPush` (`budget_alert.go:416`), not at the callers.
-
-**The invariant:** a user's save must never wait on a network call to a third-party push
-service. Two constraints that make this less trivial than it looks — the goroutine cannot hold
-`r.Context()` (it is cancelled the moment the response is written, which would abort the very
-sends being moved off the path), and the existing fan-out tests assert on sends synchronously,
-so they need a deterministic way to wait rather than a sleep.
-
-**Effort:** small-to-medium. **Do first.**
-
----
-
-### B1 — Editing an LBP transaction re-prices it at today's rate
-**Verified: reproduced.** Created a 1,500,000 LBP transaction at rate 89,000, changed the rate,
-edited *only the description* — the stored value moved **$16.85 → $15.00** while the LBP figure
-stayed 1,500,000.
-
-**Why it happens.** A transaction stores the foreign amount and the dollar value, but not the
-rate used. `resolveCurrency` (`internal/api/transaction_handlers.go:231`) re-derives the dollar
-value from the *current* rate, and the update handler calls it on every save
-(`transaction_handlers.go:651`). The frontend does the same thing on its side
-(`web/src/lib/currency.ts:53-66`, `web/src/components/TransactionRow.tsx:89-105`). No migration
-of the 17 defines a per-transaction rate column.
-
-**Currently dormant, and armed.** The LBP rate has never been changed since setup (2026-04-12),
-so recalculating has always produced the same number. Production shows 6 edits to LBP rows and
-**0 silently re-priced**. The first rate change arms it for all 88 LBP rows.
-
-**What is NOT affected** (verified): display reads the stored `transaction.amount` and does not
-recompute; server-side the live rate is used in exactly one place, the write path. Changing the
-rate does not move any existing value, report, or export. Only *saving an edit* does.
-
-**Fix — two steps, decided 2026-08-02:**
-1. *Now, no schema change:* on update, if the foreign amount is unchanged, keep the stored dollar
-   value instead of recalculating. An edit then cannot move money.
-2. *Later, folded into B7 (refunds migration):* store the rate on the transaction, so each row
-   carries the rate it used. For auditability — step 1 already fixes the bug.
-
-**Rejected: a rate table with effective dates.** It creates two sources of truth that can
-disagree, and correcting a typo in the table would silently re-value recorded transactions —
-rebuilding this exact bug with more machinery. Accounting systems snapshot the rate onto the
-record for the same reason an invoice prints its FX rate.
-
-**Effort:** small (step 1). **Blocks:** nothing, but do it before the first LBP rate change.
-
----
-
-### B2 — The documented restore procedure does not work
-**Verified: read** (the ownership mechanism confirmed directly; the full drill not executed).
-
-`README.md:589-615` is the only restore procedure, and it fails three ways:
-
-1. **The restored database is unwritable.** Step 4 copies the backup in as root.
-   `entrypoint.sh:19-23` decides whether to fix ownership by checking the owner of the
-   *directory* — which a restore never changes — so it skips the `chown` and the restored file
-   stays root-owned. The app cannot write, and the container restart-loops.
-   **What you'd see:** "attempt to write a readonly database" and a restarting container, which
-   reads exactly like corruption — so the natural next move is to try another backup, which
-   fails identically. No data is lost; the ledger is just unreachable until someone finds a fix
-   that appears nowhere in the docs.
-2. **The first two steps cannot run during the emergency they exist for.** They use
-   `docker exec`, which will not attach to a restarting container.
-3. **Nothing tests it.** The backup tests prove the file is a valid database, not that the app
-   boots on it. No restore round-trip exists in CI or anywhere else.
-
-**Fix:** correct the README procedure (under an hour). Optionally follow with an automated
-restore round-trip test — recommended, but not a blocker.
-
-**Effort:** trivial for the docs. **Why it ranks here:** it is the last line of defence for a
-household whose only copy of years of finances lives on one NAS, and the README currently says
-*"a backup you have never restored from is a wish, not a backup"* above a drill that doesn't work.
-
----
+*Numbers are discovery order, not priority. B11, B2 and B1 all shipped 2026-08-02 on
+`fix/reprice-guard-and-restore` — see Closed. **B5 is next**, sharpened by the owner confirming
+the second household account is a member.*
 
 ## Then
 
@@ -290,6 +193,63 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B1 step 1 — an edit re-priced a foreign row at today's rate** (`8dc95b4`, 2026-08-02,
+  unreleased). Restating the same foreign money now carries the stored base value forward.
+  Changing the amount, the currency, or switching to/from base all still re-price — that is the
+  user changing the money. Also closed an unreported half: a tags-only save after a rate change
+  moved the amount, which cleared `content_hash` and dropped the row out of import dedupe.
+  **The decision lives in the store, on the tx-scoped `before` row, and runs BEFORE the hash
+  decision** — both orderings are load-bearing and pinned by mutants. Deciding it in the handler
+  would use a row read outside any transaction; see [[handler-preread-is-not-store-read]].
+  **Correction to the review's framing, worth keeping:** the lost-update interleave (two people
+  editing one row, one edit overwritten) is *pre-existing* on this full-replace endpoint and is
+  NOT fixed by this commit — verified at HEAD. What the guard could have introduced, and does
+  not, is a stored base value matching neither the request nor the row the tx just read.
+  **Step 2 (snapshot the rate per row) is still open**, folded into B10.
+  **Two owner decisions outstanding:** whether a visible "re-price at the current rate" action
+  should exist (the freeze is one-way — a mistyped rate cannot be undone except by changing the
+  foreign amount and changing it back), and the `≈ $x` preview in the edit form, which is
+  computed at today's rate and will now disagree with what saving does. See
+  [[foreign-row-booked-rate-is-unrecorded]].
+
+- **B11 — a save waited on the other phone's notification** (`032ba40`, 2026-08-02, unreleased).
+  Push delivery moved off the request path. The gates (type toggle, quiet hours, over-budget
+  bypass, actor exclusion) stayed on the request goroutine; only the part that talks to a push
+  service detached. The delivery loop was proven byte-identical by diffing the old function body
+  against the concatenated new halves, so no gate moved or was dropped.
+  **Three things the fix needed that were not obvious.** Detaching while still holding
+  `r.Context()` would abort every send the instant the response was written — a fast save with
+  zero notifications, and *green tests*: mutating `context.WithoutCancel` away fails exactly ONE
+  test in the whole package, because every other push test builds its own uncancelled context.
+  A shutdown drain waits for pending deliveries after the HTTP server stops and before the DB
+  handle closes (a 404/410 prune is a write); its call site in `main.go` is source-pinned by
+  `cmd/spendrop/shutdown_drain_test.go` because deleting that one line otherwise leaves the suite
+  green. And the digest's "sent today" marker had to learn the difference between *nothing owed*
+  and *owed but dropped* — see [[async-split-redefines-done]].
+  **Accepted, not fixed:** activity notifications share a collapse topic, so concurrent fan-outs
+  can reach the gateway out of order; serialising delivery would let one stalled gateway delay
+  everything behind it. **Still open:** a dropped `over_budget` fan-out leaves its latch set, so
+  that crossing is not re-announced until spend drops under and re-crosses — now reachable via
+  the admission cap, not only via a transient send failure. Owner has the decision.
+
+- **B2 — the documented restore procedure did not work** (`e681ed6`, 2026-08-02, unreleased).
+  Every step now runs in a throwaway container with the app stopped, instead of `docker exec`
+  against a container that is by definition restart-looping. Three further defects, each verified
+  against a real deployment rather than reasoned about:
+  **The rollback was lossy** — step 4 saved the live DB as `.bak` then deleted its `-wal`, which
+  in WAL mode holds committed transactions not yet folded in (measured: 4 KB `.bak` against
+  630 KB of discarded `-wal`). The safety net was broken in the only direction it would be used.
+  **A restored database stayed root-owned** — the guard checked `/app/data`, which a restore never
+  touches. It now probes the paths the server must write, derived the way the server derives them.
+  A custom `BACKUP_DIR` previously left the app booting normally while every backup failed
+  silently, which is the worst shape a backup bug can take.
+  **`docker run -v spendrop-data:/data` addressed nothing** — compose prefixes the volume with the
+  project name, so it mounted a new empty volume and the drill died on step 2. Fixed in the README
+  only: adding a `name:` key would have repointed existing deployments at an empty volume, inside
+  a backup procedure. See [[compose-bare-volume-not-addressable]].
+  CI now asserts both halves against the real image — a restored DB is openable, AND a healthy
+  boot does not trigger a recursive chown (the lazy fix passes the first and regresses the second).
 
 - **v0.36.0 (PR #102, 2026-08-02)** — export memory 250→83 MiB with over-long cells marked
   rather than silently trimmed; text limits enforced in characters not bytes on both sides of the
