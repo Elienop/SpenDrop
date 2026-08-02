@@ -595,22 +595,34 @@ describe('Trash', () => {
   });
 
   // -------------------------------------------------------------------------
-  // As member — the admin-gating invariant
+  // As member (B5) — the page is member-reachable; only the admin-only
+  // controls (Purge, Restore all, Purge all) are hidden. The backend
+  // scopes list/restore to the member's own rows, so no control here
+  // should ever be able to 403.
   // -------------------------------------------------------------------------
   describe('as member', () => {
     beforeEach(asMember);
 
-    test('non-admin is redirected and never sees the Trash UI', () => {
+    test('renders the trash list for a member instead of redirecting', async () => {
       renderTrash();
-
-      // Trash renders <Navigate to="/" replace /> for non-admins, so the
-      // recovery heading must never appear in the DOM for a member.
       expect(
-        screen.queryByRole('heading', { level: 1, name: /trash/i }),
+        await screen.findByRole('heading', { level: 1, name: /trash/i }),
+      ).toBeInTheDocument();
+      expect(mockedApi.get).toHaveBeenCalled();
+    });
+
+    test('member sees Restore but no Purge, Purge all, or Restore all', async () => {
+      renderTrash();
+      await screen.findByRole('heading', { level: 1, name: /trash/i });
+      expect(
+        await screen.findAllByRole('button', { name: /^Restore / }),
+      ).not.toHaveLength(0);
+      expect(
+        screen.queryByRole('button', { name: /Purge/i }),
       ).not.toBeInTheDocument();
-      // And no trash fetch should fire — the effect short-circuits on
-      // !admin before it ever hits the API.
-      expect(mockedApi.get).not.toHaveBeenCalled();
+      expect(
+        screen.queryByRole('button', { name: /Restore all/i }),
+      ).not.toBeInTheDocument();
     });
   });
 
