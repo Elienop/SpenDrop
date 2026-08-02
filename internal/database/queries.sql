@@ -179,8 +179,9 @@ ON CONFLICT(code) DO UPDATE SET
 -- hidden from the live app. The only exceptions are:
 --   * GetTransactionByID: mutation-only caller (TransactionStore.Update /
 --     Delete) needs to see the tombstone row to emit the audit before/after.
---   * ListDeletedTransactions / CountDeletedTransactions: the trash view
---     specifically wants tombstoned rows.
+--   * ListDeletedTransactions / CountDeletedTransactions (and their
+--     member-scoped ByUser twins): the trash view specifically wants
+--     tombstoned rows.
 --   * CountAllTransactions: the live/deleted split used by operator tools.
 --   * CountTransactionsByUser: handleDeleteUser's guard must see tombstoned
 --     rows too — they are recoverable ledger history that ON DELETE CASCADE
@@ -325,6 +326,18 @@ WHERE id = ? AND deleted_at IS NOT NULL;
 -- live row is a full-retention soft-delete-then-purge sequence.
 DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 
+-- The two trash list queries below are written here with t.*, but that is
+-- NOT what runs. sqlc codegen is broken in this repo, so queries.sql.go is
+-- hand-maintained (despite its DO-NOT-EDIT header) and both queries execute
+-- an explicit 13-column projection of transactions that OMITS content_hash
+-- and idempotency_key, plus the two category columns — 15 fields, matching
+-- ListDeletedTransactionsRow and the two Scan calls in queries.sql.go.
+-- If codegen is ever repaired and regenerated literally from this file,
+-- t.* expands to 15 transaction columns and both Scan blocks break on a
+-- field-count mismatch (and the two extra columns would start reaching the
+-- trash handler). Narrow these to the explicit column list at the same time
+-- as regenerating, or expect trash_handlers.go to need updating with it.
+
 -- name: ListDeletedTransactions :many
 SELECT t.*, c.name AS category_name, c.type AS category_type
 FROM transactions t
@@ -335,6 +348,17 @@ LIMIT ? OFFSET ?;
 
 -- name: CountDeletedTransactions :one
 SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL;
+
+-- name: ListDeletedTransactionsByUser :many
+SELECT t.*, c.name AS category_name, c.type AS category_type
+FROM transactions t
+JOIN categories c ON t.category_id = c.id
+WHERE t.deleted_at IS NOT NULL AND t.user_id = ?
+ORDER BY t.deleted_at DESC, t.id DESC
+LIMIT ? OFFSET ?;
+
+-- name: CountDeletedTransactionsByUser :one
+SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL AND user_id = ?;
 
 -- name: ListAllDeletedTransactionIDs :many
 -- Drives handleRestoreAllTransactions: returns every tombstoned id so the

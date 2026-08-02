@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -360,6 +362,86 @@ func TestHandleRestoreTransaction_InvalidID_Returns400(t *testing.T) {
 	}
 }
 
+func TestHandleRestoreTransaction_MemberCannotRestoreOthersRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 999.0, "not the members row")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, member, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	// 404, not 403: a row sitting in another member's trash is, from this
+	// member's perspective, not in the trash at all — the same answer the
+	// scoped list gives. A 403 would turn the endpoint into an id oracle
+	// over tombstones the member cannot otherwise see.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status=%d, want 404; body=%s", rec.Code, rec.Body.String())
+	}
+
+	// The row must STAY tombstoned — a status-only assertion would pass
+	// even if the handler restored the row before rejecting.
+	got, err := q.GetTransactionByID(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if !got.DeletedAt.Valid {
+		t.Error("row was restored despite the 404")
+	}
+}
+
+func TestHandleRestoreTransaction_MemberRestoresOwnRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members own row")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, member, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	got, err := q.GetTransactionByID(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if got.DeletedAt.Valid {
+		t.Error("row is still tombstoned after a 200 restore")
+	}
+}
+
+func TestHandleRestoreTransaction_AdminRestoresMembersRow(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-03", 7.0, "members row, admin restore")
+
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/transactions/%d/restore", row.ID), nil)
+	req = withUserAndURLParam(req, admin, "id", fmt.Sprintf("%d", row.ID))
+	rec := httptest.NewRecorder()
+	h.handleRestoreTransaction(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200 (admin bypass); body=%s", rec.Code, rec.Body.String())
+	}
+
+	// A 200 alone would also be emitted by a handler that took the admin
+	// bypass and then failed to clear the tombstone — reload and check the
+	// row actually came back, same as the member-restores-own-row test.
+	got, err := q.GetTransactionByID(context.Background(), row.ID)
+	if err != nil {
+		t.Fatalf("reload row: %v", err)
+	}
+	if got.DeletedAt.Valid {
+		t.Error("row is still tombstoned after a 200 restore")
+	}
+}
+
 // --- content_hash collision on restore (TRASH-RESTORE-HASH-001) ---
 //
 // A tombstoned row keeps its content_hash, but the partial unique index
@@ -398,6 +480,18 @@ func TestHandleRestoreTransaction_ContentHashCollision_Returns409(t *testing.T) 
 	// Body must point the user at the existing/duplicate row.
 	if body := rec.Body.String(); !strings.Contains(strings.ToLower(body), "already exists") {
 		t.Errorf("409 body=%q, want a message mentioning an existing/duplicate transaction", body)
+	}
+	// The remedies offered must both be reachable by whoever reads them.
+	// Restore is member-open but purge is admin-only, so telling the
+	// reader to "purge this trashed copy" is an instruction most readers
+	// cannot follow — the copy names editing the live row (anyone can) and
+	// asking an admin to purge (everyone can do that much).
+	body := strings.ToLower(rec.Body.String())
+	if strings.Contains(body, "exists. purge this trashed copy") {
+		t.Errorf("409 body=%q tells the reader to purge, which is admin-only", body)
+	}
+	if !strings.Contains(body, "ask an admin to purge") {
+		t.Errorf("409 body=%q, want it to route the purge remedy through an admin", body)
 	}
 
 	// The trashed row stayed in the trash — restore did not partially apply.
@@ -746,6 +840,133 @@ func TestHandleBatchRestoreTransactions_RestoresAllAndCounts(t *testing.T) {
 	assertAllActorsEqual(t, rows, admin.ID)
 }
 
+func TestHandleBatchRestoreTransactions_MemberRestoresOnlyOwnRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	m1 := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-01", 10.0, "members row 1")
+	a1 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 999.0, "admins row")
+	m2 := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-03", 30.0, "members row 2")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d]}`, m1.ID, a1.ID, m2.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp batchRestoreResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 2 {
+		t.Errorf("Restored=%d, want 2 (only the member's own rows)", resp.Restored)
+	}
+	// The admin's row was refused by the ownership check, and that refusal
+	// is reported rather than silently shrinking Restored — otherwise a
+	// member who selected three rows and got "2 restored" has no way to
+	// learn the third was skipped on purpose.
+	if resp.Skipped != 1 {
+		t.Errorf("Skipped=%d, want 1 (the admin's row)", resp.Skipped)
+	}
+
+	for _, tc := range []struct {
+		id       int64
+		wantLive bool
+		label    string
+	}{
+		{m1.ID, true, "member row 1"},
+		{m2.ID, true, "member row 2"},
+		{a1.ID, false, "admin row"},
+	} {
+		got, err := q.GetTransactionByID(context.Background(), tc.id)
+		if err != nil {
+			t.Fatalf("reload %s: %v", tc.label, err)
+		}
+		if live := !got.DeletedAt.Valid; live != tc.wantLive {
+			t.Errorf("%s: live=%v, want %v", tc.label, live, tc.wantLive)
+		}
+	}
+}
+
+// A member's batch that names an id which does not exist must behave like
+// the someone-else's-row case: 200, the rest of the batch restored, and
+// the unattributable id counted in Skipped. Both outcomes reach the same
+// branch (the ownership read came back empty), and neither is an error —
+// pasting a stale id from a report must not fail the whole undo.
+func TestHandleBatchRestoreTransactions_MemberMissingIDIsSkippedNot500(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+
+	m1 := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-01", 10.0, "members row")
+	const missing int64 = 999999
+
+	body := fmt.Sprintf(`{"ids":[%d,%d]}`, m1.ID, missing)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp batchRestoreResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 1 {
+		t.Errorf("Restored=%d, want 1 (the member's own row)", resp.Restored)
+	}
+	if resp.Skipped != 1 {
+		t.Errorf("Skipped=%d, want 1 (the missing id)", resp.Skipped)
+	}
+
+	got, err := q.GetTransactionByID(context.Background(), m1.ID)
+	if err != nil {
+		t.Fatalf("reload members row: %v", err)
+	}
+	if got.DeletedAt.Valid {
+		t.Error("member's own row is still tombstoned — a missing id in the batch aborted the restore")
+	}
+}
+
+// A real database fault while checking ownership is NOT a silent skip.
+// Dropping the table makes qtx.GetTransactionByID return "no such table"
+// (a non-ErrNoRows error) for every id in the batch; the handler must
+// abort with 500 rather than treat "we could not read the row" as "the
+// row is not yours" and quietly restore nothing.
+func TestHandleBatchRestoreTransactions_MemberOwnershipReadFault_Returns500(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+	row := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-01", 10.0, "members row")
+
+	// Confirm the injected fault is the one we mean: a non-ErrNoRows read
+	// error. Without this the test would still pass if the read merely
+	// returned no rows, which is the silent-skip case, not the fault case.
+	if _, err := db.Exec("DROP TABLE transactions"); err != nil {
+		t.Fatalf("drop transactions table: %v", err)
+	}
+	if _, err := q.GetTransactionByID(context.Background(), row.ID); err == nil {
+		t.Fatal("read after DROP TABLE returned no error — fault not injected")
+	} else if errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("read after DROP TABLE returned ErrNoRows, want a real DB fault: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"ids":[%d]}`, row.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHandleBatchRestoreTransactions_SkipsLiveAndMissingIDs(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -1082,13 +1303,24 @@ func TestHandlePurgeAllTransactions_DoesNotWriteAuditRows(t *testing.T) {
 	}
 }
 
-// --- router-level admin gating ---
+// --- router-level gating ---
 //
-// The tests above exercise the handlers directly and bypass RequireAdmin
-// by setting the auth.UserContextKey themselves. These tests round-trip
-// through the router so that auth.RequireAdmin has to sign off on the
-// request — exactly the surface that guards the trash view from ordinary
-// members in production.
+// The tests above exercise the handlers directly and set the
+// auth.UserContextKey themselves, so no middleware runs. These tests
+// round-trip through the router instead, which is the only place the
+// route-level split is visible.
+//
+// Since B5 that split has two halves, and both need covering:
+//
+//   - Member-open, scoped inside the handler: GET /transactions/deleted,
+//     POST /transactions/{id}/restore, POST /transactions/restore-batch.
+//     A member must REACH these (the handler then limits her to her own
+//     rows), so the test asserts the handler's own status code rather
+//     than a 403.
+//   - Admin-only, gated by auth.RequireAdmin at the router: POST
+//     /transactions/restore-all, DELETE /transactions/{id}/purge, DELETE
+//     /transactions/trash. These are the destructive and household-wide
+//     operations, and a member must be stopped before the handler runs.
 
 func TestNewRouter_TrashEndpoints_WithoutAuth_Return401(t *testing.T) {
 	q, db := setupTestDB(t)
@@ -1166,15 +1398,16 @@ func TestNewRouter_TrashEndpoints_AsMember_Return403(t *testing.T) {
 	// shadows the 403 we are trying to exercise. DELETE /…/purge in
 	// particular needs a body and Content-Type even though the handler
 	// itself reads nothing from either.
+	//
+	// Only the destructive / household-wide trash routes stay admin-only;
+	// list, single restore, and batch restore are member-reachable since
+	// B5 (scoped in the handlers).
 	cases := []struct {
 		method string
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/api/transactions/deleted", ""},
-		{http.MethodPost, "/api/transactions/1/restore", `{}`},
 		{http.MethodDelete, "/api/transactions/1/purge", `{}`},
-		{http.MethodPost, "/api/transactions/restore-batch", `{"ids":[1]}`},
 		{http.MethodPost, "/api/transactions/restore-all", `{}`},
 		{http.MethodDelete, "/api/transactions/trash", `{}`},
 	}
@@ -1197,11 +1430,83 @@ func TestNewRouter_TrashEndpoints_AsMember_Return403(t *testing.T) {
 	}
 }
 
+func TestNewRouter_TrashEndpoints_AsMember_OpenRoutesResolve(t *testing.T) {
+	q, db := setupTestDB(t)
+	router := NewRouter(q, db, nil)
+
+	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	router.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("first register: %d body=%s", regRec.Code, regRec.Body.String())
+	}
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
+	}
+	memberBody := strings.NewReader(`{"username":"member","password":"longpassword"}`)
+	memberReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", memberBody)
+	memberReq.Header.Set("Content-Type", "application/json")
+	memberRec := httptest.NewRecorder()
+	router.ServeHTTP(memberRec, memberReq)
+	if memberRec.Code != http.StatusCreated {
+		t.Fatalf("second register: %d body=%s", memberRec.Code, memberRec.Body.String())
+	}
+	var memberCookie *http.Cookie
+	for _, c := range memberRec.Result().Cookies() {
+		if c.Name == "session" {
+			memberCookie = c
+			break
+		}
+	}
+	if memberCookie == nil {
+		t.Fatal("no session cookie for member")
+	}
+
+	// The exact status codes prove the request reached the HANDLER, not a
+	// route-level gate: 200 for the (empty) list and the skip-tolerant
+	// batch, 404 for a restore of a row that does not exist.
+	cases := []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{http.MethodGet, "/api/transactions/deleted", "", http.StatusOK},
+		{http.MethodPost, "/api/transactions/999999/restore", `{}`, http.StatusNotFound},
+		{http.MethodPost, "/api/transactions/restore-batch", `{"ids":[999999]}`, http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			var r *http.Request
+			if c.body == "" {
+				r = httptest.NewRequest(c.method, c.path, nil)
+			} else {
+				r = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+				r.Header.Set("Content-Type", "application/json")
+			}
+			r.AddCookie(memberCookie)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, r)
+			if rec.Code != c.want {
+				t.Errorf("status=%d, want %d; body=%s", rec.Code, c.want, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestNewRouter_TrashEndpoints_AsAdmin_RoutesResolve(t *testing.T) {
-	// Smoke test only: with a valid admin session the trash endpoints
-	// must at least route past auth.RequireAdmin. We don't assert the
-	// body — the per-handler tests above do that — only that the 403
-	// we saw in the member test above is not emitted for an admin.
+	// Smoke test only: with a valid admin session the trash list routes
+	// and answers. It is deliberately thin — the per-handler tests above
+	// cover the response shape, and the admin-only routes are covered by
+	// the member 403 test. What this pins is that the admin's own path
+	// through the (member-open) list route is not broken by whatever
+	// gating the member tests are exercising: the endpoint resolves and
+	// returns an empty trash rather than a 403 or a 404.
 	q, db := setupTestDB(t)
 	router := NewRouter(q, db, nil)
 
@@ -1238,5 +1543,219 @@ func TestNewRouter_TrashEndpoints_AsAdmin_RoutesResolve(t *testing.T) {
 	}
 	if body.Total != 0 {
 		t.Errorf("empty trash Total=%d, want 0", body.Total)
+	}
+}
+
+// --- member scoping (B5) ---
+
+func TestHandleListDeletedTransactions_MemberSeesOnlyOwnRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	// The admin's tombstoned row carries the 999 leak-canary amount: if it
+	// shows up in the member's trash, the assertion below names it.
+	adminRow := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 999.0, "admins deleted row")
+	memberRow := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members deleted row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp deletedTransactionListResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Total != 1 {
+		t.Errorf("Total=%d, want 1 (member-scoped count)", resp.Total)
+	}
+	if len(resp.Transactions) != 1 {
+		t.Fatalf("len(Transactions)=%d, want 1", len(resp.Transactions))
+	}
+	if resp.Transactions[0].ID != memberRow.ID {
+		t.Errorf("returned id=%d, want member's row %d", resp.Transactions[0].ID, memberRow.ID)
+	}
+	for _, tr := range resp.Transactions {
+		if tr.ID == adminRow.ID {
+			t.Errorf("admin's tombstoned row %d leaked into the member's trash", adminRow.ID)
+		}
+	}
+}
+
+func TestHandleListDeletedTransactions_AdminStillSeesAllRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 10.0, "admins row")
+	seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 20.0, "members row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, admin)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp deletedTransactionListResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Total != 2 {
+		t.Errorf("Total=%d, want 2 (admin sees the whole household's trash)", resp.Total)
+	}
+}
+
+// The member-scoped and admin-scoped trash lists run two DIFFERENT queries
+// (ListDeletedTransactionsByUser / ListDeletedTransactions) with two
+// separate hand-maintained 15-column Scan blocks in queries.sql.go — sqlc
+// codegen is broken here, so nothing regenerates them together. A field
+// dropped or reordered in one Scan block but not the other would leave the
+// two roles disagreeing about the same row, and every other test in this
+// file asserts one field at a time on one role, so none of them would see
+// it.
+//
+// This test seeds a single row with EVERY optional column populated,
+// fetches it as its owning member and as an admin, and compares the two
+// DTOs whole. The pre-flight assertions matter as much as the comparison:
+// without them two Scan blocks that both dropped tags would compare equal
+// and the test would pass while proving nothing.
+func TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	date, err := time.Parse("2006-01-02", "2026-04-01")
+	if err != nil {
+		t.Fatalf("parse date: %v", err)
+	}
+	row, err := q.CreateTransaction(context.Background(), database.CreateTransactionParams{
+		UserID:              member.ID,
+		Date:                date,
+		AmountCents:         4275,
+		OriginalAmountCents: sql.NullInt64{Int64: 3825000, Valid: true},
+		OriginalCurrency:    sql.NullString{String: "LBP", Valid: true},
+		Description:         "row with every optional column set",
+		CategoryID:          1,
+		Tags:                sql.NullString{String: "groceries,weekly", Valid: true},
+		Notes:               sql.NullString{String: "a note that must survive both Scan blocks", Valid: true},
+	})
+	if err != nil {
+		t.Fatalf("create transaction: %v", err)
+	}
+	if err := q.SoftDeleteTransaction(context.Background(), row.ID); err != nil {
+		t.Fatalf("soft-delete row: %v", err)
+	}
+
+	fetch := func(u database.User) deletedTransactionResponse {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+		req = withUser(req, u)
+		rec := httptest.NewRecorder()
+		h.handleListDeletedTransactions(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list as %q: status=%d body=%s", u.Role, rec.Code, rec.Body.String())
+		}
+		var resp deletedTransactionListResponse
+		decodeResponse(t, rec, &resp)
+		if len(resp.Transactions) != 1 {
+			t.Fatalf("list as %q: len(Transactions)=%d, want 1", u.Role, len(resp.Transactions))
+		}
+		return resp.Transactions[0]
+	}
+
+	memberView := fetch(member)
+	adminView := fetch(admin)
+
+	// Every field the row carries must be populated on at least one side,
+	// or the equality check below is comparing two sets of zero values.
+	if memberView.ID != row.ID {
+		t.Errorf("ID=%d, want %d", memberView.ID, row.ID)
+	}
+	if memberView.UserID != member.ID {
+		t.Errorf("UserID=%d, want %d", memberView.UserID, member.ID)
+	}
+	if memberView.Date != "2026-04-01" {
+		t.Errorf("Date=%q, want 2026-04-01", memberView.Date)
+	}
+	if memberView.Amount != 42.75 {
+		t.Errorf("Amount=%v, want 42.75", memberView.Amount)
+	}
+	if memberView.OriginalAmount == nil || *memberView.OriginalAmount != 38250.0 {
+		t.Errorf("OriginalAmount=%v, want 38250", memberView.OriginalAmount)
+	}
+	if memberView.OriginalCurrency != "LBP" {
+		t.Errorf("OriginalCurrency=%q, want LBP", memberView.OriginalCurrency)
+	}
+	if memberView.Description != "row with every optional column set" {
+		t.Errorf("Description=%q, want the seeded description", memberView.Description)
+	}
+	if memberView.CategoryID != 1 {
+		t.Errorf("CategoryID=%d, want 1", memberView.CategoryID)
+	}
+	if memberView.Tags != "groceries,weekly" {
+		t.Errorf("Tags=%q, want groceries,weekly", memberView.Tags)
+	}
+	if memberView.Notes == "" {
+		t.Error("Notes is empty, want the seeded note")
+	}
+	if memberView.CreatedAt == "" || memberView.UpdatedAt == "" || memberView.DeletedAt == "" {
+		t.Errorf("timestamps created=%q updated=%q deleted=%q, want all three populated",
+			memberView.CreatedAt, memberView.UpdatedAt, memberView.DeletedAt)
+	}
+	if memberView.CategoryName == "" || memberView.CategoryType == "" {
+		t.Errorf("category join name=%q type=%q, want both populated",
+			memberView.CategoryName, memberView.CategoryType)
+	}
+
+	// Same row, two queries, two Scan blocks — one DTO.
+	if !reflect.DeepEqual(memberView, adminView) {
+		t.Errorf("member and admin views of the same row disagree:\n member=%+v\n admin =%+v",
+			memberView, adminView)
+	}
+}
+
+// Money wire-edge discipline: decode into maps so a renamed/missing dollar
+// field cannot hide behind a typed struct's zero-fill, and assert no
+// *_cents column leaks.
+func TestHandleListDeletedTransactions_MemberList_DollarFieldNoCentsLeak(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	member := seedTestUser(t, q, "member", "member")
+	seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members deleted row")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	rows, ok := resp["transactions"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("transactions=%v, want 1-element array", resp["transactions"])
+	}
+	row, ok := rows[0].(map[string]any)
+	if !ok {
+		t.Fatalf("row is %T, want map", rows[0])
+	}
+	amount, ok := row["amount"].(float64)
+	if !ok {
+		t.Fatalf("amount missing or not a number: %v", row["amount"])
+	}
+	if amount != 42.0 {
+		t.Errorf("amount=%v, want 42 (dollars, not cents)", amount)
+	}
+	for k := range row {
+		if strings.Contains(k, "_cents") {
+			t.Errorf("raw cents column %q leaked onto the wire", k)
+		}
 	}
 }

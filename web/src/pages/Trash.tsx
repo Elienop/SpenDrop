@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Navigate } from 'react-router-dom';
 import { format } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { toast } from 'sonner';
@@ -60,7 +59,9 @@ import {
 } from '@/lib/constants';
 
 /*
- * Trash view — admin-only recovery surface for soft-deleted transactions.
+ * Trash view — recovery surface for soft-deleted transactions. Members
+ * see and restore their own rows; admins see the household and can
+ * purge.
  *
  * Paired endpoints on the backend:
  *   GET    /api/transactions/deleted           paginated list
@@ -69,6 +70,12 @@ import {
  *   POST   /api/transactions/restore-batch     bulk restore (<=500 ids)
  *   POST   /api/transactions/restore-all       restore every tombstoned row
  *   DELETE /api/transactions/trash             hard-delete every tombstoned row
+ *
+ * List, single restore, and batch restore are member-reachable and
+ * server-scoped to the caller's own rows (see backend Tasks 2–4).
+ * Purge, restore-all, and purge-all are admin routes — the frontend
+ * hides those controls for members below, but the 403 the backend
+ * would return is the real boundary; the UI gating is purely cosmetic.
  *
  * Design notes:
  *   - No filters, no sorting. The backend pins ordering to
@@ -472,9 +479,9 @@ export function Trash() {
   }, [page, perPage]);
 
   useEffect(() => {
-    if (!admin) return;
+    if (!user) return;
     void fetchTrash();
-  }, [admin, fetchTrash]);
+  }, [user, fetchTrash]);
 
   const totalPages = useMemo(
     () => Math.max(1, Math.ceil(total / perPage)),
@@ -544,13 +551,32 @@ export function Trash() {
     const ids = [...selectedIds];
     setBatchRestoring(true);
     try {
-      const resp = await api.post<{ restored: number }>(
-        'transactions/restore-batch',
-        { ids },
-      );
-      toast.success(
-        `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
-      );
+      const resp = await api.post<{
+        restored: number;
+        conflicted: number;
+        skipped: number;
+      }>('transactions/restore-batch', { ids });
+      // skipped > 0 only happens to a member: a selected row was purged
+      // or restored (by someone else, or on another tab) between page
+      // load and this click, so the ownership check no longer finds it
+      // as hers to restore. Compose with conflicted rather than
+      // overwrite it — both can be nonzero in the same batch.
+      const notes: string[] = [];
+      if (resp.conflicted > 0) {
+        notes.push(
+          `${resp.conflicted} could not be restored (a newer copy already exists)`,
+        );
+      }
+      if (resp.skipped > 0) {
+        notes.push(`${resp.skipped} skipped (no longer in your trash)`);
+      }
+      if (notes.length > 0) {
+        toast.success(`Restored ${resp.restored} — ${notes.join(', ')}`);
+      } else {
+        toast.success(
+          `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
+        );
+      }
       setSelectedIds(new Set());
       await fetchTrash();
     } catch (err) {
@@ -568,12 +594,18 @@ export function Trash() {
   const handleRestoreAll = useCallback(async () => {
     setRestoringAll(true);
     try {
-      const resp = await api.post<{ restored: number }>(
+      const resp = await api.post<{ restored: number; conflicted: number }>(
         'transactions/restore-all',
       );
-      toast.success(
-        `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
-      );
+      if (resp.conflicted > 0) {
+        toast.success(
+          `Restored ${resp.restored} — ${resp.conflicted} could not be restored (a newer copy already exists)`,
+        );
+      } else {
+        toast.success(
+          `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,
+        );
+      }
       // Drop any row-level selection state; the rows it pointed at are
       // about to disappear from the list anyway.
       setSelectedIds(new Set());
@@ -648,13 +680,15 @@ export function Trash() {
     [rows, isRowBusy],
   );
 
-  // --- Admin gating ---
+  // --- Auth resolution ---
   //
-  // Wait for the auth probe to resolve before deciding — otherwise a
-  // hard reload on /trash would flash "unauthorized" and redirect home
-  // for a real admin whose `user` hasn't landed yet. Once we know the
-  // user is a non-admin, bounce them to the dashboard. The backend
-  // endpoints are still 403-gated, so this is purely a UX guard.
+  // Wait for the auth probe to resolve before rendering — otherwise a
+  // hard reload on /trash would flash the page with `user` still null
+  // before the fetch effect's `!user` gate has had a chance to run.
+  // There's no admin/member branch here: the page is member-reachable
+  // (backend scopes list/restore per-role), and admin-only controls
+  // (Purge, Restore all, Purge all) are conditionally rendered further
+  // down instead of gating the whole page.
   if (authLoading) {
     return (
       <div
@@ -665,9 +699,6 @@ export function Trash() {
         <div className="size-8 animate-spin rounded-full border-[3px] border-border border-t-primary" />
       </div>
     );
-  }
-  if (!admin) {
-    return <Navigate to="/" replace />;
   }
 
   const selectionCount = selectedIds.size;
@@ -681,16 +712,17 @@ export function Trash() {
 
   const bulkBusy = restoringAll || purgingAll;
 
-  // Whole-trash bulk actions rendered into the table toolbar (next to
-  // "Rows per page") rather than above the card. Only surfaced when
-  // there's actually something in the trash — on an empty trash these
-  // buttons would be no-ops that just add visual noise. The buttons
-  // mirror the row-level action ordering (restore first, purge second)
-  // and the outline/destructive variants so the visual weight matches
-  // the consequence. Passed only to the TOP `PaginationBar` so the
-  // bottom bar stays a pure pagination strip.
+  // Whole-trash bulk actions (admin only — restore-all and purge are
+  // admin routes) rendered into the table toolbar (next to "Rows per
+  // page") rather than above the card. Only surfaced when there's
+  // actually something in the trash — on an empty trash these buttons
+  // would be no-ops that just add visual noise. The buttons mirror the
+  // row-level action ordering (restore first, purge second) and the
+  // outline/destructive variants so the visual weight matches the
+  // consequence. Passed only to the TOP `PaginationBar` so the bottom
+  // bar stays a pure pagination strip.
   const bulkActions =
-    total > 0 ? (
+    admin && total > 0 ? (
       <div className="ml-2 flex flex-wrap items-center gap-2 border-l pl-3">
         <Button
           type="button"
@@ -724,8 +756,10 @@ export function Trash() {
         <p className="max-w-3xl text-sm text-muted-foreground">
           Recently deleted transactions are kept here so a bulk-delete
           mistake can be recovered. Restored rows reappear in the live
-          transactions list immediately. Purging is permanent — there is
-          no recovery path after that.
+          transactions list immediately.
+          {admin
+            ? ' Purging is permanent — there is no recovery path after that.'
+            : ' You see the transactions you deleted yourself; an admin can restore or permanently remove anything in the household trash.'}
         </p>
       </div>
 
@@ -898,18 +932,20 @@ export function Trash() {
                           <RotateCcw className="size-3.5" />
                           {isRestoring ? 'Restoring...' : 'Restore'}
                         </Button>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
-                          onClick={() => setPendingPurge(row)}
-                          disabled={rowBusy}
-                          aria-label={`Purge ${row.description}`}
-                        >
-                          <Trash2 className="size-3.5" />
-                          Purge
-                        </Button>
+                        {admin && (
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="sm"
+                            className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
+                            onClick={() => setPendingPurge(row)}
+                            disabled={rowBusy}
+                            aria-label={`Purge ${row.description}`}
+                          >
+                            <Trash2 className="size-3.5" />
+                            Purge
+                          </Button>
+                        )}
                       </div>
                     </TableCell>
                   </TableRow>

@@ -22,8 +22,8 @@ top items. Production figures in this file come from the owner's live database o
 ## Next up
 
 *Numbers are discovery order, not priority. B11, B2 and B1 all shipped 2026-08-02 on
-`fix/reprice-guard-and-restore` — see Closed. **B5 is next**, sharpened by the owner confirming
-the second household account is a member.*
+`fix/reprice-guard-and-restore` — see Closed. B5 also shipped 2026-08-02, on
+`feat/delete-undo-member-trash` — see Closed.*
 
 ## Then
 
@@ -46,24 +46,14 @@ across all years and both members. No confirmation, no undo; the toast reports t
 afterwards. Descriptions feed import duplicate-detection, so it propagates.
 **Effort:** medium — send the filters, or make the count honest and add a confirmation.
 
-### B5 — Delete has no confirmation, and members have no Trash
-**Verified: reported.** `web/src/components/TransactionRow.tsx:379-383` deletes immediately, one
-item below Edit, with no prompt and no "moved to trash" feedback. The phone surface *does*
-confirm; desktop does not. Trash routes are admin-only (`internal/api/router.go:217-225`), so a
-member's misclick is unrecoverable without an admin.
-**Effort:** small. **Confirmed by the owner 2026-08-02: the second household account is a
-member.** So the worst case is live, not hypothetical — she can delete a row with one
-mis-tap on desktop, gets no confirmation and no "moved to trash" message, and cannot reach
-Trash to undo it. The row is recoverable, but only by asking the admin. This raises B5 above
-the rest of the small work.
-
 ### B6 — Cheap batch
-All **reported**, none independently verified. Grouped because they are individually trivial:
+All **reported**, none independently verified, except B6k and B6l which are **read** (the code was
+read and the mechanism confirmed, but not executed). Grouped because they are individually trivial:
 
 | | Item | Why it matters |
 |---|---|---|
 | B6a | Clearing a monthly budget silently does nothing — says "No changes to save" and keeps driving alerts. The Category Limits editor directly below does the opposite. | Two editors on one page with contradictory rules; the top one lies |
-| B6b | Bulk-delete says "This cannot be undone" — false; rows go to Trash and nothing purges them | Discourages a legitimate workflow, hides the real recovery path |
+| B6b | ~~Bulk-delete says "This cannot be undone" — false; rows go to Trash and nothing purges them~~ **Closed with B5** (`cae004c`, 2026-08-02) — dialog and toast copy now say rows move to Trash and are restorable | Discourages a legitimate workflow, hides the real recovery path |
 | B6c | Transactions table blinks to a skeleton on every keystroke and re-fetches | Most-used screen for finding an old transaction |
 | B6d | A row-level error banner appears once and never clears, with no dismiss | Later *successful* edits happen under a banner saying they failed |
 | B6e | README recommends deleting the "Over budget" Homepage field as unimplemented — it shipped and works | Following the docs removes a working alert |
@@ -72,6 +62,8 @@ All **reported**, none independently verified. Grouped because they are individu
 | B6h | Bulk edit clears the duplicate-detection fingerprint even when no value changed | Re-importing the same sheet later can silently double rows |
 | B6i | Search matches description only — not category, notes, or the foreign amount | Empty result is indistinguishable from "doesn't exist" |
 | B6j | Nothing shows who entered a transaction, though the app knows | A member learns a row is her spouse's only after Save returns "forbidden" |
+| B6k | **Verified: read.** `web/src/components/RecentlyAdded.tsx` bails with `if (rows.length === 0) return null;`, so deleting the *last* visible row unmounts the whole panel — including the `headingRef` that `restoreFocus()` is supposed to return focus to. Pre-existing, but higher-stakes now that Undo lives on this panel: focus is lost at the exact moment the user might want to hit Undo. | A keyboard or screen-reader user loses the Undo they just earned |
+| B6l | **Verified: read.** `handleBatchRestoreTransactions` and `handleRestoreAllTransactions` both pass a zero `time.Time` to `verifyAffectedCheckpoints`, so every bulk restore walks *every* checkpoint. The old comments blamed a missing per-row date; that was false and is now corrected in place — both loops already call `qtx.GetTransactionByID` per id to build the cell set, so an accumulated `minDate` is available. What the bound still needs is a fallback for the admin path, where a row can restore even when that read failed (the ownership check is `!isAdminUser`-gated). Comments fixed on `feat/delete-undo-member-trash`; the bound itself not done. | Unbounded checkpoint walk on every bulk restore; grows with checkpoint count, not batch size |
 
 ### B7 — No external signal when something breaks
 **Verified: reported.** The Docker health check only proves the web server is listening and never
@@ -213,6 +205,30 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B5 — Delete has no confirmation, and members have no Trash** (`ea5f51b..d84f5cd`,
+  2026-08-02, unreleased, on `feat/delete-undo-member-trash`, PR pending). Desktop row delete now
+  shows a "Moved to Trash" toast with **Undo** (10s), and a failed delete shows an error toast
+  instead of failing silently. The phone capture panel's saved-row delete toast gained the same
+  Undo. Trash opened to members: a sidebar entry and badge scoped to their own rows, and a Trash
+  page listing only their own tombstoned rows with per-row Restore and batch "Restore N".
+  Per-row Purge, "Purge all", and "Restore all" stay admin-only, enforced at both the router
+  (`restore-all` / `{id}/purge` / `trash` — there is no `purge-all` segment; emptying the trash is
+  `DELETE /transactions/trash`) and the handlers (list/count scoping, owner-or-admin
+  restore, batch ownership skip). Bulk-delete dialog and toast copy fixed in the same branch
+  (closes B6b) — rows move to Trash and are restorable, not "cannot be undone." TDD'd throughout,
+  6 mutants killed in mutation testing, browser-verified end to end for both an admin and a member
+  session.
+  **Two corrections to the original finding, worth keeping.** The backlog's claim that "the phone
+  surface does confirm" was wrong — the phone never confirmed a delete, it only toasted; the real
+  gap was desktop's missing feedback and recovery path, not a phone/desktop asymmetry. Separately,
+  desktop delete was also silently swallowing FAILED deletes (an unhandled promise rejection, no
+  error surfaced to the user) — found while fixing the confirmation gap, and fixed alongside it.
+  A review-battery fix wave (`43ee1a6..d84f5cd`) closed three gaps the first pass left open: a
+  restore of a tombstoned row that isn't the caller's now 404s for members instead of leaking
+  whether the id exists (closes the id-oracle hole); batch restore surfaces a real DB fault as a
+  500 instead of masking it as "none of those were yours"; and the batch-restore response gained
+  a `skipped` count so a member can tell a refused id from a restored one.
 
 - **B1 step 1 — an edit re-priced a foreign row at today's rate** (`8dc95b4`, 2026-08-02,
   unreleased). Restating the same foreign money now carries the stored base value forward.

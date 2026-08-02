@@ -8,11 +8,13 @@ import type { Category, Transaction } from '@/api/types';
 
 const apiGet = vi.fn();
 const apiDel = vi.fn();
+const apiPost = vi.fn();
 vi.mock('@/api/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/api/client')>()),
   api: {
     get: (...args: unknown[]) => apiGet(...args),
     del: (...args: unknown[]) => apiDel(...args),
+    post: (...args: unknown[]) => apiPost(...args),
   },
 }));
 
@@ -235,10 +237,65 @@ describe('RecentlyAdded', () => {
     await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
 
     await waitFor(() => expect(apiDel).toHaveBeenCalledWith('transactions/5'));
-    expect(toastSuccess).toHaveBeenCalledWith('Moved to Trash');
+    expect(toastSuccess).toHaveBeenCalledWith(
+      'Moved to Trash',
+      expect.objectContaining({
+        action: expect.objectContaining({ label: 'Undo' }),
+      }),
+    );
     // The row is refetched away — no leftover saved row in the panel.
     await waitFor(() =>
       expect(screen.queryByText('sdsaved')).not.toBeInTheDocument(),
+    );
+  });
+
+  test('Undo on a saved-row delete calls the restore endpoint and refetches', async () => {
+    apiDel.mockResolvedValueOnce(undefined);
+    apiPost.mockResolvedValueOnce({ status: 'restored' });
+    // Load → row present; post-delete refetch → empty; post-undo refetch →
+    // row back. Explicit three-deep queue: this file's Once-queues are per
+    // test, and a leftover would fake a later test's failure.
+    apiGet
+      .mockResolvedValueOnce({
+        transactions: [savedTxn()],
+        total: 1,
+        page: 1,
+        per_page: 5,
+      })
+      .mockResolvedValueOnce({
+        transactions: [],
+        total: 0,
+        page: 1,
+        per_page: 5,
+      })
+      .mockResolvedValueOnce({
+        transactions: [savedTxn()],
+        total: 1,
+        page: 1,
+        per_page: 5,
+      });
+
+    const user = userEvent.setup();
+    renderPanel([]);
+    await screen.findByText('sdsaved');
+
+    await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+    await waitFor(() => expect(toastSuccess).toHaveBeenCalled());
+
+    const options = toastSuccess.mock.calls[0][1] as {
+      action: { label: string; onClick: () => void };
+    };
+    options.action.onClick();
+
+    await waitFor(() =>
+      expect(apiPost).toHaveBeenCalledWith('transactions/5/restore', {}),
+    );
+    // The undo refetch brings the row back.
+    await waitFor(() => expect(screen.getByText('sdsaved')).toBeInTheDocument());
+    // And the success toast (previously silent) fires once the restore
+    // resolves — matches Trash.tsx's own restore feedback.
+    await waitFor(() =>
+      expect(toastSuccess).toHaveBeenCalledWith('Restored'),
     );
   });
 
@@ -326,7 +383,9 @@ describe('RecentlyAdded', () => {
 
     await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
 
-    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    // The rejection's own message is surfaced (same ternary as the undo
+    // catch two lines above it in the component), not a generic fallback.
+    await waitFor(() => expect(toastError).toHaveBeenCalledWith('500'));
   });
 
   test('bumping refreshKey re-pulls the saved list', async () => {

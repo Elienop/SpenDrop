@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import {
@@ -16,6 +17,7 @@ import {
 import { Input } from '@/components/ui/input';
 import { api } from '../api/client';
 import type { Category, SavedFilter } from '../api/types';
+import { UNDO_TOAST_MS } from '../lib/undo';
 import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { SortColumn } from '../hooks/useTransactions';
@@ -386,6 +388,59 @@ export function Transactions() {
   );
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
+  // Focus anchor for after a row delete: the deleted <TransactionRow> (and
+  // whatever Radix trigger inside it had auto-refocus) unmounts, which would
+  // otherwise drop keyboard/SR focus onto <body> with no context. Mirrors
+  // RecentlyAdded's headingRef/restoreFocus pattern.
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
+  const queryClient = useQueryClient();
+
+  // Single-row delete with an undo window. The delete is the same
+  // soft-delete as before; the toast makes the Trash detour visible and
+  // Undo calls the restore endpoint members can reach since B5. The catch
+  // also gives a FAILED delete feedback — previously the rejection from
+  // the row's fire-and-forget onDelete was unhandled and the row just
+  // stayed put with no explanation.
+  const handleRowDelete = useCallback(
+    async (id: number) => {
+      try {
+        await deleteTransaction(id);
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : 'Delete failed');
+        return;
+      }
+      pageHeadingRef.current?.focus();
+      toast.success('Moved to Trash', {
+        duration: UNDO_TOAST_MS,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            void api
+              .post(`transactions/${id}/restore`, {})
+              .then(() => {
+                // Explicit invalidations (rather than waiting on the SSE
+                // round-trip) so the ACTING tab — the one where Undo was
+                // clicked — gets an immediate badge/list refresh. Other
+                // open tabs/devices are covered by the SSE invalidate the
+                // backend already publishes on restore
+                // (h.publishInvalidate("trash", "transactions", ...)).
+                void queryClient.invalidateQueries({
+                  queryKey: ['transactions'],
+                });
+                void queryClient.invalidateQueries({ queryKey: ['trash'] });
+                toast.success('Restored');
+              })
+              .catch((err: unknown) => {
+                toast.error(
+                  err instanceof Error ? err.message : 'Could not restore',
+                );
+              });
+          },
+        },
+      });
+    },
+    [deleteTransaction, queryClient],
+  );
 
   const handlePageChange = useCallback(
     (newPage: number) => {
@@ -490,8 +545,14 @@ export function Transactions() {
         deleted = res.deleted;
         refetch();
       }
+      // No per-toast Undo here (unlike the single-row delete above):
+      // delete-by-filter doesn't return the ids it deleted, and a bulk
+      // operation can span thousands of rows, so a single-toast Undo
+      // wouldn't be meaningful anyway. Bulk recovery deliberately relies
+      // on the Trash page instead — spec decision, recorded so it isn't
+      // re-raised.
       toast.success(
-        `Deleted ${deleted} transaction${deleted !== 1 ? 's' : ''}`,
+        `Moved ${deleted} transaction${deleted !== 1 ? 's' : ''} to Trash`,
       );
       setSelectedIds(new Set());
       setSelectionScope('page');
@@ -694,7 +755,13 @@ export function Transactions() {
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Transactions</h1>
+        <h1
+          ref={pageHeadingRef}
+          tabIndex={-1}
+          className="text-2xl font-semibold tracking-tight outline-none"
+        >
+          Transactions
+        </h1>
         <Button variant="outline" size="sm" onClick={handleExport}>
           Export Excel
         </Button>
@@ -822,6 +889,16 @@ export function Transactions() {
         across open/close.
       */}
       <div className={showEntry ? undefined : 'hidden'}>
+        {/*
+          Raw deleteTransaction, NOT handleRowDelete: the entry row has its
+          own save-undo (⌘Z) whose catch requires onDelete to REJECT on
+          failure so it can restore the undo buffer and show "Could not
+          undo" (see undoLastSave in TransactionEntryRow). handleRowDelete
+          swallows the error into a toast instead of rejecting, and would
+          also stack a second toast on top of the entry row's own
+          save-toast. The table row below keeps handleRowDelete — it has
+          no save-undo of its own to protect.
+        */}
         <TransactionEntryRow
           categories={categories}
           onSubmit={async (v) => {
@@ -985,7 +1062,7 @@ export function Transactions() {
                       setSuggestionsKey((k) => k + 1);
                     }
                   }}
-                  onDelete={deleteTransaction}
+                  onDelete={handleRowDelete}
                   onError={setRowError}
                   descriptionSuggestions={suggestions.descriptions}
                   tagSuggestions={suggestions.tags}
@@ -1019,13 +1096,13 @@ export function Transactions() {
           <DialogHeader>
             <DialogTitle>Delete all matching transactions?</DialogTitle>
             <DialogDescription>
-              This will permanently delete{' '}
+              This will move{' '}
               <span className="font-semibold text-foreground">
                 {total.toLocaleString()}
               </span>{' '}
               transaction{total !== 1 ? 's' : ''} matching your current
-              filters, including rows you have not yet viewed. This cannot be
-              undone.
+              filters to Trash, including rows you have not yet viewed. They
+              can be restored from Trash later.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

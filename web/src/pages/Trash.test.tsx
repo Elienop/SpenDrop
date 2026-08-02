@@ -41,10 +41,12 @@ vi.mock('sonner', () => ({
 
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Trash } from './Trash';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -428,6 +430,52 @@ describe('Trash', () => {
       });
     });
 
+    test('batch restore with conflicted ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select april salary/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /restore 2/i }));
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 could not be restored (a newer copy already exists)',
+        );
+      });
+    });
+
+    test('batch restore with skipped ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 0, skipped: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select april salary/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /restore 2/i }));
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 skipped (no longer in your trash)',
+        );
+      });
+    });
+
     test('clicking the select-all checkbox selects every row on the page', async () => {
       const user = userEvent.setup();
       renderTrash();
@@ -525,6 +573,25 @@ describe('Trash', () => {
       });
     });
 
+    test('"Restore all" with conflicted ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /restore all 2/i }),
+      );
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 could not be restored (a newer copy already exists)',
+        );
+      });
+    });
+
     test('clicking "Purge all" opens a confirm dialog without calling delete', async () => {
       const user = userEvent.setup();
       renderTrash();
@@ -595,22 +662,34 @@ describe('Trash', () => {
   });
 
   // -------------------------------------------------------------------------
-  // As member — the admin-gating invariant
+  // As member (B5) — the page is member-reachable; only the admin-only
+  // controls (Purge, Restore all, Purge all) are hidden. The backend
+  // scopes list/restore to the member's own rows, so no control here
+  // should ever be able to 403.
   // -------------------------------------------------------------------------
   describe('as member', () => {
     beforeEach(asMember);
 
-    test('non-admin is redirected and never sees the Trash UI', () => {
+    test('renders the trash list for a member instead of redirecting', async () => {
       renderTrash();
-
-      // Trash renders <Navigate to="/" replace /> for non-admins, so the
-      // recovery heading must never appear in the DOM for a member.
       expect(
-        screen.queryByRole('heading', { level: 1, name: /trash/i }),
+        await screen.findByRole('heading', { level: 1, name: /trash/i }),
+      ).toBeInTheDocument();
+      expect(mockedApi.get).toHaveBeenCalled();
+    });
+
+    test('member sees Restore but no Purge, Purge all, or Restore all', async () => {
+      renderTrash();
+      await screen.findByRole('heading', { level: 1, name: /trash/i });
+      expect(
+        await screen.findAllByRole('button', { name: /^Restore / }),
+      ).not.toHaveLength(0);
+      expect(
+        screen.queryByRole('button', { name: /Purge/i }),
       ).not.toBeInTheDocument();
-      // And no trash fetch should fire — the effect short-circuits on
-      // !admin before it ever hits the API.
-      expect(mockedApi.get).not.toHaveBeenCalled();
+      expect(
+        screen.queryByRole('button', { name: /Restore all/i }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -627,11 +706,13 @@ describe('Trash', () => {
       expect(
         screen.getByRole('status', { name: /loading/i }),
       ).toBeInTheDocument();
-      // Heading must not appear yet — we haven't confirmed admin
+      // Heading must not appear yet — the page is member-reachable (no
+      // admin gate since B5), but it still waits on the auth probe so a
+      // hard reload doesn't flash the page before `user` resolves.
       expect(
         screen.queryByRole('heading', { level: 1, name: /trash/i }),
       ).not.toBeInTheDocument();
-      // And we must not fetch the trash list until admin is confirmed
+      // And we must not fetch the trash list until the `!user` gate clears
       expect(mockedApi.get).not.toHaveBeenCalled();
     });
   });
