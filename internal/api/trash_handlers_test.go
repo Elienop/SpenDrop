@@ -811,6 +811,51 @@ func TestHandleBatchRestoreTransactions_RestoresAllAndCounts(t *testing.T) {
 	assertAllActorsEqual(t, rows, admin.ID)
 }
 
+func TestHandleBatchRestoreTransactions_MemberRestoresOnlyOwnRows(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "admin", "admin")
+	member := seedTestUser(t, q, "member", "member")
+
+	m1 := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-01", 10.0, "members row 1")
+	a1 := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 999.0, "admins row")
+	m2 := seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-03", 30.0, "members row 2")
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d]}`, m1.ID, a1.ID, m2.ID)
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/restore-batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withUser(req, member)
+	rec := httptest.NewRecorder()
+	h.handleBatchRestoreTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp batchRestoreResponse
+	decodeResponse(t, rec, &resp)
+	if resp.Restored != 2 {
+		t.Errorf("Restored=%d, want 2 (only the member's own rows)", resp.Restored)
+	}
+
+	for _, tc := range []struct {
+		id       int64
+		wantLive bool
+		label    string
+	}{
+		{m1.ID, true, "member row 1"},
+		{m2.ID, true, "member row 2"},
+		{a1.ID, false, "admin row"},
+	} {
+		got, err := q.GetTransactionByID(context.Background(), tc.id)
+		if err != nil {
+			t.Fatalf("reload %s: %v", tc.label, err)
+		}
+		if live := !got.DeletedAt.Valid; live != tc.wantLive {
+			t.Errorf("%s: live=%v, want %v", tc.label, live, tc.wantLive)
+		}
+	}
+}
+
 func TestHandleBatchRestoreTransactions_SkipsLiveAndMissingIDs(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

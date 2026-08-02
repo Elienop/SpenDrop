@@ -408,10 +408,21 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	qtx := h.queries.WithTx(tx)
 	cellSet := map[budgetCell]struct{}{}
 
+	isAdminUser := user.Role == RoleAdmin
 	restored := 0
 	conflicted := 0
 	for _, id := range req.IDs {
 		existing, loadErr := qtx.GetTransactionByID(r.Context(), id)
+
+		// Members restore only rows whose ownership this in-tx read
+		// positively confirmed; any other outcome — read error, missing
+		// row, someone else's row — is skipped without counting, the
+		// same silent-skip contract batch-delete uses. Defaults closed:
+		// never restore a row we could not attribute.
+		if !isAdminUser && (loadErr != nil || existing.UserID != user.ID) {
+			continue
+		}
+
 		err := h.txnStore.RestoreTx(r.Context(), tx, user.ID, id)
 		if err == nil {
 			restored++
