@@ -1152,4 +1152,24 @@ describe('Transactions page', () => {
       expect(toastSuccess).not.toHaveBeenCalled();
     });
   });
+
+  describe('bulk delete copy (B6b)', () => {
+    it('all-matching confirm dialog says rows move to Trash, not "cannot be undone"', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ total: 2, transactions: [defaultTransaction] }),
+      );
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: 'Select Groceries' }));
+      await user.click(screen.getByRole('button', { name: /Select all 2 matching/ }));
+      await user.click(screen.getByRole('button', { name: /^Delete/ }));
+
+      expect(
+        await screen.findByText(/to Trash, including rows you have not yet viewed/),
+      ).toBeInTheDocument();
+      expect(screen.queryByText(/cannot be undone/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/permanently/i)).not.toBeInTheDocument();
+    });
+  });
 });

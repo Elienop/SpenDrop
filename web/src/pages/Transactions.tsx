@@ -533,7 +533,7 @@ export function Transactions() {
         refetch();
       }
       toast.success(
-        `Deleted ${deleted} transaction${deleted !== 1 ? 's' : ''}`,
+        `Moved ${deleted} transaction${deleted !== 1 ? 's' : ''} to Trash`,
       );
       setSelectedIds(new Set());
       setSelectionScope('page');
@@ -1061,13 +1061,13 @@ export function Transactions() {
           <DialogHeader>
             <DialogTitle>Delete all matching transactions?</DialogTitle>
             <DialogDescription>
-              This will permanently delete{' '}
+              This will move{' '}
               <span className="font-semibold text-foreground">
                 {total.toLocaleString()}
               </span>{' '}
               transaction{total !== 1 ? 's' : ''} matching your current
-              filters, including rows you have not yet viewed. This cannot be
-              undone.
+              filters to Trash, including rows you have not yet viewed. They
+              can be restored from Trash later.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
