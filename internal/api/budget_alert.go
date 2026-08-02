@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -413,10 +414,22 @@ func notifTypeEnabled(s database.NotificationSettings, notifType string) bool {
 // (real user ids are positive); over_budget passes 0 because a state alert must
 // reach everyone including the actor. Skipped subscriptions are not counted as
 // sent/pruned/failed.
-func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64, opts pushOpts) {
+//
+// SYNCHRONOUS PREFIX / ASYNCHRONOUS DELIVERY: everything down to and including
+// the quiet-hours gate runs on the caller's goroutine — those are two cheap
+// local SQLite reads, and keeping them here means a household that has the type
+// switched off costs one settings read and nothing else (no goroutine, no
+// scheduling). The moment a send is actually owed, delivery is handed to
+// deliverInBackground and this function returns. NOTHING that talks to a push
+// gateway runs on the request goroutine: a user's save must never wait on a
+// third-party network call. See deliverInBackground for the context lifetime.
+//
+// The returned fanOutResult tells a caller that keeps a cursor whether a send it
+// owed was actually accepted; callers with nothing to reconcile ignore it.
+func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []byte, excludeUserID int64, opts pushOpts) fanOutResult {
 	d := h.dispatcher()
 	if d == nil {
-		return // push disabled — no-op
+		return fanOutGated // push disabled — no-op
 	}
 	// Household gate: skip the entire fan-out when this type is switched off.
 	// The settings row is seeded at id=1 by migration 015, so a read error here
@@ -424,10 +437,10 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	settings, err := h.queries.GetNotificationSettings(ctx)
 	if err != nil {
 		log.Printf("push fan-out: read notification settings: %v", err)
-		return
+		return fanOutGated
 	}
 	if !notifTypeEnabled(settings, notifType) {
-		return // type disabled household-wide — no-op
+		return fanOutGated // type disabled household-wide — no-op
 	}
 	// Quiet-hours gate (household-wide). Inside the window, real-time ACTIVITY
 	// pushes are suppressed; over_budget bypasses unless the household disabled
@@ -437,12 +450,148 @@ func (h *Handler) fanOutPush(ctx context.Context, notifType string, payload []by
 	// GetNotificationSettings call).
 	if inQuietHours(h.clock.Now(), settings.QuietStart, settings.QuietEnd, settings.QuietTz) {
 		if tag, _, _ := pushOptionsFor(notifType); tag == "activity" {
-			return // activity suppressed during quiet hours
+			return fanOutGated // activity suppressed during quiet hours
 		}
 		if notifType == "over_budget" && !settings.QuietAllowOverBudget {
-			return // over_budget suppressed by the bypass toggle
+			return fanOutGated // over_budget suppressed by the bypass toggle
 		}
 	}
+	return h.deliverInBackground(ctx, d, notifType, payload, excludeUserID, opts)
+}
+
+// fanOutResult reports what fanOutPush did with one emit. Most callers ignore
+// it: an over-budget cross latches in the database before the fan-out, and an
+// activity notification has nothing to reconcile. The digest is the caller that
+// must tell these apart, because it advances a once-a-day cursor and must not
+// move it past a rollup that was owed and then thrown away.
+type fanOutResult int
+
+const (
+	// fanOutGated: no send was owed. Push is disabled, the household has this
+	// type switched off, quiet hours suppressed it, or the settings read failed
+	// and we failed closed. A caller with a cursor should treat the pass as
+	// complete — nothing was lost, so retrying would never produce a send.
+	//
+	// Deliberately the zero value: a caller that never reaches fanOutPush at all
+	// (nothing to report this tick) is in exactly this state.
+	fanOutGated fanOutResult = iota
+	// fanOutQueued: delivery was accepted and is running in the background. It
+	// may still fail per device — delivery is best-effort, as it was when it ran
+	// inline — but it reached the transport, which is as far as any caller can
+	// observe.
+	fanOutQueued
+	// fanOutDropped: a send WAS owed and was refused before reaching the
+	// transport (the in-flight cap, or a shutdown drain). Nothing was sent and
+	// nothing will retry it, so a caller with a cursor must leave the cursor
+	// where it is.
+	fanOutDropped
+)
+
+// pushFanOutTimeout bounds ONE background fan-out end to end. It is a
+// goroutine-leak guard, not a delivery SLA: push.defaultHTTPTimeout (30 s)
+// already bounds each individual send, and this caps the serial loop over every
+// household subscription so a wedged gateway cannot pin a goroutine (and the
+// payload it captured) for the life of the process. Five minutes covers nine
+// consecutive full 30 s stalls, an order of magnitude more devices than a
+// household registers.
+const pushFanOutTimeout = 5 * time.Minute
+
+// maxInFlightFanOuts caps how many fan-outs may be delivering at once. Each one
+// is a goroutine holding a payload plus the subscription list, and each can live
+// for pushFanOutTimeout, so without a cap a client hammering a mutation endpoint
+// while the gateway is unreachable would accumulate them without bound. At
+// household scale (a handful of devices, sub-second sends) the cap is never
+// approached; it exists so the failure mode under a pathological burst is a
+// bounded number of dropped notifications with a log line, not unbounded memory.
+const maxInFlightFanOuts = 64
+
+// admitDelivery reserves one of the maxInFlightFanOuts delivery slots, reporting
+// whether the caller got one. Both refusal reasons are logged, and neither ever
+// names an endpoint.
+//
+// The check and the increment happen together under pushMu so two concurrent
+// emitters cannot both see room that only one of them has, and so a fan-out
+// cannot slip in between a drain setting pushDraining and the drain parking on
+// pushIdle.
+func (h *Handler) admitDelivery(notifType string) bool {
+	h.pushMu.Lock()
+	defer h.pushMu.Unlock()
+	if h.pushDraining {
+		log.Printf("push fan-out: type=%s dropped, delivery is draining for shutdown", notifType)
+		return false
+	}
+	if h.pushInFlight >= maxInFlightFanOuts {
+		log.Printf("push fan-out: type=%s dropped, %d deliveries already in flight",
+			notifType, maxInFlightFanOuts)
+		return false
+	}
+	h.pushInFlight++
+	return true
+}
+
+// inFlightDeliveries reports how many fan-outs are admitted and not yet
+// finished. Package-private: the number is a test observation point for the
+// admission cap, not something a caller outside this package should branch on.
+func (h *Handler) inFlightDeliveries() int {
+	h.pushMu.Lock()
+	defer h.pushMu.Unlock()
+	return h.pushInFlight
+}
+
+// finishDelivery releases the slot admitDelivery took and wakes a parked drain
+// once the last worker is done.
+func (h *Handler) finishDelivery() {
+	h.pushMu.Lock()
+	defer h.pushMu.Unlock()
+	h.pushInFlight--
+	if h.pushInFlight == 0 && h.pushIdle != nil {
+		close(h.pushIdle)
+		h.pushIdle = nil
+	}
+}
+
+// deliverInBackground runs one already-gated fan-out off the caller's goroutine.
+//
+// CONTEXT LIFETIME is the subtle part. The caller's ctx is almost always
+// r.Context(), which net/http cancels the instant the response is written — so
+// carrying it into the goroutine would abort the very sends this moves off the
+// request path, silently deleting the feature while every existing test still
+// passed. context.WithoutCancel keeps any request-scoped values while dropping
+// the cancellation, and WithTimeout then re-bounds it with a deadline of our own
+// so the detached goroutine still cannot run forever.
+//
+// The goroutine also recovers its own panics: it runs outside chi's Recoverer,
+// so an unrecovered panic here would take the whole process down rather than
+// failing one request.
+func (h *Handler) deliverInBackground(ctx context.Context, d pushDispatcher, notifType string, payload []byte, excludeUserID int64, opts pushOpts) fanOutResult {
+	if !h.admitDelivery(notifType) {
+		return fanOutDropped
+	}
+	// The slot is taken on THIS goroutine, before we return, so a caller that
+	// has finished emitting can drain (WaitForPushDelivery) without racing the
+	// worker it is waiting for.
+	go func() {
+		// Registered first so it runs LAST: the count only drops once the
+		// delivery, its context cleanup and any panic logging are all complete.
+		defer h.finishDelivery()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("push fan-out: panic delivering type=%s: %v\n%s", notifType, r, debug.Stack())
+			}
+		}()
+		sendCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pushFanOutTimeout)
+		defer cancel()
+		h.deliverPush(sendCtx, d, notifType, payload, excludeUserID, opts)
+	}()
+	return fanOutQueued
+}
+
+// deliverPush is the delivery half of fanOutPush: it reads the household's
+// subscriptions and sends to each one, applying actor exclusion, send-time
+// pruning and the single bounded summary log documented on fanOutPush. It runs
+// on the background goroutine deliverInBackground starts; every gate has already
+// been evaluated by the time it is called.
+func (h *Handler) deliverPush(ctx context.Context, d pushDispatcher, notifType string, payload []byte, excludeUserID int64, opts pushOpts) {
 	subs, err := h.queries.ListAllPushSubscriptions(ctx)
 	if err != nil {
 		log.Printf("push fan-out: list subscriptions: %v", err)

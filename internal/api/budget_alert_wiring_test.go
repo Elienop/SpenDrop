@@ -52,6 +52,7 @@ func TestRestoreTransaction_FiresOverBudgetAlert(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("restore: want 200, got %d: %s", w.Code, w.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("restore must fire the over-budget alert; got %d sends", rec.count())
 	}
@@ -96,6 +97,7 @@ func TestRestoreTransaction_DeleteThenRestoreReArmsLatch(t *testing.T) {
 	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode created: %v", err)
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("create over budget must alert once; got %d", rec.count())
 	}
@@ -109,6 +111,7 @@ func TestRestoreTransaction_DeleteThenRestoreReArmsLatch(t *testing.T) {
 	if delRec.Code != http.StatusOK {
 		t.Fatalf("delete: want 200, got %d: %s", delRec.Code, delRec.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("delete must not add an alert; got %d", rec.count())
 	}
@@ -122,6 +125,7 @@ func TestRestoreTransaction_DeleteThenRestoreReArmsLatch(t *testing.T) {
 	if restoreRec.Code != http.StatusOK {
 		t.Fatalf("restore: want 200, got %d: %s", restoreRec.Code, restoreRec.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 2 {
 		t.Fatalf("delete-then-restore must re-alert; got %d sends total", rec.count())
 	}
@@ -156,6 +160,7 @@ func TestBatchRestoreTransactions_FiresOverBudgetAlert(t *testing.T) {
 	}
 	// Two rows of $80 in the same cell = $160 over the $100 limit; the cell is
 	// deduped so the alert fires exactly once.
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("batch restore must alert once for the deduped over-budget cell; got %d", rec.count())
 	}
@@ -186,6 +191,7 @@ func TestRestoreAllTransactions_FiresOverBudgetAlert(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("restore all: want 200, got %d: %s", w.Code, w.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("restore-all must fire the over-budget alert; got %d", rec.count())
 	}
@@ -224,6 +230,7 @@ func TestBatchUpdateTransactions_FiresOverBudgetAlert(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("batch update: want 200, got %d: %s", w.Code, w.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("batch update into over-budget category must alert once; got %d", rec.count())
 	}
@@ -299,6 +306,7 @@ func TestImportConfirm_FiresOverBudgetAlert(t *testing.T) {
 	if confirmRec.Code != http.StatusOK {
 		t.Fatalf("confirm: want 200, got %d: %s", confirmRec.Code, confirmRec.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("import crossing the budget must fire the over-budget alert; got %d", rec.count())
 	}

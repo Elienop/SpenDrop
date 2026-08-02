@@ -12,9 +12,11 @@ import (
 // Typed transaction-activity notifications. Each helper is POST-COMMIT and
 // BEST-EFFORT: it is invoked after the mutation has already committed (same
 // contract as evaluateBudgetAlerts), so it NEVER returns an error and never
-// blocks or rolls back the request. All gating + the actual send live in
-// fanOutPush, which no-ops when the household has the type switched off — so a
-// disabled type costs one settings read and nothing else.
+// blocks or rolls back the request. All gating lives in fanOutPush, which
+// no-ops when the household has the type switched off — so a disabled type
+// costs one settings read and nothing else. When a send IS owed, fanOutPush
+// queues it on a background goroutine and returns, so none of these helpers
+// ever puts a push gateway between the user and their response.
 //
 // Money in bodies is DOLLARS via centsToDollars (never a raw *_cents value).
 // The category label is looked up via GetCategoryByID; a lookup miss degrades

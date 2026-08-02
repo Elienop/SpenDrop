@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"time"
 
@@ -35,6 +37,31 @@ type Handler struct {
 	// tests can capture fan-out without a real VAPID keypair. Production code
 	// never sets this; a non-nil value outside a _test.go file is a bug.
 	pushTesterForBudgetAlerts pushDispatcher
+
+	// Background push delivery state (see deliverInBackground), all guarded by
+	// pushMu. Every field is usable at its zero value, so a Handler built by any
+	// constructor — or as a bare literal in a test — starts with delivery
+	// working and nothing in flight.
+	//
+	// pushInFlight counts fan-outs admitted and not yet finished. It is the ONE
+	// source of truth: the admission cap reads it, the drain waits on it, and a
+	// worker decrements it as its very last act, so the number a timed-out drain
+	// reports is exact rather than an approximation that lags the real
+	// population.
+	//
+	// pushDraining is set while a drain is parked, and blocks new admissions.
+	// That is what makes the counter safe: it can never go 0 -> positive while a
+	// waiter is waiting on it. A successful drain clears the flag; a timed-out
+	// one deliberately does not, because its waiter is still parked and the only
+	// caller that times out is a process already on its way out.
+	//
+	// pushIdle is non-nil only while a drain is parked, and is closed when
+	// pushInFlight reaches 0. A channel rather than a sync.Cond because the drain
+	// has to select against a context.
+	pushMu       sync.Mutex
+	pushInFlight int
+	pushDraining bool
+	pushIdle     chan struct{}
 
 	// broker fans out coarse SSE "invalidate" hints to every connected
 	// household device after a committed mutation. nil => the feature is a
@@ -190,6 +217,59 @@ func (h *Handler) getIntegrityResult() (time.Time, string) {
 // during single-threaded startup before the HTTP server binds.
 func (h *Handler) SetPushSender(s *push.Sender) {
 	h.pushSender = s
+}
+
+// WaitForPushDelivery blocks until every background push fan-out this Handler
+// started has finished, or until ctx is done — whichever comes first. It returns
+// nil only when the drain completed.
+//
+// While it is parked, NEW fan-outs are refused rather than queued (see
+// admitDelivery). During shutdown that is the honest outcome — a notification
+// accepted at that point would be abandoned seconds later anyway — and it is
+// also what makes the counter safe to wait on: nothing can push it back above
+// zero underneath a waiter.
+//
+// Called from cmd/spendrop/main.go during graceful shutdown, AFTER the HTTP
+// server has stopped (so no new fan-out can be queued) and BEFORE the database
+// handle closes (a fan-out that sees a 404/410 prunes the dead subscription row,
+// and that write needs the handle). A notification for a save the household just
+// made should survive a container restart, which on this deployment happens on
+// every app update. That ordering is pinned by
+// TestShutdownDrainsPushDeliveryAfterTheServerStops in cmd/spendrop.
+//
+// On timeout the caller is told exactly how many deliveries were abandoned
+// rather than being left to guess.
+func (h *Handler) WaitForPushDelivery(ctx context.Context) error {
+	h.pushMu.Lock()
+	if h.pushInFlight == 0 {
+		h.pushMu.Unlock()
+		return nil
+	}
+	h.pushDraining = true
+	if h.pushIdle == nil {
+		h.pushIdle = make(chan struct{})
+	}
+	idle := h.pushIdle
+	h.pushMu.Unlock()
+
+	select {
+	case <-idle:
+		h.pushMu.Lock()
+		h.pushDraining = false
+		h.pushMu.Unlock()
+		return nil
+	case <-ctx.Done():
+		h.pushMu.Lock()
+		defer h.pushMu.Unlock()
+		if h.pushInFlight == 0 {
+			// The last worker finished in the same instant the deadline expired;
+			// select picks at random between two ready cases, so report the
+			// drain that actually happened rather than "0 still delivering".
+			h.pushDraining = false
+			return nil
+		}
+		return fmt.Errorf("%d push fan-out(s) still delivering: %w", h.pushInFlight, ctx.Err())
+	}
 }
 
 // SetEventBroker installs the SSE fan-out hub. Called once from

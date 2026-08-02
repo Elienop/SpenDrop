@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/elienop/spendrop/internal/database"
-	"github.com/elienop/spendrop/internal/push"
 )
 
 // TestCountTransactionsSince_HidesTombstoned seeds one live and one tombstoned
@@ -38,29 +37,47 @@ func TestCountTransactionsSince_HidesTombstoned(t *testing.T) {
 	}
 }
 
-// cancelOnSendSender cancels the supplied context the moment it is asked to
-// Send, modelling the production regression where a stalled push gateway
-// exhausts the per-run digest budget DURING the serial fan-out — leaving the
-// outer context Done by the time the cursor write runs.
-type cancelOnSendSender struct{ cancel context.CancelFunc }
-
-func (s *cancelOnSendSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
-	s.cancel()
-	return false, nil
+// cancelOnFanOutClock is a fixed clock that cancels the supplied context on
+// every read AFTER the first. RunDigestTick reads the clock once for its own
+// "now"; the next read is fanOutPush's quiet-hours gate, which runs after the
+// transaction count and before the cursor write. That makes it a deterministic,
+// synchronous seam for "the caller's context died mid-tick" — the shape the
+// cursor write must survive.
+type cancelOnFanOutClock struct {
+	t      time.Time
+	cancel context.CancelFunc
+	calls  int // not mutex-guarded: every read happens on the tick's own goroutine
 }
 
-// TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext guards the real
-// regression: the daily cursor write must advance even when the fan-out has
-// already burned the per-run context budget. If the cursor write shares the
-// exhausted context, database/sql returns DeadlineExceeded BEFORE running the
-// UPDATE, last_digest_at never advances, and the digest re-fires every tick
-// until recovery. The fix routes SetLastDigestAt through a context independent
-// of the fan-out budget.
-func TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext(t *testing.T) {
+func (c *cancelOnFanOutClock) Now() time.Time {
+	c.calls++
+	if c.calls > 1 {
+		c.cancel()
+	}
+	return c.t
+}
+
+// TestRunDigestTick_AdvancesCursorWhenContextCancelsDuringFanOut guards the real
+// regression: the daily cursor write must advance even when the caller's context
+// dies part-way through the tick (the per-run deadline expiring, or shutdown
+// cancelling it). If the cursor write shares that context, database/sql returns
+// the cancellation BEFORE running the UPDATE, last_digest_at never advances, and
+// the digest re-fires every tick until recovery. The fix routes SetLastDigestAt
+// through context.WithoutCancel.
+//
+// The cancellation used to be driven from the sender, which worked while the
+// fan-out sent inline. Delivery is asynchronous now, so a sender-driven cancel
+// would fire on another goroutine, after the cursor write, and the test would
+// pass without ever exercising the hazard. The clock read inside fanOutPush's
+// quiet-hours gate is the surviving synchronous seam, and the assertion on
+// `calls` below fails loudly rather than going vacuous if that seam ever moves.
+func TestRunDigestTick_AdvancesCursorWhenContextCancelsDuringFanOut(t *testing.T) {
 	q, db := setupTestDB(t)
-	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
 	ctx, cancel := context.WithCancel(context.Background())
-	h.pushTesterForBudgetAlerts = &cancelOnSendSender{cancel: cancel}
+	defer cancel()
+	clock := &cancelOnFanOutClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC), cancel: cancel}
+	h := NewHandlerWithClock(q, db, clock)
+	h.pushTesterForBudgetAlerts = &recordingSender{}
 
 	user := seedTestUser(t, q, "alice", RoleAdmin)
 	cat := seedExpenseCategory(t, q, "Groceries")
@@ -73,6 +90,15 @@ func TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext(t *testing.T) {
 	}
 
 	h.RunDigestTick(ctx)
+	waitPush(t, h)
+
+	if clock.calls < 2 {
+		t.Fatalf("clock was read %d time(s): the fan-out no longer reads it, so nothing "+
+			"cancelled the context and this test proves nothing", clock.calls)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("the tick's context should have been cancelled before the cursor write")
+	}
 
 	var advanced bool
 	row := db.QueryRowContext(context.Background(),
@@ -81,7 +107,151 @@ func TestRunDigestTick_AdvancesCursorWhenFanOutExhaustsContext(t *testing.T) {
 		t.Fatalf("read last_digest_at: %v", err)
 	}
 	if !advanced {
-		t.Fatal("last_digest_at must advance even when the fan-out exhausts the context")
+		t.Fatal("last_digest_at must advance even when the tick's context is cancelled mid-run")
+	}
+}
+
+// TestRunDigestTick_NotBlockedByStalledGateway pins the other half: the digest
+// ticker owns a single goroutine, so a gateway that never answers must not hold
+// the tick open. Delivery is queued and the tick returns; the push is still sent
+// once the gateway comes back.
+func TestRunDigestTick_NotBlockedByStalledGateway(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	sender := newBlockingSender()
+	h.pushTesterForBudgetAlerts = sender
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-stalled")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+
+	if _, err := db.ExecContext(ctx,
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='07:00', quiet_start='22:00', quiet_end='08:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+
+	returned := make(chan struct{})
+	go func() {
+		h.RunDigestTick(ctx)
+		close(returned)
+	}()
+
+	waitClosed(t, sender.entered, "digest never reached the push transport")
+	waitClosed(t, returned, "the digest tick is still parked on an unreachable push gateway")
+
+	close(sender.release)
+	waitPush(t, h)
+	if n := sender.count(); n != 1 {
+		t.Fatalf("the queued digest must still be delivered; sends = %d, want 1", n)
+	}
+}
+
+// digestSettings switches the daily digest on for a household, anchored at
+// 07:00 so a 07:30 clock is past today's boundary.
+func digestSettings(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`UPDATE notification_settings SET digest_mode='daily', digest_time='07:00', quiet_start='22:00', quiet_end='08:00', quiet_tz='UTC' WHERE id=1`); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+}
+
+// digestCursorAdvanced reports whether last_digest_at has been written.
+func digestCursorAdvanced(t *testing.T, db *sql.DB) bool {
+	t.Helper()
+	var advanced bool
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT last_digest_at IS NOT NULL FROM notification_settings WHERE id=1`).Scan(&advanced); err != nil {
+		t.Fatalf("read last_digest_at: %v", err)
+	}
+	return advanced
+}
+
+// TestRunDigestTick_HoldsCursorWhenDeliveryIsDropped is the regression guard for
+// "the cursor advanced on queued, not on sent".
+//
+// The cursor means "the household has been told everything up to now", and
+// shouldSendDigest goes false for the rest of the day once it moves. Delivery is
+// asynchronous, so fanOutPush can now decline a rollup outright — and when it
+// does, nothing sent it and nothing else retries it. Advancing on a declined
+// rollup deletes the day's digest with no error anywhere: the tick logged
+// nothing, the transport was never called, and tomorrow's tick reads a cursor
+// that claims the household was already told.
+func TestRunDigestTick_HoldsCursorWhenDeliveryIsDropped(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	sender := newBlockingSender()
+	h.pushTesterForBudgetAlerts = sender
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	cat := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-dropped")
+	seedExpenseRow(t, q, user.ID, cat, "2026-01-02", 1500)
+	digestSettings(t, db)
+
+	// Fill every delivery slot with parked fan-outs so the digest's own emit is
+	// refused before it reaches the transport.
+	for i := 0; i < maxInFlightFanOuts; i++ {
+		h.fanOutPush(ctx, "over_budget", []byte(`{"type":"budget_over"}`), 0, pushOpts{})
+	}
+	if n := h.inFlightDeliveries(); n != maxInFlightFanOuts {
+		t.Fatalf("setup: in-flight = %d, want the cap %d", n, maxInFlightFanOuts)
+	}
+
+	h.RunDigestTick(ctx)
+
+	if digestCursorAdvanced(t, db) {
+		t.Fatal("last_digest_at advanced for a digest that was refused before reaching the " +
+			"transport — shouldSendDigest now reads false for the rest of the day and the " +
+			"rollup is silently gone")
+	}
+
+	// Freeing the slots must let the very next tick deliver it: holding the
+	// cursor has to mean "retry", not "stuck".
+	close(sender.release)
+	waitPush(t, h)
+	before := sender.count()
+
+	h.RunDigestTick(ctx)
+	waitPush(t, h)
+
+	if got := sender.count() - before; got != 1 {
+		t.Fatalf("the retry tick sent %d digests, want 1", got)
+	}
+	if !digestCursorAdvanced(t, db) {
+		t.Fatal("last_digest_at must advance once the digest is actually queued")
+	}
+}
+
+// TestRunDigestTick_AdvancesCursorWhenNothingWasOwed is the other side of the
+// same gate, and the reason "advance only when queued" is the wrong rule. When
+// no transaction landed in the window there is no rollup to lose, so the pass IS
+// complete — a tick that refused to advance here would re-run its count query
+// every minute for the rest of the day and never send anything.
+func TestRunDigestTick_AdvancesCursorWhenNothingWasOwed(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 2, 7, 30, 0, 0, time.UTC)})
+	rec := &recordingSender{}
+	h.pushTesterForBudgetAlerts = rec
+	ctx := context.Background()
+
+	user := seedTestUser(t, q, "alice", RoleAdmin)
+	seedPushSub(t, q, user.ID, "https://push.example/ep-quiet-day")
+	digestSettings(t, db)
+	// Deliberately no transactions: CountTransactionsSince returns 0.
+
+	h.RunDigestTick(ctx)
+	waitPush(t, h)
+
+	if rec.count() != 0 {
+		t.Fatalf("nothing happened today, so nothing should be sent; got %d", rec.count())
+	}
+	if !digestCursorAdvanced(t, db) {
+		t.Fatal("last_digest_at must advance on a pass that owed nothing, or every tick for " +
+			"the rest of the day repeats the same query and the cursor never moves")
 	}
 }
 
@@ -105,11 +275,13 @@ func TestRunDigestTick_SendsOncePerDay(t *testing.T) {
 	}
 
 	h.RunDigestTick(ctx)
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("first tick: want 1 digest push, got %d", rec.count())
 	}
 	// Second tick same day: last_digest_at now past today's boundary -> no resend.
 	h.RunDigestTick(ctx)
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("second tick same day: want still 1, got %d", rec.count())
 	}
@@ -137,6 +309,7 @@ func TestRunDigestTick_UsesOwnCollapseIdentity(t *testing.T) {
 	}
 
 	h.RunDigestTick(ctx)
+	waitPush(t, h)
 
 	if rec.count() != 1 {
 		t.Fatalf("want 1 digest push, got %d", rec.count())
@@ -179,6 +352,7 @@ func TestRunDigestTick_NotSuppressedDuringQuietHours(t *testing.T) {
 	}
 
 	h.RunDigestTick(ctx)
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("digest must pierce quiet hours: want 1 push, got %d", rec.count())
 	}

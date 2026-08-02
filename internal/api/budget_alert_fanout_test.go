@@ -62,6 +62,7 @@ func TestFanOutPush_MultipleSubsPrunesGoneRow(t *testing.T) {
 	seedPushSub(t, q, bob.ID, "https://push.example/bob-ok")
 
 	h.fanOutPush(context.Background(), "over_budget", []byte(`{"type":"budget_over"}`), 0, pushOpts{})
+	waitPush(t, h)
 
 	// All three subs were attempted (household-wide, not per-user).
 	if len(ps.seen) != 3 {
@@ -117,6 +118,7 @@ func TestFanOutPush_ExcludesActorAccount(t *testing.T) {
 	seedPushSub(t, q, other.ID, "https://push.example/other-phone")
 
 	h.fanOutPush(context.Background(), "txn_added", []byte(`{"type":"txn_added"}`), actor.ID, pushOpts{})
+	waitPush(t, h)
 
 	got := rec.endpoints()
 	want := []string{"https://push.example/other-phone"}
@@ -141,6 +143,7 @@ func TestFanOutPush_ExcludeZeroSendsToEveryone(t *testing.T) {
 
 	// over_budget defaults ON; excludeUserID 0 -> both devices receive.
 	h.fanOutPush(context.Background(), "over_budget", []byte(`{"type":"budget_over"}`), 0, pushOpts{})
+	waitPush(t, h)
 
 	got := rec.endpoints()
 	want := []string{"https://push.example/actor-phone", "https://push.example/other-phone"}
@@ -162,6 +165,7 @@ func TestFanOutPush_NilDispatcherIsNoOp(t *testing.T) {
 
 	// Must not panic and must not prune anything when the feature is off.
 	h.fanOutPush(context.Background(), "over_budget", []byte(`{}`), 0, pushOpts{})
+	waitPush(t, h)
 	all, err := q.ListAllPushSubscriptions(context.Background())
 	if err != nil {
 		t.Fatalf("list: %v", err)

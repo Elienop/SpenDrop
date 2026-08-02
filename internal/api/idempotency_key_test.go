@@ -557,6 +557,7 @@ func TestCreateTransaction_ReplayDoesNotRenotifyHousehold(t *testing.T) {
 	if rec := postCreate(t, h, user, body); rec.Code != http.StatusCreated {
 		t.Fatalf("create: status = %d, body = %s", rec.Code, rec.Body.String())
 	}
+	waitPush(t, h)
 	if n := sender.count(); n != 1 {
 		t.Fatalf("pushes after the original create = %d, want 1", n)
 	}
@@ -564,6 +565,7 @@ func TestCreateTransaction_ReplayDoesNotRenotifyHousehold(t *testing.T) {
 	if rec := postCreate(t, h, user, body); rec.Code < 200 || rec.Code > 299 {
 		t.Fatalf("replay: status = %d, want 2xx; body = %s", rec.Code, rec.Body.String())
 	}
+	waitPush(t, h)
 	if n := sender.count(); n != 1 {
 		t.Errorf("pushes after the replay = %d, want 1 — the household was told "+
 			"twice about one transaction", n)
