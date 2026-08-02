@@ -81,7 +81,27 @@ failed backup, and backups run every 24h). Push notifications work to both phone
 failure uses them. If the container dies overnight, the first sign is someone opening the app and
 seeing what looks like an offline shell — while backups have silently stopped.
 **Effort:** small — the signal and the channel both exist and are simply not connected.
-**Needs input:** whether an external uptime monitor already watches the box (see below).
+
+**ANSWERED 2026-08-02: the owner runs Dockhand, which monitors every stack for uptime and
+container health.** So the alerting channel already exists and nothing needs to be chosen or
+installed. What it is currently watching is the problem: `Dockerfile:72` points HEALTHCHECK at
+`/api/health`, which only proves the web server answers. Dockhand faithfully reports a container
+as healthy while its database is unusable.
+
+**So B7 becomes two pieces of different size:**
+1. *Small, do it:* point HEALTHCHECK at `/healthz/data` instead. It already runs
+   `PRAGMA quick_check`, the cached full integrity result, transaction counts, schema version and
+   the checkpoint freshness sweep, and it 503s on a real problem. Dockhand's existing monitoring
+   then inherits all of that for free. Safe under `restart: unless-stopped` — an unhealthy
+   container is not restarted, so a degraded check reports rather than crash-loops. Keep the
+   interval at ≥30s; the endpoint's own comment warns against making it a hot path.
+2. *Still open, and the subtler half:* **a read-only database would still report healthy.**
+   Every sub-check in `/healthz/data` is a READ — `quick_check` passes fine on a database that
+   cannot be written. That is exactly the failure mode B2's restore bug produced ("attempt to
+   write a readonly database"). The first thing that actually flips the endpoint is a failed
+   backup, up to 24h later. Catching it promptly needs a cheap write probe as a sub-check.
+   Without it, wiring up piece 1 is a real improvement but leaves the specific failure the
+   owner is most likely to hit still invisible.
 
 ### B8 — Backups carry a "verified" marker that two paths never earn
 **Verified: reported.** Scheduled backups are genuinely checked. Pre-migration snapshots and
@@ -243,9 +263,14 @@ condition *and* move the predicate, believing one was safe because the other was
   and *owed but dropped* — see [[async-split-redefines-done]].
   **Accepted, not fixed:** activity notifications share a collapse topic, so concurrent fan-outs
   can reach the gateway out of order; serialising delivery would let one stalled gateway delay
-  everything behind it. **Still open:** a dropped `over_budget` fan-out leaves its latch set, so
-  that crossing is not re-announced until spend drops under and re-crosses — now reachable via
-  the admission cap, not only via a transient send failure. Owner has the decision.
+  everything behind it.
+  **Also accepted — DECIDED by the owner 2026-08-02, do not re-raise:** a dropped `over_budget`
+  fan-out leaves its latch set, so that crossing is not re-announced until spend drops under and
+  re-crosses. Owner's answer: *"one time notification should be enough, i can always see it on
+  the web."* Reaching the drop needs 64 simultaneous fan-outs, which two people entering rows by
+  hand will never produce, and the alternative (retry on drop) risks the worse bug of notifying
+  on every save. Note the owner has never actually crossed a budget in practice, so the
+  notification's real-world behaviour is unobserved, not confirmed.
 
 - **B2 — the documented restore procedure did not work** (`e681ed6`, 2026-08-02, unreleased).
   Every step now runs in a throwaway container with the app stopped, instead of `docker exec`
