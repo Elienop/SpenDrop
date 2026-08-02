@@ -585,35 +585,69 @@ Backup behavior is controlled by seven environment variables — `BACKUP_ENABLED
 
 A backup you have never restored from is a wish, not a backup. Run this drill once on your actual deployment so you know the commands work, the permissions are right, and the data comes back intact. It takes about two minutes.
 
+Every step below runs in a throwaway `alpine` container mounted on the data volume, never `docker exec spendrop`. That is deliberate: the moments you need this drill are the moments SpenDrop will not run. A corrupt database makes it exit at the [startup integrity check](#integrity-checks), a failed migration makes it refuse to start, and `restart: unless-stopped` turns either into a loop that `docker exec` cannot attach to. A procedure that only works while the app is healthy is not a restore procedure.
+
+First establish the two things every command below depends on. **Do not skip the `docker volume ls`** — Compose prefixes volume names with the project name, so the `spendrop-data:` declared in `docker-compose.yml` actually exists as `spendrop_spendrop-data`. Mounting the unprefixed name does not fail; Docker silently creates a new empty volume and the drill then reports an empty backup directory.
+
 ```bash
-# 1. Pick a backup to restore (newest is usually what you want)
-docker exec spendrop ls -lt /app/data/backups/
+# The real volume name. Look it up rather than assuming it.
+docker volume ls | grep spendrop-data
+export VOL=spendrop_spendrop-data
 
-# 2. Verify the checksum still matches the file.
-#    Replace the filename with the one you picked in step 1.
-docker exec spendrop sh -c 'cd /app/data/backups && sha256sum -c spendrop-2026-04-13T0300Z.db.sha256'
+# The user the container runs as — the PUID/PGID from your compose file.
+# If you never set them, the image's own default is 911, not 1000.
+export PUID=1000 PGID=1000
+```
 
-# 3. Stop the container so the live DB is closed cleanly
+> **Using a bind mount instead of a named volume?** Point `VOL` at the host path — `export VOL=/mnt/zfs/data/services/apps/spendrop` — and skip the `docker volume ls`. `-v` accepts a host path in the same position, so every command below is unchanged.
+
+```bash
+# 1. Stop the container FIRST. This closes the live database cleanly if the app
+#    is healthy, and stops a crash-looping one from coming back mid-restore.
+#    Nothing after this point needs SpenDrop to be running.
 docker compose stop spendrop
 
-# 4. Replace the live DB. Keep the old one with a .bak suffix in case the
-#    restore is wrong. The -wal and -shm files belong to the OLD database —
-#    leaving them in place would corrupt the restored one.
-docker run --rm -v spendrop-data:/data alpine sh -c '
-  mv /data/spendrop.db /data/spendrop.db.bak &&
-  rm -f /data/spendrop.db-wal /data/spendrop.db-shm &&
+# 2. Pick a backup to restore (newest is usually what you want)
+docker run --rm -v "$VOL":/data alpine:3.20 ls -lt /data/backups/
+
+# 3. Verify the checksum still matches the file. Replace the filename with the
+#    one you picked in step 2. No sidecar means the file was never trusted —
+#    pick a different backup rather than restoring it.
+docker run --rm -v "$VOL":/data alpine:3.20 \
+  sh -c 'cd /data/backups && sha256sum -c spendrop-2026-04-13T0300Z.db.sha256'
+
+# 4. Replace the live database. The backup is a self-contained snapshot with no
+#    sidecars of its own, so the OLD -wal and -shm must not stay beside it —
+#    but they must not be deleted either. In WAL mode the -wal holds committed
+#    transactions that are not yet folded into the .db, so a .bak saved without
+#    it is missing your most recent entries. Move all three together and the
+#    rollback stays whole.
+docker run --rm -e PUID -e PGID -v "$VOL":/data alpine:3.20 sh -c '
+  set -e
+  mv /data/spendrop.db /data/spendrop.db.bak
+  mv /data/spendrop.db-wal /data/spendrop.db.bak-wal 2>/dev/null || true
+  mv /data/spendrop.db-shm /data/spendrop.db.bak-shm 2>/dev/null || true
   cp /data/backups/spendrop-2026-04-13T0300Z.db /data/spendrop.db
+  chown "$PUID:$PGID" /data/spendrop.db
 '
 
 # 5. Start the container back up
 docker compose start spendrop
 
-# 6. Verify with a real query
+# 6. Confirm it actually came up — a restore that fails the integrity check
+#    exits before the port is bound, and `curl` alone cannot tell that apart
+#    from a slow start.
+docker compose ps spendrop
+docker compose logs --tail=30 spendrop
+
+# 7. Verify with a real query
 curl -s http://localhost:3535/api/health
 #    Then log in and spot-check that the most recent transactions are present.
 ```
 
-If something looks wrong, you can roll back to the original by repeating step 4 with `spendrop.db.bak` as the source. Once the restore is verified, delete the `.bak` file to reclaim space.
+The restored file is written by a root helper container, so it lands owned by `root` and the server — which runs as `PUID:PGID` — cannot open it. The `chown` in step 4 is what fixes that; the container's entrypoint also corrects the ownership of the database files on boot, so the drill is safe either way. If you get the numbers wrong, or skip the `chown` on an older image, the symptom is a container that starts and immediately dies with `attempt to write a readonly database`.
+
+If something looks wrong, roll back by stopping the container and reversing step 4 — move `spendrop.db.bak`, `spendrop.db.bak-wal` and `spendrop.db.bak-shm` back to their original names, **all three together**, after deleting the restored `spendrop.db`. Restoring the `.bak` without its `-wal` is the same data loss the step above exists to avoid. Once the restore is verified, delete all three `.bak*` files to reclaim space.
 
 #### Integrity checks
 
@@ -631,7 +665,7 @@ Snapshot filenames carry the migration version they are capturing *state before*
 - **Hardcoded retention.** The three most recent snapshots are kept; older ones are pruned automatically on the next successful migration. The count is not tunable by design: snapshots are short-term recovery anchors, not history, and the sibling Tier 1 scheduled backups cover the longer tail.
 - **No-op on clean boots.** If there are no pending migrations, no snapshot is written. A normal restart does not churn the directory.
 
-To restore from a migration snapshot, follow the same restore drill above but with a `pre-migration-*.db` file as the source in step 4. The snapshot is a full SQLite database — the restore steps are identical.
+To restore from a migration snapshot, follow the same restore drill above but with a `pre-migration-*.db` file from `/data/migration-snapshots/` as the source in step 4. The snapshot is a full SQLite database — the restore steps are identical.
 
 #### Mutation audit log
 

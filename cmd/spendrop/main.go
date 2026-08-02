@@ -308,10 +308,11 @@ func main() {
 	go func() {
 		const digestInterval = time.Minute
 		// Per-run deadline mirrors the daily-integrity goroutine. RunDigestTick
-		// fans out pushes serially; without a bound, a single stalled push
-		// gateway would block the loop forever and permanently wedge every
-		// future digest. The per-request push timeout (push.defaultHTTPTimeout)
-		// bounds each send; this caps the whole pass so the ticker never leaks.
+		// no longer waits on the push gateway itself — fanOutPush queues
+		// delivery on its own bounded background goroutine — so this budget now
+		// covers only the tick's local DB work. It is kept because the pass
+		// still runs several queries and the ticker must never leak a goroutine
+		// on a pathologically slow DB.
 		const digestPerRunTimeout = 2 * time.Minute
 		ticker := time.NewTicker(digestInterval)
 		defer ticker.Stop()
@@ -368,8 +369,37 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownGrace)
 	defer cancel()
 
-	if err := srv.Shutdown(ctx); err != nil {
-		log.Fatalf("server forced to shutdown: %v", err)
+	shutdownErr := srv.Shutdown(ctx)
+
+	// Drain background push delivery. Web Push sends are queued off the request
+	// path (see api.fanOutPush), so at this point a save that returned 201
+	// seconds ago may still owe the other household member a notification. The
+	// HTTP server has stopped, so nothing new can be queued.
+	//
+	// Ordering matters twice over, and TestShutdownDrainsPushDeliveryAfterTheServerStops
+	// pins both: this must run AFTER srv.Shutdown (so it is not racing handlers
+	// that are still queueing work) and BEFORE the deferred sqlDB.Close, because
+	// a delivery that meets a 404/410 prunes the dead subscription row.
+	//
+	// It runs even when srv.Shutdown above failed. log.Fatalf calls os.Exit,
+	// which runs no defers and no further statements, so reporting the abandoned
+	// notifications after it would never happen — the operator would see a forced
+	// shutdown and no record that anything was owed.
+	//
+	// ACCEPTED TRADEOFF: the drain shares the ShutdownGrace budget (10 s by
+	// default) with srv.Shutdown, while one fan-out may run for up to
+	// api.pushFanOutTimeout (5 min). So a gateway that is unreachable at the
+	// moment of shutdown WILL have its notifications abandoned, and the log line
+	// below is the record of it. That is deliberate: a bounded shutdown matters
+	// more than a guaranteed notification, and giving the drain its own longer
+	// budget would let one wedged third-party gateway hold the container open
+	// well past the orchestrator's own kill timeout.
+	if err := h.WaitForPushDelivery(ctx); err != nil {
+		log.Printf("shutdown: %v", err)
+	}
+
+	if shutdownErr != nil {
+		log.Fatalf("server forced to shutdown: %v", shutdownErr)
 	}
 
 	log.Println("Server stopped")

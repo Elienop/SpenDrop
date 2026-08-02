@@ -654,6 +654,14 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// AmountCents here is the value TODAY's rate produces. On a foreign-currency
+	// row that is not necessarily what gets stored: saving an edit must never
+	// move money the user did not touch, so TransactionStore.Update overrides it
+	// with the row's existing amount when the request merely restates the same
+	// foreign amount in the same currency. That decision is made against the
+	// store's own transaction-scoped read of the row, not against `existing`
+	// above (which is read outside any transaction and can be stale about money)
+	// — see database.foreignMoneyUnchanged for the whole argument.
 	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
 		Date:                date,
 		AmountCents:         dollarsToCents(amount),

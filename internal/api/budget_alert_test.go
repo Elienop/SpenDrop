@@ -74,6 +74,7 @@ func TestEmit_ActivityCarriesTagTopicUrgency(t *testing.T) {
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
 	h.emit(context.Background(), "txn_added", "Transaction added", "$1.00 in X — y", "/transactions", 0)
+	waitPush(t, h)
 
 	if rec.count() != 1 {
 		t.Fatalf("want 1 send, got %d", rec.count())
@@ -119,6 +120,7 @@ func TestFanOutPush_NoOpWhenTypeDisabled(t *testing.T) {
 
 	// txn_added defaults OFF (migration 015) — fan-out must not send.
 	h.fanOutPush(context.Background(), "txn_added", []byte(`{"title":"x","body":"y","url":"/","type":"txn_added"}`), 0, pushOpts{})
+	waitPush(t, h)
 	if rec.count() != 0 {
 		t.Fatalf("disabled type: want 0 sends, got %d", rec.count())
 	}
@@ -135,6 +137,7 @@ func TestFanOutPush_SendsWhenTypeEnabled(t *testing.T) {
 
 	// over_budget defaults ON — fan-out must send to the one subscription.
 	h.fanOutPush(context.Background(), "over_budget", []byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0, pushOpts{})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("enabled type: want 1 send, got %d", rec.count())
 	}
@@ -160,11 +163,13 @@ func TestEvaluateBudgetAlerts_LatchSendsOnceThenDedups(t *testing.T) {
 
 	cell := budgetCell{CategoryID: catID, Year: 2026, Month: 5}
 	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("first eval: want 1 send, got %d", rec.count())
 	}
 	// Second eval, same over-state: latch row already present -> no send.
 	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("second eval (dedup): want 1 send total, got %d", rec.count())
 	}
@@ -189,6 +194,7 @@ func TestEvaluateBudgetAlerts_DropUnderClearsThenReCrossSendsAgain(t *testing.T)
 	// Cross over: send 1, latch set.
 	over := seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 15000)
 	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("cross: want 1, got %d", rec.count())
 	}
@@ -198,6 +204,7 @@ func TestEvaluateBudgetAlerts_DropUnderClearsThenReCrossSendsAgain(t *testing.T)
 		t.Fatalf("delete: %v", err)
 	}
 	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("drop-under: want still 1 (no new send), got %d", rec.count())
 	}
@@ -205,6 +212,7 @@ func TestEvaluateBudgetAlerts_DropUnderClearsThenReCrossSendsAgain(t *testing.T)
 	// Re-cross: latch was cleared, so this sends AGAIN.
 	seedExpenseRow(t, q, user.ID, catID, "2026-05-12", 20000)
 	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
 	if rec.count() != 2 {
 		t.Fatalf("re-cross: want 2 sends total, got %d", rec.count())
 	}
@@ -234,6 +242,7 @@ func TestEvaluateBudgetAlerts_HidesTombstoned(t *testing.T) {
 
 	h.evaluateBudgetAlerts(context.Background(),
 		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+	waitPush(t, h)
 	if rec.count() != 0 {
 		t.Fatalf("tombstoned 999 row must not trip alert: got %d sends", rec.count())
 	}
@@ -257,6 +266,7 @@ func TestEvaluateBudgetAlerts_NoSubscribersNoOp(t *testing.T) {
 
 	h.evaluateBudgetAlerts(context.Background(),
 		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+	waitPush(t, h)
 	if rec.count() != 0 {
 		t.Fatalf("no subscribers: want 0 sends, got %d", rec.count())
 	}
@@ -290,6 +300,7 @@ func TestEvaluateBudgetAlerts_PayloadIsDollarsNotCents(t *testing.T) {
 
 	h.evaluateBudgetAlerts(context.Background(),
 		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("want 1 send, got %d", rec.count())
 	}
@@ -354,6 +365,7 @@ func TestEvaluateBudgetAlerts_SingleCrossTagsTheCell(t *testing.T) {
 
 	h.evaluateBudgetAlerts(context.Background(),
 		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+	waitPush(t, h)
 
 	if rec.count() != 1 {
 		t.Fatalf("single cross: want exactly 1 push, got %d", rec.count())
@@ -399,6 +411,7 @@ func TestEvaluateBudgetAlerts_MultiCrossSendsOneSummary(t *testing.T) {
 		{CategoryID: groceries, Year: 2026, Month: 5},
 		{CategoryID: dining, Year: 2026, Month: 5},
 	})
+	waitPush(t, h)
 
 	if rec.count() != 1 {
 		t.Fatalf("two crossings: want exactly 1 summary push, got %d", rec.count())
@@ -455,6 +468,7 @@ func TestEvaluateBudgetAlerts_QuietHoursDefersCrossNotDrops(t *testing.T) {
 	hQuiet := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 23, 0, 0, 0, time.UTC)})
 	hQuiet.pushTesterForBudgetAlerts = recQuiet
 	hQuiet.evaluateBudgetAlerts(ctx, []budgetCell{cell})
+	waitPush(t, hQuiet)
 	if recQuiet.count() != 0 {
 		t.Fatalf("quiet hours: want 0 sends, got %d", recQuiet.count())
 	}
@@ -474,6 +488,7 @@ func TestEvaluateBudgetAlerts_QuietHoursDefersCrossNotDrops(t *testing.T) {
 	hDay := NewHandlerWithClock(q, db, fixedClock{t: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)})
 	hDay.pushTesterForBudgetAlerts = recDay
 	hDay.evaluateBudgetAlerts(ctx, []budgetCell{cell})
+	waitPush(t, hDay)
 	if recDay.count() != 1 {
 		t.Fatalf("post-quiet eval must re-fire the cross once, got %d", recDay.count())
 	}
@@ -497,6 +512,7 @@ func TestFanOutPush_QuietHoursSuppressesActivity(t *testing.T) {
 	h.fanOutPush(context.Background(), "txn_added",
 		[]byte(`{"title":"x","body":"y","url":"/transactions","type":"txn_added"}`), 0,
 		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	waitPush(t, h)
 	if rec.count() != 0 {
 		t.Fatalf("activity inside quiet hours must be suppressed: got %d sends", rec.count())
 	}
@@ -521,6 +537,7 @@ func TestFanOutPush_QuietHoursOverBudgetBypassToggle(t *testing.T) {
 	h.fanOutPush(ctx, "over_budget",
 		[]byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0,
 		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("over_budget with bypass on must deliver in quiet hours: got %d", rec.count())
 	}
@@ -533,6 +550,7 @@ func TestFanOutPush_QuietHoursOverBudgetBypassToggle(t *testing.T) {
 	h.fanOutPush(ctx, "over_budget",
 		[]byte(`{"title":"x","body":"y","url":"/budgets","type":"budget_over"}`), 0,
 		pushOpts{Tag: tag, Topic: topic, Urgency: urg})
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("over_budget with bypass off must be suppressed: got %d (want still 1)", rec.count())
 	}

@@ -141,3 +141,71 @@ jobs:
             echo '::error::The frontend bundle does not carry its APP_VERSION while the binary does — the two artifacts in this image disagree about what version they are. Check that the web-builder stage still sets ENV VITE_APP_VERSION=${APP_VERSION} and that the frontend still reads import.meta.env.VITE_APP_VERSION (Vite only inlines VITE_-prefixed vars, and only where the value is actually referenced).'
             exit 1
           fi
+
+      # The README's restore drill is performed with the container stopped, by
+      # a root process writing straight into the data volume. The restored
+      # spendrop.db therefore lands root-owned inside an /app/data whose own
+      # ownership is already correct, and the server — which runs as PUID:PGID
+      # — then cannot open its own database. That failure surfaces on exactly
+      # the boot an operator is least equipped to debug: mid-restore, with the
+      # app already down and the backup apparently in place.
+      #
+      # No Go test can reach this. entrypoint.sh is shell, it needs root and a
+      # real volume to do anything observable, and the bug is invisible to any
+      # check that only inspects the data directory.
+      #
+      # Both halves are asserted because a naive fix satisfies only one. Making
+      # the guard correct is easy if you drop it and `chown -R` unconditionally
+      # — but that sweep is O(files) and grows with every backup and migration
+      # snapshot, so it is a boot-time regression on a large volume that
+      # nothing else here would catch. The guard has to fire on a wrong-owned
+      # database AND stay quiet on a healthy boot.
+      - name: Entrypoint makes a restored database openable
+        run: |
+          vol="spendrop-restore-drill-${GITHUB_RUN_ID}"
+          # The Actions shell runs with -e, so any docker failure below aborts
+          # the step mid-way. Clean up from a trap rather than inline, or a red
+          # run leaves the volume behind on the host.
+          trap 'docker volume rm "$vol" >/dev/null 2>&1 || true' EXIT
+          docker volume create "$vol" >/dev/null
+
+          # Reproduce the post-restore state: correctly-owned directories, a
+          # root-owned database, and a root-owned sentinel deep inside
+          # backups/ that ONLY a recursive sweep would ever touch.
+          docker run --rm -v "$vol":/app/data alpine:3.20 sh -c '
+            mkdir -p /app/data/backups /app/data/migration-snapshots
+            echo restored > /app/data/spendrop.db
+            echo sentinel > /app/data/backups/sentinel.db
+            chown 1000:1000 /app/data /app/data/backups /app/data/migration-snapshots
+            chown 0:0 /app/data/spendrop.db /app/data/backups/sentinel.db'
+
+          # Boot 1: the real invariant is not "the uid changed", it is "the
+          # app user can write the database", so probe it with a write.
+          write_rc=0
+          docker run --rm -e PUID=1000 -e PGID=1000 -v "$vol":/app/data spendrop:ci \
+            sh -c 'echo probe >> /app/data/spendrop.db' || write_rc=$?
+
+          # Boot 1 swept the sentinel along with everything else. Put it back
+          # so boot 2 starts from a state where every path the guard probes is
+          # already correct.
+          docker run --rm -v "$vol":/app/data alpine:3.20 \
+            chown 0:0 /app/data/backups/sentinel.db
+
+          sentinel="$(docker run --rm -e PUID=1000 -e PGID=1000 -v "$vol":/app/data spendrop:ci \
+            stat -c '%u:%g' /app/data/backups/sentinel.db | tail -n 1)"
+
+          # The capture above is piped into `tail`, so a failed `docker run`
+          # yields an empty string rather than a nonzero status. Without this
+          # the next assertion reports it as an ownership regression.
+          if [ -z "$sentinel" ]; then
+            echo "::error::Could not read the sentinel file's ownership — the probe container did not run. This is an infrastructure failure in this step, not an entrypoint.sh regression."
+            exit 1
+          fi
+          if [ "$write_rc" -ne 0 ]; then
+            echo "::error::The server user cannot write a restored database. entrypoint.sh left /app/data/spendrop.db owned by someone other than PUID:PGID, which breaks every restore. Check that its ownership guard probes the DATABASE FILES and not only the /app/data directory — a restored file lands root-owned inside a directory that already has the right owner, so a directory-only guard sees a match and skips the chown."
+            exit 1
+          fi
+          if [ "$sentinel" != "0:0" ]; then
+            echo "::error::entrypoint.sh ran a recursive chown on a boot where every path it probes was already correctly owned (a sentinel inside /app/data/backups was rewritten to ${sentinel}). That sweep is O(files) and grows with every backup and migration snapshot, so it slows every boot on a large volume. Keep the guard: sweep only when a probed path actually mismatches."
+            exit 1
+          fi

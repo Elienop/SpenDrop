@@ -53,8 +53,12 @@ func enableNotif(t *testing.T, q *database.Queries, mut func(*database.UpdateNot
 	}
 }
 
-func decodeOnly(t *testing.T, rec *recordingSender) pushAlertPayload {
+// decodeOnly drains h's background delivery, then asserts a single send and
+// returns its decoded payload. It takes the Handler because delivery is
+// asynchronous — reading the recorder without draining first races the worker.
+func decodeOnly(t *testing.T, h *Handler, rec *recordingSender) pushAlertPayload {
 	t.Helper()
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("want exactly 1 send, got %d", rec.count())
 	}
@@ -82,7 +86,7 @@ func TestNotifyTxnAdded_FiresWhenEnabled(t *testing.T) {
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234) // $12.34, below default $500 threshold
 	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
 
-	p := decodeOnly(t, rec)
+	p := decodeOnly(t, h, rec)
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
 	}
@@ -115,7 +119,7 @@ func TestNotifyTxnDeleted_And_Edited_FireWithType(t *testing.T) {
 
 			txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234)
 			tc.call(h, txn)
-			p := decodeOnly(t, rec)
+			p := decodeOnly(t, h, rec)
 			if p.Type != tc.wantTyp {
 				t.Errorf("type: got %q want %q", p.Type, tc.wantTyp)
 			}
@@ -145,7 +149,7 @@ func TestNotifyTxnAdded_LargePrecedence(t *testing.T) {
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 120000) // $1200 >= $500
 	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
 
-	p := decodeOnly(t, rec) // exactly one push, not two
+	p := decodeOnly(t, h, rec) // exactly one push, not two
 	if p.Type != "large_txn" {
 		t.Errorf("type: got %q want large_txn (precedence)", p.Type)
 	}
@@ -164,6 +168,7 @@ func TestNotifyTxnAdded_NoOpWhenDisabled(t *testing.T) {
 
 	txn := seedExpenseRow(t, q, user.ID, cat, "2026-05-10", 1234)
 	h.notifyTxnAdded(context.Background(), txn, user.DisplayName, 0)
+	waitPush(t, h)
 	if rec.count() != 0 {
 		t.Fatalf("disabled: want 0 sends, got %d", rec.count())
 	}
@@ -179,7 +184,7 @@ func TestNotifyTxnBatch_AggregatesOneSend(t *testing.T) {
 	enableNotif(t, q, func(p *database.UpdateNotificationSettingsParams) { p.TxnAdded = true })
 
 	h.notifyTxnBatch(context.Background(), "added", 7, user.DisplayName, 0)
-	p := decodeOnly(t, rec) // ONE aggregate push, not 7
+	p := decodeOnly(t, h, rec) // ONE aggregate push, not 7
 	if p.Type != "txn_added" {
 		t.Errorf("type: got %q want txn_added", p.Type)
 	}

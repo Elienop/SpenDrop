@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -14,12 +15,24 @@ import (
 )
 
 // explodingSender always errors on Send; used to prove a push failure never
-// rolls back or errors the already-committed transaction mutation.
-type explodingSender struct{ calls int }
+// rolls back or errors the already-committed transaction mutation. Delivery runs
+// on a background goroutine, so the call counter is mutex-guarded.
+type explodingSender struct {
+	mu    sync.Mutex
+	calls int
+}
 
 func (s *explodingSender) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls++
 	return false, errors.New("transport boom")
+}
+
+func (s *explodingSender) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
 }
 
 func TestCreateTransaction_SendFailureDoesNotErrorCommittedMutation(t *testing.T) {
@@ -49,7 +62,8 @@ func TestCreateTransaction_SendFailureDoesNotErrorCommittedMutation(t *testing.T
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("want 201 despite send failure, got %d: %s", rec.Code, rec.Body.String())
 	}
-	if boom.calls == 0 {
+	waitPush(t, h)
+	if boom.count() == 0 {
 		t.Fatalf("expected the failing sender to have been invoked")
 	}
 	counts, err := q.CountAllTransactions(context.Background())
@@ -93,6 +107,7 @@ func TestUpdateTransaction_BackDatedEvaluatesPriorMonth(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("update: want 200, got %d: %s", w.Code, w.Body.String())
 	}
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("back-dated edit must evaluate the APRIL cell and alert; got %d sends", rec.count())
 	}

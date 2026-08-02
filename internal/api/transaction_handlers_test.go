@@ -3860,6 +3860,7 @@ func TestCreateTransaction_FiresTxnAdded(t *testing.T) {
 		t.Fatalf("create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
 	}
 	// Exactly one push — to the other member, never an echo to the actor.
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("want 1 push (only the other member), got %d", rec.count())
 	}
@@ -3895,6 +3896,9 @@ func TestCreateTransaction_SendFailureNeverErrors(t *testing.T) {
 	if rec2.Code != http.StatusCreated {
 		t.Fatalf("send failure must not break the mutation: got %d", rec2.Code)
 	}
+	// Drain before the test's DB cleanup runs: delivery is asynchronous, and a
+	// worker still querying a closed handle would log a spurious failure.
+	waitPush(t, h)
 }
 
 func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
@@ -3920,6 +3924,7 @@ func TestDeleteTransaction_FiresTxnDeleted(t *testing.T) {
 		t.Fatalf("delete: expected 200, got %d", rec2.Code)
 	}
 	var p pushAlertPayload
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("want 1 push (only the other member), got %d", rec.count())
 	}
@@ -3960,6 +3965,7 @@ func TestBatchCreate_FiresSingleAggregatePush(t *testing.T) {
 		t.Fatalf("batch create: expected 201, got %d; body %s", rec2.Code, rec2.Body.String())
 	}
 	// ONE aggregate push, to the other member only — never an echo to the actor.
+	waitPush(t, h)
 	if rec.count() != 1 {
 		t.Fatalf("batch must fire ONE aggregate push (only the other member), got %d", rec.count())
 	}

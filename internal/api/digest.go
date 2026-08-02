@@ -132,6 +132,9 @@ func (h *Handler) RunDigestTick(ctx context.Context) {
 		log.Printf("digest: count since %v: %v", since, err)
 		return
 	}
+	// fanOutGated is the right zero value for "n == 0": no rollup was owed this
+	// pass, so there is nothing to lose by advancing the cursor.
+	outcome := fanOutGated
 	if n > 0 {
 		noun := "transactions"
 		if n == 1 {
@@ -149,17 +152,43 @@ func (h *Handler) RunDigestTick(ctx context.Context) {
 			log.Printf("digest: marshal payload: %v", err)
 			return
 		}
-		h.fanOutPush(ctx, "digest", body, 0, pushOpts{
+		outcome = h.fanOutPush(ctx, "digest", body, 0, pushOpts{
 			Tag: "digest", Topic: "digest", Urgency: push.UrgencyLow,
 		})
 	}
-	// Advance the cursor on a context INDEPENDENT of the fan-out budget. The
-	// caller bounds `ctx` to digestPerRunTimeout; a stalled push gateway can
-	// exhaust that budget during the serial fan-out above, which would leave
-	// `ctx` Done and make database/sql return DeadlineExceeded BEFORE running
-	// the UPDATE — last_digest_at would never advance and the digest would
-	// re-fire every tick until recovery. WithoutCancel keeps the deadline/cancel
-	// off this write while preserving any request-scoped values on the context.
+
+	// The cursor means "the household has been told about everything up to
+	// `now`", so it must only move when that is true. Delivery is asynchronous,
+	// and fanOutPush returns as soon as it has ACCEPTED the rollup — so the two
+	// non-accepting outcomes have to be told apart:
+	//
+	//   fanOutQueued — handed to the transport. Advance. Per-device delivery is
+	//     best-effort from here, exactly as it was when the loop ran inline, and
+	//     re-sending the whole day because one phone was unreachable would be
+	//     worse than the miss.
+	//   fanOutGated  — nothing was owed. n == 0, or the household switched the
+	//     digest off between this pass's settings read and fanOutPush's. Advance:
+	//     no rollup was lost, and refusing to advance would make every tick from
+	//     here on repeat the count query forever.
+	//   fanOutDropped — a rollup WAS owed and was refused before reaching the
+	//     transport (the in-flight cap, or a shutdown drain). Nothing sent it and
+	//     nothing else will retry it. Advancing here would push the window past a
+	//     digest that never existed and shouldSendDigest would go false for the
+	//     rest of the day: the digest is silently gone until tomorrow. Leaving
+	//     the cursor makes the next tick, one minute later, rebuild the same
+	//     window and try again.
+	if outcome == fanOutDropped {
+		log.Printf("digest: delivery refused, holding last_digest_at so the next tick retries")
+		return
+	}
+
+	// Advance the cursor on a context INDEPENDENT of the caller's. The caller
+	// bounds `ctx` to digestPerRunTimeout and cancels it at shutdown; if `ctx`
+	// goes Done anywhere above, database/sql returns DeadlineExceeded BEFORE
+	// running the UPDATE — last_digest_at would never advance and the digest
+	// would re-fire every tick until recovery. WithoutCancel keeps the
+	// deadline/cancel off this write while preserving any request-scoped values
+	// on the context.
 	if err := h.queries.SetLastDigestAt(context.WithoutCancel(ctx), now); err != nil {
 		log.Printf("digest: set last_digest_at: %v", err)
 	}

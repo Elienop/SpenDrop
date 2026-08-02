@@ -131,21 +131,103 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 	return t, nil
 }
 
+// foreignMoneyUnchanged reports whether an update merely restates the foreign
+// money the row already carries — same currency code, same original amount to
+// the cent — in which case the base-currency value stored on the row must be
+// carried forward verbatim instead of being re-derived from today's rate.
+//
+// A foreign-currency row records the foreign amount and what it was worth in
+// the base currency, but NOT the rate that produced that number; no migration
+// defines such a column. The api layer's resolveCurrency divides by the CURRENT
+// rate on every call, and PUT /transactions/{id} is a full replace — the inline
+// row editor rebuilds original_amount / original_currency from the stored row
+// and resends them on every save (web/src/lib/currency.ts, toEditDefaults +
+// toCreatePayload). So once the rate moved, editing only the description of a
+// 1,500,000 LBP row silently re-priced it: $16.85 became $15.00 while the LBP
+// figure never changed. Saving an edit must never move money the user did not
+// touch.
+//
+// It deliberately does not freeze everything. A corrected foreign amount
+// (1,500,000 -> 1,600,000), a switch to a different foreign currency, and a
+// switch to or from the base currency all keep the caller's recomputed amount,
+// because each of those IS the user changing the money. Re-pricing a corrected
+// foreign amount at today's rate is the only option available — the rate the
+// row was booked at is recorded nowhere. Snapshotting it per row is backlog B1
+// step 2, folded into the refunds migration; this is step 1.
+//
+// KNOWN LIMITATION, and it is one-way. Once a foreign row exists, no re-save
+// can ever move its base value again while the foreign amount and currency code
+// stay put. If a rate is typed wrong (89,000 entered as 8,900), every row
+// booked under it holds a 10x wrong base value that correcting the rate will
+// NOT repair. The escape hatch is to change the foreign amount, save, change it
+// back, and save again — undiscoverable, and deliberately not surfaced as an
+// affordance here: a "re-price these rows" action is an owner decision, and
+// rebuilding it as an automatic sweep is precisely the effective-dated rate
+// table that was rejected for creating a second source of truth.
+//
+// Why the decision lives in the store, on `before`, and not in the handler:
+// handleUpdateTransaction reads the row OUTSIDE any transaction for its
+// tombstone and ownership checks, so that copy can be stale about money by the
+// time this transaction opens. Deriving the freeze there would let the store
+// write a base value that corresponds to neither the request nor the row it
+// just read inside the tx — and hashInputsMoved, which is derived from `before`,
+// would then see a phantom move and clear content_hash. SetMaxOpenConns(1) does
+// not close that window: the pool cap serialises statements, not a
+// read-then-open-transaction sequence (the same reasoning the create-path hash
+// probe documents in transaction_handlers.go). `before` is the only read that
+// both decisions can safely share.
+//
+// Two details for a future reviewer:
+//
+//   - Only the last two comparisons are load-bearing. The Valid checks are
+//     defensive: given the code comparison and the cents comparison that
+//     follow, no mutation of them is killable by any test, because a NULL
+//     column and a set one already disagree on one of those two. Do not record
+//     them as covered.
+//   - The currency code is compared EXACTLY and no writer normalizes its case
+//     (the import path stores whatever the spreadsheet's currency column says,
+//     verbatim). A sheet spelling "lbp" therefore yields a row this predicate
+//     can never match, so every save of it re-prices. Normalizing here alone
+//     would not fix that — the row would still fail to match on the next
+//     import — so it belongs with a data cleanup, not here.
+func foreignMoneyUnchanged(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+	if !after.OriginalCurrency.Valid || !after.OriginalAmountCents.Valid {
+		return false
+	}
+	if !before.OriginalCurrency.Valid || !before.OriginalAmountCents.Valid {
+		return false
+	}
+	if after.OriginalCurrency.String != before.OriginalCurrency.String {
+		return false
+	}
+	return after.OriginalAmountCents.Int64 == before.OriginalAmountCents.Int64
+}
+
 // Update loads the before row, applies the UPDATE, loads the after row, and
 // appends an audit row — all inside a single transaction. The before/after
 // reads are issued against the tx so they see a consistent view even under
 // concurrent writers; pulling the before row outside the tx would race with
 // other mutators.
 //
-// p.ClearContentHash is DERIVED here, not accepted from the caller: the store
-// is the only place that holds both the pre-edit row and the post-edit params
-// inside one tx, so deciding "did a hash input actually move?" anywhere else
-// would either race the read or duplicate the predicate. See hashInputsMoved.
+// Two fields of p are DERIVED here rather than accepted from the caller —
+// p.ClearContentHash always, and p.AmountCents on the one path described below.
+// The store is the only place that holds both the pre-edit row and the
+// post-edit params inside one tx, so deciding either question anywhere else
+// would race its own read. See hashInputsMoved and foreignMoneyUnchanged.
+//
+// The two derivations are ordered, and the order is load-bearing: the freeze
+// runs FIRST so the hash decision sees the amount that will actually be
+// stored. Reversed, a rate change alone would report "amount moved", clear
+// content_hash, and drop the row out of import dedupe — the exact failure the
+// freeze exists to prevent, reintroduced one line later.
 func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTransactionParams) error {
 	return s.withTx(ctx, func(qtx *Queries) error {
 		before, err := qtx.GetTransactionByID(ctx, p.ID)
 		if err != nil {
 			return fmt.Errorf("load before: %w", err)
+		}
+		if foreignMoneyUnchanged(before, p) {
+			p.AmountCents = before.AmountCents
 		}
 		p.ClearContentHash = hashInputsMoved(before, p)
 		if err := qtx.UpdateTransaction(ctx, p); err != nil {
