@@ -206,21 +206,27 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 			r.Post("/{id}/reset-password", h.handleAdminResetPassword)
 		})
 
-		// Trash view (admin only). Mounted as a chi.Group rather than a
-		// Route sub-tree because the trash endpoints live alongside the
-		// existing /transactions routes — using Route("/transactions", …)
-		// here would shadow the member-facing list/create handlers
-		// registered above. Group applies auth.RequireAdmin to all four
-		// endpoints without adding a path prefix, and chi's radix router
-		// distinguishes the literal segments (deleted, restore-batch)
-		// from the {id} sub-routes cleanly.
+		// Trash recovery (any authenticated user). Registered at this
+		// level — not inside Route("/transactions", …) — because that
+		// sub-tree would shadow the member-facing list/create handlers
+		// registered above; chi's radix router distinguishes the literal
+		// segments (deleted, restore-batch) from the {id} sub-routes
+		// cleanly. The handlers scope members to rows they own (list and
+		// count via the ByUser queries, restores via an owner-or-admin
+		// check), so opening the routes does not widen what a member can
+		// touch — only lets her reach her own tombstones.
+		r.Get("/transactions/deleted", h.handleListDeletedTransactions)
+		r.Post("/transactions/restore-batch", h.handleBatchRestoreTransactions)
+		r.Post("/transactions/{id}/restore", h.handleRestoreTransaction)
+
+		// Trash destruction and household-wide restore (admin only).
+		// Purge is the only hard delete in the system and restore-all's
+		// blast radius is every user's trash, so both keep the
+		// route-level gate.
 		r.Group(func(r chi.Router) {
 			r.Use(auth.RequireAdmin)
-			r.Get("/transactions/deleted", h.handleListDeletedTransactions)
-			r.Post("/transactions/restore-batch", h.handleBatchRestoreTransactions)
 			r.Post("/transactions/restore-all", h.handleRestoreAllTransactions)
 			r.Delete("/transactions/trash", h.handlePurgeAllTransactions)
-			r.Post("/transactions/{id}/restore", h.handleRestoreTransaction)
 			r.Delete("/transactions/{id}/purge", h.handlePurgeTransaction)
 		})
 

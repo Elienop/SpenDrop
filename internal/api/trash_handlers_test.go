@@ -1276,15 +1276,16 @@ func TestNewRouter_TrashEndpoints_AsMember_Return403(t *testing.T) {
 	// shadows the 403 we are trying to exercise. DELETE /…/purge in
 	// particular needs a body and Content-Type even though the handler
 	// itself reads nothing from either.
+	//
+	// Only the destructive / household-wide trash routes stay admin-only;
+	// list, single restore, and batch restore are member-reachable since
+	// B5 (scoped in the handlers).
 	cases := []struct {
 		method string
 		path   string
 		body   string
 	}{
-		{http.MethodGet, "/api/transactions/deleted", ""},
-		{http.MethodPost, "/api/transactions/1/restore", `{}`},
 		{http.MethodDelete, "/api/transactions/1/purge", `{}`},
-		{http.MethodPost, "/api/transactions/restore-batch", `{"ids":[1]}`},
 		{http.MethodPost, "/api/transactions/restore-all", `{}`},
 		{http.MethodDelete, "/api/transactions/trash", `{}`},
 	}
@@ -1302,6 +1303,75 @@ func TestNewRouter_TrashEndpoints_AsMember_Return403(t *testing.T) {
 			router.ServeHTTP(rec, r)
 			if rec.Code != http.StatusForbidden {
 				t.Errorf("status=%d, want 403; body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestNewRouter_TrashEndpoints_AsMember_OpenRoutesResolve(t *testing.T) {
+	q, db := setupTestDB(t)
+	router := NewRouter(q, db, nil)
+
+	regBody := strings.NewReader(`{"username":"admin","password":"longpassword"}`)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", regBody)
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	router.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("first register: %d body=%s", regRec.Code, regRec.Body.String())
+	}
+	if err := q.UpsertSetting(context.Background(), database.UpsertSettingParams{
+		Key:   "registration_enabled",
+		Value: "true",
+	}); err != nil {
+		t.Fatalf("upsert setting: %v", err)
+	}
+	memberBody := strings.NewReader(`{"username":"member","password":"longpassword"}`)
+	memberReq := httptest.NewRequest(http.MethodPost, "/api/auth/register", memberBody)
+	memberReq.Header.Set("Content-Type", "application/json")
+	memberRec := httptest.NewRecorder()
+	router.ServeHTTP(memberRec, memberReq)
+	if memberRec.Code != http.StatusCreated {
+		t.Fatalf("second register: %d body=%s", memberRec.Code, memberRec.Body.String())
+	}
+	var memberCookie *http.Cookie
+	for _, c := range memberRec.Result().Cookies() {
+		if c.Name == "session" {
+			memberCookie = c
+			break
+		}
+	}
+	if memberCookie == nil {
+		t.Fatal("no session cookie for member")
+	}
+
+	// The exact status codes prove the request reached the HANDLER, not a
+	// route-level gate: 200 for the (empty) list and the skip-tolerant
+	// batch, 404 for a restore of a row that does not exist.
+	cases := []struct {
+		method string
+		path   string
+		body   string
+		want   int
+	}{
+		{http.MethodGet, "/api/transactions/deleted", "", http.StatusOK},
+		{http.MethodPost, "/api/transactions/999999/restore", `{}`, http.StatusNotFound},
+		{http.MethodPost, "/api/transactions/restore-batch", `{"ids":[999999]}`, http.StatusOK},
+	}
+	for _, c := range cases {
+		t.Run(c.method+" "+c.path, func(t *testing.T) {
+			var r *http.Request
+			if c.body == "" {
+				r = httptest.NewRequest(c.method, c.path, nil)
+			} else {
+				r = httptest.NewRequest(c.method, c.path, strings.NewReader(c.body))
+				r.Header.Set("Content-Type", "application/json")
+			}
+			r.AddCookie(memberCookie)
+			rec := httptest.NewRecorder()
+			router.ServeHTTP(rec, r)
+			if rec.Code != c.want {
+				t.Errorf("status=%d, want %d; body=%s", rec.Code, c.want, rec.Body.String())
 			}
 		})
 	}
