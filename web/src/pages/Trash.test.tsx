@@ -453,6 +453,29 @@ describe('Trash', () => {
       });
     });
 
+    test('batch restore with skipped ids names both counts in the toast', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 1, conflicted: 0, skipped: 1 });
+      renderTrash();
+      await waitFor(() => {
+        expect(screen.getByText('Weekly groceries')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('checkbox', { name: /select april salary/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /restore 2/i }));
+
+      await waitFor(() => {
+        expect(mockedToast.success).toHaveBeenCalledWith(
+          'Restored 1 — 1 skipped (no longer in your trash)',
+        );
+      });
+    });
+
     test('clicking the select-all checkbox selects every row on the page', async () => {
       const user = userEvent.setup();
       renderTrash();

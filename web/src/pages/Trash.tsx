@@ -551,14 +551,27 @@ export function Trash() {
     const ids = [...selectedIds];
     setBatchRestoring(true);
     try {
-      const resp = await api.post<{ restored: number; conflicted: number }>(
-        'transactions/restore-batch',
-        { ids },
-      );
+      const resp = await api.post<{
+        restored: number;
+        conflicted: number;
+        skipped: number;
+      }>('transactions/restore-batch', { ids });
+      // skipped > 0 only happens to a member: a selected row was purged
+      // or restored (by someone else, or on another tab) between page
+      // load and this click, so the ownership check no longer finds it
+      // as hers to restore. Compose with conflicted rather than
+      // overwrite it — both can be nonzero in the same batch.
+      const notes: string[] = [];
       if (resp.conflicted > 0) {
-        toast.success(
-          `Restored ${resp.restored} — ${resp.conflicted} could not be restored (a newer copy already exists)`,
+        notes.push(
+          `${resp.conflicted} could not be restored (a newer copy already exists)`,
         );
+      }
+      if (resp.skipped > 0) {
+        notes.push(`${resp.skipped} skipped (no longer in your trash)`);
+      }
+      if (notes.length > 0) {
+        toast.success(`Restored ${resp.restored} — ${notes.join(', ')}`);
       } else {
         toast.success(
           `Restored ${resp.restored} transaction${resp.restored === 1 ? '' : 's'}`,

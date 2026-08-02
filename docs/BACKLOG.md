@@ -206,7 +206,7 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
-- **B5 — Delete has no confirmation, and members have no Trash** (`ea5f51b..cae004c`,
+- **B5 — Delete has no confirmation, and members have no Trash** (`ea5f51b..d84f5cd`,
   2026-08-02, unreleased, on `feat/delete-undo-member-trash`, PR pending). Desktop row delete now
   shows a "Moved to Trash" toast with **Undo** (10s), and a failed delete shows an error toast
   instead of failing silently. The phone capture panel's saved-row delete toast gained the same
@@ -224,6 +224,11 @@ condition *and* move the predicate, believing one was safe because the other was
   gap was desktop's missing feedback and recovery path, not a phone/desktop asymmetry. Separately,
   desktop delete was also silently swallowing FAILED deletes (an unhandled promise rejection, no
   error surfaced to the user) — found while fixing the confirmation gap, and fixed alongside it.
+  A review-battery fix wave (`43ee1a6..d84f5cd`) closed three gaps the first pass left open: a
+  restore of a tombstoned row that isn't the caller's now 404s for members instead of leaking
+  whether the id exists (closes the id-oracle hole); batch restore surfaces a real DB fault as a
+  500 instead of masking it as "none of those were yours"; and the batch-restore response gained
+  a `skipped` count so a member can tell a refused id from a restored one.
 
 - **B1 step 1 — an edit re-priced a foreign row at today's rate** (`8dc95b4`, 2026-08-02,
   unreleased). Restating the same foreign money now carries the stored base value forward.
