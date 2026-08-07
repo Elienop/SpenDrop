@@ -327,3 +327,94 @@ func TestRunMigrations_RefusesWhenSnapshotFails(t *testing.T) {
 		t.Errorf("expected 0 applied migrations after snapshot failure, got %d", count)
 	}
 }
+
+// failMigrations seeds the conflicting index that makes the initial
+// schema migration fail deterministically (same idiom as
+// TestRunMigrations_ErrorNamesSnapshotPath), so tests can drive
+// RunMigrations' failure path on demand.
+func failMigrations(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if _, err := db.Exec(`CREATE TABLE sessions (token TEXT, user_id INTEGER);
+CREATE INDEX idx_sessions_user_id ON sessions(user_id);`); err != nil {
+		t.Fatalf("seed conflicting index: %v", err)
+	}
+}
+
+// TestRunMigrations_FailurePathPrunesSnapshots is the B3 regression: a
+// failing migration under a restart loop used to add one full DB copy
+// per attempt with nothing ever pruning. Seed the snapshot dir as if
+// several failed attempts already happened, fail one more, and assert
+// the directory is bounded AND the bracket anchor (the oldest snapshot
+// for the pending target version) survived — the assertion that kills a
+// naive keep-newest prune.
+func TestRunMigrations_FailurePathPrunesSnapshots(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	failMigrations(t, db)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	// The bracket's target version is the highest pending migration —
+	// derived from the same embed FS RunMigrations reads.
+	names := embeddedMigrationNames(t)
+	target := strings.TrimSuffix(names[len(names)-1], ".sql")
+
+	// Seed 5 prior "attempts" for this bracket, oldest first, timed
+	// RELATIVE to now (minutes in the past) so the real snapshot
+	// RunMigrations takes is always strictly newest — hardcoded dates
+	// made this test time-of-day dependent.
+	if err := os.MkdirAll(opts.SnapshotDir, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot dir: %v", err)
+	}
+	var seeded []string
+	for i := 0; i < 5; i++ {
+		ts := time.Now().UTC().Add(-time.Duration(10-i) * time.Minute)
+		name := formatMigrationSnapshotName(target, ts)
+		seeded = append(seeded, name)
+		writeSnapPair(t, opts.SnapshotDir, name)
+	}
+	anchor := seeded[0]
+
+	err := RunMigrations(db, opts)
+	if err == nil {
+		t.Fatal("expected RunMigrations to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "restore from ") {
+		t.Errorf("failure-path prune must not change the error: got %q", err.Error())
+	}
+
+	// Bounded: at most migrationSnapshotKeep snapshots remain (5 seeded
+	// + 1 real minus pruning).
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n > migrationSnapshotKeep {
+		t.Errorf("snapshot dir holds %d snapshots after failure, want <= %d", n, migrationSnapshotKeep)
+	}
+	// Anchored: the oldest bracket snapshot survived the prune.
+	if _, statErr := os.Stat(filepath.Join(opts.SnapshotDir, anchor)); statErr != nil {
+		t.Errorf("bracket anchor %s was pruned on the failure path: %v", anchor, statErr)
+	}
+}
+
+// TestRunMigrations_RepeatedFailuresStayBounded drives the failure path
+// twice end-to-end (two real snapshots ~1.1s apart so their
+// seconds-precision names differ) and asserts the directory converges
+// instead of growing — the crash-loop shape itself.
+func TestRunMigrations_RepeatedFailuresStayBounded(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	failMigrations(t, db)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	if err := RunMigrations(db, opts); err == nil {
+		t.Fatal("attempt 1: expected failure, got nil")
+	}
+	firstCount := countSnapshotFiles(t, opts.SnapshotDir)
+	if firstCount != 1 {
+		t.Fatalf("after attempt 1: %d snapshots, want 1", firstCount)
+	}
+
+	time.Sleep(1100 * time.Millisecond) // distinct seconds-precision filename
+
+	if err := RunMigrations(db, opts); err == nil {
+		t.Fatal("attempt 2: expected failure, got nil")
+	}
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n > migrationSnapshotKeep {
+		t.Errorf("after attempt 2: %d snapshots, want <= %d", n, migrationSnapshotKeep)
+	}
+}
