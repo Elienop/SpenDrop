@@ -124,8 +124,30 @@ type createTransactionRequest struct {
 // transactionResponse is the JSON output for a single transaction including
 // joined category info.
 type transactionResponse struct {
-	ID               int64    `json:"id"`
-	UserID           int64    `json:"user_id"`
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+	// CreatedBy names UserID — who entered this row — so a member can tell
+	// their own rows from their household's without resolving user_id
+	// client-side. They cannot: GET /users is admin-only, so before this
+	// field a member learned a row was somebody else's only when Save came
+	// back 403.
+	//
+	// It carries users.display_name, NOT users.username, because display_name
+	// is what this app shows wherever it names a person (the sidebar renders
+	// display_name as the primary label with @username beneath it; Settings
+	// copy uses display_name throughout). The key is deliberately not called
+	// "username" — carrying a display name under that key would misdescribe
+	// the value and collide with the login-identifier meaning `username` has
+	// everywhere else on the wire.
+	//
+	// Display-only. It changes no ownership or authorization semantics: the
+	// list was already household-wide, and every mutation path's 403/404
+	// behaviour and audit attribution are untouched.
+	//
+	// The key is ALWAYS emitted (no omitempty) so the frontend never has to
+	// tell "absent" from "unknown". An empty string means the creator's user
+	// row is gone — see the LEFT JOIN in handleListTransactions.
+	CreatedBy        string   `json:"created_by"`
 	Date             string   `json:"date"`
 	Amount           float64  `json:"amount"`
 	OriginalAmount   *float64 `json:"original_amount,omitempty"`
@@ -155,10 +177,17 @@ type transactionListResponse struct {
 // dropped in migration 010 — integer cents are now the only money columns,
 // so the handler path cannot touch a float sum and float drift is impossible
 // by construction for every aggregation that flows through this function.
-func toTransactionResponse(t database.Transaction) transactionResponse {
+// createdBy is the display name of t.UserID. It is a parameter rather than
+// something derived here because database.Transaction carries only the id: the
+// list path gets the name from its LEFT JOIN, and the create paths take it from
+// the authenticated user's stored DisplayName, who by construction is the row's
+// owner. Making it explicit means a new emit site cannot silently ship a blank
+// attribution — the compiler asks the question.
+func toTransactionResponse(t database.Transaction, createdBy string) transactionResponse {
 	resp := transactionResponse{
 		ID:          t.ID,
 		UserID:      t.UserID,
+		CreatedBy:   createdBy,
 		Date:        t.Date.Format("2006-01-02"),
 		Amount:      centsToDollars(t.AmountCents),
 		Description: t.Description,
@@ -282,15 +311,28 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 
 	whereClause, args := buildTransactionWhereClause(q)
 
-	// Soft-delete filter: list endpoints only ever surface live rows.
-	// buildTransactionWhereClause is shared with the trash view, so the
-	// deleted_at predicate is applied here by the caller instead of inside
-	// the helper. Every live-transactions read path in this file does the
-	// same: append "AND t.deleted_at IS NULL" (or the "WHERE" form when the
-	// helper returned an empty clause).
+	// Soft-delete filter: list endpoints only ever surface live rows. The
+	// deleted_at predicate is applied here by the caller rather than inside
+	// buildTransactionWhereClause, so the live-vs-all choice stays visible at
+	// each call site. Every live-transactions read path does the same: append
+	// "AND t.deleted_at IS NULL" (or the "WHERE" form when the helper returned
+	// an empty clause).
+	//
+	// The helper's consumers are exactly: this list endpoint, the XLSX export
+	// (export_handlers.go), delete-by-filter, both update-by-filter branches,
+	// and enumerateFilterCells. The TRASH view is NOT one of them — it reads
+	// through the sqlc ListDeleted* queries and accepts no ?search=, so
+	// widening this predicate cannot reach it. (An older version of this
+	// comment claimed the opposite and misstated the blast radius of any
+	// change here.)
 	liveClause := appendLiveTransactionsFilter(whereClause)
 
-	// Count query
+	// Count query. Deliberately does NOT carry the users LEFT JOIN the data
+	// query below adds: no filter references u, and a LEFT JOIN on a unique
+	// key cannot change the row count, so joining here would be work that
+	// buys nothing. If that join ever becomes an inner one, total and the
+	// returned rows would disagree — which is what
+	// TestHandleListTransactions_TotalMatchesReturnedRows watches for.
 	countQuery := "SELECT COUNT(*) FROM transactions t JOIN categories c ON t.category_id = c.id" + liveClause
 	var total int
 	if err := h.db.QueryRowContext(r.Context(), countQuery, args...).Scan(&total); err != nil {
@@ -309,12 +351,23 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	// list path consumes cents and converts to dollars exactly once at the
 	// wire edge via centsToDollars — no per-row float round-trip, so no
 	// IEEE-754 drift in the list endpoint.
+	//
+	// users is LEFT joined, not inner joined, and that is the whole
+	// safety story for the attribution column: transactions.user_id is
+	// NOT NULL REFERENCES users(id) ON DELETE CASCADE, so a row whose
+	// creator is gone should not exist — but a restored backup or a
+	// connection that lost _foreign_keys=on can produce one. Under an
+	// inner join such a row would silently VANISH from the ledger and
+	// from every total computed off this list. Under the LEFT JOIN it
+	// renders with an empty creator, which is a cosmetic gap rather than
+	// missing money.
 	offset := (page - 1) * perPage
 	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount_cents, t.original_amount_cents, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
-		c.name AS category_name, c.type AS category_type
+		c.name AS category_name, c.type AS category_type, u.display_name
 		FROM transactions t
-		JOIN categories c ON t.category_id = c.id` + liveClause + orderClause + ` LIMIT ? OFFSET ?`
+		JOIN categories c ON t.category_id = c.id
+		LEFT JOIN users u ON t.user_id = u.id` + liveClause + orderClause + ` LIMIT ? OFFSET ?`
 
 	dataArgs := make([]any, len(args))
 	copy(dataArgs, args)
@@ -341,11 +394,14 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 			updatedAt    time.Time
 			categoryName string
 			categoryType string
+			// Nullable because of the LEFT JOIN, not because display names can
+			// be empty — the column is NOT NULL on users.
+			createdBy sql.NullString
 		)
 		if err := rows.Scan(
 			&tr.ID, &tr.UserID, &date, &amountCents, &origAmtCents, &origCur,
 			&tr.Description, &tr.CategoryID, &tags, &notes, &createdAt, &updatedAt,
-			&categoryName, &categoryType,
+			&categoryName, &categoryType, &createdBy,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
@@ -356,6 +412,9 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 		tr.UpdatedAt = updatedAt.Format(time.RFC3339)
 		tr.CategoryName = categoryName
 		tr.CategoryType = categoryType
+		// NULL only when the LEFT JOIN found no user row; the empty string it
+		// maps to is the documented "creator unknown" value on the wire.
+		tr.CreatedBy = createdBy.String
 		if origAmtCents.Valid {
 			v := centsToDollars(origAmtCents.Int64)
 			tr.OriginalAmount = &v
@@ -533,7 +592,10 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		// live-update broadcast — because no row changed. Firing the activity
 		// push here would notify the household a second time about a
 		// transaction that was added once.
-		writeJSON(w, http.StatusCreated, toTransactionResponse(existing))
+		// The caller's stored DisplayName is the right attribution even on a
+		// replay: the row was looked up by (user_id = user.ID,
+		// idempotency_key), so the caller owns it by construction.
+		writeJSON(w, http.StatusCreated, toTransactionResponse(existing, user.DisplayName))
 		return
 	}
 	if err != nil {
@@ -560,7 +622,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// dashboard totals, the reports aggregates, and the budget cells.
 	h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 
-	writeJSON(w, http.StatusCreated, toTransactionResponse(txn))
+	writeJSON(w, http.StatusCreated, toTransactionResponse(txn, user.DisplayName))
 }
 
 // handleUpdateTransaction updates an existing transaction by ID.
@@ -902,7 +964,9 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 
 		minBatchDate = earliestDate(minBatchDate, txn.Date)
 		cellSet[cellForDate(txn.CategoryID, txn.Date)] = struct{}{}
-		results = append(results, toTransactionResponse(txn))
+		// Every row in a batch is created with UserID: user.ID, so the caller
+		// is the creator of all of them.
+		results = append(results, toTransactionResponse(txn, user.DisplayName))
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -2135,6 +2199,7 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 	// updated_at doesn't perturb the trailing comma.
 	var setClauses []string
 	var args []any
+	var patchDate time.Time
 	if patch.Date != nil {
 		// patch.Date is the canonical YYYY-MM-DD form returned by
 		// validateDate. Re-parse to a time.Time so the driver writes the
@@ -2146,6 +2211,7 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		if err != nil {
 			return 0, time.Time{}, fmt.Errorf("invalid date in patch: %w", err)
 		}
+		patchDate = d
 		setClauses = append(setClauses, "date = ?")
 		args = append(args, d)
 	}
@@ -2157,11 +2223,10 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		setClauses = append(setClauses, "category_id = ?")
 		args = append(args, *patch.CategoryID)
 	}
-	// This branch only runs for tags-free patches, and buildUpdatePatch
-	// rejects an empty patch, so at least one dedupe-identity input (date,
-	// description, category) always changes here. Clear the stale identity —
-	// see the note on the UpdateTransaction query for what keeping it costs.
-	setClauses = append(setClauses, "content_hash = NULL")
+	if clause, clauseArgs := contentHashClearClause(patch, patchDate); clause != "" {
+		setClauses = append(setClauses, clause)
+		args = append(args, clauseArgs...)
+	}
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 
 	whereClause, whereArgs := buildTransactionWhereClause(r.URL.Query())
@@ -2196,6 +2261,79 @@ func (h *Handler) runUpdateByFilterNoTags(r *http.Request, tx *sql.Tx, user data
 		return 0, time.Time{}, fmt.Errorf("read update result: %w", err)
 	}
 	return n, time.Time{}, nil
+}
+
+// contentHashClearClause renders the SET fragment that clears a row's dedupe
+// identity, and only for the rows whose identity the patch actually MOVES. It
+// returns an empty clause (and no args) when the patch carries no
+// ComputeContentHash input at all, which leaves every matched row anchored.
+//
+// The clause exists because runUpdateByFilterNoTags is one UPDATE over an
+// unbounded row set, so "did this move?" cannot be answered per row in Go
+// without turning the branch into the read-then-write loop the tags branch
+// uses. It used to append a flat `content_hash = NULL` instead, on the
+// reasoning that a non-empty tags-free patch must be changing a hash input.
+// That reasoning is the trap this file documents everywhere else: the
+// statement rewriting a column is not the column's VALUE moving. A filter
+// update that resends what the rows already hold — a saved filter replayed
+// over its own output, a Replace All whose target rows already carry the new
+// description, a client that submits every field it rendered — moved nothing
+// and de-anchored the whole selection from import dedupe anyway. Re-importing
+// the sheet those rows came from then doubles all of them, permanently:
+// BackfillContentHashes runs at boot and only WHERE content_hash IS NULL, so
+// once the duplicates own the hashes the edited rows are skipped forever.
+//
+// Two properties of SQLite make the single statement enough:
+//
+//   - Every SET expression is evaluated against the row's PRE-update values,
+//     so `date(date) IS NOT date(?)` compares the stored date to the incoming
+//     one even though `date = ?` sits in the same SET list. Load-bearing: were
+//     it otherwise, the comparison would read new-against-new, report "not
+//     moved" for every row, and turn the clear off entirely.
+//   - The comparisons mirror ComputeContentHash's own normalizers, so a
+//     re-cased or re-padded resend ("  COFFEE " over "Coffee") reports "not
+//     moved" exactly as database.HashInputsMoved does on the sibling branch,
+//     and date() folds a stored offset to the same UTC day normalizeHashDate
+//     does. amount_cents is absent because UpdatePatch cannot carry it.
+//
+// This is the one place that restates the normalization instead of calling
+// database.HashInputsMoved, and the restatement is not exact: SQLite's lower()
+// folds ASCII only, so re-casing a non-ASCII description ("CAFÉ" -> "café")
+// reads as moved here and as unmoved on every Go path. The divergence is
+// one-directional — SQLite's fold is strictly weaker, so it can only
+// over-report a move — which costs an unnecessary clear (the row leaves dedupe
+// until the next boot re-anchors it) and never the dangerous direction of
+// keeping a hash that has become a lie. Byte-identical values always fold
+// identically, so the preserve invariant holds for every input. If this
+// branch ever gains a per-row read for another reason, drop the mirror and
+// call database.HashInputsMoved instead.
+func contentHashClearClause(patch database.UpdatePatch, patchDate time.Time) (string, []any) {
+	var moved []string
+	var args []any
+	if patch.Date != nil {
+		moved = append(moved, "date(date) IS NOT date(?)")
+		args = append(args, patchDate)
+	}
+	if patch.Description != nil {
+		moved = append(moved, "lower(trim(description)) IS NOT lower(trim(?))")
+		args = append(args, *patch.Description)
+	}
+	if patch.CategoryID != nil {
+		moved = append(moved, "category_id IS NOT ?")
+		args = append(args, *patch.CategoryID)
+	}
+	if len(moved) == 0 {
+		// Unreachable today: buildUpdatePatch rejects an empty patch and this
+		// branch runs only when Tags is nil, so one of the three above is
+		// always set. It is the correct default for the next non-identity
+		// patch field (notes, say) rather than a hazard to guard against —
+		// a field that does not feed the hash must never clear it.
+		return "", nil
+	}
+	return fmt.Sprintf(
+		"content_hash = CASE WHEN %s THEN NULL ELSE content_hash END",
+		strings.Join(moved, " OR "),
+	), args
 }
 
 // runUpdateByFilterTags is the tags read-then-write branch of update-by-filter.

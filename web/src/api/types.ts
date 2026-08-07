@@ -12,6 +12,23 @@ export interface User {
 export interface Transaction {
   id: number;
   user_id: number;
+  /**
+   * Who entered this row. It names `user_id`, which a member cannot resolve
+   * themselves because `GET /users` is admin-only — before this field they
+   * learned a row was somebody else's only when Save came back 403.
+   *
+   * Carries `users.display_name`, not `users.username`: display_name is what
+   * this app shows wherever it names a person. Render it as a plain name —
+   * NOT in the Sidebar's `@handle` idiom, which is reserved for the login
+   * identifier.
+   *
+   * Always present on the wire (the backend emits it without `omitempty`),
+   * so there is no absent case to distinguish. The empty string means the
+   * creator's user row is gone — render a neutral fallback, never a blank.
+   *
+   * Display only: it changes no ownership or authorization semantics.
+   */
+  created_by: string;
   date: string;
   amount: number;
   original_amount: number | null;
@@ -35,8 +52,15 @@ export interface Transaction {
  * backend's `deletedTransactionResponse` deliberately does NOT use
  * `omitempty` on this field so the recovery surface always shows the
  * exact moment each row was tombstoned, even for the zero-value case.
+ *
+ * `created_by` is omitted on purpose: `deletedTransactionResponse` is a
+ * SEPARATE struct from `transactionResponse` (see the comment above it) and
+ * has not grown the attribution field. Inheriting it would let Trash code
+ * read `tx.created_by`, type-check clean, and get `undefined` at runtime —
+ * the same shape as the migration-010 money regression. Delete the `Omit`
+ * when the trash endpoints start emitting it.
  */
-export interface DeletedTransaction extends Transaction {
+export interface DeletedTransaction extends Omit<Transaction, 'created_by'> {
   deleted_at: string;
 }
 

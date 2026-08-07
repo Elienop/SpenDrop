@@ -38,6 +38,7 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
   return {
     id: 1,
     user_id: 1,
+    created_by: 'Elie',
     date: '2026-04-01',
     amount: 25.5,
     original_amount: null,
@@ -113,6 +114,43 @@ describe('TransactionRow tags display', () => {
   });
 });
 
+// B6j. The ledger is household-wide but GET /users is admin-only, so a member
+// could not resolve user_id herself — she found out a row was her spouse's when
+// Save came back 403. The creator therefore has to be readable on the resting
+// row, with no hover and no click (Radix tooltips are dead on touch, and the
+// phone is the primary surface).
+describe('TransactionRow creator attribution', () => {
+  it('shows who entered the row without any interaction', () => {
+    // created_by carries display_name, so it renders as a plain name — the
+    // Sidebar's "@handle" form belongs to the login identifier, not this.
+    renderRow(makeTx({ created_by: 'Partner Name' }));
+    const creator = screen.getByText('Partner Name');
+    expect(creator).toBeInTheDocument();
+    // A bare name in a muted line does not announce what it is.
+    expect(creator.closest('p')).toHaveTextContent('Entered by Partner Name');
+  });
+
+  it('renders a neutral fallback when the creator account is gone', () => {
+    // "" is the backend's documented "creator unknown" value (the list query's
+    // LEFT JOIN found no user row). It must never surface as a blank.
+    renderRow(makeTx({ created_by: '' }));
+    const fallback = screen.getByText('Unknown');
+    expect(fallback).toBeInTheDocument();
+    expect(fallback.closest('p')).toHaveTextContent('Entered by Unknown');
+  });
+
+  it('keeps the description readable alongside the attribution', () => {
+    // The creator line shares the description cell, so the cell's truncation
+    // (and the title= that makes an over-long imported description reachable)
+    // has to survive moving onto an inner element.
+    const long = 'x'.repeat(400);
+    renderRow(makeTx({ description: long, created_by: 'Elie' }));
+    const desc = screen.getByTitle(long);
+    expect(desc).toHaveClass('truncate');
+    expect(screen.getByText('Elie')).toBeInTheDocument();
+  });
+});
+
 describe('TransactionRow actions menu', () => {
   it('exposes an actions menu trigger with an explicit aria-label', () => {
     renderRow(makeTx({ description: 'Weekly groceries' }));
@@ -176,6 +214,28 @@ describe('TransactionRow tags editing', () => {
         expect.objectContaining({ tags: 'groceries' }),
       );
     });
+  });
+
+  // B6d. onError raises a page-level banner. Nothing used to lower it, so a
+  // save that failed once left "Failed to save" standing over every later
+  // successful edit of any row.
+  it('clears the error on a save that succeeds after one that failed', async () => {
+    const onError = vi.fn<TransactionRowProps['onError']>();
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValue(undefined);
+    renderRow(makeTx(), onUpdate, undefined, { onError });
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+    await waitFor(() => expect(onError).toHaveBeenCalledWith('boom'));
+
+    // Still in edit mode after the failure, so the retry is the same form.
+    fireEvent.submit(form);
+    await waitFor(() => expect(onError).toHaveBeenLastCalledWith(''));
   });
 
   it('resets tags on cancel', async () => {

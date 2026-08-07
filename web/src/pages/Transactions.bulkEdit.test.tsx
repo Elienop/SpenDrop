@@ -58,11 +58,23 @@ describe('BulkEditDialog', () => {
     // it; SelectContent items are present-but-hidden in the DOM, hence
     // getAllByText rather than getByText).
     expect(screen.getAllByText(/no change/i).length).toBeGreaterThan(0);
-    // Apply button: visible text is "Apply to 12", aria-label is the
-    // accessible name "Apply changes to 12 transactions" (spec §4.4).
+    // Apply button: the accessible name IS the visible text, so it satisfies
+    // WCAG 2.5.3 by construction — there is no aria-label to diverge from it.
+    const apply = screen.getByRole('button', {
+      name: 'Apply to 12 transactions',
+    });
+    expect(apply).toBeDisabled();
+    expect(apply).not.toHaveAttribute('aria-label');
+  });
+
+  // I3. The Apply button was pluralized earlier; the title above it was not,
+  // so a one-row selection read "Edit 1 transactions" directly over
+  // "Apply to 1 transaction".
+  test('pluralizes the title for a single-row selection', () => {
+    renderDialog({ count: 1 });
     expect(
-      screen.getByRole('button', { name: /apply.*to 12/i }),
-    ).toBeDisabled();
+      screen.getByRole('heading', { name: 'Edit 1 transaction' }),
+    ).toBeInTheDocument();
   });
 
   test('bulk-edit dialog exposes an accessible description', () => {
@@ -190,6 +202,41 @@ describe('BulkEditConfirmDialog', () => {
     );
     const node = screen.getByText((content) => content.includes('…'));
     expect(node).toBeInTheDocument();
+  });
+
+  test('pluralizes a single-row selection in both the title and the button', () => {
+    render(
+      <BulkEditConfirmDialog
+        open={true} onCancel={() => {}} onConfirm={() => {}}
+        count={1} patch={{ patch: { category_id: 5 } }} categoryName={() => 'Groceries'}
+      />
+    );
+    expect(
+      screen.getByText('Apply changes to 1 transaction?'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Apply changes to 1 transaction' }),
+    ).toBeInTheDocument();
+  });
+
+  // WCAG 2.5.3 Label in Name: the accessible name must contain the visible
+  // text. It used to read "Apply changes to N transactions" over a visible
+  // "Apply to N", so a speech-control user saying "click Apply to 3" matched
+  // nothing. Querying by role+name IS that check — getByRole resolves the
+  // accessible name exactly the way an assistive technology does, so an
+  // aria-label that diverges from the visible text fails this outright.
+  test('confirm button accessible name contains its visible text', () => {
+    render(
+      <BulkEditConfirmDialog
+        open={true} onCancel={() => {}} onConfirm={() => {}}
+        count={3} patch={{ patch: { category_id: 5 } }} categoryName={() => 'Groceries'}
+      />
+    );
+    const btn = screen.getByRole('button', {
+      name: 'Apply changes to 3 transactions',
+    });
+    expect(btn).toHaveTextContent('Apply changes to 3 transactions');
+    expect(btn).not.toHaveAttribute('aria-label');
   });
 
   test('confirm fires onConfirm', async () => {

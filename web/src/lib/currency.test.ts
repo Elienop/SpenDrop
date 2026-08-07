@@ -13,6 +13,7 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
   return {
     id: 1,
     user_id: 1,
+    created_by: 'Elie',
     date: '2026-04-17',
     amount: 100,
     original_amount: null,

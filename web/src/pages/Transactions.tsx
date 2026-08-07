@@ -342,11 +342,15 @@ export function Transactions() {
     filters,
     setFilter,
     clearFilters,
+    searchInput,
+    setSearchInput,
     clearPanelFilters,
     setPage,
     setPerPage,
     setSort,
     initialLoad,
+    showingPrevious,
+    searchPending,
     error,
     createTransaction,
     updateTransaction,
@@ -357,6 +361,17 @@ export function Transactions() {
     buildFilterQuery,
     refetch,
   } = useTransactions();
+
+  // Every control whose scope is "everything matching the current filters"
+  // is gated on this one predicate. Two different windows put the visible
+  // numbers and the write's actual target out of step, and both are fatal in
+  // the same way (B4: a labelled count that describes a different set than
+  // the write touches):
+  //   showingPrevious — the term has reached the query key but the new page
+  //                     has not landed, so `total` still counts the old one.
+  //   searchPending   — the user has typed past the committed term, so
+  //                     buildFilterQuery() still serializes the old one.
+  const filterScopeUnsettled = showingPrevious || searchPending;
 
   const [suggestionsKey, setSuggestionsKey] = useState(0);
   const suggestions = useSuggestions(suggestionsKey);
@@ -483,8 +498,26 @@ export function Transactions() {
   const handleReplaceAll = useCallback(() => {
     const desc = replaceText.trim();
     if (!desc || !filters.search.trim()) return;
+    // `total` is still the previous filter's count while the new page is in
+    // flight, but the write resolves buildFilterQuery() against the CURRENT
+    // filters — firing here would rename a set the "Replace All (N)" label
+    // never described. The guard lives in the handler, not just on the
+    // button: the text input's Enter key reaches this same path, which is
+    // also the whole reason the debounce window has to be covered — type,
+    // then Enter inside 250ms, and the button never gets a say.
+    if (filterScopeUnsettled) return;
     setReplaceConfirm({ patch: { description: desc } });
-  }, [replaceText, filters.search]);
+  }, [replaceText, filters.search, filterScopeUnsettled]);
+
+  // Retiring the replace bar takes focus with it: the confirm dialog restored
+  // focus to the "Replace All" button on close, and that button lives inside
+  // the bar we are about to unmount — so without a deliberate target, focus
+  // lands on <body>. The page heading is the same anchor a row delete uses.
+  const closeReplaceBar = useCallback(() => {
+    setShowReplace(false);
+    setReplaceText('');
+    pageHeadingRef.current?.focus();
+  }, []);
 
   // Fires after the confirm click. Deliberately independent of
   // dispatchBulkEdit: that path clears the row selection on success,
@@ -499,15 +532,13 @@ export function Transactions() {
         toast.success(
           `Renamed ${updated} transaction${updated !== 1 ? 's' : ''}`,
         );
-        setShowReplace(false);
-        setReplaceText('');
+        closeReplaceBar();
       } catch (err) {
         if (err instanceof RefetchAfterMutationError) {
           toast.error(
             `Rename applied, but refresh failed — please reload to see the latest. (${err.message})`,
           );
-          setShowReplace(false);
-          setReplaceText('');
+          closeReplaceBar();
         } else {
           toast.error(
             `Rename failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -518,7 +549,7 @@ export function Transactions() {
         setReplacing(false);
       }
     },
-    [buildFilterQuery, bulkUpdateByFilter],
+    [buildFilterQuery, bulkUpdateByFilter, closeReplaceBar],
   );
 
   const handleSelect = useCallback((id: number, checked: boolean) => {
@@ -546,8 +577,19 @@ export function Transactions() {
   );
 
   const handleSelectAllMatching = useCallback(() => {
+    // Defence-in-depth, currently UNREACHABLE: the only caller is the banner
+    // button, which the !filterScopeUnsettled render guard hides, and unlike
+    // Replace All there is no keyboard path around it — so no test can drive
+    // this line and none pins it (deep review, 2026-08-07). It exists for the
+    // day the render guard is relaxed from hidden to disabled (the trade-off
+    // the Replace All comment weighs): entering 'all-matching' routes the
+    // next delete/edit through the filter endpoints, so if this handler ever
+    // becomes reachable in the unsettled window, the gate must already be on
+    // the state transition. If you make it reachable, copy Replace All's
+    // bypass test + positive control.
+    if (filterScopeUnsettled) return;
     setSelectionScope('all-matching');
-  }, []);
+  }, [filterScopeUnsettled]);
 
   const handleClearSelection = useCallback(() => {
     setSelectedIds(new Set());
@@ -623,6 +665,11 @@ export function Transactions() {
   const dispatchBulkEdit = useCallback(
     async (p: ComputedPatchResult) => {
       const isFilterMode = selectionScope === 'all-matching';
+      // Whether this success leaves the selection empty — which unmounts the
+      // selection bar, and with it the "Edit (N)" button the dialog will try
+      // to restore focus to. Same failure as Replace All had: Radix aims at a
+      // node that no longer exists and focus lands on <body>.
+      let selectionEmptied = false;
       try {
         if (isFilterMode) {
           const filterQuery = buildFilterQuery();
@@ -631,6 +678,7 @@ export function Transactions() {
             `${n} transaction${n === 1 ? '' : 's'}`;
           toast.success(`Updated ${noun(updated)}`);
           handleClearSelection();
+          selectionEmptied = true;
         } else {
           const { updated, skipped, visibleIds } = await bulkUpdate({
             ids: [...selectedIds],
@@ -642,6 +690,7 @@ export function Transactions() {
             [...selectedIds].filter((id) => visible.has(id)),
           );
           setSelectedIds(newSelection);
+          selectionEmptied = newSelection.size === 0;
           const dropped = prevSize - newSelection.size;
           const noun = (n: number) =>
             `${n} transaction${n === 1 ? '' : 's'}`;
@@ -657,6 +706,10 @@ export function Transactions() {
         }
         setBulkEditOpen(false);
         setBulkConfirm(null);
+        // Only when the bar is going away. If a page-mode edit left rows
+        // selected, the "Edit (N)" trigger is still mounted and Radix's own
+        // restore puts focus back on it, which is the better target.
+        if (selectionEmptied) pageHeadingRef.current?.focus();
       } catch (err) {
         if (err instanceof RefetchAfterMutationError) {
           toast.error(
@@ -800,8 +853,8 @@ export function Transactions() {
       </div>
 
       <TransactionToolbar
-        search={filters.search}
-        onSearchChange={(v) => setFilter('search', v)}
+        search={searchInput}
+        onSearchChange={setSearchInput}
         type={filters.type}
         onTypeChange={(v) => setFilter('type', v)}
         activeFilterCount={activeFilterCount}
@@ -845,7 +898,9 @@ export function Transactions() {
                 size="sm"
                 className="h-8 text-xs"
                 onClick={handleReplaceAll}
-                disabled={replacing || !replaceText.trim()}
+                disabled={
+                  replacing || filterScopeUnsettled || !replaceText.trim()
+                }
               >
                 {replacing ? 'Replacing...' : `Replace All (${total})`}
               </Button>
@@ -948,7 +1003,32 @@ export function Transactions() {
       {(error || rowError) && (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
-          <AlertDescription>{error || rowError}</AlertDescription>
+          <AlertDescription className="flex items-start justify-between gap-3">
+            <span>{error || rowError}</span>
+            {/*
+              Dismiss is offered only for `rowError` — a save failure, which
+              is a past event the user can acknowledge. `error` is the list
+              query's CURRENT state; hiding it would claim the table loaded
+              when it didn't, and the next render would bring it straight
+              back. A successful row save also clears rowError on its own
+              (TransactionRow.handleSave), so the banner can't outlive the
+              failure it describes.
+            */}
+            {!error && (
+              <button
+                type="button"
+                onClick={() => setRowError('')}
+                aria-label="Dismiss error"
+                className={cn(
+                  'shrink-0 rounded-sm opacity-70 ring-offset-background',
+                  'transition-opacity hover:opacity-100',
+                  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+                )}
+              >
+                <X className="size-4" />
+              </button>
+            )}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -959,7 +1039,25 @@ export function Transactions() {
           No transactions found. Add one above to get started.
         </Card>
       ) : (
-        <Card ref={cardRef} className="overflow-hidden">
+        // Dim + aria-busy answer one question: does what you are looking at
+        // still answer what you asked for? Only `showingPrevious` makes it
+        // "no" — the rows are held over from the previous filter/page/sort
+        // while the new one loads (see `placeholderData` in useTransactions).
+        //
+        // Deliberately NOT keyed on `fetching`. Every household save reaches
+        // this tab as an SSE-driven same-key refetch, and those rows are
+        // correct and settled; pulsing the table on each one is noise about
+        // work the user neither asked for nor can act on. aria-busy moves
+        // with the dim rather than tracking `fetching`, for the same reason:
+        // flipping it on every partner save is that pulse in non-visual form.
+        <Card
+          ref={cardRef}
+          aria-busy={showingPrevious || undefined}
+          className={cn(
+            'overflow-hidden transition-opacity duration-200',
+            showingPrevious && 'opacity-60',
+          )}
+        >
           <PaginationBar
             page={page}
             totalPages={totalPages}
@@ -1012,8 +1110,16 @@ export function Transactions() {
                 visible row AND there are more matching rows beyond the
                 current page. Clicking switches to the atomic filter-based
                 delete path. Hidden once scope is already 'all-matching'.
+
+                Also hidden — not merely disabled — for the whole of
+                `filterScopeUnsettled`: BOTH numbers it prints belong to the
+                filter the rows were fetched under, and the filter-scoped
+                delete/edit it opts into resolves against whatever is
+                committed when it fires. Disabling would leave the wrong
+                count sitting there as if it were a fact.
               */}
-              {selectionScope === 'page' &&
+              {!filterScopeUnsettled &&
+                selectionScope === 'page' &&
                 transactions.length > 0 &&
                 transactions.every((tx) => selectedIds.has(tx.id)) &&
                 total > transactions.length && (
@@ -1188,8 +1294,18 @@ export function Transactions() {
         <BulkEditConfirmDialog
           open={true}
           onCancel={() => setBulkConfirm(null)}
+          // Close-before-dispatch, matching the Replace All call site below.
+          // Both dialogs auto-close anyway — AlertDialogAction fires
+          // onOpenChange(false) right after onConfirm, which routes through
+          // onCancel — so relying on dispatchBulkEdit's own setBulkConfirm(null)
+          // meant the confirm-state lifetime was decided by Radix rather than
+          // here, and read as "stays open to retry" when it does not. Retry
+          // after a failure is offered by the BulkEditDialog underneath, which
+          // keeps the user's patch and closes only on success.
           onConfirm={() => {
-            void dispatchBulkEdit(bulkConfirm);
+            const p = bulkConfirm;
+            setBulkConfirm(null);
+            void dispatchBulkEdit(p);
           }}
           count={selectionCount}
           patch={bulkConfirm}

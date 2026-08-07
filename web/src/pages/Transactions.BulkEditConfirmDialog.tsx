@@ -16,6 +16,10 @@ function trunc(s: string): string {
   return s.length > TRUNCATE_AT ? s.slice(0, TRUNCATE_AT) + '…' : s;
 }
 
+function transactionCount(n: number): string {
+  return `${n} transaction${n === 1 ? '' : 's'}`;
+}
+
 interface Props {
   open: boolean;
   onCancel: () => void;
@@ -47,7 +51,7 @@ export function BulkEditConfirmDialog({
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>
-            Apply changes to {count} transactions?
+            Apply changes to {transactionCount(count)}?
           </AlertDialogTitle>
           <AlertDialogDescription asChild>
             <div>
@@ -62,11 +66,20 @@ export function BulkEditConfirmDialog({
         <AlertDialogFooter>
           <AlertDialogCancel onClick={onCancel}>Cancel</AlertDialogCancel>
           {/* Default primary palette — bulk-edit is recoverable, not destructive (spec §3.4) */}
-          <AlertDialogAction
-            onClick={onConfirm}
-            aria-label={`Apply changes to ${count} transactions`}
-          >
-            Apply to {count}
+          {/*
+            No aria-label. The old one read "Apply changes to N transactions"
+            over a visible "Apply to N", so the accessible name did not
+            contain the visible label — WCAG 2.5.3 (Label in Name), which
+            breaks speech control: saying "click Apply to 5" matches nothing.
+            Spelling the phrase out in the visible text makes the two
+            identical and leaves nothing to drift apart.
+
+            "Apply changes to N", not "Apply to N": the dialog that opens this
+            one has its own "Apply to N" submit button, and while both are
+            mounted two buttons would answer to the same spoken name.
+          */}
+          <AlertDialogAction onClick={onConfirm}>
+            Apply changes to {transactionCount(count)}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

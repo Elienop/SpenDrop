@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, within, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -232,6 +232,129 @@ describe('Budgets page', () => {
           { amount: 5000 },
         );
       });
+    });
+
+    // B6a. Clearing a monthly budget now really unsets it, via
+    // DELETE /budgets/{year}/{month} — the verb PUT cannot express, since it
+    // rejects amount <= 0. Clearing is NOT budgeting zero: a month with no row
+    // falls back to the household default_budget in Reports, so the copy has
+    // to name that or the user discovers it from the report instead.
+    test('clearing a monthly budget DELETEs it and names the default fallback', async () => {
+      mockedApi.del.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const label = /Budget for April 2026/i;
+      await waitFor(() => {
+        expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe(
+          '3000',
+        );
+      });
+
+      await user.clear(screen.getByLabelText(label));
+      await user.click(screen.getByRole('button', { name: /save budgets/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.del).toHaveBeenCalledWith('budgets/2026/4');
+      });
+      // A cleared month must never be forged into a PUT of 0 — the server
+      // would 400 it, and "budget zero" is a different thing from "no budget".
+      expect(mockedApi.put).not.toHaveBeenCalled();
+      expect(mockedToast.info).not.toHaveBeenCalledWith('No changes to save');
+      expect(mockedToast.success).toHaveBeenCalledWith(
+        expect.stringContaining('April'),
+      );
+      expect(mockedToast.success).toHaveBeenCalledWith(
+        expect.stringContaining('household default budget'),
+      );
+    });
+
+    test('a failed clear puts the row back, so the blank field cannot lie', async () => {
+      // The refetch in the `finally` is what restores it, from real server
+      // state rather than a possibly-stale baseline: April is still on the
+      // server precisely because the DELETE failed.
+      mockedApi.del.mockRejectedValue(new Error('network down'));
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const label = /Budget for April 2026/i;
+      await waitFor(() => {
+        expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe(
+          '3000',
+        );
+      });
+
+      await user.clear(screen.getByLabelText(label));
+      await user.click(screen.getByRole('button', { name: /save budgets/i }));
+
+      await waitFor(() => {
+        expect(mockedToast.error).toHaveBeenCalledWith(
+          expect.stringContaining('April'),
+        );
+      });
+      await waitFor(() => {
+        expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe(
+          '3000',
+        );
+      });
+    });
+
+    test('a pending clear counts as an unsaved change', async () => {
+      // dirtyCount drives the "(N)" badge AND the year-change / navigation /
+      // beforeunload guards. A cleared row used to be excluded on the grounds
+      // that no DELETE was issued for it, so nothing could be lost by walking
+      // away. Now one IS issued, and leaving without saving discards a real
+      // pending change.
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const label = /Budget for April 2026/i;
+      await waitFor(() => {
+        expect((screen.getByLabelText(label) as HTMLInputElement).value).toBe(
+          '3000',
+        );
+      });
+      expect(
+        screen.getByRole('button', { name: 'Save Budgets' }),
+      ).toBeInTheDocument();
+
+      await user.clear(screen.getByLabelText(label));
+
+      expect(
+        screen.getByRole('button', { name: 'Save Budgets (1)' }),
+      ).toBeInTheDocument();
+    });
+
+    test('a cleared month does not suppress the other months that did change', async () => {
+      mockedApi.put.mockResolvedValue({});
+      mockedApi.del.mockResolvedValue({});
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      await waitFor(() => {
+        expect(
+          (screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement)
+            .value,
+        ).toBe('3000');
+      });
+
+      await user.clear(screen.getByLabelText(/Budget for April 2026/i));
+      await user.type(screen.getByLabelText(/Budget for May 2026/i), '1200');
+      await user.click(screen.getByRole('button', { name: /save budgets/i }));
+
+      await waitFor(() => {
+        expect(mockedApi.put).toHaveBeenCalledWith('budgets/2026/5', {
+          amount: 1200,
+        });
+      });
+      expect(mockedApi.del).toHaveBeenCalledWith('budgets/2026/4');
+      // May was PUT, April was DELETEd — neither verb may be applied twice or
+      // to the wrong month.
+      expect(mockedApi.put).toHaveBeenCalledTimes(1);
+      expect(mockedApi.del).toHaveBeenCalledTimes(1);
+      expect(mockedToast.success).toHaveBeenCalledWith(
+        expect.stringContaining('April'),
+      );
     });
 
     test('Set all applies amount to every month and shows Undo', async () => {
@@ -880,6 +1003,98 @@ describe('Budgets page', () => {
         );
       });
       expect(mockedApi.put).not.toHaveBeenCalled();
+    });
+  });
+
+  // C1. The backend 403s BOTH the budgets PUT and the budgets DELETE for
+  // non-admins, so a member must never be able to stage a monthly-budget edit.
+  // Before the gate she could: type in any month, watch the dirty badge climb,
+  // and be blocked by an unsaved-changes prompt she had no way to discharge —
+  // Save would 403 every row. Clearing a month made it worse once that began
+  // issuing a real DELETE.
+  describe('Monthly Budgets panel — as member (read-only)', () => {
+    beforeEach(asMember);
+
+    // Two collisions to dodge, both real:
+    //   - "April" also appears in the Category Limits month picker (and its
+    //     Radix SelectContent items are present-but-hidden in the DOM), so
+    //     scope to the monthly table via its unique "Month" column header.
+    //   - April is the only budgeted month in the fixture, so the card
+    //     header's Annual total renders the SAME "$3,000.00" string; scope to
+    //     the row.
+    function aprilCell(): HTMLElement {
+      const table = screen
+        .getByRole('columnheader', { name: 'Month' })
+        .closest('table');
+      if (!table) throw new Error('monthly budgets table not found');
+      const row = within(table).getByText('April').closest('tr');
+      if (!row) throw new Error('April row not found');
+      return within(row).getByText('$3,000.00');
+    }
+
+    test('shows the budget as text with no input, save, or bulk controls', async () => {
+      renderBudgets();
+
+      await waitFor(() => {
+        expect(screen.getByText(/monthly budgets/i)).toBeInTheDocument();
+      });
+      // The April budget renders as formatted text, not an editable field.
+      expect(
+        screen.queryByLabelText(/Budget for April 2026/i),
+      ).not.toBeInTheDocument();
+      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
+      expect(
+        screen.queryByRole('button', { name: /save budgets/i }),
+      ).not.toBeInTheDocument();
+
+      // Every write control is gone, not merely disabled — a disabled Apply
+      // still advertises an action she cannot perform.
+      expect(
+        screen.queryByLabelText(/Apply amount to all months/i),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /^Apply$/ }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /copy from 2025/i }),
+      ).not.toBeInTheDocument();
+
+      // The year picker stays: it navigates the read view, it does not write.
+      expect(screen.getByLabelText(/Budget year/i)).toBeInTheDocument();
+    });
+
+    test('carries no dirty state, so no unsaved-changes prompt can strand her', async () => {
+      renderBudgets();
+
+      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
+      // The dirty indicator is the thing that drives the discard dialog and
+      // the beforeunload prompt. With nothing to type into, it must not even
+      // be mounted for a member.
+      expect(
+        screen.queryByTestId('budget-dirty-indicator'),
+      ).not.toBeInTheDocument();
+    });
+
+    test('renders the read-only budget with font-mono tabular-nums', async () => {
+      renderBudgets();
+
+      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
+      expect(aprilCell()).toHaveClass('font-mono');
+      expect(aprilCell()).toHaveClass('tabular-nums');
+    });
+
+    test('falls back to em-dash for a month with no budget', async () => {
+      renderBudgets();
+
+      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
+      // Only April is in the fixture; the other 11 months must degrade to "—"
+      // rather than "$NaN". Counted within the monthly table — the Category
+      // Limits section below renders its own em-dashes for unlimited rows.
+      const table = screen
+        .getByRole('columnheader', { name: 'Month' })
+        .closest('table')!;
+      expect(within(table).getAllByText('—')).toHaveLength(11);
+      expect(screen.queryByText(/NaN/)).not.toBeInTheDocument();
     });
   });
 

@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/xuri/excelize/v2"
@@ -89,10 +90,67 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 			wantArgs:  nil,
 		},
 		{
+			// B6i: search spans description, notes and category name. Tags
+			// stay out — they have their own filter.
 			name:      "search",
 			q:         url.Values{"search": {"groceries"}},
-			wantWhere: " WHERE t.description LIKE ? ESCAPE '\\'",
-			wantArgs:  []any{"%groceries%"},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%groceries%", "%groceries%", "%groceries%"},
+		},
+		{
+			// A bare number adds the foreign-amount arm on top of the text
+			// ones, matching original_amount_cents exactly.
+			name:      "numeric search adds the foreign amount arm",
+			q:         url.Values{"search": {"1500000"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR t.original_amount_cents = ?)",
+			wantArgs:  []any{"%1500000%", "%1500000%", "%1500000%", int64(150000000)},
+		},
+		{
+			// Thousands separators are accepted; the text arms still match
+			// the term exactly as typed.
+			name:      "numeric search accepts thousands separators",
+			q:         url.Values{"search": {"1,500,000"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR t.original_amount_cents = ?)",
+			wantArgs:  []any{"%1,500,000%", "%1,500,000%", "%1,500,000%", int64(150000000)},
+		},
+		{
+			// Anything that is not a bare number gets no amount arm, so an
+			// ordinary text search cannot pick up rows by amount.
+			name:      "mixed text search gets no amount arm",
+			q:         url.Values{"search": {"1500000 LBP"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%1500000 LBP%", "%1500000 LBP%", "%1500000 LBP%"},
+		},
+		{
+			// Past MaxTransactionAmount there is no storable row to find, and
+			// clamping would compare against a nonsense value.
+			name:      "out-of-range number gets no amount arm",
+			q:         url.Values{"search": {"9999999999"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%9999999999%", "%9999999999%", "%9999999999%"},
+		},
+		// The next three are the anchors on searchAmountPattern earning their
+		// keep. ParseFloat alone is NOT the guard: it happily accepts every one
+		// of these, so an unanchored pattern would hand the amount arm a value
+		// the user never typed — 100,000 for "1e5", a negative for "-100", and
+		// 123 for a term whose comma groups are not thousands.
+		{
+			name:      "exponent notation gets no amount arm",
+			q:         url.Values{"search": {"1e5"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%1e5%", "%1e5%", "%1e5%"},
+		},
+		{
+			name:      "signed number gets no amount arm",
+			q:         url.Values{"search": {"-100"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%-100%", "%-100%", "%-100%"},
+		},
+		{
+			name:      "malformed comma groups get no amount arm",
+			q:         url.Values{"search": {"1,2,3"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%1,2,3%", "%1,2,3%", "%1,2,3%"},
 		},
 		{
 			name: "amount range is compared in cents",
@@ -130,8 +188,10 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 				"search":     {"rent"},
 				"amount_min": {"500"},
 			},
-			wantWhere: " WHERE date(t.date) >= ? AND date(t.date) <= ? AND c.type = ? AND t.description LIKE ? ESCAPE '\\' AND t.amount_cents >= ?",
-			wantArgs:  []any{"2025-01-01", "2025-12-31", "expense", "%rent%", int64(50000)},
+			// The search group is parenthesised so it composes with AND
+			// against the surrounding filters instead of rebinding them.
+			wantWhere: " WHERE date(t.date) >= ? AND date(t.date) <= ? AND c.type = ? AND (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\') AND t.amount_cents >= ?",
+			wantArgs:  []any{"2025-01-01", "2025-12-31", "expense", "%rent%", "%rent%", "%rent%", int64(50000)},
 		},
 	}
 
@@ -559,4 +619,53 @@ func TestHandleExportYearly_HidesTombstoned(t *testing.T) {
 	if !foundFood {
 		t.Errorf("Food row missing from Category Totals sheet")
 	}
+}
+
+// FuzzSearchAmountCents drives the ?search= numeric parser with arbitrary
+// input. The parser sits at an unauthenticated-reachable boundary (any
+// authenticated household member can put any string in the querystring), and it
+// feeds a value straight into a SQL comparison, so the two properties that
+// matter are:
+//
+//   - it never panics, and
+//   - when it reports ok, the cents value is in range: 0 <= cents <=
+//     100*MaxTransactionAmount. A negative or overflowed value would compare
+//     against original_amount_cents as nonsense, and the amount_min/amount_max
+//     incident (see safeDollarsToCents) is the precedent for how int64 minimum
+//     gets laundered in through a float.
+//
+// The lower bound is 0 rather than 1 because "0" is a legal parse; no row can
+// carry a zero original amount (CHECK(amount_cents > 0) and the handler's own
+// validation), so it simply matches nothing.
+func FuzzSearchAmountCents(f *testing.F) {
+	seeds := []string{
+		// The unit-table cases, so the corpus starts from known behaviour.
+		"1500000", "1,500,000", "1500000.50", "1,500,000.50", "1500", "0",
+		"1500000 LBP", "9999999999", "Coffee", "",
+		// Nasties from the security review.
+		"1e5", "-100", "1,2,3", "١٥٠٠", "999999999999999999999999",
+		strings.Repeat("9", 400),
+		// Shapes the regex alternation has to decide between.
+		"1,500", "12,34", ".50", "1500000.", "+1500", "1_500", "  1500  ",
+		"NaN", "Inf", "-Inf", "0x1p4", "1500000.005",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+
+	f.Fuzz(func(t *testing.T, term string) {
+		cents, ok := searchAmountCents(term)
+		if !ok {
+			// The contract for a rejected term is only that cents is unused;
+			// the caller adds no arm at all.
+			return
+		}
+		if cents < 0 {
+			t.Fatalf("searchAmountCents(%q) accepted a NEGATIVE cents value %d", term, cents)
+		}
+		if cents > 100*MaxTransactionAmount {
+			t.Fatalf("searchAmountCents(%q) accepted %d, above the %d cents cap",
+				term, cents, int64(100*MaxTransactionAmount))
+		}
+	})
 }

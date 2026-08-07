@@ -94,26 +94,8 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	yearStr := chi.URLParam(r, "year")
-	monthStr := chi.URLParam(r, "month")
-
-	year, err := strconv.ParseInt(yearStr, 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid year")
-		return
-	}
-	if year < PlanningMinYear || year > PlanningMaxYear {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
-		return
-	}
-
-	month, err := strconv.ParseInt(monthStr, 10, 64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid month")
-		return
-	}
-	if month < 1 || month > 12 {
-		writeError(w, http.StatusBadRequest, "month must be between 1 and 12")
+	year, month, ok := parseBudgetPath(w, r)
+	if !ok {
 		return
 	}
 
@@ -146,7 +128,7 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 	// Phase 3.1b: the legacy REAL amount column was dropped in migration 010;
 	// only amount_cents is written. The cents value is derived once from the
 	// client-supplied float at the wire edge.
-	err = h.queries.UpsertBudget(r.Context(), database.UpsertBudgetParams{
+	err := h.queries.UpsertBudget(r.Context(), database.UpsertBudgetParams{
 		Year:        year,
 		Month:       month,
 		AmountCents: amountCents,
@@ -161,6 +143,91 @@ func (h *Handler) handleSetBudget(w http.ResponseWriter, r *http.Request) {
 	h.publishInvalidate("budgets", "reports")
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+}
+
+// handleDeleteBudget clears a month's budget. Admin only and idempotent:
+// deleting a budget that was never set still returns 200 (the post-condition
+// "no budget for this month" holds either way).
+//
+// Deletion is the ONLY way to unset a month, and deliberately so.
+// handleSetBudget rejects amount <= 0 — keep it that way. A stored zero would
+// mean "this household budgeted nothing this month", which is a different claim
+// from "this month has no budget of its own", and the two render differently:
+// with no row, the Reports budget-vs-actual table falls back to the household
+// default_budget setting (reports_new_handlers.go), so clearing a month means
+// "let this month use the default" rather than "budget it at zero".
+//
+// Over-budget alerts are unaffected either way — budget_alert.go evaluates
+// per-category limits, not the monthly total — so this endpoint cannot silence
+// an alert the household was relying on.
+//
+// Mirrors handleDeleteCategoryBudget exactly: same auth gate, same idempotent
+// not-found semantics, same response shape, same invalidation.
+//
+//	DELETE /api/budgets/{year}/{month}
+func (h *Handler) handleDeleteBudget(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.GetUser(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if user.Role != RoleAdmin {
+		writeError(w, http.StatusForbidden, "forbidden")
+		return
+	}
+
+	year, month, ok := parseBudgetPath(w, r)
+	if !ok {
+		return
+	}
+
+	if err := h.queries.DeleteBudget(r.Context(), database.DeleteBudgetParams{
+		Year:  year,
+		Month: month,
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete budget")
+		return
+	}
+
+	// Live-updates: clearing a month's budget re-colors that month's budget
+	// cells and the reports budget surface (which now falls back to the
+	// default). The op is idempotent, so we always signal — a no-op-on-the-
+	// server delete still re-syncs viewers cheaply under the client-side
+	// debounce. Post-commit, best-effort, nil-safe.
+	h.publishInvalidate("budgets", "reports")
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// parseBudgetPath reads the {year}/{month} chi URL params and validates each.
+// On any failure it writes a 400 and returns ok=false.
+//
+// Shared by the PUT and the DELETE for the same reason parseCategoryBudgetPath
+// is shared by its pair: the two verbs address the same resource, so a bound
+// that moved on one and not the other would let a month be created that could
+// never be cleared.
+func parseBudgetPath(w http.ResponseWriter, r *http.Request) (year, month int64, ok bool) {
+	year, err := strconv.ParseInt(chi.URLParam(r, "year"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid year")
+		return 0, 0, false
+	}
+	if year < PlanningMinYear || year > PlanningMaxYear {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("year must be between %d and %d", PlanningMinYear, PlanningMaxYear))
+		return 0, 0, false
+	}
+
+	month, err = strconv.ParseInt(chi.URLParam(r, "month"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid month")
+		return 0, 0, false
+	}
+	if month < 1 || month > 12 {
+		writeError(w, http.StatusBadRequest, "month must be between 1 and 12")
+		return 0, 0, false
+	}
+
+	return year, month, true
 }
 
 // defaultBudgetCents parses the default_budget app_settings value into cents.

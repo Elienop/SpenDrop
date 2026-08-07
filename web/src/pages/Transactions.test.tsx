@@ -1,4 +1,6 @@
 import {
+  act,
+  fireEvent,
   render as rtlRender,
   screen,
   waitFor,
@@ -44,6 +46,7 @@ const defaultFilters = {
 const defaultTransaction = {
   id: 1,
   user_id: 1,
+  created_by: 'Elie',
   date: '2026-04-01',
   amount: 25.5,
   original_amount: null,
@@ -139,6 +142,7 @@ import { api } from '../api/client';
 const mockSetPage = vi.fn();
 const mockSetPerPage = vi.fn();
 const mockSetSort = vi.fn();
+const mockSetSearchInput = vi.fn();
 
 function defaultHookReturn(overrides = {}) {
   return {
@@ -151,11 +155,18 @@ function defaultHookReturn(overrides = {}) {
     filters: { ...defaultFilters },
     setFilter: mockSetFilter,
     clearFilters: mockClearFilters,
+    // The live box vs the committed term. They agree at rest; `searchPending`
+    // is the window in which they do not (see the debounce in useTransactions).
+    searchInput: '',
+    setSearchInput: mockSetSearchInput,
+    searchPending: false,
     clearPanelFilters: mockClearPanelFilters,
     setPage: mockSetPage,
     setPerPage: mockSetPerPage,
     setSort: mockSetSort,
     initialLoad: false,
+    fetching: false,
+    showingPrevious: false,
     error: '',
     createTransaction: vi.fn(),
     updateTransaction: vi.fn(),
@@ -190,6 +201,30 @@ describe('Transactions page', () => {
       expect(screen.getByRole('button', { name: 'Income' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Filters' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: '+ Add' })).toBeInTheDocument();
+    });
+
+    // B6n. The search box renders the LIVE text and never the committed
+    // term — wiring it to `filters.search` would make every keystroke appear
+    // 250ms late, which is the one thing the debounce must not cost.
+    it('shows what has been typed rather than the committed term', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ searchInput: 'coff', searchPending: true }),
+      );
+      render(<Transactions />);
+
+      const box = screen.getByLabelText('Search transactions');
+      expect(box).toHaveValue('coff');
+
+      await user.type(box, 'e');
+
+      // Keystrokes go to the debounced setter. Routing them back through
+      // setFilter would commit on every character and undo the debounce.
+      expect(mockSetSearchInput).toHaveBeenCalledWith('coffe');
+      expect(mockSetFilter).not.toHaveBeenCalledWith(
+        'search',
+        expect.anything(),
+      );
     });
 
     it('clicking Filters button opens the filter Sheet and shows Date tab content', async () => {
@@ -764,6 +799,233 @@ describe('Transactions page', () => {
         .filter((el) => el.tagName === 'BUTTON')[0];
     }
 
+    // I1. The stale-total gate used to sit only on Replace All. During the
+    // held-over window a user can re-select via the header checkbox, and this
+    // banner offers "Select all {total} matching" with the PREVIOUS filter's
+    // total — from which delete-by-filter / update-by-filter then resolve
+    // against the CURRENT filters. B4's shape through the side door.
+    it('hides "Select all matching" while the count is the previous filter’s', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 9,
+          showingPrevious: true,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: 'Select all' }));
+
+      expect(
+        screen.queryByRole('button', { name: /select all 9 matching/i }),
+      ).not.toBeInTheDocument();
+      // Page-scoped id-based work on the rows actually on screen is unaffected
+      // — those ids are real regardless of which filter produced them.
+      expect(
+        screen.getByRole('button', { name: /^edit \(2\)$/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('button', { name: 'Delete' }),
+      ).toBeInTheDocument();
+    });
+
+    // Same gate, the debounce half. `total` counts the committed term, so
+    // escalating to all-matching here would opt the next delete/edit into a
+    // filter the user has already typed over.
+    it('hides "Select all matching" while the typed term has not reached the query', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 9,
+          searchInput: 'coff',
+          searchPending: true,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: 'Select all' }));
+
+      expect(
+        screen.queryByRole('button', { name: /select all 9 matching/i }),
+      ).not.toBeInTheDocument();
+      // Page-scoped work on the ids actually on screen stays available.
+      expect(
+        screen.getByRole('button', { name: /^edit \(2\)$/i }),
+      ).toBeInTheDocument();
+    });
+
+    it('offers "Select all matching" once the new page has landed', async () => {
+      // The control is gated by the stale window, not removed outright.
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(2), total: 9 }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: 'Select all' }));
+
+      expect(
+        screen.getByRole('button', { name: /select all 9 matching/i }),
+      ).toBeInTheDocument();
+    });
+
+    // Shared setup for the focus tests below: one category so the dialog's
+    // Select has something to pick, which is what makes the patch non-empty
+    // and enables Apply.
+    async function stubCategories() {
+      const { api } = await import('../api/client');
+      (api.get as ReturnType<typeof vi.fn>).mockImplementation(
+        (path: string) => {
+          if (path === 'categories') {
+            return Promise.resolve([
+              {
+                id: 5,
+                name: 'Cleaning',
+                type: 'expense',
+                icon: null,
+                sort_order: 0,
+                is_active: true,
+                created_at: '2026-01-01T00:00:00Z',
+              },
+            ]);
+          }
+          return Promise.resolve([]);
+        },
+      );
+      return api;
+    }
+
+    async function pickCategoryInDialog(
+      user: ReturnType<typeof userEvent.setup>,
+    ) {
+      await user.click(categoryTriggerInDialog());
+      await user.click(await screen.findByRole('option', { name: /cleaning/i }));
+    }
+
+    // I2. Same class as the Replace All focus bug. On success the selection
+    // bar unmounts, taking the "Edit (N)" trigger with it — and that trigger
+    // is exactly what the dialog restores focus to on close, so focus lands
+    // on a disconnected node and falls to <body>.
+    it('parks focus on the page heading when a page-mode edit empties the selection', async () => {
+      const user = userEvent.setup();
+      // visibleIds: [] — every edited row dropped off the current filter, so
+      // the pruned selection is empty and the bar goes away.
+      const bulkUpdate = vi
+        .fn()
+        .mockResolvedValue({ updated: 2, skipped: 0, visibleIds: [] });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(2), total: 2, bulkUpdate }),
+      );
+      const api = await stubCategories();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('button', { name: /^edit \(2\)$/i }));
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+      await pickCategoryInDialog(user);
+
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /apply.*to 2/i }),
+      );
+
+      await waitFor(() => expect(bulkUpdate).toHaveBeenCalledTimes(1));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: /^edit \(/i }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+      expect(
+        screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+      ).toHaveFocus();
+    });
+
+    it('leaves focus alone when a page-mode edit keeps rows selected', async () => {
+      // The heading grab is conditional on purpose: while the bar survives,
+      // the "Edit (N)" trigger is still mounted and Radix's own restore puts
+      // focus back on it, which is a better target than the page title.
+      // Without this case, an unconditional focus would pass every test above.
+      const user = userEvent.setup();
+      const bulkUpdate = vi
+        .fn()
+        .mockResolvedValue({ updated: 2, skipped: 0, visibleIds: [1, 2] });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ transactions: makeRows(2), total: 2, bulkUpdate }),
+      );
+      const api = await stubCategories();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: /select row 1/i }));
+      await user.click(screen.getByRole('checkbox', { name: /select row 2/i }));
+      await user.click(screen.getByRole('button', { name: /^edit \(2\)$/i }));
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+      await pickCategoryInDialog(user);
+
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /apply.*to 2/i }),
+      );
+
+      await waitFor(() => expect(bulkUpdate).toHaveBeenCalledTimes(1));
+      // Selection survived, so the bar (and its trigger) is still there.
+      expect(
+        await screen.findByRole('button', { name: /^edit \(2\)$/i }),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+      ).not.toHaveFocus();
+    });
+
+    it('parks focus on the page heading after a filter-mode edit', async () => {
+      const user = userEvent.setup();
+      const bulkUpdateByFilter = vi.fn().mockResolvedValue({ updated: 9 });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 9,
+          bulkUpdateByFilter,
+        }),
+      );
+      const api = await stubCategories();
+      render(<Transactions />);
+
+      // Escalate to all-matching, which is the mode that clears the selection
+      // wholesale on success.
+      await user.click(screen.getByRole('checkbox', { name: 'Select all' }));
+      await user.click(
+        screen.getByRole('button', { name: /select all 9 matching/i }),
+      );
+      await user.click(screen.getByRole('button', { name: /^edit \(9\)$/i }));
+      await waitFor(() => expect(api.get).toHaveBeenCalledWith('categories'));
+      await pickCategoryInDialog(user);
+
+      const dialog = screen.getByRole('dialog');
+      await user.click(
+        within(dialog).getByRole('button', { name: /apply.*to 9/i }),
+      );
+      // All-matching routes through the confirmation step first.
+      await user.click(
+        await screen.findByRole('button', { name: /apply changes to 9/i }),
+      );
+
+      await waitFor(() =>
+        expect(bulkUpdateByFilter).toHaveBeenCalledTimes(1),
+      );
+      await waitFor(() =>
+        expect(
+          screen.queryByRole('button', { name: /^edit \(/i }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+      expect(
+        screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+      ).toHaveFocus();
+    });
+
     it('Edit button is absent when no row is selected', () => {
       render(<Transactions />);
       expect(
@@ -1075,6 +1337,47 @@ describe('Transactions page', () => {
     });
   });
 
+  // B6n. The table used to dim on ANY fetch, so every SSE live-refresh — one
+  // per save by the other household member — pulsed an open table. The dim
+  // now answers "are these rows still answering your question?", which only
+  // a query-key change makes false.
+  describe('table busy treatment', () => {
+    // findBy, not getBy: the page's mount effects (categories fetch,
+    // service-worker probe) settle after the synchronous render, and reading
+    // the DOM before they land leaves their state updates outside act().
+    // Anchored on the table so the query cannot drift onto some other
+    // transition-opacity element (the error banner's dismiss button has one).
+    async function tableCard(): Promise<HTMLElement> {
+      const card = (await screen.findByRole('table')).closest(
+        '.transition-opacity',
+      );
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    }
+
+    it('does not dim or mark busy for a same-key background refetch', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ fetching: true, showingPrevious: false }),
+      );
+      render(<Transactions />);
+
+      const card = await tableCard();
+      expect(card).not.toHaveClass('opacity-60');
+      expect(card).not.toHaveAttribute('aria-busy');
+    });
+
+    it('dims and marks busy while the rows belong to a previous query', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ fetching: true, showingPrevious: true }),
+      );
+      render(<Transactions />);
+
+      const card = await tableCard();
+      expect(card).toHaveClass('opacity-60');
+      expect(card).toHaveAttribute('aria-busy', 'true');
+    });
+  });
+
   describe('app badge', () => {
     afterEach(() => {
       Reflect.deleteProperty(navigator, 'clearAppBadge');
@@ -1121,6 +1424,79 @@ describe('Transactions page', () => {
       // Registration present but without the Notifications API surface.
       mockGetReadyRegistration.mockResolvedValue({});
       expect(() => render(<Transactions />)).not.toThrow();
+    });
+  });
+
+  // B6j. The member's actual failure mode is discovering a row is her spouse's
+  // only when Save returns 403, so every row has to name its own creator on the
+  // resting table.
+  describe('creator attribution', () => {
+    it('attributes each row to its own creator', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: [
+            { ...defaultTransaction, id: 1, description: 'Groceries', created_by: 'Elie' },
+            { ...defaultTransaction, id: 2, description: 'Pharmacy', created_by: 'Partner Name' },
+          ],
+          total: 2,
+        }),
+      );
+      render(<Transactions />);
+
+      // findBy, not getBy: the page's mount effects (categories fetch,
+      // service-worker probe) settle after the synchronous render, and
+      // asserting before they land leaves their state updates outside act().
+      //
+      // Distinct names on distinct rows — a mutant that rendered the viewing
+      // user's own name, or hard-coded one row's creator for all of them,
+      // would still satisfy a single-row assertion.
+      expect(await screen.findByText('Elie')).toBeInTheDocument();
+      expect(screen.getByText('Partner Name')).toBeInTheDocument();
+    });
+  });
+
+  // B6d. The row-error banner used to have no way down at all: no dismiss,
+  // and no code path that reset it. It outlived the failure it described.
+  describe('row error banner', () => {
+    async function failARowSave(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(
+        screen.getByRole('button', { name: 'Actions for Groceries' }),
+      );
+      await user.click(await screen.findByRole('menuitem', { name: 'Edit' }));
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+    }
+
+    it('can be dismissed by the user', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          updateTransaction: vi.fn().mockRejectedValue(new Error('nope')),
+        }),
+      );
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await failARowSave(user);
+      const alert = await screen.findByRole('alert');
+      expect(alert).toHaveTextContent('nope');
+
+      await user.click(screen.getByRole('button', { name: 'Dismiss error' }));
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('offers no dismiss for a list-load error, which is current state', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ error: 'Failed to load transactions' }),
+      );
+      render(<Transactions />);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'Failed to load transactions',
+      );
+      // Hiding it would claim the table loaded when it did not, and the next
+      // render would bring it straight back anyway.
+      expect(
+        screen.queryByRole('button', { name: 'Dismiss error' }),
+      ).not.toBeInTheDocument();
     });
   });
 
@@ -1246,12 +1622,32 @@ describe('Transactions page', () => {
         defaultHookReturn({
           total: 4,
           filters: filtersWithSearch,
+          // At rest the box shows exactly the committed term. A fixture where
+          // these disagree while searchPending is false is a state the hook
+          // cannot produce.
+          searchInput: filtersWithSearch.search,
           buildFilterQuery: vi.fn().mockReturnValue(FILTER_QS),
           bulkUpdateByFilter,
           ...overrides,
         }),
       );
       return { bulkUpdateByFilter };
+    }
+
+    // fireEvent, NOT user.type(input, '{Enter}'): under happy-dom, userEvent's
+    // Enter never reaches React's onKeyDown, even with the input focused and
+    // filled (verified by probe — the confirm dialog never opened with the
+    // guard deleted outright). Every "Enter is inert" assertion written that
+    // way passes with the guard removed, which is how the original B6c guard
+    // test came to prove nothing. keyDown is precisely the event the handler
+    // listens for, so this exercises the real path.
+    async function pressEnter(input: HTMLElement) {
+      // act-wrapped: the keydown can mount the confirm AlertDialog, whose
+      // Radix focus management settles in effects. Firing bare leaves those
+      // updates outside act() and prints eight warnings per call.
+      await act(async () => {
+        fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      });
     }
 
     async function openReplaceAndType(user: ReturnType<typeof userEvent.setup>) {
@@ -1307,6 +1703,100 @@ describe('Transactions page', () => {
       expect(screen.getByPlaceholderText('New description...')).toHaveValue(
         'Spinneys',
       );
+    });
+
+    // B6m(3). Confirming unmounts the replace bar, and the AlertDialog had
+    // restored focus to the "Replace All" button that lived inside it — so
+    // without a deliberate target focus lands on <body>, with no announcement
+    // and nothing for a keyboard user to tab from.
+    it('a successful rename parks focus on the page heading, not <body>', async () => {
+      setupReplace();
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await openReplaceAndType(user);
+      await user.click(
+        screen.getByRole('button', { name: 'Apply changes to 4 transactions' }),
+      );
+
+      await waitFor(() => {
+        expect(
+          screen.queryByPlaceholderText('New description...'),
+        ).not.toBeInTheDocument();
+      });
+      expect(document.activeElement).not.toBe(document.body);
+      expect(
+        screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+      ).toHaveFocus();
+    });
+
+    // B6c guard. While the held-over rows are on screen `total` still counts
+    // the PREVIOUS filter, but buildFilterQuery() resolves against the new
+    // one — so firing here would rename a set the "Replace All (N)" label
+    // never described. That is B4's bug shape, reintroduced by the stale
+    // window rather than by the querystring.
+    it('does not fire a rename while the row count is still the previous filter’s', async () => {
+      const { bulkUpdateByFilter } = setupReplace({ showingPrevious: true });
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      const input = screen.getByPlaceholderText('New description...');
+      await user.type(input, 'Spinneys');
+
+      expect(
+        screen.getByRole('button', { name: 'Replace All (4)' }),
+      ).toBeDisabled();
+
+      // The input's Enter key reaches handleReplaceAll without touching the
+      // button, so a disabled button alone would not hold this shut.
+      await pressEnter(input);
+
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+    });
+
+    // Positive control for the two Enter-key guard tests below. Both assert
+    // that Enter does NOT open the confirm dialog, which is worth nothing
+    // unless Enter opens it when the gate is open.
+    it('Enter in the replace box opens the confirmation when the gate is open', async () => {
+      setupReplace();
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      const input = screen.getByPlaceholderText('New description...');
+      await user.type(input, 'Spinneys');
+      await pressEnter(input);
+
+      expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    });
+
+    // B6n. The search debounce opens a SECOND window of the same shape: for
+    // 250ms after a keystroke the box shows one term while buildFilterQuery()
+    // still serializes the previous one. Enter reaches handleReplaceAll
+    // without touching the button, so type-then-Enter inside that window
+    // would rename the pre-keystroke match set under a label counting it.
+    it('does not fire a rename while the typed term has not reached the query', async () => {
+      const { bulkUpdateByFilter } = setupReplace({
+        searchInput: 'spinneys market',
+        searchPending: true,
+      });
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      const input = screen.getByPlaceholderText('New description...');
+      await user.type(input, 'Spinneys');
+
+      expect(
+        screen.getByRole('button', { name: 'Replace All (4)' }),
+      ).toBeDisabled();
+
+      await pressEnter(input);
+
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
     });
 
     it('a failed rename keeps the bar and text for retry', async () => {

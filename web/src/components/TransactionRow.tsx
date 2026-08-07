@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
-import { MoreHorizontal } from 'lucide-react';
+import { MoreHorizontal, User } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
@@ -110,6 +110,10 @@ export function TransactionRow({
     }
     try {
       await onUpdate(payload);
+      // Retire whatever the last failed save left on the page-level banner.
+      // Cleared on SUCCESS, not before the request: clearing up front would
+      // blank the banner for the duration of a retry and then re-raise it.
+      onError('');
       setEditing(false);
     } catch (err) {
       onError(err instanceof Error ? err.message : 'Failed to save');
@@ -339,9 +343,27 @@ export function TransactionRow({
           only on the per-row edit route — so a spreadsheet cell can put a far
           longer description into the ledger. Unbounded, one such row stretches
           the table for every row and both members. title= keeps the full text
-          reachable on hover. */}
-      <TableCell className="max-w-[28rem] truncate font-medium" title={transaction.description}>
-        {transaction.description}
+          reachable on hover.
+
+          The creator rides UNDER the description rather than in a column of
+          its own: the ledger is household-wide, so a member needs to know a
+          row is her spouse's BEFORE she edits it and gets a 403 — but a
+          seventh always-on column would cost width the 390px phone layout
+          does not have. A second muted line costs row height instead, which
+          the phone has. Not a tooltip: those are dead on touch. */}
+      <TableCell className="max-w-md">
+        <div className="truncate font-medium" title={transaction.description}>
+          {transaction.description}
+        </div>
+        <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+          <User className="size-3.5 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 truncate">
+            {/* A bare name in a muted line does not announce what it IS, and
+                the icon is aria-hidden decoration. */}
+            <span className="sr-only">Entered by </span>
+            {transaction.created_by || 'Unknown'}
+          </span>
+        </p>
       </TableCell>
       <TableCell>
         <CategoryBadge

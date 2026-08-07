@@ -1,5 +1,9 @@
-import { useCallback, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { api } from '../api/client';
 import type {
   Transaction,
@@ -79,11 +83,37 @@ interface UseTransactionsResult {
   filters: TransactionFilters;
   setFilter: (key: keyof TransactionFilters, value: string) => void;
   clearFilters: () => void;
+  /**
+   * Live text in the search box. This is what the input renders, so it
+   * echoes every keystroke immediately; `filters.search` — the term in the
+   * query key AND in `buildFilterQuery()` — trails it by
+   * SEARCH_DEBOUNCE_MS. Programmatic sets (`setFilter('search', …)`,
+   * `clearFilters()`) move both at once and skip the debounce entirely.
+   */
+  searchInput: string;
+  setSearchInput: (value: string) => void;
   clearPanelFilters: () => void;
   setPage: (page: number) => void;
   setPerPage: (perPage: number) => void;
   setSort: (column: SortColumn) => void;
   initialLoad: boolean;
+  /** True during any fetch, including refetches over data already on screen. */
+  fetching: boolean;
+  /**
+   * True while the rows and `total` on screen belong to a previous query key
+   * (the user changed a filter and the new page has not landed). Callers must
+   * not fire a filter-scoped write while this is true — `total` labels the
+   * button but the write would target the NEW filters.
+   */
+  showingPrevious: boolean;
+  /**
+   * True while `searchInput` has not reached `filters.search` yet — the
+   * window in which the visible search box and the serialized term
+   * disagree. Filter-scoped writes must sit out this window for the same
+   * reason they sit out `showingPrevious`: `buildFilterQuery()` would
+   * resolve against a term the user has already typed over.
+   */
+  searchPending: boolean;
   error: string;
   refetch: () => void;
   createTransaction: (input: CreateTransactionInput) => Promise<Transaction>;
@@ -143,6 +173,14 @@ const defaultFilters: TransactionFilters = {
   search: '',
 };
 
+/**
+ * Trailing-debounce window for the search box. Long enough to swallow a
+ * burst of keystrokes at ordinary typing speed (inter-key gaps sit around
+ * 100-200ms), short enough that the results still read as following the
+ * typing rather than lagging it.
+ */
+const SEARCH_DEBOUNCE_MS = 250;
+
 function getInitialPerPage(): number {
   try {
     const stored = localStorage.getItem(STORAGE_KEYS.transactionsPerPage);
@@ -165,6 +203,32 @@ export function useTransactions(): UseTransactionsResult {
   const [sortBy, setSortBy] = useState<SortColumn>('date');
   const [sortDir, setSortDir] = useState<SortDirection>('desc');
   const [filters, setFilters] = useState<TransactionFilters>(defaultFilters);
+  // Live search text. `filters.search` is the COMMITTED term — the only one
+  // that reaches the query key or buildFilterQuery — and it trails this by
+  // SEARCH_DEBOUNCE_MS. Keeping the two apart (rather than debouncing the
+  // whole filters object) means everything that DESCRIBES the result set on
+  // screen — the count, the export URL, the replace bar — reads the same
+  // term the rows were fetched with, while only the input itself shows what
+  // the user has typed so far.
+  const [searchInput, setSearchInput] = useState('');
+
+  // Trailing debounce: one commit per typing pause, not one per keystroke.
+  // Depending on `filters.search` as well as `searchInput` is what makes the
+  // effect idempotent — once the commit lands the two are equal and the
+  // re-run bails out instead of scheduling a second identical write.
+  useEffect(() => {
+    if (searchInput === filters.search) return;
+    const timer = setTimeout(() => {
+      setFilters((prev) => ({ ...prev, search: searchInput }));
+      setPage(1);
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput, filters.search]);
+
+  // The window where the box and the serialized term disagree. Exposed
+  // rather than derived on the page so there is exactly one definition of
+  // "the filters a write would resolve against are not what you can see".
+  const searchPending = searchInput !== filters.search;
 
   // Filter-only query string (no pagination/sort). Shared by buildQuery
   // (list endpoint) and deleteByFilter (destructive endpoint) so both
@@ -212,12 +276,28 @@ export function useTransactions(): UseTransactionsResult {
     ],
     queryFn: () =>
       api.get<PaginatedResponse<Transaction>>(`transactions?${buildQuery()}`),
+    // The filters/page/sort all sit IN the key, so every keystroke in the
+    // search box mints a new key. Without this, each one lands on an empty
+    // cache entry, `isLoading` flips true and the whole table is replaced by
+    // a skeleton mid-typing. Holding the previous key's rows keeps the list
+    // on screen and confines the skeleton to the genuine no-data-yet case.
+    // Same-key refetches (the SSE invalidate path) are unaffected: they keep
+    // their own data and leave `isPlaceholderData` false.
+    placeholderData: keepPreviousData,
   });
 
   const transactions = query.data?.transactions ?? [];
   const total = query.data?.total ?? 0;
   // `initialLoad` keeps the legacy contract: true until the first settle.
   const initialLoad = query.isLoading;
+  const fetching = query.isFetching;
+  // True while the rows/total on screen were loaded under a DIFFERENT key
+  // than the current filters — i.e. they are the held-over previous page.
+  // `total` is stale for exactly this window, so any control whose scope is
+  // "everything matching the current filters" has to sit out until it clears
+  // (see the Replace All button). A same-key background refetch never sets
+  // this, so live updates don't disable anything.
+  const showingPrevious = query.isPlaceholderData;
   const error = query.isError
     ? query.error instanceof Error
       ? query.error.message
@@ -243,9 +323,15 @@ export function useTransactions(): UseTransactionsResult {
     return result.data;
   }, [query]);
 
+  // Programmatic filter sets commit immediately and drag the search box with
+  // them. Loading a saved filter or clearing is a discrete choice, not
+  // typing — debouncing it would leave the box showing the OLD term for
+  // 250ms, and (worse) the debounce effect would then see a mismatch and
+  // write the stale box value back over the filter that was just applied.
   const setFilter = useCallback(
     (key: keyof TransactionFilters, value: string) => {
       setFilters((prev) => ({ ...prev, [key]: value }));
+      if (key === 'search') setSearchInput(value);
       setPage(1);
     },
     [],
@@ -253,6 +339,7 @@ export function useTransactions(): UseTransactionsResult {
 
   const clearFilters = useCallback(() => {
     setFilters(defaultFilters);
+    setSearchInput(defaultFilters.search);
     setPage(1);
   }, []);
 
@@ -394,11 +481,16 @@ export function useTransactions(): UseTransactionsResult {
     filters,
     setFilter,
     clearFilters,
+    searchInput,
+    setSearchInput,
     clearPanelFilters,
     setPage,
     setPerPage,
     setSort,
     initialLoad,
+    fetching,
+    showingPrevious,
+    searchPending,
     error,
     refetch,
     createTransaction,

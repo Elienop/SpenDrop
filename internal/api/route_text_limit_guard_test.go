@@ -64,9 +64,9 @@ import (
 // scan silently narrower than the caps it is guarding.
 var transactionTextJSONFields = map[string]bool{
 	"description": true,
-	"tags":         true,
-	"notes":        true,
-	"note":         true,
+	"tags":        true,
+	"notes":       true,
+	"note":        true,
 }
 
 // --- the route inventory, read off the real router ---

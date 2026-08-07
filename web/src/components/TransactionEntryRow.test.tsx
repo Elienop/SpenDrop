@@ -150,6 +150,7 @@ const mockCategories: Category[] = [
 const savedTransaction: Transaction = {
   id: 42,
   user_id: 1,
+  created_by: 'Elie',
   date: '2026-04-08',
   amount: 127.43,
   description: 'Whole Foods',

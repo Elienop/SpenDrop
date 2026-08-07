@@ -1155,7 +1155,7 @@ Save `services.yaml` and Homepage hot-reloads the widget. Within 30 seconds the 
 - **Widget shows "Error" or nothing** — open Homepage's container logs (`docker logs homepage`). A 401 means the token was rejected (revoked, expired, typo, or the env var substitution failed — verify with `docker exec homepage env | grep SPENDROP`). A timeout or connection refused means `url:` is wrong or your reverse proxy is not routing `/api/homepage/summary` to SpenDrop.
 - **Numbers are stale by up to 15 seconds** — expected. The endpoint caches per token for 15s to keep 30s polling cheap. The `as_of` field in the raw JSON response shows the real aggregation time.
 - **"Remaining" shows a huge negative number** — you haven't set a monthly budget in SpenDrop. `month_remaining = budget - month_spent`, so with no budget row it equals `-month_spent`. Go to **Settings → General** and set a budget; the widget will then show the real remainder.
-- **"Over budget" always shows `0`** — expected in the current release. The field is reserved for a future per-category-budgets feature and is hard-wired to `0` today. Hide the row by deleting its entry from `mappings:` if the constant zero is noisy.
+- **"Over budget" always shows `0`** — the count only becomes non-zero when a category's month-to-date spend crosses a configured per-category limit. With no limits set (or nothing over its limit) the field is legitimately `0`. Set limits in **Settings → General → Category Limits**; the field table above documents exactly how the count is computed.
 
 ## Project Structure
 
@@ -1191,10 +1191,10 @@ Dockerfile                 Multi-stage Docker build
 - [ ] Multi-currency dashboard (show totals in multiple currencies)
 - [ ] Receipt photo attachments
 - [ ] Mobile-optimized responsive views
-- [ ] Spending alerts and notifications
+- [x] Spending alerts and notifications — shipped (over-budget and activity push, quiet hours, daily digest)
 - [ ] Data visualization improvements (pie charts, heatmaps)
-- [ ] Shared household budgets (per-category budgets)
-- [ ] API key authentication for external integrations
+- [x] Shared household budgets (per-category budgets) — shipped (Settings → General → Category Limits)
+- [x] API key authentication for external integrations — shipped (Settings → API Tokens; powers the Homepage widget above)
 
 ## License
 
