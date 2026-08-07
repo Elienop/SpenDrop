@@ -158,11 +158,28 @@ func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 // timestamp encoded in the filename, not by filesystem mtime — mtime is
 // not a reliable ordering under tools like rsync or `cp -p`.
 //
-// When anchorVersion is non-empty, the oldest snapshot encoding that
-// version (name as tiebreaker) is exempt from removal and the rest
-// compete for keep-1 slots; when empty, the original newest-keep rule
-// applies unchanged. An anchorVersion matching no file degrades to the
-// empty behavior.
+// Up to two snapshots are exempt from removal, identified by the
+// anchorVersion and floorVersion inputs (both "" on the success path,
+// which reproduces the original newest-keep rule byte-for-byte):
+//
+//   - floorVersion — the oldest snapshot whose encoded version is >=
+//     floorVersion. RunMigrations passes the FIRST pending migration
+//     here, so this resolves to the pristine pre-upgrade copy and stays
+//     resolved to it even when a newly shipped migration rotates the
+//     bracket's target version mid-crash-loop.
+//   - anchorVersion — the oldest snapshot encoding exactly that version:
+//     the current bracket's own pre-upgrade copy.
+//
+// The two frequently resolve to the same file, which then consumes a
+// single exemption. Remaining files compete for keep-|exemptions| slots
+// (floored at 0), so total retention never exceeds keep. A version
+// matching no file simply contributes no exemption.
+//
+// Version comparison is lexical, which is correct here because every
+// migration filename carries a zero-padded numeric prefix
+// ("002_cascade_deletes" < "017_transactions_idempotency_key"), so
+// string order is apply order — the same property listPendingMigrations
+// relies on when it sorts pending migrations by filename.
 //
 // Files that do not match the canonical pre-migration-*Z.db shape are
 // ignored: operator files and the sibling Tier 1 scheduled backups both
@@ -174,7 +191,7 @@ func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 // bit-perfect cleanup. Only a read-dir failure surfaces as a return
 // error, because that indicates the prune logic couldn't even enumerate
 // its input.
-func pruneMigrationSnapshots(dir string, keep int, anchorVersion string) error {
+func pruneMigrationSnapshots(dir string, keep int, anchorVersion, floorVersion string) error {
 	if keep < 0 {
 		return fmt.Errorf("pruneMigrationSnapshots: keep must be non-negative (got %d)", keep)
 	}
@@ -204,42 +221,68 @@ func pruneMigrationSnapshots(dir string, keep int, anchorVersion string) error {
 		snaps = append(snaps, snapFile{name: e.Name(), version: ver, ts: ts})
 	}
 
-	// Anchor exemption (B3): when anchorVersion is set, the OLDEST
-	// snapshot carrying that version is the bracket's pristine
-	// pre-upgrade copy — the only full-rollback point once a partial
-	// apply has committed earlier migrations — and is exempt from
-	// deletion absolutely (even at keep=0). The remaining files then
-	// compete for keep-1 slots so total retention stays ≤ keep. With
-	// anchorVersion == "" (the success path) behavior is byte-identical
-	// to the original newest-keep rule.
-	anchorIdx := -1
-	if anchorVersion != "" {
+	// oldestMatching returns the index of the oldest snapshot satisfying
+	// match, or -1. The name tiebreaker keeps the choice deterministic
+	// when two snapshots share a second — unreachable for a single
+	// version (SnapshotForMigration refuses to overwrite an existing
+	// path) but kept so a future caller passing a predicate that spans
+	// versions cannot reintroduce the ambiguity.
+	oldestMatching := func(match func(snapFile) bool) int {
+		best := -1
 		for i, s := range snaps {
-			if s.version != anchorVersion {
+			if !match(s) {
 				continue
 			}
-			if anchorIdx == -1 {
-				anchorIdx = i
+			if best == -1 {
+				best = i
 				continue
 			}
-			a := snaps[anchorIdx]
-			if s.ts.Before(a.ts) || (s.ts.Equal(a.ts) && s.name < a.name) {
-				anchorIdx = i
+			b := snaps[best]
+			if s.ts.Before(b.ts) || (s.ts.Equal(b.ts) && s.name < b.name) {
+				best = i
 			}
+		}
+		return best
+	}
+
+	// Exemptions (B3, amended 2026-08-07): the pristine pre-upgrade copy
+	// is the only full-rollback point once a partial apply has committed
+	// earlier migrations, so it must survive a crash loop absolutely —
+	// even at keep=0. Two rules identify it, deduped by index when they
+	// land on the same file:
+	//
+	//	floorVersion — the oldest snapshot at or above the first pending
+	//	  migration. This is the rotation-proof rule: anchorVersion is the
+	//	  HIGHEST pending migration, so a newly shipped migration rotates
+	//	  it and the pristine copy (named for the OLD target) would stop
+	//	  matching and be pruned mid-incident.
+	//	anchorVersion — the oldest snapshot of the current bracket.
+	//
+	// Both empty (the success path) means no exemptions and behavior
+	// byte-identical to the original newest-keep rule.
+	exempt := map[int]struct{}{}
+	if floorVersion != "" {
+		if i := oldestMatching(func(s snapFile) bool { return s.version >= floorVersion }); i != -1 {
+			exempt[i] = struct{}{}
+		}
+	}
+	if anchorVersion != "" {
+		if i := oldestMatching(func(s snapFile) bool { return s.version == anchorVersion }); i != -1 {
+			exempt[i] = struct{}{}
 		}
 	}
 
 	candidates := snaps
-	slots := keep
-	if anchorIdx != -1 {
-		candidates = make([]snapFile, 0, len(snaps)-1)
+	slots := keep - len(exempt)
+	if slots < 0 {
+		slots = 0
+	}
+	if len(exempt) > 0 {
+		candidates = make([]snapFile, 0, len(snaps)-len(exempt))
 		for i, s := range snaps {
-			if i != anchorIdx {
+			if _, ok := exempt[i]; !ok {
 				candidates = append(candidates, s)
 			}
-		}
-		if slots > 0 {
-			slots--
 		}
 	}
 

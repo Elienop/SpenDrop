@@ -37,6 +37,12 @@ type MigrationOptions struct {
 // came up cleanly". Anything older has been superseded by newer snapshots
 // or by the sibling Tier 1 scheduled backups. Three is enough to survive
 // two back-to-back restarts without losing the pristine pre-upgrade copy.
+//
+// It must not drop below 3. The failure path can hold two exemptions at
+// once (the floor-version pristine copy and the bracket anchor), and the
+// one remaining slot is what keeps the snapshot the "restore from <path>"
+// error names on disk. At keep <= 2 that file could be pruned in the same
+// breath as the error naming it.
 const migrationSnapshotKeep = 3
 
 // RunMigrations applies every .sql migration file embedded in
@@ -60,10 +66,17 @@ const migrationSnapshotKeep = 3
 // RunMigrations prunes opts.SnapshotDir on both exits: after a
 // successful apply it keeps the `migrationSnapshotKeep` most recent
 // snapshots; after a FAILED apply it prunes to the same bound but
-// exempts the bracket anchor — the oldest snapshot for the current
-// target version — so a crash-looping migration cannot fill the disk
-// yet never loses its pristine pre-upgrade copy. Prune failures are
-// logged and never abort startup or mask the migration error.
+// exempts up to two files so a crash-looping migration cannot fill the
+// disk yet never loses its pristine pre-upgrade copy — the oldest
+// snapshot at or above the FIRST pending migration (the pristine copy,
+// pinned by a floor that a newly shipped migration cannot rotate away)
+// and the bracket anchor, the oldest snapshot for the current target
+// version. Prune failures are logged and never abort startup or mask
+// the migration error.
+//
+// The pin is self-limiting: the success path passes ("", ""), so the
+// first migration run that actually succeeds releases every pinned file
+// back into the ordinary newest-keep rule.
 func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 	if err := ensureMigrationsTable(db); err != nil {
 		return err
@@ -83,6 +96,11 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 	// upgrade bracket: the snapshot captures state *before* this version
 	// was applied.
 	targetVersion := strings.TrimSuffix(pending[len(pending)-1], ".sql")
+
+	// The first pending migration is the prune's floor: it is the
+	// migration that is actually stuck, so it stays put across restarts
+	// even when a newly shipped migration rotates targetVersion upward.
+	firstPending := strings.TrimSuffix(pending[0], ".sql")
 
 	// context.Background() is deliberate here: we are running at process
 	// start before any server context exists, and we specifically do NOT
@@ -104,17 +122,19 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 		// before this call existed nothing pruned on the failure path —
 		// a failing migration under Docker restart filled the disk one
 		// full DB copy per attempt. Prune here too, but never the
-		// bracket anchor: the oldest snapshot for this targetVersion is
-		// the only pristine pre-upgrade copy once a partial apply has
-		// committed earlier migrations. Best-effort — a prune error is
-		// logged and must never mask the migration error.
-		if perr := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, targetVersion); perr != nil {
+		// pristine pre-upgrade copy: once a partial apply has committed
+		// earlier migrations it is the only full-rollback point. It is
+		// pinned by firstPending (a floor that survives targetVersion
+		// rotating when a new migration ships mid-loop) and, when that
+		// is a different file, by the bracket anchor. Best-effort — a
+		// prune error is logged and must never mask the migration error.
+		if perr := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, targetVersion, firstPending); perr != nil {
 			log.Printf("WARN: migration snapshot prune (failure path) failed: %v", perr)
 		}
 		return fmt.Errorf("migration failed (restore from %s): %w", snapPath, err)
 	}
 
-	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, ""); err != nil {
+	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, "", ""); err != nil {
 		log.Printf("WARN: migration snapshot prune failed: %v", err)
 	}
 	return nil

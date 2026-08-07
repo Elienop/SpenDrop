@@ -74,31 +74,41 @@ func embeddedMigrationNames(t *testing.T) []string {
 	return names
 }
 
-// countSnapshotFiles returns the number of pre-migration snapshot .db
-// files present in dir. It only counts the .db files, not the sidecars,
-// so tests can read the "how many snapshots exist" signal unambiguously.
-// Non-matching files are ignored so a sibling Tier 1 backup wouldn't
-// confuse the count.
-func countSnapshotFiles(t *testing.T, dir string) int {
+// snapshotNames returns the names of every pre-migration snapshot .db
+// file in dir, sorted. Sidecars are excluded so callers read the "which
+// snapshots exist" signal unambiguously, and non-matching files (a
+// sibling Tier 1 backup, an operator file) are ignored. Because the
+// version label is constant within one upgrade bracket and the timestamp
+// is fixed-width, sorted order is chronological order for a bracket's
+// snapshots.
+func snapshotNames(t *testing.T, dir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return 0
+			return nil
 		}
 		t.Fatalf("read snapshot dir: %v", err)
 	}
-	n := 0
+	var names []string
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
 		name := e.Name()
 		if strings.HasPrefix(name, "pre-migration-") && strings.HasSuffix(name, "Z.db") {
-			n++
+			names = append(names, name)
 		}
 	}
-	return n
+	sort.Strings(names)
+	return names
+}
+
+// countSnapshotFiles returns the number of pre-migration snapshot .db
+// files present in dir.
+func countSnapshotFiles(t *testing.T, dir string) int {
+	t.Helper()
+	return len(snapshotNames(t, dir))
 }
 
 func TestRunMigrations_CreatesSchemaTable(t *testing.T) {
@@ -386,35 +396,148 @@ func TestRunMigrations_FailurePathPrunesSnapshots(t *testing.T) {
 	if n := countSnapshotFiles(t, opts.SnapshotDir); n > migrationSnapshotKeep {
 		t.Errorf("snapshot dir holds %d snapshots after failure, want <= %d", n, migrationSnapshotKeep)
 	}
-	// Anchored: the oldest bracket snapshot survived the prune.
-	if _, statErr := os.Stat(filepath.Join(opts.SnapshotDir, anchor)); statErr != nil {
-		t.Errorf("bracket anchor %s was pruned on the failure path: %v", anchor, statErr)
-	}
+	// Anchored: the oldest bracket snapshot survived the prune, sidecar
+	// included — prune removes a .db and its .sha256 as a pair, so the
+	// retention assertion checks the pair too.
+	mustExist(t, opts.SnapshotDir, anchor)
 }
 
-// TestRunMigrations_RepeatedFailuresStayBounded drives the failure path
-// twice end-to-end (two real snapshots ~1.1s apart so their
-// seconds-precision names differ) and asserts the directory converges
-// instead of growing — the crash-loop shape itself.
+// TestRunMigrations_RepeatedFailuresStayBounded pins the crash-loop
+// STEADY STATE: a directory already carrying the debris of earlier
+// failed attempts must converge to exactly migrationSnapshotKeep files
+// on the next failure, and the pristine pre-upgrade copy must be one of
+// them.
+//
+// It seeds the priors rather than driving several real attempts because
+// the assertion that matters is only reachable once more than `keep`
+// files exist — the earlier version of this test drove two real attempts
+// and asserted `n > migrationSnapshotKeep`, which two attempts can never
+// produce, so it passed with the entire failure-path prune deleted.
+// Seeding four priors puts five files on disk before the prune and makes
+// `== migrationSnapshotKeep` a claim only a working prune can satisfy.
 func TestRunMigrations_RepeatedFailuresStayBounded(t *testing.T) {
 	db, dbPath := openTestDB(t)
 	failMigrations(t, db)
 	opts := defaultMigrationOptions(t, dbPath)
 
-	if err := RunMigrations(db, opts); err == nil {
-		t.Fatal("attempt 1: expected failure, got nil")
+	// Priors carry the bracket's target version — the highest pending
+	// migration, read from the same embed FS RunMigrations uses.
+	names := embeddedMigrationNames(t)
+	target := strings.TrimSuffix(names[len(names)-1], ".sql")
+
+	if err := os.MkdirAll(opts.SnapshotDir, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot dir: %v", err)
 	}
-	firstCount := countSnapshotFiles(t, opts.SnapshotDir)
-	if firstCount != 1 {
-		t.Fatalf("after attempt 1: %d snapshots, want 1", firstCount)
+	// Timed RELATIVE to now (minutes in the past, oldest first) so the
+	// real snapshot this run takes is always strictly the newest.
+	var seeded []string
+	for i := 0; i < 4; i++ {
+		ts := time.Now().UTC().Add(-time.Duration(10-i) * time.Minute)
+		name := formatMigrationSnapshotName(target, ts)
+		seeded = append(seeded, name)
+		writeSnapPair(t, opts.SnapshotDir, name)
 	}
 
-	time.Sleep(1100 * time.Millisecond) // distinct seconds-precision filename
-
 	if err := RunMigrations(db, opts); err == nil {
-		t.Fatal("attempt 2: expected failure, got nil")
+		t.Fatal("expected RunMigrations to fail, got nil")
 	}
-	if n := countSnapshotFiles(t, opts.SnapshotDir); n > migrationSnapshotKeep {
-		t.Errorf("after attempt 2: %d snapshots, want <= %d", n, migrationSnapshotKeep)
+
+	// 4 seeded + 1 just written = 5 before the prune; one exemption
+	// (floor and anchor resolve to the same oldest file) leaves keep-1
+	// competitive slots, so the directory lands on exactly keep.
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n != migrationSnapshotKeep {
+		t.Errorf("snapshot dir holds %d snapshots after a failed attempt, want exactly %d", n, migrationSnapshotKeep)
+	}
+	mustExist(t, opts.SnapshotDir, seeded[0])
+}
+
+// TestRunMigrations_PartialApplyBracketKeepsPristineAnchor drives a REAL
+// partial apply — the shape the exemption exists for — instead of the
+// nothing-ever-commits shape the other failure tests produce.
+//
+// Pre-creating `transactions_new` is what splits the bracket. It is the
+// staging table 002_cascade_deletes.sql creates in its first statement
+// and renames away in its last, so it exists nowhere else in the
+// migration set and 001_initial_schema.sql never mentions it: 001
+// applies and COMMITS, 002 aborts at "table transactions_new already
+// exists". From that point the pre-upgrade snapshot is the only artifact
+// that can roll the database back past 001. The conflicting-index idiom
+// failMigrations uses cannot serve here — it fails the FIRST migration,
+// so nothing is ever committed and there is no partial apply.
+//
+// The loop runs migrationSnapshotKeep+1 attempts because that is the
+// first count at which the prune must delete something; with fewer files
+// on disk the retention assertions would hold even with the exemption
+// removed. Each attempt waits past a second boundary so its
+// seconds-precision snapshot filename is distinct.
+//
+// True targetVersion rotation cannot be driven from here — the migration
+// set is an embed.FS fixed at build time — which is why
+// TestPruneMigrationSnapshots_FloorSurvivesVersionRotation pins the
+// rotation case at the policy level instead.
+func TestRunMigrations_PartialApplyBracketKeepsPristineAnchor(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	if _, err := db.Exec(`CREATE TABLE transactions_new (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("seed conflicting staging table: %v", err)
+	}
+
+	err := RunMigrations(db, opts)
+	if err == nil {
+		t.Fatal("attempt 1: expected RunMigrations to fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "restore from ") {
+		t.Errorf("attempt 1 error should name the snapshot, got %q", err.Error())
+	}
+
+	// The partial apply itself: everything before the conflict is
+	// committed, the conflicting migration is not.
+	assertMigrationApplied(t, db, "001_initial_schema.sql", true)
+	assertMigrationApplied(t, db, "002_cascade_deletes.sql", false)
+
+	after1 := snapshotNames(t, opts.SnapshotDir)
+	if len(after1) != 1 {
+		t.Fatalf("after attempt 1: %d snapshots, want 1", len(after1))
+	}
+	pristine := after1[0]
+
+	var secondAttempt string
+	for attempt := 2; attempt <= migrationSnapshotKeep+1; attempt++ {
+		time.Sleep(1100 * time.Millisecond) // distinct seconds-precision filename
+
+		if err := RunMigrations(db, opts); err == nil {
+			t.Fatalf("attempt %d: expected failure, got nil", attempt)
+		}
+		if attempt == 2 {
+			names := snapshotNames(t, opts.SnapshotDir)
+			if len(names) != 2 {
+				t.Fatalf("after attempt 2: %d snapshots, want 2", len(names))
+			}
+			secondAttempt = names[1]
+		}
+	}
+
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n != migrationSnapshotKeep {
+		t.Errorf("snapshot dir holds %d snapshots after %d failed attempts, want exactly %d",
+			n, migrationSnapshotKeep+1, migrationSnapshotKeep)
+	}
+	// The pristine copy outlives the loop; the second attempt's snapshot
+	// (the oldest non-exempt file) is what the prune consumed instead.
+	mustExist(t, opts.SnapshotDir, pristine)
+	mustBeGone(t, opts.SnapshotDir, secondAttempt)
+}
+
+// assertMigrationApplied checks whether schema_migrations carries a row
+// for version, so partial-apply tests can state both halves of the split
+// (committed / not committed) directly.
+func assertMigrationApplied(t *testing.T, db *sql.DB, version string, want bool) {
+	t.Helper()
+	var n int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations WHERE version = ?", version).Scan(&n); err != nil {
+		t.Fatalf("query schema_migrations for %s: %v", version, err)
+	}
+	if got := n > 0; got != want {
+		t.Errorf("migration %s applied = %v, want %v", version, got, want)
 	}
 }
