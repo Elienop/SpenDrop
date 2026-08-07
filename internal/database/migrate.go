@@ -100,7 +100,7 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 		return fmt.Errorf("migration failed (restore from %s): %w", snapPath, err)
 	}
 
-	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep); err != nil {
+	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, ""); err != nil {
 		log.Printf("WARN: migration snapshot prune failed: %v", err)
 	}
 	return nil

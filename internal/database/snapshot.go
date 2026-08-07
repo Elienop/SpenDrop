@@ -158,6 +158,12 @@ func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 // timestamp encoded in the filename, not by filesystem mtime — mtime is
 // not a reliable ordering under tools like rsync or `cp -p`.
 //
+// When anchorVersion is non-empty, the oldest snapshot encoding that
+// version (name as tiebreaker) is exempt from removal and the rest
+// compete for keep-1 slots; when empty, the original newest-keep rule
+// applies unchanged. An anchorVersion matching no file degrades to the
+// empty behavior.
+//
 // Files that do not match the canonical pre-migration-*Z.db shape are
 // ignored: operator files and the sibling Tier 1 scheduled backups both
 // live in the same tree, and we must not touch either. For each snapshot
@@ -168,7 +174,7 @@ func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 // bit-perfect cleanup. Only a read-dir failure surfaces as a return
 // error, because that indicates the prune logic couldn't even enumerate
 // its input.
-func pruneMigrationSnapshots(dir string, keep int) error {
+func pruneMigrationSnapshots(dir string, keep int, anchorVersion string) error {
 	if keep < 0 {
 		return fmt.Errorf("pruneMigrationSnapshots: keep must be non-negative (got %d)", keep)
 	}
@@ -198,7 +204,46 @@ func pruneMigrationSnapshots(dir string, keep int) error {
 		snaps = append(snaps, snapFile{name: e.Name(), version: ver, ts: ts})
 	}
 
-	if len(snaps) <= keep {
+	// Anchor exemption (B3): when anchorVersion is set, the OLDEST
+	// snapshot carrying that version is the bracket's pristine
+	// pre-upgrade copy — the only full-rollback point once a partial
+	// apply has committed earlier migrations — and is exempt from
+	// deletion absolutely (even at keep=0). The remaining files then
+	// compete for keep-1 slots so total retention stays ≤ keep. With
+	// anchorVersion == "" (the success path) behavior is byte-identical
+	// to the original newest-keep rule.
+	anchorIdx := -1
+	if anchorVersion != "" {
+		for i, s := range snaps {
+			if s.version != anchorVersion {
+				continue
+			}
+			if anchorIdx == -1 {
+				anchorIdx = i
+				continue
+			}
+			a := snaps[anchorIdx]
+			if s.ts.Before(a.ts) || (s.ts.Equal(a.ts) && s.name < a.name) {
+				anchorIdx = i
+			}
+		}
+	}
+
+	candidates := snaps
+	slots := keep
+	if anchorIdx != -1 {
+		candidates = make([]snapFile, 0, len(snaps)-1)
+		for i, s := range snaps {
+			if i != anchorIdx {
+				candidates = append(candidates, s)
+			}
+		}
+		if slots > 0 {
+			slots--
+		}
+	}
+
+	if len(candidates) <= slots {
 		return nil
 	}
 
@@ -207,14 +252,14 @@ func pruneMigrationSnapshots(dir string, keep int) error {
 	// snapshots share the same second (distinct version strings can still
 	// produce distinct-but-same-second filenames), so prune decisions are
 	// reproducible across runs.
-	sort.SliceStable(snaps, func(i, j int) bool {
-		if snaps[i].ts.Equal(snaps[j].ts) {
-			return snaps[i].name < snaps[j].name
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ts.Equal(candidates[j].ts) {
+			return candidates[i].name < candidates[j].name
 		}
-		return snaps[i].ts.Before(snaps[j].ts)
+		return candidates[i].ts.Before(candidates[j].ts)
 	})
 
-	toRemove := snaps[:len(snaps)-keep]
+	toRemove := candidates[:len(candidates)-slots]
 	for _, s := range toRemove {
 		dbPath := filepath.Join(dir, s.name)
 		sidecarPath := dbPath + ".sha256"

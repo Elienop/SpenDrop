@@ -114,7 +114,7 @@ func TestPruneMigrationSnapshots_KeepsMostRecent(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, ""); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestPruneMigrationSnapshots_IgnoresNonSnapshots(t *testing.T) {
 
 	// Prune to 0 (keep nothing prunable). Only the pre-migration file
 	// should be removed; the Tier 1 backup and operator file must survive.
-	if err := pruneMigrationSnapshots(dir, 0); err != nil {
+	if err := pruneMigrationSnapshots(dir, 0, ""); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestPruneMigrationSnapshots_NoOpWhenFewerThanKeep(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, ""); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -214,7 +214,7 @@ func TestPruneMigrationSnapshots_NoOpWhenFewerThanKeep(t *testing.T) {
 // with mkdir).
 func TestPruneMigrationSnapshots_MissingDirIsNotError(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	if err := pruneMigrationSnapshots(dir, 3); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, ""); err != nil {
 		t.Errorf("expected nil for missing dir, got %v", err)
 	}
 }
@@ -225,7 +225,7 @@ func TestPruneMigrationSnapshots_MissingDirIsNotError(t *testing.T) {
 // on disk.
 func TestPruneMigrationSnapshots_NegativeKeepRejected(t *testing.T) {
 	dir := t.TempDir()
-	if err := pruneMigrationSnapshots(dir, -1); err == nil {
+	if err := pruneMigrationSnapshots(dir, -1, ""); err == nil {
 		t.Fatal("expected error for negative keep, got nil")
 	}
 }
@@ -368,6 +368,165 @@ func TestSnapshotForMigration_FailsOnFilenameCollision(t *testing.T) {
 	if string(got) != "collision" {
 		t.Errorf("pre-seeded file was clobbered, contents now %q", string(got))
 	}
+}
+
+// mustExist / mustBeGone: tiny assertion helpers for the anchor-policy
+// tests below, checking a snapshot .db and its sidecar together so every
+// assertion covers the pair invariant prune maintains.
+func mustExist(t *testing.T, dir, name string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+		t.Errorf("expected %s retained: %v", name, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, name+".sha256")); err != nil {
+		t.Errorf("expected %s sidecar retained: %v", name, err)
+	}
+}
+
+func mustBeGone(t *testing.T, dir, name string) {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+		t.Errorf("expected %s removed, still present", name)
+	}
+	if _, err := os.Stat(filepath.Join(dir, name+".sha256")); err == nil {
+		t.Errorf("expected %s sidecar removed, still present", name)
+	}
+}
+
+// TestPruneMigrationSnapshots_AnchorSurvivesCrashLoop is the B3 policy
+// test: a failing upgrade's bracket holds one pristine pre-upgrade
+// snapshot (the OLDEST for the target version) plus a stream of
+// per-retry snapshots. Prune with the anchor exemption must converge to
+// {anchor, newest keep-1} — deleting the anchor would destroy the only
+// full-rollback point once a partial apply has committed earlier
+// migrations.
+func TestPruneMigrationSnapshots_AnchorSurvivesCrashLoop(t *testing.T) {
+	dir := t.TempDir()
+
+	var names []string
+	for i := 0; i < 6; i++ {
+		ts := time.Date(2026, 8, 7, 12, 0, i, 0, time.UTC)
+		name := formatMigrationSnapshotName("021_target", ts)
+		names = append(names, name)
+		writeSnapPair(t, dir, name)
+	}
+
+	if err := pruneMigrationSnapshots(dir, 3, "021_target"); err != nil {
+		t.Fatalf("pruneMigrationSnapshots: %v", err)
+	}
+
+	// Retained: the anchor (oldest, index 0) + the 2 newest (indexes 4, 5).
+	mustExist(t, dir, names[0])
+	mustExist(t, dir, names[4])
+	mustExist(t, dir, names[5])
+	// Removed: the middle of the loop.
+	mustBeGone(t, dir, names[1])
+	mustBeGone(t, dir, names[2])
+	mustBeGone(t, dir, names[3])
+}
+
+// TestPruneMigrationSnapshots_EmptyAnchorKeepsOldBehavior pins that the
+// "" anchor (the success path) behaves exactly as the pre-B3 prune did
+// on the same seed: newest keep survive, oldest go — including the
+// would-be anchor.
+func TestPruneMigrationSnapshots_EmptyAnchorKeepsOldBehavior(t *testing.T) {
+	dir := t.TempDir()
+
+	var names []string
+	for i := 0; i < 6; i++ {
+		ts := time.Date(2026, 8, 7, 12, 0, i, 0, time.UTC)
+		name := formatMigrationSnapshotName("021_target", ts)
+		names = append(names, name)
+		writeSnapPair(t, dir, name)
+	}
+
+	if err := pruneMigrationSnapshots(dir, 3, ""); err != nil {
+		t.Fatalf("pruneMigrationSnapshots: %v", err)
+	}
+
+	mustBeGone(t, dir, names[0])
+	mustBeGone(t, dir, names[1])
+	mustBeGone(t, dir, names[2])
+	mustExist(t, dir, names[3])
+	mustExist(t, dir, names[4])
+	mustExist(t, dir, names[5])
+}
+
+// TestPruneMigrationSnapshots_AbsentAnchorDegrades: an anchorVersion with
+// no matching snapshot (operator deleted the bracket's files mid-loop)
+// must degrade to the plain newest-keep rule, not error and not
+// accidentally protect anything else.
+func TestPruneMigrationSnapshots_AbsentAnchorDegrades(t *testing.T) {
+	dir := t.TempDir()
+
+	var names []string
+	for i := 0; i < 5; i++ {
+		ts := time.Date(2026, 8, 7, 12, 0, i, 0, time.UTC)
+		name := formatMigrationSnapshotName("020_other", ts)
+		names = append(names, name)
+		writeSnapPair(t, dir, name)
+	}
+
+	if err := pruneMigrationSnapshots(dir, 3, "021_missing"); err != nil {
+		t.Fatalf("pruneMigrationSnapshots: %v", err)
+	}
+
+	mustBeGone(t, dir, names[0])
+	mustBeGone(t, dir, names[1])
+	mustExist(t, dir, names[2])
+	mustExist(t, dir, names[3])
+	mustExist(t, dir, names[4])
+}
+
+// TestPruneMigrationSnapshots_AnchorIsVersionScoped: the exemption
+// protects the oldest snapshot of the ANCHOR version only — an older
+// snapshot from a previous upgrade bracket gets no protection.
+func TestPruneMigrationSnapshots_AnchorIsVersionScoped(t *testing.T) {
+	dir := t.TempDir()
+
+	oldBracket := formatMigrationSnapshotName("019_old", time.Date(2026, 8, 7, 11, 0, 0, 0, time.UTC))
+	writeSnapPair(t, dir, oldBracket)
+
+	var names []string
+	for i := 0; i < 4; i++ {
+		ts := time.Date(2026, 8, 7, 12, 0, i, 0, time.UTC)
+		name := formatMigrationSnapshotName("021_target", ts)
+		names = append(names, name)
+		writeSnapPair(t, dir, name)
+	}
+
+	if err := pruneMigrationSnapshots(dir, 3, "021_target"); err != nil {
+		t.Fatalf("pruneMigrationSnapshots: %v", err)
+	}
+
+	// oldBracket is the oldest file overall but the WRONG version — it
+	// must not be protected. Anchor = names[0] (oldest 021_target).
+	mustBeGone(t, dir, oldBracket)
+	mustExist(t, dir, names[0])
+	mustBeGone(t, dir, names[1])
+	mustExist(t, dir, names[2])
+	mustExist(t, dir, names[3])
+}
+
+// TestPruneMigrationSnapshots_AnchorSurvivesKeepZero pins that the
+// exemption is absolute: even keep=0 (remove everything prunable) spares
+// the anchor. No production caller uses keep=0 with an anchor; this test
+// exists so the "exempt means exempt" semantics can't silently regress
+// into "exempt unless keep is small".
+func TestPruneMigrationSnapshots_AnchorSurvivesKeepZero(t *testing.T) {
+	dir := t.TempDir()
+
+	a := formatMigrationSnapshotName("021_target", time.Date(2026, 8, 7, 12, 0, 0, 0, time.UTC))
+	b := formatMigrationSnapshotName("021_target", time.Date(2026, 8, 7, 12, 0, 1, 0, time.UTC))
+	writeSnapPair(t, dir, a)
+	writeSnapPair(t, dir, b)
+
+	if err := pruneMigrationSnapshots(dir, 0, "021_target"); err != nil {
+		t.Fatalf("pruneMigrationSnapshots: %v", err)
+	}
+
+	mustExist(t, dir, a)
+	mustBeGone(t, dir, b)
 }
 
 // TestRunMigrations_ErrorNamesSnapshotPath asserts that when the
