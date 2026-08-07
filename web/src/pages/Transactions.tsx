@@ -509,7 +509,9 @@ export function Transactions() {
           setShowReplace(false);
           setReplaceText('');
         } else {
-          toast.error(err instanceof Error ? err.message : 'Rename failed');
+          toast.error(
+            `Rename failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
           // Bar and text stay so the user can retry.
         }
       } finally {

@@ -1321,7 +1321,7 @@ describe('Transactions page', () => {
       );
 
       await waitFor(() => {
-        expect(toastError).toHaveBeenCalledWith('boom');
+        expect(toastError).toHaveBeenCalledWith('Rename failed: boom');
       });
       expect(screen.getByPlaceholderText('New description...')).toHaveValue(
         'Spinneys',
