@@ -531,7 +531,7 @@ backup ok: spendrop-2026-04-13T0300Z.db (4.8 MB, 9842 rows, sha256 a1b2c3d4e5f6�
 
 #### Monitoring backups without reading the log
 
-Every condition above also reaches [`GET /healthz/data`](#api-reference) under a `backups` block, so you do not have to grep container logs to find out that backups stopped working:
+Every condition above also reaches [`GET /healthz/data`](#api-reference) under a `backups` block, so you do not have to grep container logs to find out that backups stopped working — and because that endpoint is what the container's [`HEALTHCHECK`](#container-health) scrapes, the conditions flagged below as flipping it to 503 also turn the container red:
 
 ```json
 "backups": {
@@ -640,8 +640,13 @@ docker compose start spendrop
 docker compose ps spendrop
 docker compose logs --tail=30 spendrop
 
-# 7. Verify with a real query
-curl -s http://localhost:3535/api/health
+# 7. Verify with a real query. /healthz/data runs PRAGMA quick_check against
+#    the file you just restored and reports its schema version and row counts;
+#    /api/health would answer "ok" even if the restored file were unreadable.
+curl -s http://localhost:3535/healthz/data
+#    Expect "status":"ok" and a plausible "transactions_live". The container's
+#    own health status reports the same check as soon as a probe succeeds —
+#    the 60s start-period only forgives failures, it does not delay a pass.
 #    Then log in and spot-check that the most recent transactions are present.
 ```
 
@@ -654,6 +659,29 @@ If something looks wrong, roll back by stopping the container and reversing step
 SpenDrop runs a full `PRAGMA integrity_check` **synchronously at startup** — after migrations, before the HTTP server binds a port — and refuses to start on any non-`ok` result. A corrupt database under a live server compounds damage with every write, so the right operator response is "crash loudly, restore from backup, investigate" rather than "limp along and hope." The full result (not just pass/fail) is logged verbatim so the exact SQLite error list is in `docker logs spendrop`.
 
 Once the server is up, a background ticker reruns the full check **every 24 hours** and caches the result. `GET /healthz/data` surfaces both the cached full-check result (`last_integrity_check_at`, `last_integrity_check_result`) and a per-request `PRAGMA quick_check` that catches torn page writes between scheduled runs. Monitoring scrapers should alert on the HTTP status code (503 on degraded) and include the response body in the alert payload so the exact wording reaches the operator without needing another shell.
+
+#### Container health
+
+The image ships a `HEALTHCHECK` that scrapes [`GET /healthz/data`](#api-reference), so the container's own health status carries database-level signal and any monitor that already watches Docker health — Dockhand, Uptime Kuma's Docker monitor, `docker ps` — inherits it with nothing to configure:
+
+```
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD wget -q -O /dev/null http://127.0.0.1:8080/healthz/data || exit 1
+```
+
+- **`healthy` means the database answered *and accepted a write***, not merely that the port is open: one probe covers `PRAGMA quick_check`, a single-row write probe, the cached daily `integrity_check`, schema version, transaction counts, the balance-checkpoint freshness sweep and the backup subsystem.
+- **It takes ~90s to flip.** Three consecutive failures at a 30s interval, so a single blip does not page anyone.
+- **`start-period=60s`** covers a large legacy database's first boot — the migration backfill and startup integrity scan run before the port is bound, and the endpoint cannot answer until they finish.
+- **Unhealthy is reported, not restarted.** Docker does not restart a container for failing its health check, and `restart: unless-stopped` does not change that. A corrupt database shows up as a red container you can still `docker exec` into, never as a crash loop.
+
+To see *why* it went red, read the probe's own log and then the endpoint body. `wget` prints only the status line on a 503, so fetch the body with `curl` from the host:
+
+```bash
+docker inspect --format '{{json .State.Health}}' spendrop
+curl -s http://localhost:3535/healthz/data
+```
+
+**A read-only database is caught too.** One sub-check — the `write_probe` field — is a write rather than a read: a single-row upsert into a dedicated one-row table that holds nothing but a timestamp. It exists because every other check passes on a database the server cannot write to, which is exactly the state a bad restore leaves behind (`attempt to write a readonly database`, usually a file owned by `root` while the server runs as `PUID:PGID` — see the `chown` in the restore drill above). The container now goes red ~90s after that happens instead of whenever the next scheduled backup fails, which can be up to 24h. The response body carries SQLite's own error string, so `write_probe` tells you whether to reach for `chown` or for `df`.
 
 #### Pre-migration snapshots
 
@@ -964,8 +992,8 @@ Deleted transactions are retained as tombstones and surfaced through the endpoin
 ### Health and monitoring
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting) |
-| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. Public (unauthenticated); every field is a count, timestamp, duration, or version string that is safe to expose on a self-hosted LAN — no filesystem paths and no row contents. `schema_version` (the newest applied migration filename) is a deployment fingerprint and is exposed on purpose: the release tag is a sharper fingerprint and is already unauthenticated in the frontend bundle, and the migration filenames ship inside the published image anyway, so authenticating this field would cost you the ability to alert on schema drift from an external scraper while making nothing actually secret. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
+| GET | `/api/health` | Minimal liveness probe (always `{"status":"ok"}` while the HTTP server is accepting). Public. It runs no query, so it answers 200 on a container whose database is corrupt — the image's `HEALTHCHECK` deliberately does **not** scrape it. Reach for this one only when you specifically want "is the process answering" with no database dependency; for anything you would page on, use `/healthz/data`. |
+| GET | `/healthz/data` | DB-aware health: schema version, live/deleted transaction counts, last write timestamp, per-request `PRAGMA quick_check`, a per-request `write_probe` (a single-row upsert into a dedicated one-row table — the only sub-check that writes, and the only one that can catch a database that has gone read-only, since every read passes in that state), the cached result of the daily full `PRAGMA integrity_check`, and a [`backups` block](#monitoring-backups-without-reading-the-log) reporting the scheduled-backup subsystem. Returns 200 on "ok" and 503 on any degraded sub-check — monitoring scrapers should alert on the HTTP code. **This is what the image's `HEALTHCHECK` scrapes** (every 30s, three retries), so `docker ps`, `docker inspect` and any container-health monitor inherit every sub-check listed here without extra configuration; see [Container health](#container-health). Public (unauthenticated); every field is a count, timestamp, duration, version string, or a database error sentence (`quick_check`, `write_probe`) audited to carry no filesystem paths and no row contents. `schema_version` (the newest applied migration filename) is a deployment fingerprint and is exposed on purpose: the release tag is a sharper fingerprint and is already unauthenticated in the frontend bundle, and the migration filenames ship inside the published image anyway, so authenticating this field would cost you the ability to alert on schema drift from an external scraper while making nothing actually secret. Keep scrape intervals ≥10s to avoid reintroducing WAL busy-writes on larger databases. |
 | GET | `/api/version` | The release the running server was built from — `{"version":"v0.35.0"}`, carrying the leading `v`. A build that was not stamped with a release (a local `go build`, `docker-compose.dev.yml`, an image built without `--build-arg APP_VERSION`) reports exactly `dev`; the value is never empty. The string is baked into the binary at link time, so it needs no environment variable and cannot be changed without rebuilding, and the same build arg stamps the frontend bundle, so the UI and the API of one image always agree. **Auth required**, unlike `/api/health`, for consistency with the rest of `/api` rather than to keep the release secret — the same string is stamped into the frontend bundle, which is served unauthenticated so the login page can render, so anyone who can reach the app can already read it. Treat your version as public information. |
 | GET | `/api/events` | Server-Sent Events stream for [live updates](#live-updates) (auth required, session cookie). Emits tiny `invalidate` hints naming the views that changed so every open tab re-fetches through the normal API — no transaction data crosses the stream. Requires `flush_interval -1` and exclusion from compression at the reverse proxy (see [Live updates](#live-updates)). |
 

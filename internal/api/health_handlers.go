@@ -23,6 +23,13 @@ import (
 // row — which IS a real degradation signal worth paging on.
 const checkpointStaleWindow = 24 * time.Hour
 
+// writeProbeOK is the healthy value of the write_probe field. Spelled out
+// here rather than reusing database.IntegrityOK: the two constants happen to
+// share the string "ok" today, but one is the value SQLite's integrity
+// pragmas return and the other is a value this package chooses. Coupling them
+// would make a change to either silently redefine the other.
+const writeProbeOK = "ok"
+
 // healthzDataResponse is the payload returned by GET /healthz/data.
 //
 // The contract is pinned in docs/superpowers/plans/data-stewardship-plan.md
@@ -67,9 +74,12 @@ type healthzDataResponse struct {
 	//  3. Gating it would cost real signal. The value's whole job is to
 	//     let an operator alert on "the DB is on an older schema than the
 	//     binary expects" — a check that has to run from outside the app,
-	//     from a scraper that has no session. (The Docker HEALTHCHECK is
-	//     not the consumer at risk: it scrapes /api/health, not this
-	//     endpoint. External monitoring is.)
+	//     from a scraper that has no session. Since B7 the Docker
+	//     HEALTHCHECK is itself one of those sessionless callers: it
+	//     scrapes /healthz/data every 30s (see the Dockerfile), so
+	//     authenticating this endpoint would not merely cost external
+	//     monitoring its signal — it would peg every container
+	//     permanently unhealthy.
 	//
 	// So the honest reason to leave it open is that authenticating it
 	// would be secrecy theatre — the same false rationale the version
@@ -108,6 +118,39 @@ type healthzDataResponse struct {
 	// JSON consumers will see a single string with embedded newlines
 	// rather than an array.
 	QuickCheck string `json:"quick_check"`
+
+	// WriteProbe reports whether the database accepted a WRITE during
+	// this request. "ok" is the only healthy value; anything else is the
+	// driver's error string prefixed with "error: ", matching QuickCheck's
+	// encoding so an alert rule can treat the two fields identically.
+	//
+	// This is the only sub-check on the endpoint that is not a read, and
+	// it is the only one that can tell a readable database apart from a
+	// writable one. quick_check, the counts and the cached integrity
+	// result all pass on a database the process cannot write to — the
+	// exact state a restore leaves behind when the file ends up owned by
+	// root while the server runs as PUID:PGID. Before this field, the
+	// first thing in the system to notice was a failed scheduled backup,
+	// up to BACKUP_INTERVAL (default 24h) later. See probeWritable.
+	//
+	// The driver error is surfaced VERBATIM, unlike the backup block's
+	// verify error, which is deliberately withheld from this
+	// unauthenticated endpoint because it embeds a filesystem path and a
+	// byte size. What can appear here is the driver's sqlite3_errmsg
+	// text — "attempt to write a readonly database", "database is
+	// locked", "database or disk is full", … plus an errno name for
+	// CANTOPEN/IOERR — or a Go context error when the client hung up
+	// mid-request. Audited 2026-08-08: no reachable string carries a
+	// filesystem path or row contents, and not by accident — paths enter
+	// SQLite error text only via ATTACH (never issued here) and via the
+	// sqlite3_log stream, which has no registered callback in this
+	// process. The string IS the diagnosis — an operator who sees
+	// "readonly" reaches for chown and one who sees "disk is full"
+	// reaches for df — so redacting it would cost the whole point of the
+	// check to protect nothing. If a future change issues ATTACH on this
+	// handle or registers SQLITE_CONFIG_LOG into anything
+	// response-adjacent, this is the line to revisit.
+	WriteProbe string `json:"write_probe"`
 
 	// LastIntegrityCheckAt is the instant the daily ticker (or the
 	// startup check) finished the most recent full `PRAGMA
@@ -255,13 +298,25 @@ type healthzCheckpointCounts struct {
 //     do not promote this endpoint to a hot path without adding one.
 //  4. quick_check — the synchronous per-request PRAGMA. Anything other
 //     than "ok" flags the status as degraded.
-//  5. cached full integrity result — read from the Handler struct under
+//  5. write_probe — a single-row upsert into health_write_probe. The
+//     only sub-check here that WRITES, and the only one that can fail on
+//     a database every other check calls healthy (see probeWritable).
+//  6. cached full integrity result — read from the Handler struct under
 //     its RWMutex; degraded if last result was non-ok.
 //
 // Failures in steps 1-3 set the status to degraded and return 503; we
 // do not short-circuit because operators benefit from seeing the
 // partial document ("quick_check is ok but count query failed" is a
 // different incident from "the whole DB is gone").
+//
+// The write probe sits after quick_check rather than first, for two
+// reasons. It reads better in the response — integrity, then
+// writability — and, more concretely, it must not run while a *sql.Rows
+// cursor from an earlier sub-check is still open: the production pool is
+// capped at one connection (cmd/spendrop/db.go), so a statement issued
+// under a live cursor waits forever for the connection only that cursor
+// can release. Every sub-check above it drains its rows fully. Keep any
+// future sub-check that writes under the same rule.
 //
 // No logging on the happy path: this endpoint is hit on every scrape
 // cycle (once a minute by Prometheus, up to once a second by
@@ -320,6 +375,34 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 	} else {
 		resp.QuickCheck = "error: " + err.Error()
 		degraded = true
+	}
+
+	// write_probe: the endpoint's only write. h.clock.Now() rather than
+	// time.Now() so a test can freeze or step the instant and assert the
+	// stored marker actually moved — a status field alone would still read
+	// "ok" if the statement were quietly dropped.
+	//
+	// Logged on failure, which quick_check deliberately is not. A corrupt
+	// database already reports itself through the daily integrity ticker's
+	// own log line; a read-only database has no other in-process reporter
+	// at all — the backup scheduler is the next thing to notice and it is
+	// up to 24h behind, which is the bug this check exists to fix. The log
+	// line is gated on the request context still being live: a client
+	// that hung up mid-request surfaces here as a context error, which
+	// is not a database fault, and without the gate any anonymous caller
+	// could mint log lines at whatever rate it can abort requests. With
+	// the gate, the log rate is bounded by the scrape rate (~2/min from
+	// the container probe, a handful more from any external monitor) and
+	// only while the fault persists; the README's "why did it go red"
+	// drill sends the operator to `docker logs` first.
+	if err := probeWritable(ctx, h.db, h.clock.Now()); err == nil {
+		resp.WriteProbe = writeProbeOK
+	} else {
+		resp.WriteProbe = "error: " + err.Error()
+		degraded = true
+		if ctx.Err() == nil {
+			log.Printf("/healthz/data: write probe: %v", err)
+		}
 	}
 
 	// Cached full integrity result populated by main.go (startup +
@@ -399,6 +482,13 @@ func (h *Handler) handleHealthzData(w http.ResponseWriter, r *http.Request) {
 			degraded = true
 		}
 	}
+
+	// A cached 200 would make every sub-check vacuous — an intermediary
+	// answering for the origin means the probe never ran, and the
+	// read-only detection this endpoint exists for silently stops
+	// working. no-store makes the control self-defending; the document
+	// is stale one scrape later anyway.
+	w.Header().Set("Cache-Control", "no-store")
 
 	status := http.StatusOK
 	if degraded {
@@ -534,6 +624,53 @@ func latestSchemaVersion(ctx context.Context, db *sql.DB) (string, error) {
 		return "", nil
 	}
 	return v, err
+}
+
+// probeWritable proves the database still accepts writes, by performing one.
+// It upserts the single row of health_write_probe (migration 018) with the
+// caller's timestamp and returns whatever the driver said.
+//
+// Why a real write and not a cheaper gesture: `BEGIN IMMEDIATE; ROLLBACK` also
+// fails on a read-only handle and touches nothing, but it only proves SQLite
+// would GRANT a write lock. It never puts a byte on the disk, so it cannot
+// see a full volume or a failing device — SQLITE_FULL and SQLITE_IOERR both
+// surface when pages are actually written. A one-row upsert costs the same
+// order of magnitude and answers the stronger question.
+//
+// Why this is safe to run on every scrape:
+//
+//   - The statement is a single INSERT ... ON CONFLICT DO UPDATE, so it is its
+//     own implicit transaction. There is no BEGIN for a failure to strand: a
+//     rejected probe leaves no partial state and holds no lock past the call.
+//   - The upsert's INSERT arm seeds row 1 on a database that has never been
+//     probed (including the very first scrape after this migration applies)
+//     and its UPDATE arm rewrites that row in place forever after. The table
+//     never gains a second row — CHECK (id = 1) enforces that in the schema,
+//     not here — so the storage cost is one row and one WAL frame per scrape,
+//     with no growth over time.
+//   - It writes nothing a user can see: not `transactions`, so the counts and
+//     last_write_at in this same response are unaffected, and nothing in the
+//     API or UI reads this table.
+//
+// The error is returned unwrapped, matching latestSchemaVersion and
+// latestTransactionWriteAt above: the sole caller files it into a field named
+// write_probe, which is the context a wrapper would add.
+func probeWritable(ctx context.Context, db *sql.DB, now time.Time) error {
+	// The time.Time bind lands on disk in the driver's default timestamp
+	// format ("2026-08-08 10:00:00+00:00") — NOT the RFC3339 T/Z string
+	// idiom the balance_checkpoints columns use. Nothing compares
+	// probed_at in SQL today; if that changes, do not reuse the
+	// checkpoint columns' lexicographic string-compare idiom against
+	// this column — ' ' sorts before 'T' and the comparison would be
+	// silently wrong. (RFC3339's trailing Z is not in the driver's parse
+	// formats, so switching the stored format would break time.Time
+	// scans; the trap is cheaper to document than to move.)
+	_, err := db.ExecContext(ctx,
+		`INSERT INTO health_write_probe (id, probed_at) VALUES (1, ?)
+		 ON CONFLICT(id) DO UPDATE SET probed_at = excluded.probed_at`,
+		now.UTC(),
+	)
+	return err
 }
 
 // latestTransactionWriteAt returns the maximum updated_at across the

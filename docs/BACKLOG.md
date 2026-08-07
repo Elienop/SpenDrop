@@ -28,9 +28,15 @@ top items. Production figures in this file come from the owner's live database o
 
 ## Then
 
-*B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed.*
+*B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed. B7 is fully
+implemented on `fix/b7-healthcheck-data` (both pieces) and is awaiting merge, not work.*
 
 ### B7 — No external signal when something breaks
+**Status: both pieces implemented on `fix/b7-healthcheck-data` (piece 1 2026-08-07, piece 2
+2026-08-08), unmerged. Nothing open.**
+The original finding is kept verbatim below — the "nothing in the deployment reads it" sentence
+describes the state at discovery, not today.
+
 **Verified: reported.** The Docker health check only proves the web server is listening and never
 touches the database. `/healthz/data` is thorough but nothing in the deployment reads it, and it
 reports "ok" while the database is unwritable for up to a day (the first thing that flips it is a
@@ -41,24 +47,61 @@ seeing what looks like an offline shell — while backups have silently stopped.
 
 **ANSWERED 2026-08-02: the owner runs Dockhand, which monitors every stack for uptime and
 container health.** So the alerting channel already exists and nothing needs to be chosen or
-installed. What it is currently watching is the problem: `Dockerfile:72` points HEALTHCHECK at
+installed. What it was watching is the problem: the Dockerfile's HEALTHCHECK pointed at
 `/api/health`, which only proves the web server answers. Dockhand faithfully reports a container
 as healthy while its database is unusable.
 
 **So B7 becomes two pieces of different size:**
-1. *Small, do it:* point HEALTHCHECK at `/healthz/data` instead. It already runs
-   `PRAGMA quick_check`, the cached full integrity result, transaction counts, schema version and
-   the checkpoint freshness sweep, and it 503s on a real problem. Dockhand's existing monitoring
-   then inherits all of that for free. Safe under `restart: unless-stopped` — an unhealthy
-   container is not restarted, so a degraded check reports rather than crash-loops. Keep the
-   interval at ≥30s; the endpoint's own comment warns against making it a hot path.
-2. *Still open, and the subtler half:* **a read-only database would still report healthy.**
-   Every sub-check in `/healthz/data` is a READ — `quick_check` passes fine on a database that
-   cannot be written. That is exactly the failure mode B2's restore bug produced ("attempt to
-   write a readonly database"). The first thing that actually flips the endpoint is a failed
-   backup, up to 24h later. Catching it promptly needs a cheap write probe as a sub-check.
-   Without it, wiring up piece 1 is a real improvement but leaves the specific failure the
-   owner is most likely to hit still invisible.
+1. ~~*Small, do it:* point HEALTHCHECK at `/healthz/data` instead.~~ **Implemented 2026-08-07 on
+   `fix/b7-healthcheck-data`** (not yet merged — this entry moves to *Closed* with the squash hash
+   at merge). The probe is now
+   `wget -q -O /dev/null http://127.0.0.1:8080/healthz/data`, `--interval=30s --timeout=10s
+   --start-period=60s --retries=3`. Verified end to end on a throwaway container: healthy while
+   the endpoint returns 200, and after three data pages of `spendrop.db` were overwritten in the
+   *running* container, `/healthz/data` returned 503
+   (`quick_check: "database disk image is malformed"`) and the container reached `unhealthy` after
+   the 3-retry budget, with `RestartCount=0` — it reports, it does not crash-loop. The same boot
+   had `/api/health` still answering 200, which is the bug this closes, measured rather than
+   argued. Two details worth keeping: the timeout went 5s→10s because the probe now does real
+   reads against a pool capped at one connection, and the probe uses an explicit GET rather than
+   `--spider` because chi answers `HEAD /healthz/data` with 405 (verified) — today's busybox sends
+   GET for `--spider`, but a build that took the flag literally would pin the container unhealthy
+   forever.
+2. ~~*The subtler half:* **a read-only database would still report healthy.** Every sub-check in
+   `/healthz/data` is a READ — `quick_check` passes fine on a database that cannot be written.
+   That is exactly the failure mode B2's restore bug produced ("attempt to write a readonly
+   database"). The first thing that actually flips the endpoint is a failed backup, up to 24h
+   later.~~ **Implemented 2026-08-08 on `fix/b7-healthcheck-data`** (not yet merged — this entry
+   moves to *Closed* with the squash hash at merge).
+
+   Migration `018_health_write_probe.sql` adds a one-row table, and `probeWritable`
+   (`internal/api/health_handlers.go`) upserts it once per request from `h.clock.Now()`. Failure
+   surfaces as a new `write_probe` field carrying SQLite's own error string verbatim, flips the
+   endpoint to 503, and logs one line. With the container probing every 30s ×3 retries, a
+   read-only database now turns the container unhealthy in ~90s instead of ≤24h.
+
+   Three design points worth keeping:
+   - **A real write, not `BEGIN IMMEDIATE; ROLLBACK`.** The cheap gesture also fails on a
+     read-only handle but never puts a byte on the disk, so it cannot see `SQLITE_FULL` or
+     `SQLITE_IOERR`. A one-row upsert costs the same order of magnitude and answers the stronger
+     question.
+   - **Bounded by the schema, not by the caller.** `CHECK (id = 1)` means the table cannot gain a
+     second row no matter what a future caller writes, so an endpoint scraped ~6×/min forever
+     does not grow the database. The upsert's INSERT arm seeds row 1 on a fresh database, so
+     nothing needs pre-seeding and the first scrape after upgrade reports ok.
+   - **Per-request, not cached or ticker-driven.** Anything wired in `main()` is this repo's
+     known untestable seam; per-request keeps the reported writability exactly as fresh as the
+     scrape. It sits after `quick_check` because the pool is capped at one connection and a write
+     issued under a live `*sql.Rows` cursor would wait forever for the connection that cursor
+     holds.
+
+   Verified by `internal/api/health_write_probe_test.go`: a `mode=ro` second handle to the same
+   file makes writes fail with the real string while every read still succeeds, so the 503 is
+   attributable to the probe alone (the test asserts `quick_check` is still `"ok"` beside it).
+   Mutation-tested three ways — remove the call (read-only test returns 200 with `status: ok`,
+   i.e. the original bug reproduced), make the probe return nil without writing (the stored
+   marker never appears), and swap `DO UPDATE` for `DO NOTHING` (the marker stops advancing on
+   the second scrape). Container-level verification was deliberately deferred to after review.
 
 ### B8 — Backups carry a "verified" marker that two paths never earn
 **Verified: reported.** Scheduled backups are genuinely checked. Pre-migration snapshots and
@@ -115,6 +158,23 @@ gate-on-data discipline the B6 member-Budgets tests got in `dd49a5c`, plus decid
 the page itself should distinguish loading from empty (a UX question — currently a user with
 goals sees the empty state flash).
 **Effort:** small.
+
+### B17 — An unauthenticated flood on /healthz/data starves real user writes
+**Verified: reproduced** (measured 2026-08-08 by the B7 piece 2 security audit, on a built
+branch binary against a seeded 10k-row DB). All traffic serializes on the single-connection
+pool: under 16 concurrent unauthenticated `GET /healthz/data` clients (310 req/s sustained),
+authenticated `POST /api/transactions` latency went from 0.6–0.9 ms to median 74.8 ms (~100x).
+**Pre-existing, not introduced by the write probe** — timed individually, `quick_check` is
+~90% of the endpoint's DB cost (4.49 ms), the unindexed `updated_at` scan ~0.45 ms, the probe
+upsert 0.035 ms (~0.7%). Accepted under the household-trust doctrine (`router.go`: LAN
+deployments "trusted by construction", no rate limit); the audit also noted a doctrine
+tension — the README recommends scraping this endpoint from an EXTERNAL monitor, and an
+operator following that past the LAN boundary exposes an unauthenticated write trigger. If
+the doctrine is ever revisited, the lever is a short-TTL cache or rate limit on the whole
+endpoint aimed at the pragma, not at the probe. Related WAL fact recorded at the router note:
+the -wal recycles at ~4 MiB except while a reader pins a snapshot (VACUUM INTO), where it
+grows ~4 KiB/request to a durable high-water mark.
+**Effort:** small (if ever wanted) — but it is a doctrine decision first, not a code task.
 
 ### B15 — Nine test files use an Enter idiom that may prove nothing
 **Verified: read** (found 2026-08-07 during the B6 debounce work). Under happy-dom,
@@ -183,7 +243,10 @@ case, six frontend sites. Expect one immediate visible break: a negative expense
 
 - ~~Is push enabled in production?~~ **Answered 2026-08-02: yes, and both members receive
   notifications.** Promoted to B11 — it is a live defect, not a question.
-- **Does anything already monitor the box from outside?** If yes, B7 shrinks considerably.
+- ~~**Does anything already monitor the box from outside?** If yes, B7 shrinks considerably.~~
+  **Answered 2026-08-02: yes, Dockhand watches every stack's container health.** That is what
+  made B7 a two-line change to what the `HEALTHCHECK` scrapes rather than a new alerting
+  channel; both pieces are now implemented — see B7 above.
 - **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
   back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
   has never moved); real once it does. Fixing it properly needs the rate column from B1 step 2

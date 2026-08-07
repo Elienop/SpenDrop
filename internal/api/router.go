@@ -76,8 +76,10 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	// every field is safe to expose unauthenticated.
 	//
 	// OPERATIONAL NOTE — scrape interval: every request runs the
-	// synchronous PRAGMA quick_check plus three small SELECTs against
-	// the transactions table. At household scale (≤10k rows) the whole
+	// synchronous PRAGMA quick_check, a handful of small reads (two
+	// against transactions, one against schema_migrations, plus the
+	// checkpoint sweep's queries), and one single-row upsert (the write
+	// probe — see probeWritable). At household scale (≤10k rows) the whole
 	// handler returns in single-digit milliseconds, and Prometheus/Kuma
 	// scraping once every 15-30s is cost-free. On larger databases the
 	// quick_check walks every page of the main DB file, which is still
@@ -88,6 +90,19 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 	// limit the endpoint in code — household deployments are trusted
 	// by construction and an in-process cache would add complexity for
 	// no real-world payoff. Revisit if we ever ship a multi-tenant build.
+	//
+	// The write probe does not change that calculus. Measured on a
+	// 10k-row database (2026-08-08 audit): the upsert is ~35µs — under 1%
+	// of the endpoint's DB time, which quick_check dominates at ~4.5ms
+	// (the unindexed updated_at scan is ~0.45ms). Any future rate-limit
+	// or cache discussion should aim at the pragma, not the probe. Two
+	// bounds worth knowing: the probe rewrites one row in place
+	// (CHECK(id=1) — the table cannot grow), and the -wal file recycles
+	// frames up to the 1000-page autocheckpoint (~4 MiB measured) EXCEPT
+	// while a concurrent reader pins a WAL snapshot — exactly what
+	// VACUUM INTO holds during a backup — where the WAL grows ~4 KiB per
+	// request and keeps its high-water mark on disk until a clean close
+	// (journal_size_limit is unset).
 	r.Get("/healthz/data", h.handleHealthzData)
 
 	// Web Push VAPID public key (public — the key is not a secret and the

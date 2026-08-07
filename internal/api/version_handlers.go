@@ -20,7 +20,10 @@ type versionResponse struct {
 // Authenticated for consistency with the rest of /api — everything else
 // under that prefix requires a session, and a lone public exception is a
 // surprise for anyone reading the router. /api/health is the deliberate
-// exception, and only because the Docker HEALTHCHECK scrapes it.
+// exception: it stays public as the documented minimal liveness probe for
+// callers that only need to know the HTTP server is accepting. Since B7 the
+// Docker HEALTHCHECK is no longer one of them — it scrapes /healthz/data,
+// which is public for the same sessionless-scraper reason.
 //
 // This is NOT a fingerprinting control, and must not be described as one.
 // The same release string is stamped into the frontend bundle at build
