@@ -483,3 +483,80 @@ func softDelete(t *testing.T, h *Handler, actorID, id int64) {
 		t.Fatalf("soft-delete row %d as actor %d: %v", id, actorID, err)
 	}
 }
+
+// --- delete-by-filter, the third consumer ---
+
+// deleteByFilterSearchCount runs POST /api/transactions/delete-by-filter with
+// the same search term and returns how many rows the write tombstoned. Same
+// direct-invocation shape as updateByFilterSearchCount; the endpoint takes no
+// body — its scope is the querystring filter alone.
+func deleteByFilterSearchCount(t *testing.T, h *Handler, user database.User, term string) int64 {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/transactions/delete-by-filter?search="+urlQueryEscape(term), nil)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleDeleteTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete-by-filter %q: expected 200, got %d; body: %s", term, rec.Code, rec.Body.String())
+	}
+	var resp map[string]int64
+	decodeResponse(t, rec, &resp)
+	return resp["deleted"]
+}
+
+// assertRowTombstoned checks one row's tombstone state directly — the deleted
+// count alone cannot say WHICH row a widened search swept up.
+func assertRowTombstoned(t *testing.T, h *Handler, id int64, wantTombstoned bool) {
+	t.Helper()
+	var deletedAt sql.NullString
+	if err := h.db.QueryRowContext(context.Background(),
+		"SELECT deleted_at FROM transactions WHERE id = ?", id).Scan(&deletedAt); err != nil {
+		t.Fatalf("read row %d: %v", id, err)
+	}
+	if wantTombstoned && !deletedAt.Valid {
+		t.Errorf("row %d survived a delete-by-filter whose search matches it", id)
+	}
+	if !wantTombstoned && deletedAt.Valid {
+		t.Errorf("row %d was tombstoned by a delete-by-filter whose search does not match it", id)
+	}
+}
+
+// TestSearchScope_DeleteByFilterHonoursWidenedSearch pins the third consumer
+// this file's header names. The deep review verified the code path with a
+// throwaway probe; without an in-tree assertion, a future fork of
+// delete-by-filter's predicate would ship green. Deletion is destructive, so
+// each arm seeds its own handler rather than sharing the lockstep fixture.
+func TestSearchScope_DeleteByFilterHonoursWidenedSearch(t *testing.T) {
+	t.Run("notes_arm", func(t *testing.T) {
+		h := setupHandler(t)
+		admin := seedTestUser(t, h.queries, "admin", RoleAdmin)
+		catID := seedExpenseCategory(t, h.queries, "Pharmacy-"+t.Name())
+		match := seedSearchRow(t, h.queries, admin.ID, catID, "2026-03-01",
+			"Card payment", "reimbursed by insurance", 40, 0, "")
+		control := seedSearchRow(t, h.queries, admin.ID, catID, "2026-03-02",
+			"Card payment", "paid in cash", 25, 0, "")
+
+		if deleted := deleteByFilterSearchCount(t, h, admin, "insurance"); deleted != 1 {
+			t.Errorf("delete-by-filter %q tombstoned %d rows, want exactly 1 — the shared predicate has forked", "insurance", deleted)
+		}
+		assertRowTombstoned(t, h, match.ID, true)
+		assertRowTombstoned(t, h, control.ID, false)
+	})
+
+	t.Run("category_name_arm", func(t *testing.T) {
+		h := setupHandler(t)
+		admin := seedTestUser(t, h.queries, "admin", RoleAdmin)
+		osteo := seedExpenseCategory(t, h.queries, "Osteopathy")
+		bakery := seedExpenseCategory(t, h.queries, "Bakery")
+		match := seedSearchRow(t, h.queries, admin.ID, osteo, "2026-03-01",
+			"Session", "monthly", 60, 0, "")
+		control := seedSearchRow(t, h.queries, admin.ID, bakery, "2026-03-02",
+			"Croissant", "morning", 3, 0, "")
+
+		if deleted := deleteByFilterSearchCount(t, h, admin, "Osteopathy"); deleted != 1 {
+			t.Errorf("delete-by-filter %q tombstoned %d rows, want exactly 1 — the shared predicate has forked", "Osteopathy", deleted)
+		}
+		assertRowTombstoned(t, h, match.ID, true)
+		assertRowTombstoned(t, h, control.ID, false)
+	})
+}

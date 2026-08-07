@@ -277,3 +277,44 @@ func deleteUserWithoutCascade(t *testing.T, h *Handler, userID int64) {
 		t.Fatal("fixture did not produce an orphaned transaction — the cascade fired despite PRAGMA foreign_keys=off")
 	}
 }
+
+// TestHandleBatchCreateTransactions_ReturnsCreatorDisplayName pins the third
+// emit site. The deep review's surviving mutant proved why an assertion is
+// needed and a signature is not: toTransactionResponse's explicit createdBy
+// parameter makes every call site pass SOMETHING, but only a test checks WHAT.
+// Batch-create shipped "" under mutation with the whole suite green until this
+// test existed. No web/src code calls this endpoint today; the API-token
+// surface can, and TransactionRow renders "" as "Unknown".
+func TestHandleBatchCreateTransactions_ReturnsCreatorDisplayName(t *testing.T) {
+	h := setupHandler(t)
+	user := seedNamedUser(t, h.queries, "elienop", "Elie", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	body := strings.NewReader(`[
+		{"date": "2026-03-01", "amount": 12.00, "description": "Batch row one", "category_id": ` + itoa(catID) + `},
+		{"date": "2026-03-02", "amount": 7.50, "description": "Batch row two", "category_id": ` + itoa(catID) + `}
+	]`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions/batch", body), user)
+	rec := httptest.NewRecorder()
+	h.handleBatchCreateTransactions(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp []map[string]any
+	decodeResponse(t, rec, &resp)
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 created rows in the response, got %d", len(resp))
+	}
+	for i, row := range resp {
+		got, ok := row["created_by"].(string)
+		if !ok {
+			t.Errorf("batch row %d is missing the created_by key entirely: %v", i, row)
+			continue
+		}
+		if got != "Elie" {
+			t.Errorf("batch row %d: created_by = %q, want the display name %q (username is %q)",
+				i, got, "Elie", "elienop")
+		}
+	}
+}
