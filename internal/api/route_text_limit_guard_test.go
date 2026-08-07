@@ -63,11 +63,10 @@ import (
 // by MaxNotesLength like the others, and leaving it out would have made the
 // scan silently narrower than the caps it is guarding.
 var transactionTextJSONFields = map[string]bool{
-	"description":     true,
-	"new_description": true,
-	"tags":            true,
-	"notes":           true,
-	"note":            true,
+	"description": true,
+	"tags":         true,
+	"notes":        true,
+	"note":         true,
 }
 
 // --- the route inventory, read off the real router ---

@@ -3113,6 +3113,45 @@ func TestUpdateByFilter_RespectsOwnershipForNonAdmin(t *testing.T) {
 	}
 }
 
+// TestUpdateByFilter_TagsPatch_RespectsOwnershipForNonAdmin mirrors
+// TestUpdateByFilter_RespectsOwnershipForNonAdmin but drives the tags
+// read-then-write branch (runUpdateByFilterTags) instead of the no-tags SQL
+// UPDATE branch. That branch builds its own non-admin user_id scoping
+// independently of runUpdateByFilterNoTags, and had zero coverage before
+// this test — a full-suite mutation survivor found in deep review.
+func TestUpdateByFilter_TagsPatch_RespectsOwnershipForNonAdmin(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	aliceTxn := seedTestTransactionWithTags(t, q, alice.ID, cat.ID, "2026-04-01", 10.0, "a", "old-a")
+	bobTxn := seedTestTransactionWithTags(t, q, bob.ID, cat.ID, "2026-04-02", 10.0, "b", "old-b")
+
+	body := `{"patch":{"tags":"b4tag"},"tagsMode":"replace"}`
+	rec := postUpdateByFilter(t, h, alice, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1", resp.Updated)
+	}
+
+	var aliceTags, bobTags string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, aliceTxn.ID).Scan(&aliceTags)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, bobTxn.ID).Scan(&bobTags)
+	if aliceTags != "b4tag" {
+		t.Errorf("alice's row not updated: %q, want %q", aliceTags, "b4tag")
+	}
+	if bobTags != "old-b" {
+		t.Errorf("bob's row was wrongly touched: %q, want %q", bobTags, "old-b")
+	}
+}
+
 func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -3179,7 +3218,8 @@ func TestUpdateByFilter_SearchFilter_CaseInsensitive(t *testing.T) {
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "alice", "member")
 	cat := seedTestCategory(t, q, "Cat", "expense")
-	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "MR BROWN COFFEE")
+	matched := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "MR BROWN COFFEE")
+	control := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "carrefour")
 
 	rec := postUpdateByFilter(t, h, user, "search=mr+brown", `{"patch":{"description":"Mr Brown"}}`)
 	if rec.Code != http.StatusOK {
@@ -3191,6 +3231,20 @@ func TestUpdateByFilter_SearchFilter_CaseInsensitive(t *testing.T) {
 	decodeResponse(t, rec, &resp)
 	if resp.Updated != 1 {
 		t.Errorf("updated=%d, want 1 (LIKE must match case-insensitively)", resp.Updated)
+	}
+
+	var matchedDesc, controlDesc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, matched.ID).Scan(&matchedDesc); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, control.ID).Scan(&controlDesc); err != nil {
+		t.Fatal(err)
+	}
+	if matchedDesc != "Mr Brown" {
+		t.Errorf("matched row: description=%q, want %q", matchedDesc, "Mr Brown")
+	}
+	if controlDesc != "carrefour" {
+		t.Errorf("control row wrongly touched: description=%q, want %q", controlDesc, "carrefour")
 	}
 }
 
@@ -3288,8 +3342,8 @@ func TestUpdateByFilter_DescriptionPatch_UpdatesTimestamp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get transaction: %v", err)
 	}
-	if updated.UpdatedAt == origUpdatedAt {
-		t.Errorf("updated_at not bumped: still %v", origUpdatedAt)
+	if !updated.UpdatedAt.After(origUpdatedAt) {
+		t.Errorf("expected updated_at to advance; before=%v, after=%v", origUpdatedAt, updated.UpdatedAt)
 	}
 }
 
