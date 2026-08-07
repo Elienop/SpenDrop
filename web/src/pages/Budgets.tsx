@@ -329,12 +329,15 @@ function MonthlyBudgetsSection({
       const raw = editAmounts[m] ?? '';
       const baseline = baselineRef.current[m] ?? '';
       if (raw === '') {
-        // Was set, now cleared → DELETE. (baseline must be non-empty here
-        // since raw !== baseline.) Clearing is not the same as budgeting
-        // zero: a month with no row falls back to the household
-        // default_budget in the Reports budget-vs-actual table, which is
-        // exactly what the user is asking for. PUT cannot express it — it
-        // rejects amount <= 0 — so the delete verb is the only way to say it.
+        // Was set, now cleared → DELETE. The baseline check is LOAD-BEARING,
+        // not an assertion: a month that was never budgeted also has
+        // raw === '' (the raw === baseline skip only runs further down), so
+        // without it every empty month would stage a spurious DELETE — the
+        // test pins 11 of them. Clearing is not the same as budgeting zero:
+        // a month with no row falls back to the household default_budget in
+        // the Reports budget-vs-actual table, which is exactly what the user
+        // is asking for. PUT cannot express it — it rejects amount <= 0 — so
+        // the delete verb is the only way to say it.
         if (baseline !== '') clearedMonths.push(m);
         continue;
       }

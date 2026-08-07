@@ -577,10 +577,16 @@ export function Transactions() {
   );
 
   const handleSelectAllMatching = useCallback(() => {
-    // Same reason the Replace All handler carries this guard rather than
-    // relying on its button being disabled: entering 'all-matching' is what
-    // routes the next delete/edit through the filter endpoints, so the gate
-    // belongs on the state transition, not only on the affordance.
+    // Defence-in-depth, currently UNREACHABLE: the only caller is the banner
+    // button, which the !filterScopeUnsettled render guard hides, and unlike
+    // Replace All there is no keyboard path around it — so no test can drive
+    // this line and none pins it (deep review, 2026-08-07). It exists for the
+    // day the render guard is relaxed from hidden to disabled (the trade-off
+    // the Replace All comment weighs): entering 'all-matching' routes the
+    // next delete/edit through the filter endpoints, so if this handler ever
+    // becomes reachable in the unsettled window, the gate must already be on
+    // the state transition. If you make it reachable, copy Replace All's
+    // bypass test + positive control.
     if (filterScopeUnsettled) return;
     setSelectionScope('all-matching');
   }, [filterScopeUnsettled]);
@@ -704,9 +710,6 @@ export function Transactions() {
         // selected, the "Edit (N)" trigger is still mounted and Radix's own
         // restore puts focus back on it, which is the better target.
         if (selectionEmptied) pageHeadingRef.current?.focus();
-        // Only when the bar is going away. If a page-mode edit left rows
-        // selected, the "Edit (N)" trigger is still mounted and Radix's own
-        // restore puts focus back on it, which is the better target.
       } catch (err) {
         if (err instanceof RefetchAfterMutationError) {
           toast.error(
