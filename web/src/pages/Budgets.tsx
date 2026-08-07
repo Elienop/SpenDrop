@@ -976,9 +976,12 @@ function CategoryLimitsSection({
   // ref value. Do not add `baselineRef` to the deps — a ref is not a
   // reactive dependency and listing it would mislead future readers.
   //
-  // Same suppressions as <MonthlyBudgetsSection>'s `dirtyCount`, for the
-  // same reason: the baseline is deliberately non-reactive while the count
-  // it feeds is user-visible, so the read has to happen during render.
+  // Same reason as <MonthlyBudgetsSection>'s `dirtyCount` but a different
+  // suppression set: the baseline is deliberately non-reactive while the
+  // count it feeds is user-visible, so the read has to happen during
+  // render — here the ref read flows through `.trim()`, which moves the
+  // analyzer's report onto the memo itself, hence one `refs` directive
+  // plus `preserve-manual-memoization` instead of Monthly's two `refs`.
   // `preserve-manual-memoization` is the downstream consequence — React
   // Compiler cannot keep a memo whose inputs it cannot see — and dropping
   // the `useMemo` instead is not an option: this count also gates the
