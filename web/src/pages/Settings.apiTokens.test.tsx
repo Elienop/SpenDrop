@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   fireEvent,
   render,
@@ -558,5 +558,136 @@ describe('ApiTokensSection', () => {
       ),
     ).toBeInTheDocument();
     expect(mockedApi.post).not.toHaveBeenCalled();
+  });
+
+  // ------------------------------------------------------------------
+  // Expiry column.
+  //
+  // `formatExpires` decides "Expired" by comparing each token's
+  // `expires_at` against `tokensReadAtMs` — the instant captured inside
+  // `fetchTokens`, alongside the data it applies to — rather than by
+  // calling `Date.now()` during render. Reading the clock while
+  // rendering makes a row's text depend on *when React happens to
+  // re-render*, so two renders of the same unchanged token can disagree.
+  //
+  // WHY THE FIXTURE SEEDS AN ALREADY-EXPIRED ROW — do not "correct" this
+  // to match the server. `handleListAPITokens` runs
+  // `ListLiveAPITokensForUser`, whose WHERE clause is
+  // `expires_at IS NULL OR expires_at > datetime('now')`, so the live
+  // endpoint filters expired rows out and a real response would rarely
+  // carry one. The mock bypasses that filter on purpose: the frontend
+  // still owns a formatting contract for the boundary case where a row
+  // lapses between the server's `datetime('now')` and the browser's
+  // render (clock skew, a slow response, a tab left open). Dropping the
+  // expired fixture to "match the backend" would delete the only
+  // coverage the Expired branch has and leave these tests vacuous.
+  describe('expiry column', () => {
+    // Only `Date` is faked — setTimeout and microtasks stay real, so
+    // RTL's waitFor/findBy and fireEvent behave normally.
+    const NOW = '2026-04-18T12:00:00Z';
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(NOW));
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    function tokenFixture(over: Partial<ApiToken> & { id: number }): ApiToken {
+      return {
+        name: `Token ${over.id}`,
+        token_prefix: `spdr_pfx${over.id}`,
+        created_at: '2026-04-01T00:00:00Z',
+        last_used_at: null,
+        last_used_ip: null,
+        expires_at: null,
+        ...over,
+      };
+    }
+
+    function rowFor(name: string): HTMLElement {
+      const row = screen.getByText(name).closest('tr');
+      if (!row) throw new Error(`row for "${name}" not found`);
+      return row;
+    }
+
+    test('reads "Expired" for a lapsed token and a date for a live one', async () => {
+      const past = '2026-04-17T12:00:00Z'; // NOW - 1 day
+      const future = '2026-05-18T12:00:00Z'; // NOW + 30 days
+      seedGetMock([
+        // Names deliberately avoid the substring "Expired" so the
+        // assertions below cannot match the Name cell by accident.
+        tokenFixture({ id: 101, name: 'Lapsed scraper', expires_at: past }),
+        tokenFixture({ id: 102, name: 'Live dashboard', expires_at: future }),
+        tokenFixture({ id: 103, name: 'Perpetual job', expires_at: null }),
+      ]);
+      renderSettingsOnApiTokensTab();
+
+      await screen.findByText('Lapsed scraper');
+
+      // Formatted through the same API the component uses, so the
+      // assertion is locale- and timezone-independent.
+      expect(
+        within(rowFor('Lapsed scraper')).getByText('Expired'),
+      ).toBeInTheDocument();
+      expect(
+        within(rowFor('Live dashboard')).getByText(
+          new Date(future).toLocaleDateString(),
+        ),
+      ).toBeInTheDocument();
+      expect(within(rowFor('Perpetual job')).getByText('Never')).toBeInTheDocument();
+
+      // The live row must NOT read "Expired". Without this, inverting the
+      // comparison still fails the first assertion but the test would not
+      // say which direction broke.
+      expect(
+        within(rowFor('Live dashboard')).queryByText('Expired'),
+      ).not.toBeInTheDocument();
+    });
+
+    test('a lapse while the page sits open does not flip a row without a refetch', async () => {
+      const expiresAt = '2026-04-18T13:00:00Z'; // NOW + 1 hour
+      seedGetMock([
+        tokenFixture({ id: 104, name: 'Lapsing token', expires_at: expiresAt }),
+      ]);
+      renderSettingsOnApiTokensTab();
+
+      await screen.findByText('Lapsing token');
+      const formatted = new Date(expiresAt).toLocaleDateString();
+      expect(within(rowFor('Lapsing token')).getByText(formatted)).toBeInTheDocument();
+
+      // Count only the token-list fetches: the other Settings sections
+      // fire their own gets on mount and must not affect this check.
+      const listFetches = () =>
+        mockedApi.get.mock.calls.filter((c) => c[0] === 'api-tokens').length;
+      const before = listFetches();
+      expect(before).toBeGreaterThan(0);
+
+      // Walk the wall clock an hour PAST the expiry, then force a
+      // re-render that does not refetch. Opening the revoke dialog is
+      // pure local state — `fetchTokens` is only ever called from the
+      // mount effect — so the row re-renders against the exact data it
+      // already had.
+      vi.setSystemTime(new Date('2026-04-18T14:00:00Z'));
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Revoke Lapsing token' }),
+      );
+
+      // The dialog proves the re-render actually happened...
+      expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+      // ...and no new list request went out behind it.
+      expect(listFetches()).toBe(before);
+
+      // So the Expires cell must still read the same formatted date it
+      // read before the clock moved. Deciding this from `Date.now()` at
+      // render time flips it to "Expired" with no new data behind it —
+      // the row silently disagrees with the list it was built from.
+      expect(within(rowFor('Lapsing token')).getByText(formatted)).toBeInTheDocument();
+      expect(
+        within(rowFor('Lapsing token')).queryByText('Expired'),
+      ).not.toBeInTheDocument();
+    });
   });
 });

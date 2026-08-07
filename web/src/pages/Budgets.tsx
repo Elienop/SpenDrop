@@ -450,11 +450,22 @@ function MonthlyBudgetsSection({
   // `editAmounts` changes, and every write to `baselineRef.current` in
   // `fetchBudgets` is paired with a `setEditAmounts`, so this memo always
   // sees the latest ref value.
+  //
+  // The `react-hooks/refs` suppressions below are the price of that
+  // deliberate design, not an oversight. The baseline is intentionally
+  // non-reactive — see the ref's own comment above — while the count it
+  // feeds is user-visible on the Save button, so it has to be derived
+  // during render. The pairing invariant is what makes the read safe, and
+  // it is enforced by keeping every `baselineRef.current = …` write inside
+  // `fetchBudgets` / its catch. Scoped to these two reads; the rest of the
+  // file keeps the rule.
   const dirtyCount = useMemo(() => {
     let count = 0;
     for (let m = 1; m <= 12; m++) {
       const raw = editAmounts[m] ?? '';
+      // eslint-disable-next-line react-hooks/refs
       const baseline = baselineRef.current[m] ?? '';
+      // eslint-disable-next-line react-hooks/refs
       if (raw === baseline) continue;
       if (raw === '') {
         count++;
@@ -964,10 +975,23 @@ function CategoryLimitsSection({
   // `setEditAmounts`/`setCategories`, so this memo always sees the latest
   // ref value. Do not add `baselineRef` to the deps — a ref is not a
   // reactive dependency and listing it would mislead future readers.
+  //
+  // Same reason as <MonthlyBudgetsSection>'s `dirtyCount` but a different
+  // suppression set: the baseline is deliberately non-reactive while the
+  // count it feeds is user-visible, so the read has to happen during
+  // render — here the ref read flows through `.trim()`, which moves the
+  // analyzer's report onto the memo itself, hence one `refs` directive
+  // plus `preserve-manual-memoization` instead of Monthly's two `refs`.
+  // `preserve-manual-memoization` is the downstream consequence — React
+  // Compiler cannot keep a memo whose inputs it cannot see — and dropping
+  // the `useMemo` instead is not an option: this count also gates the
+  // year/month pickers and the nav guard.
+  // eslint-disable-next-line react-hooks/preserve-manual-memoization
   const dirtyCount = useMemo(() => {
     let count = 0;
     for (const cat of expenseCategories) {
       const raw = (editAmounts[cat.id] ?? '').trim();
+      // eslint-disable-next-line react-hooks/refs
       const baseline = (baselineRef.current[cat.id] ?? '').trim();
       if (raw === baseline) continue;
       if (raw === '') {
