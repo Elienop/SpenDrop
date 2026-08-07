@@ -1674,325 +1674,6 @@ func TestParseSortParams_CreatedAt(t *testing.T) {
 	}
 }
 
-// --- handleBulkRename ---
-
-func TestHandleBulkRename_RenamesMatchingTransactions(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "starbucks")
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(2) {
-		t.Errorf("expected updated=2, got %v", resp["updated"])
-	}
-
-	// Verify the descriptions were actually changed in the DB
-	listReq := httptest.NewRequest(http.MethodGet, "/api/transactions?search=MR+BROWN", nil)
-	listReq = withUser(listReq, user)
-	listRec := httptest.NewRecorder()
-	h.handleListTransactions(listRec, listReq)
-
-	var listResp transactionListResponse
-	decodeResponse(t, listRec, &listResp)
-	if listResp.Total != 2 {
-		t.Errorf("expected 2 renamed transactions, got %d", listResp.Total)
-	}
-	for _, txn := range listResp.Transactions {
-		if txn.Description != "MR BROWN" {
-			t.Errorf("expected description 'MR BROWN', got %q", txn.Description)
-		}
-	}
-}
-
-func TestHandleBulkRename_CaseInsensitiveSearch(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "MR BROWN COFFEE")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "Mr Brown Bakery")
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "Mr. Brown"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(2) {
-		t.Errorf("expected updated=2 (case-insensitive), got %v", resp["updated"])
-	}
-}
-
-func TestHandleBulkRename_NoMatches_ReturnsZero(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "starbucks")
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(0) {
-		t.Errorf("expected updated=0, got %v", resp["updated"])
-	}
-}
-
-func TestHandleBulkRename_EmptySearch_Returns400(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	body := strings.NewReader(`{"search": "", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandleBulkRename_EmptyNewDescription_Returns400(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": ""}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandleBulkRename_NewDescriptionTooLong_Returns400(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	longDesc := strings.Repeat("x", 501)
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "` + longDesc + `"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandleBulkRename_InvalidJSON_Returns400(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	body := strings.NewReader(`not json`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("expected 400, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-}
-
-func TestHandleBulkRename_NoAuth_Returns401(t *testing.T) {
-	h := setupHandler(t)
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rec.Code)
-	}
-}
-
-func TestHandleBulkRename_MemberOnlyRenamesOwnTransactions(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	alice := seedTestUser(t, q, "alice", "member")
-	bob := seedTestUser(t, q, "bob", "member")
-
-	// Both users have "mr brown" transactions
-	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
-	seedTestTransaction(t, q, bob.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
-
-	// Alice renames — should only affect her own transaction
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, alice)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(1) {
-		t.Errorf("expected updated=1 (only alice's), got %v", resp["updated"])
-	}
-
-	// Verify bob's transaction is unchanged
-	bobTxn, err := q.GetTransactionByID(context.Background(), 2) // bob's txn
-	if err != nil {
-		t.Fatalf("get bob txn: %v", err)
-	}
-	if bobTxn.Description != "mr brown bakery" {
-		t.Errorf("expected bob's transaction unchanged, got %q", bobTxn.Description)
-	}
-}
-
-func TestHandleBulkRename_AdminRenamesAllTransactions(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	alice := seedTestUser(t, q, "alice", "member")
-	admin := seedTestUser(t, q, "admin", "admin")
-
-	seedTestTransaction(t, q, alice.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
-	seedTestTransaction(t, q, admin.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
-
-	// Admin renames — should affect all transactions
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, admin)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(2) {
-		t.Errorf("expected updated=2 (admin renames all), got %v", resp["updated"])
-	}
-}
-
-func TestHandleBulkRename_EscapesSQLWildcards(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	// Create transactions with SQL LIKE wildcards in the description
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "100% discount store")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "100 percent store")
-
-	// Searching for "100%" should only match the first one (% is escaped)
-	body := strings.NewReader(`{"search": "100%", "new_description": "HUNDRED PERCENT"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	var resp map[string]any
-	decodeResponse(t, rec, &resp)
-	if resp["updated"] != float64(1) {
-		t.Errorf("expected updated=1 (only exact '100%%' match), got %v", resp["updated"])
-	}
-}
-
-func TestHandleBulkRename_UpdatesTimestamp(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	txn := seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown")
-
-	// SQLite CURRENT_TIMESTAMP has only second-level precision, so a
-	// time.Sleep race against the handler's subsequent CURRENT_TIMESTAMP
-	// update is fragile (both operations can land inside the same wall-clock
-	// second under scheduler jitter). Backdate the seeded row 10 seconds into
-	// the past instead — the handler's CURRENT_TIMESTAMP is then guaranteed
-	// strictly greater, with no dependency on sleep timing.
-	if _, err := db.ExecContext(context.Background(),
-		"UPDATE transactions SET updated_at = datetime('now', '-10 seconds') WHERE id = ?",
-		txn.ID); err != nil {
-		t.Fatalf("backdate updated_at: %v", err)
-	}
-	reread, err := q.GetTransactionByID(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("reread transaction: %v", err)
-	}
-	origUpdatedAt := reread.UpdatedAt
-
-	body := strings.NewReader(`{"search": "mr brown", "new_description": "MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-
-	// Verify updated_at changed
-	updated, err := q.GetTransactionByID(context.Background(), txn.ID)
-	if err != nil {
-		t.Fatalf("get transaction: %v", err)
-	}
-	if !updated.UpdatedAt.After(origUpdatedAt) {
-		t.Errorf("expected updated_at to advance; before=%v, after=%v", origUpdatedAt, updated.UpdatedAt)
-	}
-}
-
 // --- handleDeleteTransactionsByFilter ---
 
 // countTransactions returns the total row count in the transactions table,
@@ -2414,45 +2095,6 @@ func TestHandleTransactionSuggestions_HidesTombstoned(t *testing.T) {
 	}
 	if !foundDesc {
 		t.Errorf("live description missing from suggestions: %v", resp.Descriptions)
-	}
-}
-
-func TestHandleBulkRename_SkipsTombstoned(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
-	seedTombstonedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "mr brown tombstoned")
-
-	body := strings.NewReader(`{"search":"mr brown","new_description":"MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	var resp struct {
-		Updated int64 `json:"updated"`
-	}
-	decodeResponse(t, rec, &resp)
-	if resp.Updated != 1 {
-		t.Errorf("updated=%d, want 1 (tombstoned excluded)", resp.Updated)
-	}
-
-	// Verify the tombstoned row's description is unchanged (still the
-	// original, not MR BROWN).
-	var tombDesc string
-	if err := db.QueryRow(
-		`SELECT description FROM transactions WHERE deleted_at IS NOT NULL`,
-	).Scan(&tombDesc); err != nil {
-		t.Fatalf("load tombstoned desc: %v", err)
-	}
-	if tombDesc != "mr brown tombstoned" {
-		t.Errorf("tombstoned description got rewritten to %q — bulk-rename leaked into trash", tombDesc)
 	}
 }
 
@@ -3471,6 +3113,45 @@ func TestUpdateByFilter_RespectsOwnershipForNonAdmin(t *testing.T) {
 	}
 }
 
+// TestUpdateByFilter_TagsPatch_RespectsOwnershipForNonAdmin mirrors
+// TestUpdateByFilter_RespectsOwnershipForNonAdmin but drives the tags
+// read-then-write branch (runUpdateByFilterTags) instead of the no-tags SQL
+// UPDATE branch. That branch builds its own non-admin user_id scoping
+// independently of runUpdateByFilterNoTags, and had zero coverage before
+// this test — a full-suite mutation survivor found in deep review.
+func TestUpdateByFilter_TagsPatch_RespectsOwnershipForNonAdmin(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	alice := seedTestUser(t, q, "alice", "member")
+	bob := seedTestUser(t, q, "bob", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	aliceTxn := seedTestTransactionWithTags(t, q, alice.ID, cat.ID, "2026-04-01", 10.0, "a", "old-a")
+	bobTxn := seedTestTransactionWithTags(t, q, bob.ID, cat.ID, "2026-04-02", 10.0, "b", "old-b")
+
+	body := `{"patch":{"tags":"b4tag"},"tagsMode":"replace"}`
+	rec := postUpdateByFilter(t, h, alice, fmt.Sprintf("category_id=%d", cat.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1", resp.Updated)
+	}
+
+	var aliceTags, bobTags string
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, aliceTxn.ID).Scan(&aliceTags)
+	db.QueryRow(`SELECT tags FROM transactions WHERE id = ?`, bobTxn.ID).Scan(&bobTags)
+	if aliceTags != "b4tag" {
+		t.Errorf("alice's row not updated: %q, want %q", aliceTags, "b4tag")
+	}
+	if bobTags != "old-b" {
+		t.Errorf("bob's row was wrongly touched: %q, want %q", bobTags, "old-b")
+	}
+}
+
 func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -3479,6 +3160,213 @@ func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
 	rec := postUpdateByFilter(t, h, user, "", body)
 	if rec.Code != http.StatusBadRequest {
 		t.Errorf("empty patch: got %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestUpdateByFilter_SearchAndCategoryFilter_DescriptionPatch is the B4
+// backend pin: a description-only patch scoped by search PLUS another
+// filter must rename only rows matching BOTH. Replace All rides this
+// path; the retired rename endpoint it superseded dropped every filter
+// but search.
+func TestUpdateByFilter_SearchAndCategoryFilter_DescriptionPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catGroceries := seedTestCategory(t, q, "Groceries", "expense")
+	catHousehold := seedTestCategory(t, q, "Household", "expense")
+	inScope := seedTestTransaction(t, q, user.ID, catGroceries.ID, "2026-01-05", 10.0, "spinney dbayeh")
+	wrongCat := seedTestTransaction(t, q, user.ID, catHousehold.ID, "2026-01-06", 20.0, "spinney household")
+	wrongSearch := seedTestTransaction(t, q, user.ID, catGroceries.ID, "2026-01-07", 30.0, "carrefour")
+
+	body := `{"patch":{"description":"Spinneys"}}`
+	rec := postUpdateByFilter(t, h, user,
+		fmt.Sprintf("search=spinney&category_id=%d", catGroceries.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (search AND category must both apply)", resp.Updated)
+	}
+	for _, tc := range []struct {
+		id   int64
+		want string
+	}{
+		{inScope.ID, "Spinneys"},
+		{wrongCat.ID, "spinney household"},
+		{wrongSearch.ID, "carrefour"},
+	} {
+		var desc string
+		if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, tc.id).Scan(&desc); err != nil {
+			t.Fatal(err)
+		}
+		if desc != tc.want {
+			t.Errorf("row %d: description=%q, want %q", tc.id, desc, tc.want)
+		}
+	}
+}
+
+// TestUpdateByFilter_SearchFilter_CaseInsensitive transfers the
+// case-insensitive-search coverage from the retired bulk rename endpoint's
+// test suite: SQLite LIKE is case-insensitive for ASCII, and Replace All's
+// match set depends on it.
+func TestUpdateByFilter_SearchFilter_CaseInsensitive(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	matched := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "MR BROWN COFFEE")
+	control := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "carrefour")
+
+	rec := postUpdateByFilter(t, h, user, "search=mr+brown", `{"patch":{"description":"Mr Brown"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (LIKE must match case-insensitively)", resp.Updated)
+	}
+
+	var matchedDesc, controlDesc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, matched.ID).Scan(&matchedDesc); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, control.ID).Scan(&controlDesc); err != nil {
+		t.Fatal(err)
+	}
+	if matchedDesc != "Mr Brown" {
+		t.Errorf("matched row: description=%q, want %q", matchedDesc, "Mr Brown")
+	}
+	if controlDesc != "carrefour" {
+		t.Errorf("control row wrongly touched: description=%q, want %q", controlDesc, "carrefour")
+	}
+}
+
+// TestUpdateByFilter_SearchFilter_EscapesSQLWildcards transfers the
+// wildcard-escaping coverage from the retired bulk rename endpoint's test
+// suite: a literal % in the search term must not act as a wildcard. The
+// term travels in the querystring, so it is URL-encoded here exactly as
+// the browser sends it.
+func TestUpdateByFilter_SearchFilter_EscapesSQLWildcards(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "100% discount store")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "100 percent store")
+
+	rec := postUpdateByFilter(t, h, user,
+		"search="+url.QueryEscape("100%"), `{"patch":{"description":"HUNDRED PERCENT"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (%% must match only the literal)", resp.Updated)
+	}
+}
+
+// TestUpdateByFilter_AdminDescriptionPatch_UpdatesAllUsers transfers the
+// admin-scope coverage from the retired bulk rename endpoint's test suite:
+// an admin's description patch reaches other members' rows (Transaction
+// Authorization Discipline — admins bypass row ownership on every
+// mutation path).
+func TestUpdateByFilter_AdminDescriptionPatch_UpdatesAllUsers(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "boss", "admin")
+	member := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	adminTxn := seedTestTransaction(t, q, admin.ID, cat.ID, "2026-04-01", 10.0, "shared shop")
+	memberTxn := seedTestTransaction(t, q, member.ID, cat.ID, "2026-04-02", 20.0, "shared shop too")
+
+	rec := postUpdateByFilter(t, h, admin, "search=shared+shop", `{"patch":{"description":"Shared Shop"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 2 {
+		t.Errorf("updated=%d, want 2 (admin scope is household-wide)", resp.Updated)
+	}
+	for _, id := range []int64{adminTxn.ID, memberTxn.ID} {
+		var desc string
+		if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, id).Scan(&desc); err != nil {
+			t.Fatal(err)
+		}
+		if desc != "Shared Shop" {
+			t.Errorf("row %d: description=%q, want %q", id, desc, "Shared Shop")
+		}
+	}
+}
+
+// TestUpdateByFilter_DescriptionPatch_UpdatesTimestamp transfers the
+// timestamp-bump coverage from the retired bulk rename endpoint's test
+// suite, including its backdating technique: SQLite CURRENT_TIMESTAMP has
+// second precision, so the seeded row is pushed 10s into the past instead
+// of sleeping.
+func TestUpdateByFilter_DescriptionPatch_UpdatesTimestamp(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "mr brown")
+
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE transactions SET updated_at = datetime('now', '-10 seconds') WHERE id = ?",
+		txn.ID); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	reread, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("reread transaction: %v", err)
+	}
+	origUpdatedAt := reread.UpdatedAt
+
+	rec := postUpdateByFilter(t, h, user, "search=mr+brown", `{"patch":{"description":"MR BROWN"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("get transaction: %v", err)
+	}
+	if !updated.UpdatedAt.After(origUpdatedAt) {
+		t.Errorf("expected updated_at to advance; before=%v, after=%v", origUpdatedAt, updated.UpdatedAt)
+	}
+}
+
+// TestUpdateByFilter_EmptyDescription_Returns400 pins validateDescription
+// on this path: a whitespace-only description in the patch must 400, not
+// blank every matching row. No existing test covered this.
+func TestUpdateByFilter_EmptyDescription_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "keep me")
+
+	rec := postUpdateByFilter(t, h, user, "search=keep", `{"patch":{"description":"   "}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	var desc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, txn.ID).Scan(&desc); err != nil {
+		t.Fatal(err)
+	}
+	if desc != "keep me" {
+		t.Errorf("description mutated to %q despite 400", desc)
 	}
 }
 

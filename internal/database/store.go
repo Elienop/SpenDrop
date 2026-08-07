@@ -39,10 +39,10 @@ type Actor struct {
 	// IsAdmin lifts the row-OWNERSHIP restriction and nothing else, per
 	// design spec §3.9 ("Admin bypass matches existing transaction
 	// handlers" — handleUpdateTransaction, handleBatchDeleteTransactions,
-	// handleBulkRename and update-by-filter all drop the user_id predicate
-	// for RoleAdmin). Tombstoned and missing rows are checked FIRST and
-	// stay skip-worthy for every role, so an admin can never resurrect a
-	// soft-deleted row through this path.
+	// and update-by-filter all drop the user_id predicate for RoleAdmin).
+	// Tombstoned and missing rows are checked FIRST and stay skip-worthy
+	// for every role, so an admin can never resurrect a soft-deleted row
+	// through this path.
 	IsAdmin bool
 }
 

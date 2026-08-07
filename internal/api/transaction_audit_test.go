@@ -444,78 +444,6 @@ func TestAudit_BatchDelete_WritesOneDeleteRowPerID(t *testing.T) {
 
 // --- bulk handlers ---
 
-func TestAudit_BulkRename_WritesSingleSummaryRow(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "mr brown coffee")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-02", 20.0, "mr brown bakery")
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-03", 30.0, "starbucks")
-
-	body := strings.NewReader(`{"search":"mr brown","new_description":"MR BROWN"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-	h.handleBulkRename(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk rename: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	rows := listAuditRows(t, db)
-	if len(rows) != 1 {
-		t.Fatalf("expected exactly 1 summary audit row, got %d", len(rows))
-	}
-	r := rows[0]
-	if r.Action != database.AuditUpdate {
-		t.Errorf("action=%q, want update", r.Action)
-	}
-	if r.TransactionID != database.BulkAuditTransactionID {
-		t.Errorf("transaction_id=%d, want BulkAuditTransactionID (%d)", r.TransactionID, database.BulkAuditTransactionID)
-	}
-	if r.Before == nil {
-		t.Fatalf("summary row should carry before_json with bulk metadata")
-	}
-	if r.Before["bulk"] != true {
-		t.Errorf("before.bulk=%v, want true", r.Before["bulk"])
-	}
-	if r.Before["count"].(float64) != 2 {
-		t.Errorf("before.count=%v, want 2", r.Before["count"])
-	}
-	if filter, _ := r.Before["filter"].(string); !strings.Contains(filter, "mr brown") || !strings.Contains(filter, "MR BROWN") {
-		t.Errorf("before.filter=%q, want it to name both search and new_description", filter)
-	}
-	assertAllActorsEqual(t, rows, user.ID)
-}
-
-func TestAudit_BulkRename_ZeroMatches_StillWritesSummaryRow(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-01", 10.0, "starbucks")
-
-	body := strings.NewReader(`{"search":"nonexistent","new_description":"ignored"}`)
-	req := httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-	h.handleBulkRename(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk rename: status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	// Even a zero-match bulk rename is operator-visible: we want the
-	// audit log to record "Alice ran a bulk rename against <filter> and
-	// nothing matched", not silently drop the event.
-	rows := listAuditRows(t, db)
-	if len(rows) != 1 {
-		t.Fatalf("expected 1 audit row even on zero match, got %d", len(rows))
-	}
-	if rows[0].Before["count"].(float64) != 0 {
-		t.Errorf("before.count=%v, want 0", rows[0].Before["count"])
-	}
-}
-
 func TestAudit_DeleteByFilter_WritesSingleSummaryRow(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -759,7 +687,7 @@ func TestAudit_BatchUpdate_WithSkips_WritesSummaryRow(t *testing.T) {
 	}
 	// scope= distinguishes a member hitting the ownership wall from an admin
 	// hitting only tombstones, now that admins bypass ownership. Mirrors the
-	// scope marker batch-delete and bulk-rename already record.
+	// scope marker batch-delete already records.
 	if !strings.Contains(filter, "scope=own") {
 		t.Errorf("summary filter: %q, want it to contain scope=own for a member actor", filter)
 	}
@@ -887,7 +815,7 @@ func TestAudit_UpdateByFilter_WritesOneSummaryRow_WithFilterAndPatch(t *testing.
 // the summary row is emitted **unconditionally**, even when the filter
 // matched zero rows. The audit table records the user's *attempt* against
 // filter X, not just successful work — same precedent as
-// handleBulkRename's zero-match behaviour and handleDeleteTransactionsByFilter.
+// handleDeleteTransactionsByFilter's zero-match behaviour.
 func TestAudit_UpdateByFilter_ZeroMatches_StillEmitsSummary(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)

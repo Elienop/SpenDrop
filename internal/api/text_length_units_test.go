@@ -431,34 +431,6 @@ func TestCreateAPIToken_NameLimitIsCharacters_AndTheColumnAgrees(t *testing.T) {
 	}
 }
 
-// TestHandleBulkRename_NewDescriptionLimitIsCharacters. Bulk rename writes a
-// description to every matching row through raw SQL rather than through
-// validateTransactionRequest, so it carries its own copy of the cap and needs
-// its own boundary assertion.
-func TestHandleBulkRename_NewDescriptionLimitIsCharacters(t *testing.T) {
-	h := setupHandler(t)
-	user := seedTestUser(t, h.queries, "rename-charlimit", "member")
-	cat := seedTestCategory(t, h.queries, "Rename-"+t.Name(), "expense")
-	seedTestTransaction(t, h.queries, user.ID, cat.ID, "2026-04-01", 10, "old name")
-
-	rename := func(newDescription string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		h.handleBulkRename(rec, withUser(jsonRequest(t, http.MethodPut, "/api/transactions/bulk-rename",
-			map[string]any{"search": "old name", "new_description": newDescription}), user))
-		return rec
-	}
-
-	rec := rename(repeatTo(arabicLetter, MaxDescriptionLength))
-	if rec.Code != http.StatusOK {
-		t.Errorf("a %d-character new_description got %d, want 200: %s",
-			MaxDescriptionLength, rec.Code, rec.Body.String())
-	}
-	rec = rename(repeatTo(arabicLetter, MaxDescriptionLength+1))
-	if rec.Code != http.StatusBadRequest {
-		t.Errorf("a %d-character new_description got %d, want 400", MaxDescriptionLength+1, rec.Code)
-	}
-}
-
 // TestHandleDismissRecurring_DescriptionLimitIsCharacters. The dismissed-
 // recurring list stores the description it was given, so it applies the same
 // cap through a check of its own.

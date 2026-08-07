@@ -333,26 +333,3 @@ func TestPublishInvalidate_UpdateByFilter_BroadcastsTxnResources(t *testing.T) {
 	assertResources(t, drainResources(t, ch),
 		[]string{"transactions", "dashboard", "reports", "budgets"})
 }
-
-func TestPublishInvalidate_BulkRename_BroadcastsTransactionsAndReports(t *testing.T) {
-	q, db := setupTestDB(t)
-	h := NewHandler(q, db)
-	user := seedTestUser(t, q, "alice", "member")
-	hub, ch := newHubWithSubscriber(t, user.ID)
-	h.SetEventBroker(hub)
-
-	seedTestTransaction(t, q, user.ID, 1, "2026-04-06", 10.0, "Coffe")
-
-	body := strings.NewReader(`{"search":"Coffe","new_description":"Coffee"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/transactions/bulk-rename", body)
-	req = withUser(req, user)
-	rec := httptest.NewRecorder()
-
-	h.handleBulkRename(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk-rename: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
-	}
-	assertResources(t, drainResources(t, ch),
-		[]string{"transactions", "reports"})
-}
