@@ -178,7 +178,7 @@ SpenDrop is now running at **http://localhost:3535**. Data is persisted in a Doc
 ### Prerequisites
 
 - Go 1.26+
-- Node.js 20+
+- Node.js 24+
 - GCC (required for go-sqlite3 CGO compilation)
 
 ### Backend
@@ -789,13 +789,13 @@ default** and requires a VAPID keypair.
 1. Generate a VAPID keypair (one-time). The keys are just base64url strings,
    so generate them on any machine and paste them below — pick whichever you have:
    - **Docker only** (no Go or Node install needed — works on the server):
-     `docker run --rm node:22-alpine npx -y web-push generate-vapid-keys`
+     `docker run --rm node:24-alpine npx -y web-push generate-vapid-keys`
    - **Node:** `npx web-push generate-vapid-keys`
    - **This repo (Go):** `go run ./cmd/vapidgen`
 
    The Docker option runs a throwaway, self-deleting container (`--rm`) — it
-   installs no app and leaves nothing running; only the small `node:22-alpine`
-   image stays cached afterward (drop it with `docker rmi node:22-alpine` if you
+   installs no app and leaves nothing running; only the small `node:24-alpine`
+   image stays cached afterward (drop it with `docker rmi node:24-alpine` if you
    want). You do this **once, on any machine** — the keys are just text you paste
    below, so your server itself never needs Go or Node.
 2. Set `PUSH_ENABLED=true`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, and
