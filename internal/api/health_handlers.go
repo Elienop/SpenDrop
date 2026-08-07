@@ -67,9 +67,12 @@ type healthzDataResponse struct {
 	//  3. Gating it would cost real signal. The value's whole job is to
 	//     let an operator alert on "the DB is on an older schema than the
 	//     binary expects" — a check that has to run from outside the app,
-	//     from a scraper that has no session. (The Docker HEALTHCHECK is
-	//     not the consumer at risk: it scrapes /api/health, not this
-	//     endpoint. External monitoring is.)
+	//     from a scraper that has no session. Since B7 the Docker
+	//     HEALTHCHECK is itself one of those sessionless callers: it
+	//     scrapes /healthz/data every 30s (see the Dockerfile), so
+	//     authenticating this endpoint would not merely cost external
+	//     monitoring its signal — it would peg every container
+	//     permanently unhealthy.
 	//
 	// So the honest reason to leave it open is that authenticating it
 	// would be secrecy theatre — the same false rationale the version

@@ -31,6 +31,10 @@ top items. Production figures in this file come from the owner's live database o
 *B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed.*
 
 ### B7 — No external signal when something breaks
+**Status: piece 1 implemented on `fix/b7-healthcheck-data` (2026-08-07, unmerged); piece 2 open.**
+The original finding is kept verbatim below — the "nothing in the deployment reads it" sentence
+describes the state at discovery, not today.
+
 **Verified: reported.** The Docker health check only proves the web server is listening and never
 touches the database. `/healthz/data` is thorough but nothing in the deployment reads it, and it
 reports "ok" while the database is unwritable for up to a day (the first thing that flips it is a
@@ -41,18 +45,28 @@ seeing what looks like an offline shell — while backups have silently stopped.
 
 **ANSWERED 2026-08-02: the owner runs Dockhand, which monitors every stack for uptime and
 container health.** So the alerting channel already exists and nothing needs to be chosen or
-installed. What it is currently watching is the problem: `Dockerfile:72` points HEALTHCHECK at
+installed. What it was watching is the problem: the Dockerfile's HEALTHCHECK pointed at
 `/api/health`, which only proves the web server answers. Dockhand faithfully reports a container
 as healthy while its database is unusable.
 
 **So B7 becomes two pieces of different size:**
-1. *Small, do it:* point HEALTHCHECK at `/healthz/data` instead. It already runs
-   `PRAGMA quick_check`, the cached full integrity result, transaction counts, schema version and
-   the checkpoint freshness sweep, and it 503s on a real problem. Dockhand's existing monitoring
-   then inherits all of that for free. Safe under `restart: unless-stopped` — an unhealthy
-   container is not restarted, so a degraded check reports rather than crash-loops. Keep the
-   interval at ≥30s; the endpoint's own comment warns against making it a hot path.
-2. *Still open, and the subtler half:* **a read-only database would still report healthy.**
+1. ~~*Small, do it:* point HEALTHCHECK at `/healthz/data` instead.~~ **Implemented 2026-08-07 on
+   `fix/b7-healthcheck-data`** (not yet merged — this entry moves to *Closed* with the squash hash
+   at merge). The probe is now
+   `wget -q -O /dev/null http://127.0.0.1:8080/healthz/data`, `--interval=30s --timeout=10s
+   --start-period=60s --retries=3`. Verified end to end on a throwaway container: healthy while
+   the endpoint returns 200, and after three data pages of `spendrop.db` were overwritten in the
+   *running* container, `/healthz/data` returned 503
+   (`quick_check: "database disk image is malformed"`) and the container reached `unhealthy` after
+   the 3-retry budget, with `RestartCount=0` — it reports, it does not crash-loop. The same boot
+   had `/api/health` still answering 200, which is the bug this closes, measured rather than
+   argued. Two details worth keeping: the timeout went 5s→10s because the probe now does real
+   reads against a pool capped at one connection, and the probe uses an explicit GET rather than
+   `--spider` because chi answers `HEAD /healthz/data` with 405 (verified) — today's busybox sends
+   GET for `--spider`, but a build that took the flag literally would pin the container unhealthy
+   forever.
+2. *Still open — the live remainder of this item, and the subtler half:* **a read-only database
+   would still report healthy.**
    Every sub-check in `/healthz/data` is a READ — `quick_check` passes fine on a database that
    cannot be written. That is exactly the failure mode B2's restore bug produced ("attempt to
    write a readonly database"). The first thing that actually flips the endpoint is a failed
