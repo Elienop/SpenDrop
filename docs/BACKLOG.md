@@ -28,25 +28,7 @@ top items. Production figures in this file come from the owner's live database o
 
 ## Then
 
-### B6 — Cheap batch
-All **reported**, none independently verified, except B6k and B6l which are **read** (the code was
-read and the mechanism confirmed, but not executed). Grouped because they are individually trivial:
-
-| | Item | Why it matters |
-|---|---|---|
-| B6a | Clearing a monthly budget silently does nothing — says "No changes to save" and keeps driving alerts. The Category Limits editor directly below does the opposite. | Two editors on one page with contradictory rules; the top one lies |
-| B6b | ~~Bulk-delete says "This cannot be undone" — false; rows go to Trash and nothing purges them~~ **Closed with B5** (`cae004c`, 2026-08-02) — dialog and toast copy now say rows move to Trash and are restorable | Discourages a legitimate workflow, hides the real recovery path |
-| B6c | Transactions table blinks to a skeleton on every keystroke and re-fetches | Most-used screen for finding an old transaction |
-| B6d | A row-level error banner appears once and never clears, with no dismiss | Later *successful* edits happen under a banner saying they failed |
-| B6e | README recommends deleting the "Over budget" Homepage field as unimplemented — it shipped and works | Following the docs removes a working alert |
-| B6f | README Roadmap lists three shipped features as unbuilt | — |
-| B6g | Two rules in `.claude/CLAUDE.md` are factually wrong (see *Corrections* below) | Bad premises propagate into agent briefs |
-| B6h | Bulk edit clears the duplicate-detection fingerprint even when no value changed | Re-importing the same sheet later can silently double rows |
-| B6i | Search matches description only — not category, notes, or the foreign amount | Empty result is indistinguishable from "doesn't exist" |
-| B6j | Nothing shows who entered a transaction, though the app knows | A member learns a row is her spouse's only after Save returns "forbidden" |
-| B6k | **Verified: read.** `web/src/components/RecentlyAdded.tsx` bails with `if (rows.length === 0) return null;`, so deleting the *last* visible row unmounts the whole panel — including the `headingRef` that `restoreFocus()` is supposed to return focus to. Pre-existing, but higher-stakes now that Undo lives on this panel: focus is lost at the exact moment the user might want to hit Undo. | A keyboard or screen-reader user loses the Undo they just earned |
-| B6l | **Verified: read.** `handleBatchRestoreTransactions` and `handleRestoreAllTransactions` both pass a zero `time.Time` to `verifyAffectedCheckpoints`, so every bulk restore walks *every* checkpoint. The old comments blamed a missing per-row date; that was false and is now corrected in place — both loops already call `qtx.GetTransactionByID` per id to build the cell set, so an accumulated `minDate` is available. What the bound still needs is a fallback for the admin path, where a row can restore even when that read failed (the ownership check is `!isAdminUser`-gated). Comments fixed on `feat/delete-undo-member-trash`; the bound itself not done. | Unbounded checkpoint walk on every bulk restore; grows with checkpoint count, not batch size |
-| B6m | BulkEditConfirmDialog polish, found by the B4 review battery: "1 transactions" pluralization; the confirm button's aria-label ("Apply changes to N transactions") does not contain its visible text ("Apply to N"), a WCAG 2.5.3 miss; focus drops to `<body>` after a successful Replace All; the two confirm call sites disagree on retry shape — align bulk edit to Replace All's safer close-before-dispatch. | Four one-liners in one shared component |
+*B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed.*
 
 ### B7 — No external signal when something breaks
 **Verified: reported.** The Docker health check only proves the web server is listening and never
@@ -206,7 +188,8 @@ leads are not re-investigated.
 
 ## Corrections to project instructions (B6g detail)
 
-Two rules in `.claude/CLAUDE.md` are wrong and were briefed to agents as fact:
+**CORRECTED 2026-08-07 with B6** — both rules below were rewritten in the local `.claude/CLAUDE.md`
+(gitignored; the correction cannot appear in any diff). Kept for the record of what was wrong:
 
 1. **The soft-delete `JOIN`-placement rule.** It warns that moving `t.deleted_at IS NULL` from
    `ON` to `WHERE` drops empty categories from reports. Tested directly against a fixture
@@ -225,6 +208,82 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B6 — Cheap batch, all 12 open items** (`e46af7e..6283a09`, eight commits, 2026-08-07, on
+  `fix/b6-cheap-batch`, PR pending). Built by five implementation agents in three waves, then a
+  five-reviewer battery (code / data-correctness / security / UI-UX / design), a two-part fix
+  wave, an isolated-worktree deep review (verdict MERGEABLE, 8/8 kill-list mutants re-executed),
+  and a browser pass on `:3535` (SW purged first). What each item became, and what was NOT obvious:
+  - **B6a** — the stated consequence was WRONG: over-budget alerts read *category* budgets and
+    never the monthly total, so a stale monthly budget never drove an alert. The real semantic:
+    a month with no budget row falls back to `default_budget` in Reports, so "clear" means "use
+    the default" — an intent the API could not express (no DELETE existed; PUT rejects 0 by
+    design — zero is a value, deletion is the unset). New `DELETE /api/budgets/{year}/{month}`,
+    admin-only, idempotent, mirroring the category-budget delete. **C1, the battery's one
+    Critical (UI-UX review):** `MonthlyBudgetsSection` had NO role gating while the sibling
+    section did — members were offered saves and clears that could only 403, and the new real
+    DELETE would have added un-dischargeable dirty prompts on top. Now read-only for members
+    (year picker deliberately stays — it navigates the read view). Browser-verified in both roles.
+  - **B6c** — skeleton fixed with held-over rows + the Dashboard dim idiom. The subtle half:
+    the stale-count window had to gate BOTH total-scoped controls (Replace All *and*
+    Select-all-matching) — gating only the obvious button reopens B4's count-vs-scope shape
+    through the side door (found by review, not by the implementer). Residual, deliberate:
+    search still fires one request per keystroke; debouncing is a separate behaviour decision.
+  - **B6d** — banner clears on that row's next successful save + manual dismiss. Semantics are
+    "last failure", not "open failures" (a success on row B retires row A's banner) — accepted,
+    the failed row's edit state is the real signal.
+  - **B6e/B6f** — the README bullet claimed the Homepage over-budget field was "hard-wired to 0,
+    reserved for a future feature" and advised deleting it; the same README's field table
+    documented it computed. Three roadmap items marked shipped (alerts, per-category budgets,
+    API tokens).
+  - **B6g** — both local `.claude/CLAUDE.md` rules rewritten in place: ON-vs-WHERE placement is
+    defensive, not load-bearing (the `HAVING total_cents > 0` is the live protection — the
+    code's own comment at `export_handlers.go:687-695` says so); and single-row mutations use
+    the store while four bulk paths use raw SQL deliberately, with the true invariant being
+    audit-in-same-tx + tombstone exclusion + checkpoint hook.
+  - **B6h** — HALF the claim had drifted: the tags branch was already conditional (`c3d5290`);
+    only update-by-filter's no-tags branch cleared unconditionally. Fixed inside the single
+    UPDATE via CASE comparisons against pre-update values. The SQL restatement of the hash
+    normalization is provably over-clear-only — SQLite's ASCII `lower()`/space-only `trim()`
+    are strictly weaker than Go's folds, so SQL-equal ⟹ Go-digest-equal (security review fuzzed
+    300k Unicode-hostile pairs: zero dangerous keeps). Identity fields are exactly
+    date/amount/description/category; tags and notes never touch the hash.
+  - **B6i** — the shared predicate lives in `export_handlers.go` with FOUR consumers including
+    the XLSX export (widened deliberately — export matches the list). Foreign amounts match
+    exact cents, never substring, so "1500" cannot sweep 1,500,000 into delete-by-filter. The
+    regexp anchors are load-bearing: without them ParseFloat accepts `1e5`/`-100` — found as a
+    surviving mutant during implementation, then pinned; the fuzz target's seed corpus alone
+    catches the int64-minimum laundering shape. Delete-by-filter lockstep pinned in `6283a09`.
+  - **B6j** — `created_by` carries **display_name** under an honest key: push notifications
+    already said "Elie added…", so shipping the username would have made the table disagree
+    with the phones; `/users` is admin-only so a client cannot resolve names itself. LEFT JOIN
+    (a deleted account renders "", "Unknown" in the UI), always-present key (no omitempty —
+    the key-absence trap), spoof-proof (name sourced from the session user; probed). Deep
+    review's one SURVIVOR: batch-create could emit `""` untested — "the compiler asks the
+    question" is a signature, not a test; closed in `6283a09`. **display_name is user-editable
+    and NOT unique** — any future filter/group on "who" must key `user_id`. Trash's identical
+    blindness filed as B13.
+  - **B6k** — panel renders an empty state instead of unmounting; focus lands on the announced
+    heading. The empty state follows the *table-panel* idiom (Transactions/Trash single muted
+    line), NOT Savings' icon pattern as first claimed — two sanctioned registers exist, match
+    by surface type. `role="status"` was dropped in review: a conditionally-mounted live
+    region mostly doesn't announce and can double-announce against the toast.
+  - **B6l** — walk bounded by the earliest restored row's date, degrading to the full walk if
+    any restored row lacks a usable date. The gates are a THIRD deliberately-distinct liveness
+    variant (`restored > 0` + an `unboundedFloor` flag) — batch-update's and update-by-filter's
+    gates still differ and none may be unified. The `loadErr != nil` degrade arm is
+    structurally untestable (RestoreTx re-runs the identical read on the same tx) and its site
+    comment says so. The two production comments that pointed at this backlog entry were
+    deleted with the fix.
+  - **B6m** — all four fixed, plus the SAME WCAG 2.5.3 defect found in BulkEditDialog (the
+    dialog users hit first), whose old test matched both the aria-label and the visible text
+    and passed either way. Trigger and confirm now carry distinct accessible names; focus is
+    anchored after any success that unmounts its own trigger — bulk edit had the identical
+    focus-strand one door over (review catch), plus the dialog TITLE was still unpluralized.
+  Also from the battery: security M1 independently rediscovered B12 (cross-referenced above);
+  M2 filed as B14. Accepted residuals, on the record: per-keystroke fetch (B6c), ~24px dismiss
+  target (matches the chip idiom; revisit in B9), the table dims on every SSE refetch
+  (Dashboard idiom; scope to key-changes if it proves noisy in daily use), B6h's one-directional
+  ASCII over-clear, and B6d's last-failure banner semantics.
 - **B4 — "Replace All (4)" renamed more than 4** (`cb8cbc4..0902485`, merged 2026-08-07
   via PR #118, squash `923fe66`, released v0.37.2). **Verified: reproduced** in the browser
   before and after. Replace All now stages a description-only patch through the same
