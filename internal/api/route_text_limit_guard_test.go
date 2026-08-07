@@ -380,16 +380,6 @@ var textLimitProbes = []textLimitProbe{
 		},
 	},
 
-	// Bulk rename writes one description across every matching row.
-	{
-		method: http.MethodPut, pattern: "/api/transactions/bulk-rename", field: "new_description",
-		limit: MaxDescriptionLength, okStatus: http.StatusOK,
-		url: func(probeEnv) string { return "/api/transactions/bulk-rename" },
-		body: func(_ probeEnv, v string) string {
-			return jsonBody(map[string]any{"search": "no such description", "new_description": v})
-		},
-	},
-
 	// Bulk edit by id list, and the same patch applied by filter.
 	{
 		method: http.MethodPost, pattern: "/api/transactions/batch-update", field: "description",
@@ -521,7 +511,6 @@ func TestRouteWalk_SeesTheRealRouteTable(t *testing.T) {
 		"POST /api/transactions":                    "handleCreateTransaction",
 		"POST /api/transactions/batch":              "handleBatchCreateTransactions",
 		"PUT /api/transactions/{id}":                "handleUpdateTransaction",
-		"PUT /api/transactions/bulk-rename":         "handleBulkRename",
 		"POST /api/transactions/batch-update":       "handleBatchUpdateTransactions",
 		"POST /api/transactions/update-by-filter":   "handleUpdateTransactionsByFilter",
 		"POST /api/import/confirm":                  "handleImportConfirm",
@@ -558,7 +547,6 @@ func TestTransactionTextScan_FindsTheKnownWritePaths(t *testing.T) {
 		"POST /api/transactions":                  "description",
 		"POST /api/transactions/batch":            "notes",
 		"PUT /api/transactions/{id}":              "tags",
-		"PUT /api/transactions/bulk-rename":       "new_description",
 		"POST /api/transactions/batch-update":     "description",
 		"POST /api/transactions/update-by-filter": "tags",
 		"POST /api/checkpoints":                   "note",

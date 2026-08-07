@@ -479,66 +479,6 @@ func seedHashedTransaction(t *testing.T, h *Handler, userID, categoryID int64, d
 	return txn.ID
 }
 
-// TestBulkRename_ClearsContentHash covers the raw-SQL bulk rename, which does
-// not go through UpdateTransaction. It rewrites description — a hash input —
-// on every matching row, so every one of them would otherwise be left holding
-// a stale identity.
-func TestBulkRename_ClearsContentHash(t *testing.T) {
-	h := setupHandler(t)
-	user := seedTestUser(t, h.queries, "alice", "member")
-	cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
-	id := seedHashedTransaction(t, h, user.ID, cat.ID, "2026-04-01", "mr brown coffee", 10.0)
-
-	req := withUser(httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename",
-		bytes.NewReader([]byte(`{"search":"mr brown","new_description":"MR BROWN"}`))), user)
-	rec := httptest.NewRecorder()
-	h.handleBulkRename(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk rename: status = %d; body = %s", rec.Code, rec.Body.String())
-	}
-
-	if hash := hashOf(t, h, id); hash.Valid {
-		t.Errorf("renamed row kept content_hash %q — it now claims the identity of its old description", hash.String)
-	}
-}
-
-// TestBulkRename_Admin_ClearsContentHash is the admin-branch twin of
-// TestBulkRename_ClearsContentHash.
-//
-// handleBulkRename runs one of two literal SQL statements depending on the
-// actor's role, and only the member one was covered — deleting
-// `content_hash = NULL, ` from the admin statement left every package green.
-// The route sits in the plain authenticated group with no admin gate, and the
-// first user registered in a household install IS the admin, so the untested
-// statement is the likely dominant production path.
-func TestBulkRename_Admin_ClearsContentHash(t *testing.T) {
-	h := setupHandler(t)
-	admin := seedTestUser(t, h.queries, "boss", RoleAdmin)
-	cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
-	id := seedHashedTransaction(t, h, admin.ID, cat.ID, "2026-04-01", "mr brown coffee", 10.0)
-
-	req := withUser(httptest.NewRequest(http.MethodPut, "/api/transactions/bulk-rename",
-		bytes.NewReader([]byte(`{"search":"mr brown","new_description":"MR BROWN"}`))), admin)
-	rec := httptest.NewRecorder()
-	h.handleBulkRename(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bulk rename: status = %d; body = %s", rec.Code, rec.Body.String())
-	}
-	// Guard against a vacuous pass: if the admin statement matched nothing the
-	// hash assertion below would be meaningless.
-	var updated struct {
-		Updated int64 `json:"updated"`
-	}
-	decodeResponse(t, rec, &updated)
-	if updated.Updated != 1 {
-		t.Fatalf("updated = %d, want 1 (the admin branch must have matched the row)", updated.Updated)
-	}
-
-	if hash := hashOf(t, h, id); hash.Valid {
-		t.Errorf("admin-renamed row kept content_hash %q — it now claims the identity of its old description", hash.String)
-	}
-}
-
 // TestUpdateByFilter_NoTags_ClearsContentHash covers runUpdateByFilterNoTags,
 // the single-statement branch of update-by-filter. category_id is a hash input
 // (the identity hashes the category NAME), so moving a row between categories

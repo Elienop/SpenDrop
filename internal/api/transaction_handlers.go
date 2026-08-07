@@ -1258,131 +1258,6 @@ func summarizePatch(p database.UpdatePatch) string {
 	return out
 }
 
-// bulkRenameRequest is the JSON input for bulk-renaming transaction descriptions.
-type bulkRenameRequest struct {
-	Search         string `json:"search"`
-	NewDescription string `json:"new_description"`
-}
-
-// handleBulkRename updates the description of all transactions matching a
-// case-insensitive LIKE search. Non-admin users can only rename their own
-// transactions; admins can rename across all users.
-func (h *Handler) handleBulkRename(w http.ResponseWriter, r *http.Request) {
-	user, ok := auth.GetUser(r)
-	if !ok {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
-		return
-	}
-
-	var req bulkRenameRequest
-	if err := decodeJSON(w, r, &req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	req.Search = strings.TrimSpace(req.Search)
-	req.NewDescription = strings.TrimSpace(req.NewDescription)
-
-	if req.Search == "" {
-		writeError(w, http.StatusBadRequest, "search is required")
-		return
-	}
-	if req.NewDescription == "" {
-		writeError(w, http.StatusBadRequest, "new_description is required")
-		return
-	}
-	if charLen(req.NewDescription) > MaxDescriptionLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("new_description must be %d characters or less", MaxDescriptionLength))
-		return
-	}
-
-	// Escape SQL LIKE wildcards (same pattern as buildTransactionWhereClause)
-	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(req.Search)
-
-	// Wrap the bulk UPDATE + summary audit row in a single *sql.Tx so the
-	// audit row commits if and only if the data rows commit. RecordBulkTx
-	// writes a single summary row with transaction_id=BulkAuditTransactionID
-	// rather than one-row-per-match; the plan documents this as the
-	// deliberate fidelity/perf trade-off for an endpoint that can touch
-	// tens of thousands of rows.
-	tx, err := h.db.BeginTx(r.Context(), nil)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to begin transaction")
-		return
-	}
-	defer tx.Rollback()
-
-	var result sql.Result
-	// Soft-delete aware: the rename must skip tombstoned rows because
-	// those are "no longer in the live set" and reviving them via an
-	// incidental bulk rename would silently restore deleted data. If an
-	// operator wants to rename tombstoned rows, they restore first.
-	//
-	// content_hash = NULL for the same reason UpdateTransaction clears it:
-	// description is a dedupe-identity input, so every renamed row would
-	// otherwise keep claiming the identity of the description it no longer
-	// has — and a later import of that original content would be rejected as
-	// a duplicate of a row that no longer matches it. The startup backfill
-	// re-anchors the renamed rows to their current content on the next boot.
-	if user.Role == RoleAdmin {
-		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND deleted_at IS NULL`,
-			req.NewDescription, "%"+escaped+"%",
-		)
-	} else {
-		result, err = tx.ExecContext(r.Context(),
-			`UPDATE transactions SET description = ?, content_hash = NULL, updated_at = CURRENT_TIMESTAMP WHERE description LIKE ? ESCAPE '\' AND user_id = ? AND deleted_at IS NULL`,
-			req.NewDescription, "%"+escaped+"%", user.ID,
-		)
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to update transactions")
-		return
-	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to get update count")
-		return
-	}
-
-	// Record the summary audit row for the bulk rename. The filter string
-	// embeds BOTH the raw user-supplied search term (quoted with %q so
-	// trailing whitespace, quotes, and escape chars survive a round-trip)
-	// AND the exact SQL LIKE pattern actually executed. Without the
-	// executed pattern an operator replaying the audit log cannot tell
-	// which `%` / `_` characters were literals vs. wildcards — critical
-	// for reconstructing intent when the raw search contains either.
-	scope := "own"
-	if user.Role == RoleAdmin {
-		scope = "all"
-	}
-	filter := fmt.Sprintf("rename scope=%s search=%q -> %q (SQL LIKE %q ESCAPE '\\')",
-		scope, req.Search, req.NewDescription, "%"+escaped+"%")
-	if err := h.txnStore.RecordBulkTx(r.Context(), tx, user.ID, database.AuditUpdate, database.BulkAuditSummary{
-		Count:  rowsAffected,
-		Filter: filter,
-	}); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to record audit")
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to commit bulk rename")
-		return
-	}
-
-	// Live-updates broadcast (post-commit, best-effort, nil-safe): a rename only
-	// changes descriptions (no amount/date/category move), so the list and the
-	// description-keyed report aggregates change; dashboard totals and budget
-	// cells are untouched.
-	if rowsAffected > 0 {
-		h.publishInvalidate("transactions", "reports")
-	}
-
-	writeJSON(w, http.StatusOK, map[string]int64{"updated": rowsAffected})
-}
-
 // batchDeleteRequest is the JSON input for deleting multiple transactions.
 type batchDeleteRequest struct {
 	IDs []int64 `json:"ids"`
@@ -1766,9 +1641,10 @@ func (h *Handler) handleBatchUpdateTransactions(w http.ResponseWriter, r *http.R
 		// rolls both the data updates and this audit row back together.
 		// RecordBulkTx wraps the JSON envelope itself; pass the struct,
 		// not a marshalled string.
-		// scope= mirrors batch-delete and bulk-rename: now that admins bypass
-		// ownership, a skip count alone no longer tells an operator whether a
-		// member hit the ownership wall or an admin hit tombstones.
+		// scope= mirrors batch-delete and the filter-scoped bulk paths: now that
+		// admins bypass ownership, a skip count alone no longer tells an
+		// operator whether a member hit the ownership wall or an admin hit
+		// tombstones.
 		scope := "own"
 		if user.Role == RoleAdmin {
 			scope = "all"
@@ -2177,7 +2053,7 @@ func (h *Handler) handleUpdateTransactionsByFilter(w http.ResponseWriter, r *htt
 	// human-greppable Filter field. The raw URL.RawQuery is %q-quoted so
 	// trailing whitespace, embedded quotes, and escape characters survive
 	// a round-trip.
-	// scope= completes the set: batch-delete, bulk-rename, delete-by-filter and
+	// scope= completes the set: batch-delete, delete-by-filter and
 	// batch-update all record it. This path needs it MOST — a member's filter
 	// is scoped to their own rows in SQL while an admin's runs household-wide,
 	// and unlike batch-update there is no skipped count to hint at which ran.
