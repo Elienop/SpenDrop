@@ -14,7 +14,15 @@ FROM golang:1.26-alpine AS go-builder
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+# The --mount=type=cache mounts here and below keep the Go module/compile
+# caches and the npm download cache on the build host, OUTSIDE the layer
+# cache: a rebuild whose lockfile changed re-downloads only the delta instead
+# of the whole dependency tree. On a fresh builder (CI runners) the mounts
+# start empty and the step behaves exactly as before — the caches only pay
+# off where builds repeat, i.e. local dev rebuilds. Requires BuildKit, the
+# default engine since Docker 23; a legacy-builder invocation fails loudly on
+# the --mount flag rather than silently skipping the cache.
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd/ cmd/
 COPY internal/ internal/
 # Re-declared to pull the global ARG into this stage's scope (it inherits the
@@ -29,7 +37,11 @@ ARG APP_VERSION
 # builds cleanly and silently ships "dev" — so
 # TestDockerfileStampsTheLinkedVersionVar pins this line against the Go
 # source.
-RUN CGO_ENABLED=1 go build \
+# The module cache mount must repeat here — mounts are per-RUN, and without
+# it the modules `go mod download` cached would be invisible to the build.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=1 go build \
     -ldflags "-X github.com/elienop/spendrop/internal/version.version=${APP_VERSION}" \
     -o spendrop ./cmd/spendrop
 
@@ -37,7 +49,15 @@ RUN CGO_ENABLED=1 go build \
 FROM node:24-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package*.json ./
-RUN npm ci
+# Same scheme as the Go stage: /root/.npm is npm's content-addressed download
+# cache, so `npm ci` still rebuilds node_modules from scratch (its contract)
+# but fetches from disk instead of the network for every version the cache
+# has seen before. The flags make the cache actually bite: without
+# --prefer-offline npm revalidates against the registry even on full cache
+# hits, and the audit/fund calls are pure network chatter a build doesn't
+# need (Dependabot owns advisory scanning for this repo). Integrity is not
+# weakened — every tarball is still checked against the lockfile's SHA pins.
+RUN --mount=type=cache,target=/root/.npm npm ci --prefer-offline --no-audit --no-fund
 COPY web/ .
 # Same value, second artifact. Vite inlines VITE_-prefixed env vars into the
 # bundle at build time, so the frontend reads it as
