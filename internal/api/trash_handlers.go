@@ -431,6 +431,13 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 	restored := 0
 	conflicted := 0
 	skipped := 0
+	// Earliest date among the rows this batch actually restores, plus a flag
+	// for "at least one restored row could not contribute one". The pair —
+	// not the date alone — is what the checkpoint hook below reads; see the
+	// comment there for why a missing date has to widen the walk rather than
+	// silently narrow it.
+	var minRestoredDate time.Time
+	unboundedFloor := false
 	for _, id := range req.IDs {
 		existing, loadErr := qtx.GetTransactionByID(r.Context(), id)
 
@@ -467,6 +474,19 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 			if loadErr == nil {
 				cellSet[cellForDate(existing.CategoryID, existing.Date)] = struct{}{}
 			}
+			// A row that restored without a usable date cannot narrow the
+			// checkpoint walk. loadErr != nil means we never saw its date —
+			// only reachable for an admin, since the member branch above
+			// skips every id whose read failed. A zero existing.Date is
+			// indistinguishable from "unset" to earliestDate, so folding it
+			// in would leave the floor at some later row's date and skip the
+			// checkpoints in between. Both cases fall back to the unbounded
+			// walk instead of dropping a checkpoint this row could have moved.
+			if loadErr != nil || existing.Date.IsZero() {
+				unboundedFloor = true
+				continue
+			}
+			minRestoredDate = earliestDate(minRestoredDate, existing.Date)
 			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
@@ -497,22 +517,26 @@ func (h *Handler) handleBatchRestoreTransactions(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Phase 3.3: pass a zero time.Time so every checkpoint is re-verified.
-	// This is a deliberate CONSERVATIVE choice, not a data-availability
-	// constraint — the loop above already reads each row (that read builds
-	// cellSet and carries the member ownership check), so existing.Date is
-	// in hand for most ids and a bounded minDate could be accumulated from
-	// it. What stops that today is the admin path: the ownership check is
-	// gated on !isAdminUser, so an admin's id whose GetTransactionByID
-	// failed is still handed to RestoreTx and can restore with no date
-	// available. A bounded floor would need a fallback for exactly that
-	// case (fall back to zero for the whole batch, or refuse the read
-	// failure), and getting the fallback wrong silently under-verifies.
-	// Zero is correct meanwhile: restoring a row always re-adds cents to
-	// the live SUM, so every red/green state is potentially affected.
-	// Tracked as a bounded-walk follow-up in docs/BACKLOG.md.
+	// Phase 3.3: restoring a row puts its cents back into the live SUM, so
+	// every checkpoint on or after the earliest restored date has to be
+	// re-verified. A checkpoint dated before all of them sums no restored row
+	// and is untouchable, so the walk is bounded by the batch rather than by
+	// the size of the checkpoint table.
+	//
+	// The liveness gate is `restored > 0`, NOT `!minRestoredDate.IsZero()`.
+	// This loop can restore a row without ever seeing its date (an admin's id
+	// whose in-tx read failed is still handed to RestoreTx), and that case has
+	// to WIDEN the walk to everything, not disable it — which is exactly what
+	// a zero-date liveness gate would do. Do not "unify" this with
+	// batch-update's !minDate.IsZero() gate: there every updated row is
+	// guaranteed to contribute a date, so the two are equivalent; here they
+	// are not.
 	if restored > 0 {
-		h.verifyAffectedCheckpoints(r.Context(), time.Time{})
+		from := minRestoredDate
+		if unboundedFloor {
+			from = time.Time{}
+		}
+		h.verifyAffectedCheckpoints(r.Context(), from)
 	}
 
 	// Phase C (Task 17): evaluate the over-budget alert for every distinct
@@ -611,6 +635,16 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 
 	restored := 0
 	conflicted := 0
+	// Earliest date among the rows actually restored, plus the "a restored
+	// row supplied no usable date" flag. Same pair, same reason, as
+	// handleBatchRestoreTransactions — but this loop needs no ownership branch,
+	// because the route is registered inside the auth.RequireAdmin group
+	// (router.go), so a non-admin caller cannot reach it at all. batch-restore
+	// is NOT admin-gated and therefore has to check ownership per row; here the
+	// route gate has already settled that question for every id, and a failed
+	// per-id read goes straight to RestoreTx.
+	var minRestoredDate time.Time
+	unboundedFloor := false
 	for _, id := range ids {
 		existing, loadErr := qtx.GetTransactionByID(ctx, id)
 		err := h.txnStore.RestoreTx(ctx, tx, user.ID, id)
@@ -619,6 +653,11 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 			if loadErr == nil {
 				cellSet[cellForDate(existing.CategoryID, existing.Date)] = struct{}{}
 			}
+			if loadErr != nil || existing.Date.IsZero() {
+				unboundedFloor = true
+				continue
+			}
+			minRestoredDate = earliestDate(minRestoredDate, existing.Date)
 			continue
 		}
 		if errors.Is(err, sql.ErrNoRows) {
@@ -644,16 +683,19 @@ func (h *Handler) handleRestoreAllTransactions(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Phase 3.3: same rationale as batch-restore. The zero floor re-verifies
-	// every checkpoint by choice, not because no date is available — the
-	// loop above reads each row for cellSet, so existing.Date is there for
-	// every id whose read succeeded. Bounding the walk with an accumulated
-	// minDate would still need a fallback for ids that restore despite a
-	// failed read (loadErr != nil does not stop RestoreTx here either), so
-	// the unbounded walk stands until that fallback is designed. Tracked as
-	// a follow-up in docs/BACKLOG.md.
+	// Phase 3.3: same bounded walk and same liveness gate as batch-restore —
+	// `restored > 0` decides whether to walk, minRestoredDate/unboundedFloor
+	// decide how far back. Restore-all is the path where the unbounded
+	// fallback matters most: it takes no id list, so a single row that
+	// restores with an unreadable date sits among an arbitrary number of
+	// well-read ones, and only the fallback keeps the earlier checkpoints in
+	// the walk.
 	if restored > 0 {
-		h.verifyAffectedCheckpoints(ctx, time.Time{})
+		from := minRestoredDate
+		if unboundedFloor {
+			from = time.Time{}
+		}
+		h.verifyAffectedCheckpoints(ctx, from)
 	}
 
 	// Phase C (Task 17): evaluate the over-budget alert for every distinct
