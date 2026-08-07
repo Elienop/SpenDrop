@@ -197,6 +197,22 @@ func TestPublishInvalidate_RepresentativeResourceSets(t *testing.T) {
 			want:     []string{"budgets", "reports"},
 		},
 		{
+			// B6a: clearing a month drops it back to the household default in
+			// the reports budget-vs-actual table, so it must invalidate the
+			// same pair the PUT does — not a narrower set.
+			name: "budget delete broadcasts budgets+reports",
+			invoke: func(t *testing.T, h *Handler, q *database.Queries, admin database.User) *httptest.ResponseRecorder {
+				seedBudget(t, q, 2026, 4, 1200)
+				req := httptest.NewRequest(http.MethodDelete, "/api/budgets/2026/4", nil)
+				req = withUserAndURLParams(req, admin, map[string]string{"year": "2026", "month": "4"})
+				rec := httptest.NewRecorder()
+				h.handleDeleteBudget(rec, req)
+				return rec
+			},
+			wantCode: http.StatusOK,
+			want:     []string{"budgets", "reports"},
+		},
+		{
 			name: "purge single broadcasts trash",
 			invoke: func(t *testing.T, h *Handler, q *database.Queries, admin database.User) *httptest.ResponseRecorder {
 				tombstoned := seedTombstonedTestTransaction(t, q, admin.ID, 1, "2026-04-01", 12.50, "gone")

@@ -531,6 +531,14 @@ ON CONFLICT(year, month) DO UPDATE SET
 -- name: ListBudgetsByYear :many
 SELECT * FROM budgets WHERE year = ? ORDER BY month;
 
+-- name: DeleteBudget :exec
+-- Clearing a month's budget is a DELETE, not an UPDATE to zero: handleSetBudget
+-- rejects amount <= 0, and a zero row would read as "budgeted nothing" rather
+-- than "not budgeted". With no row for the month, the Reports budget-vs-actual
+-- table falls back to the household default_budget setting — which is the state
+-- the UI previously had no way to ask for.
+DELETE FROM budgets WHERE year = ? AND month = ?;
+
 -- Category Budgets (Gap 2)
 -- Per-category monthly limits. Independent sub-caps; see migration 012 header.
 -- sqlc cannot generate this repo (parser fails on RETURNING/window funcs), so

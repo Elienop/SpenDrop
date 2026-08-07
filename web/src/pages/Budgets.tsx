@@ -172,6 +172,17 @@ function DiscardEditsDialog({
 const BUDGET_YEARS_AHEAD = 5;
 
 interface MonthlyBudgetsSectionProps {
+  // Editing/saving is admin-only because the backend PUT *and* DELETE for
+  // budgets reject non-admins. Non-admins still get the read view (the plan
+  // matters to everyone who spends against it), but the dollar fields render
+  // as static text and every write control is hidden so they can't trigger a
+  // request that would 403. Mirrors <CategoryLimitsSectionProps>.admin.
+  //
+  // Without the gate a member could stage edits she can never save — and once
+  // clearing a month began issuing a real DELETE, a cleared row also counted
+  // toward dirtyCount, so she got unsaved-changes prompts with no way to
+  // discharge them.
+  admin: boolean;
   // Parent-held mirror of `dirtyCount`. Lets the Budgets page's
   // click-listener consult the current dirty state *before* committing
   // a route change (and before the page unmounts and wipes the
@@ -188,6 +199,7 @@ interface MonthlyBudgetsSectionProps {
 }
 
 function MonthlyBudgetsSection({
+  admin,
   dirtyCountRef,
   onDirtyChange,
 }: MonthlyBudgetsSectionProps) {
@@ -306,14 +318,26 @@ function MonthlyBudgetsSection({
   async function handleSave(e: FormEvent) {
     e.preventDefault();
 
-    // Bucket the 12 rows into pending (save), invalid (block), unchanged
-    // (skip). O(1) baseline lookups via the ref — comparison is on
+    // Bucket the 12 rows into pending (PUT), cleared (DELETE), invalid
+    // (block), unchanged (skip) — the same four buckets the Category Limits
+    // editor below uses. O(1) baseline lookups via the ref; comparison is on
     // strings, see the `baselineRef` comment for rationale.
     const pending: { month: number; amount: number }[] = [];
+    const clearedMonths: number[] = [];
     const invalidMonths: number[] = [];
     for (let m = 1; m <= 12; m++) {
       const raw = editAmounts[m] ?? '';
-      if (raw === '') continue;
+      const baseline = baselineRef.current[m] ?? '';
+      if (raw === '') {
+        // Was set, now cleared → DELETE. (baseline must be non-empty here
+        // since raw !== baseline.) Clearing is not the same as budgeting
+        // zero: a month with no row falls back to the household
+        // default_budget in the Reports budget-vs-actual table, which is
+        // exactly what the user is asking for. PUT cannot express it — it
+        // rejects amount <= 0 — so the delete verb is the only way to say it.
+        if (baseline !== '') clearedMonths.push(m);
+        continue;
+      }
       const n = Number(raw);
       // Backend rejects amount <= 0; surface it client-side with a
       // concrete per-row error instead of silently dropping.
@@ -321,7 +345,6 @@ function MonthlyBudgetsSection({
         invalidMonths.push(m);
         continue;
       }
-      const baseline = baselineRef.current[m] ?? '';
       if (raw === baseline) continue;
       pending.push({ month: m, amount: n });
     }
@@ -333,24 +356,46 @@ function MonthlyBudgetsSection({
       toast.error(`Amount must be greater than 0: ${names}`);
       return;
     }
-    if (pending.length === 0) {
+
+    const clearedNames = clearedMonths
+      .map((m) => MONTH_NAMES_FULL[m - 1])
+      .join(', ');
+
+    if (pending.length === 0 && clearedMonths.length === 0) {
       toast.info('No changes to save');
       return;
     }
 
     setSaving(true);
-    // Track the month we're currently PUTting so a mid-loop failure can
-    // point the user at the row that broke, rather than a generic error.
+    // Track the month currently in flight so a mid-loop failure can point the
+    // user at the row that broke, rather than a generic error. Covers the
+    // DELETE pass too — a clear that fails needs naming just as much as a save.
     let failedMonth: number | null = null;
     try {
       for (const { month, amount } of pending) {
         failedMonth = month;
         await api.put(`budgets/${year}/${month}`, { amount });
       }
+      for (const month of clearedMonths) {
+        failedMonth = month;
+        await api.del(`budgets/${year}/${month}`);
+      }
       failedMonth = null;
-      toast.success(
-        `Saved ${pending.length} budget${pending.length === 1 ? '' : 's'}`,
-      );
+      // Name the fallback explicitly. "Cleared January" alone reads as "January
+      // now has no budget", but Reports will compare that month against the
+      // household default — the user should not have to discover that there.
+      let msg = '';
+      if (pending.length > 0) {
+        msg = `Saved ${pending.length} budget${pending.length === 1 ? '' : 's'}`;
+      }
+      if (clearedMonths.length > 0) {
+        const cleared =
+          clearedMonths.length === 1
+            ? `Cleared ${clearedNames} — that month now uses the household default budget`
+            : `Cleared ${clearedNames} — those months now use the household default budget`;
+        msg = msg ? `${msg}. ${cleared}` : cleared;
+      }
+      toast.success(msg);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to save';
       if (failedMonth !== null) {
@@ -387,12 +432,16 @@ function MonthlyBudgetsSection({
   }, [editAmounts]);
 
   // Count of rows whose `editAmounts` value differs from `baselineRef`
-  // AND would produce a valid PUT at save time — mirroring the bucketing
-  // logic in `handleSave`. The count drives the "(N)" badge on the Save
-  // button and the year-change / beforeunload confirms, so it has to
-  // match "what would actually save" rather than "what's visually
-  // different" (a row whose value was cleared is visually different but
-  // we don't issue a DELETE for it, so it shouldn't block navigation).
+  // AND would produce a valid PUT or DELETE at save time — mirroring the
+  // bucketing logic in `handleSave`. The count drives the "(N)" badge on the
+  // Save button and the year-change / beforeunload confirms, so it has to
+  // match "what would actually save" rather than "what's visually different".
+  //
+  // A CLEARED row counts. It did not use to, on the stated grounds that no
+  // DELETE was issued for it so it could not be lost by navigating away —
+  // true then, wrong now that clearing really unsets the month. Leaving it
+  // out would let the user walk away from a pending clear with no prompt and
+  // no "(N)" on the button. Same rule as the Category Limits editor below.
   //
   // `baselineRef.current` is read on every render; React re-renders when
   // `editAmounts` changes, and every write to `baselineRef.current` in
@@ -402,11 +451,14 @@ function MonthlyBudgetsSection({
     let count = 0;
     for (let m = 1; m <= 12; m++) {
       const raw = editAmounts[m] ?? '';
-      if (raw === '') continue;
-      const n = Number(raw);
-      if (!Number.isFinite(n) || n <= 0) continue;
       const baseline = baselineRef.current[m] ?? '';
       if (raw === baseline) continue;
+      if (raw === '') {
+        count++;
+        continue;
+      }
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n <= 0) continue;
       count++;
     }
     return count;
@@ -514,46 +566,53 @@ function MonthlyBudgetsSection({
               </SelectContent>
             </Select>
           </div>
-          <div className="flex flex-col gap-1">
-            <Label
-              htmlFor="budget-set-all"
-              className="text-sm text-muted-foreground"
-            >
-              Set all months ({baseCurrency})
-            </Label>
-            <div className="flex gap-2">
-              <Input
-                id="budget-set-all"
-                type="number"
-                step="0.01"
-                min="0"
-                placeholder="0.00"
-                value={bulkInput}
-                onChange={(e) => setBulkInput(e.target.value)}
-                onFocus={selectAllOnFocus}
-                disabled={saving}
-                aria-label={`Apply amount to all months of ${year}`}
-                className="w-32"
-              />
+          {/* Write controls. The year picker above stays for everyone — it
+              navigates the read view — but Set-all and Copy-from only stage
+              edits a member could never save. */}
+          {admin && (
+            <>
+              <div className="flex flex-col gap-1">
+                <Label
+                  htmlFor="budget-set-all"
+                  className="text-sm text-muted-foreground"
+                >
+                  Set all months ({baseCurrency})
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="budget-set-all"
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    placeholder="0.00"
+                    value={bulkInput}
+                    onChange={(e) => setBulkInput(e.target.value)}
+                    onFocus={selectAllOnFocus}
+                    disabled={saving}
+                    aria-label={`Apply amount to all months of ${year}`}
+                    className="w-32"
+                  />
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    onClick={handleApplyBulk}
+                    disabled={applyDisabled}
+                  >
+                    Apply
+                  </Button>
+                </div>
+              </div>
               <Button
                 type="button"
-                variant="secondary"
-                onClick={handleApplyBulk}
-                disabled={applyDisabled}
+                variant="outline"
+                onClick={() => void handleCopyFromPrev()}
+                disabled={copyPrevDisabled}
+                className="self-end"
               >
-                Apply
+                Copy from {year - 1}
               </Button>
-            </div>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() => void handleCopyFromPrev()}
-            disabled={copyPrevDisabled}
-            className="self-end"
-          >
-            Copy from {year - 1}
-          </Button>
+            </>
+          )}
           <div className="flex flex-col gap-1 sm:ml-auto sm:items-end">
             <span className="text-sm text-muted-foreground">Annual total</span>
             <span
@@ -571,7 +630,7 @@ function MonthlyBudgetsSection({
             aria-live region below is in the DOM before its content changes —
             assistive tech needs that to announce the first 0->1 transition. */}
         <div className="flex flex-wrap items-center gap-3">
-          {preBulkSnapshot !== null && (
+          {admin && preBulkSnapshot !== null && (
             <>
               <Badge variant="secondary">Bulk change applied</Badge>
               <Button
@@ -586,15 +645,19 @@ function MonthlyBudgetsSection({
               </Button>
             </>
           )}
-          {/* Always-mounted live region; only the text is gated so AT observes
-              a content mutation rather than a node insertion on 0->1. */}
-          <span
-            className={`text-sm sm:ml-auto ${dirtyCount > 0 ? ATTENTION_TEXT_CLASS : ''}`}
-            aria-live="polite"
-            data-testid="budget-dirty-indicator"
-          >
-            {dirtyCount > 0 ? `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}` : ''}
-          </span>
+          {admin && (
+            // Always-mounted live region (gated only by admin so the region
+            // exists before the first dirty edit); only the text is
+            // conditional so AT observes a content mutation rather than a
+            // node insertion on 0->1. Mirrors the Category Limits indicator.
+            <span
+              className={`text-sm sm:ml-auto ${dirtyCount > 0 ? ATTENTION_TEXT_CLASS : ''}`}
+              aria-live="polite"
+              data-testid="budget-dirty-indicator"
+            >
+              {dirtyCount > 0 ? `${dirtyCount} unsaved change${dirtyCount === 1 ? '' : 's'}` : ''}
+            </span>
+          )}
         </div>
       </CardHeader>
       <CardContent>
@@ -619,40 +682,54 @@ function MonthlyBudgetsSection({
                   <TableRow key={month}>
                     <TableCell>{name}</TableCell>
                     <TableCell className="text-right">
-                      <Input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        placeholder="0.00"
-                        value={editAmounts[month] ?? ''}
-                        onChange={(e) =>
-                          setEditAmounts((prev) => ({
-                            ...prev,
-                            [month]: e.target.value,
-                          }))
-                        }
-                        onFocus={selectAllOnFocus}
-                        disabled={saving}
-                        aria-label={`Budget for ${name} ${year} in ${baseCurrency}`}
-                        className="ml-auto max-w-[160px] text-right"
-                      />
+                      {admin ? (
+                        <Input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          placeholder="0.00"
+                          value={editAmounts[month] ?? ''}
+                          onChange={(e) =>
+                            setEditAmounts((prev) => ({
+                              ...prev,
+                              [month]: e.target.value,
+                            }))
+                          }
+                          onFocus={selectAllOnFocus}
+                          disabled={saving}
+                          aria-label={`Budget for ${name} ${year} in ${baseCurrency}`}
+                          className="ml-auto max-w-[160px] text-right"
+                        />
+                      ) : (
+                        <span className="font-mono tabular-nums">
+                          {editAmounts[month] &&
+                          Number.isFinite(Number(editAmounts[month]))
+                            ? formatCurrency(
+                                Number(editAmounts[month]),
+                                baseCurrency,
+                              )
+                            : '—'}
+                        </span>
+                      )}
                     </TableCell>
                   </TableRow>
                 );
               })}
             </TableBody>
           </Table>
-          <Button
-            type="submit"
-            className={`w-fit ${dirtyCount > 0 && !saving ? 'font-semibold' : ''}`}
-            disabled={saving}
-          >
-            {saving
-              ? 'Saving...'
-              : dirtyCount > 0
-                ? `Save Budgets (${dirtyCount})`
-                : 'Save Budgets'}
-          </Button>
+          {admin && (
+            <Button
+              type="submit"
+              className={`w-fit ${dirtyCount > 0 && !saving ? 'font-semibold' : ''}`}
+              disabled={saving}
+            >
+              {saving
+                ? 'Saving...'
+                : dirtyCount > 0
+                  ? `Save Budgets (${dirtyCount})`
+                  : 'Save Budgets'}
+            </Button>
+          )}
         </form>
       </CardContent>
       <DiscardEditsDialog
@@ -1265,6 +1342,7 @@ export function Budgets() {
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Budgets</h1>
       <MonthlyBudgetsSection
+        admin={admin}
         dirtyCountRef={monthlyDirtyCountRef}
         onDirtyChange={setMonthlyDirty}
       />

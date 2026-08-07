@@ -447,6 +447,25 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (User, e
 	return i, err
 }
 
+const deleteBudget = `-- name: DeleteBudget :exec
+DELETE FROM budgets WHERE year = ? AND month = ?
+`
+
+type DeleteBudgetParams struct {
+	Year  int64 `json:"year"`
+	Month int64 `json:"month"`
+}
+
+// Clearing a month's budget is a DELETE, not an UPDATE to zero: handleSetBudget
+// rejects amount <= 0, and a zero row would read as "budgeted nothing" rather
+// than "not budgeted". With no row for the month, the Reports budget-vs-actual
+// table falls back to the household default_budget setting — which is the state
+// the UI previously had no way to ask for.
+func (q *Queries) DeleteBudget(ctx context.Context, arg DeleteBudgetParams) error {
+	_, err := q.db.ExecContext(ctx, deleteBudget, arg.Year, arg.Month)
+	return err
+}
+
 const deleteCategory = `-- name: DeleteCategory :execresult
 DELETE FROM categories WHERE id = ?
 `
