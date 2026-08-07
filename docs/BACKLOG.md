@@ -198,20 +198,26 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
-- **B3 — A failed upgrade fills the disk** (`78a9cf2`, 2026-08-07, unreleased, on
+- **B3 — A failed upgrade fills the disk** (`08d25ab..201fec5`, 2026-08-07, unreleased, on
   `fix/migration-snapshot-crash-loop-prune`, PR pending). **Verified: read** (was `reported`;
-  confirmed at `migrate.go:93-105` and `snapshot.go:42-53`). The failure path in `RunMigrations`
+  confirmed at `migrate.go:93-131` and `snapshot.go:42-53`). The failure path in `RunMigrations`
   now prunes the snapshot directory too, not just the success path, so a crash-looping migration
   under Docker restart converges instead of leaving one full DB copy per attempt.
   **What was not obvious: the prune itself already existed and was correct — only its call site
   was success-only.** The fix is one added call, not a rewrite. And the backlog's own suggested
   fixes ("prune regardless of outcome, or cap the directory") would have made things worse mid-incident:
-  because each migration commits in its own transaction, a partial apply can leave later
-  migrations committed while the current one failed, so only the *oldest* snapshot for the
-  target version — the bracket anchor — is still the pristine pre-upgrade copy. Pruning
+  each migration commits in its own transaction and `applyPendingMigrations` applies them in
+  sorted order, stopping at the first failure — so a partial apply leaves the EARLIER migrations
+  committed while the failing one and everything after it stay pending, and only the snapshot
+  taken before the first attempt is still a pristine pre-upgrade copy. Pruning
   indiscriminately on the failure path could delete exactly the file an operator needs to
-  recover with. The shipped fix exempts that anchor and prunes around it, converging a
-  crash-loop to {anchor + `migrationSnapshotKeep` (3) newest} instead of unbounded growth.
+  recover with. The shipped fix pins that snapshot and prunes around it, bounding a crash-loop
+  at `migrationSnapshotKeep` (3) files total, one of which is the pinned pristine copy, instead
+  of unbounded growth. Reviewing the branch then found the first version of the pin could
+  rotate away from the file it was protecting — it keyed on the HIGHEST pending migration, so
+  shipping a new migration during a crash loop released the pristine copy to be pruned
+  mid-incident; amended in the same branch to additionally pin the oldest snapshot at or above
+  the FIRST pending migration, which a new migration cannot move.
   `snapshot.go`'s seconds-precision filename layout was already deliberate for this: its comment
   anticipates a same-minute restart on immediate Docker retry and exists specifically so
   crash-loop snapshots don't collide and fail to write.
