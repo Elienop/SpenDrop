@@ -93,10 +93,13 @@ EXPOSE 8080
 # balance-checkpoint freshness sweep, and the scheduled-backup subsystem. Any
 # degraded sub-check answers 503, which is what flips the container.
 #
-# NOT covered, and deliberately still open (backlog B7 piece 2): every
-# sub-check is a READ, so a database that has gone read-only keeps reporting
-# 200 until a backup fails — up to 24h later. Pointing the probe here does not
-# close that gap; only a cheap write probe does.
+# A database that has gone READ-ONLY is covered too, since backlog B7 piece 2:
+# one sub-check is a single-row upsert, so "attempt to write a readonly
+# database" — what a restore leaves behind when the file ends up owned by root
+# — answers 503 on the next scrape and turns the container unhealthy after the
+# retry budget, ~90s, instead of waiting up to 24h for a backup to fail. Every
+# other sub-check is a read and passes cleanly in that state, which is exactly
+# why the write probe had to exist.
 #
 # --interval=30s: the endpoint's own operational note (internal/api/router.go)
 # asks for >=10s so quick_check does not become a hot path that starves WAL
