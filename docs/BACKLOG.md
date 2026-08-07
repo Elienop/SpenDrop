@@ -99,6 +99,28 @@ correctness bug. An honest fix needs a per-actor count (scoped count in the list
 a count endpoint) applied to all bulk surfaces at once, not bolted onto one.
 **Effort:** small-medium — one scoped count, several consumers.
 **Owner ranking (2026-08-07): below B6.**
+**2026-08-07, during the B6 review battery:** independently rediscovered by the security audit
+(its M1) with a measured repro — member list `total=2`, write `updated=1`. Confirms the
+direction is fail-safe (the write is always a subset of what was displayed, never a superset).
+Still polish, still below B6.
+
+### B13 — Trash list shows no creator attribution
+**Verified: read** (found 2026-08-07 while building B6j). The main transactions list now carries
+`created_by` (the creator's display name, via LEFT JOIN users); the Trash list does not —
+`deletedTransactionResponse` (internal/api/trash_handlers.go) carries `user_id` only. Same
+one-field change plus the same LEFT JOIN shape on the ListDeleted* queries. The frontend type
+`DeletedTransaction` is deliberately `Omit<Transaction, 'created_by'>` (web/src/api/types.ts) so
+Trash code cannot silently read an undefined field — remove the Omit when the field ships.
+**Effort:** small.
+
+### B14 — Budget mutations write no audit trail
+**Verified: read** (B6 security audit M2, 2026-08-07). `handleSetBudget`, `handleDeleteBudget`,
+and the category-budget set/delete all mutate budget state with no audit row; `transaction_audit`
+has never covered budgets, and no FK references the budgets table. Not a regression — the B6a
+DELETE mirrored the existing handlers. Low priority in a two-person household (every budget verb
+is admin-only), but it is a second way to destroy state with no forensic trail. If done, cover
+all four verbs in one pass, not one.
+**Effort:** small-medium (a new audit surface, not a one-liner).
 
 ---
 
@@ -203,8 +225,8 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
-- **B4 — "Replace All (4)" renamed more than 4** (`cb8cbc4..0902485`, 2026-08-07, unreleased, on
-  `fix/b4-replace-all-honors-filters`, PR pending). **Verified: reproduced** in the browser
+- **B4 — "Replace All (4)" renamed more than 4** (`cb8cbc4..0902485`, merged 2026-08-07
+  via PR #118, squash `923fe66`, released v0.37.2). **Verified: reproduced** in the browser
   before and after. Replace All now stages a description-only patch through the same
   `update-by-filter` + `buildFilterQuery()` machinery bulk edit uses — the button's count and
   the write's scope come from one serialization — and always confirms via the existing
@@ -224,8 +246,8 @@ condition *and* move the predicate, believing one was safe because the other was
   Found while designing: B12 (bulk counts overstate a member's blast radius), filed
   separately; dialog polish items went to B6m.
 
-- **B3 — A failed upgrade fills the disk** (`08d25ab..201fec5`, 2026-08-07, unreleased, on
-  `fix/migration-snapshot-crash-loop-prune`, PR pending). **Verified: read** (was `reported`;
+- **B3 — A failed upgrade fills the disk** (`08d25ab..201fec5`, merged 2026-08-07
+  via PR #117, squash `c44a01c`, released v0.37.1). **Verified: read** (was `reported`;
   confirmed at `migrate.go:93-131` and `snapshot.go:42-53`). The failure path in `RunMigrations`
   now prunes the snapshot directory too, not just the success path, so a crash-looping migration
   under Docker restart converges instead of leaving one full DB copy per attempt.
@@ -251,7 +273,7 @@ condition *and* move the predicate, believing one was safe because the other was
   crash-loop snapshots don't collide and fail to write.
 
 - **B5 — Delete has no confirmation, and members have no Trash** (`ea5f51b..d84f5cd`,
-  2026-08-02, unreleased, on `feat/delete-undo-member-trash`, PR pending). Desktop row delete now
+  merged 2026-08-02 via PR #115, squash `ecfa32a`, released v0.37.0). Desktop row delete now
   shows a "Moved to Trash" toast with **Undo** (10s), and a failed delete shows an error toast
   instead of failing silently. The phone capture panel's saved-row delete toast gained the same
   Undo. Trash opened to members: a sidebar entry and badge scoped to their own rows, and a Trash
@@ -275,7 +297,7 @@ condition *and* move the predicate, believing one was safe because the other was
   a `skipped` count so a member can tell a refused id from a restored one.
 
 - **B1 step 1 — an edit re-priced a foreign row at today's rate** (`8dc95b4`, 2026-08-02,
-  unreleased). Restating the same foreign money now carries the stored base value forward.
+  merged via PR #112, squash `4ae8143`). Restating the same foreign money now carries the stored base value forward.
   Changing the amount, the currency, or switching to/from base all still re-price — that is the
   user changing the money. Also closed an unreported half: a tags-only save after a rate change
   moved the amount, which cleared `content_hash` and dropped the row out of import dedupe.
@@ -307,7 +329,7 @@ condition *and* move the predicate, believing one was safe because the other was
   carries the value forward — so such a row is uneditable for a reason the server no longer
   shares. Small, and worth doing.
 
-- **B11 — a save waited on the other phone's notification** (`032ba40`, 2026-08-02, unreleased).
+- **B11 — a save waited on the other phone's notification** (`032ba40`, 2026-08-02, merged via PR #112, squash `4ae8143`).
   Push delivery moved off the request path. The gates (type toggle, quiet hours, over-budget
   bypass, actor exclusion) stayed on the request goroutine; only the part that talks to a push
   service detached. The delivery loop was proven byte-identical by diffing the old function body
@@ -332,7 +354,7 @@ condition *and* move the predicate, believing one was safe because the other was
   on every save. Note the owner has never actually crossed a budget in practice, so the
   notification's real-world behaviour is unobserved, not confirmed.
 
-- **B2 — the documented restore procedure did not work** (`e681ed6`, 2026-08-02, unreleased).
+- **B2 — the documented restore procedure did not work** (`e681ed6`, 2026-08-02, merged via PR #112, squash `4ae8143`).
   Every step now runs in a throwaway container with the app stopped, instead of `docker exec`
   against a container that is by definition restart-looping. Three further defects, each verified
   against a real deployment rather than reasoned about:
