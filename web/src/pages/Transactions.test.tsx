@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render as rtlRender,
   screen,
@@ -1640,8 +1641,13 @@ describe('Transactions page', () => {
     // way passes with the guard removed, which is how the original B6c guard
     // test came to prove nothing. keyDown is precisely the event the handler
     // listens for, so this exercises the real path.
-    function pressEnter(input: HTMLElement) {
-      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+    async function pressEnter(input: HTMLElement) {
+      // act-wrapped: the keydown can mount the confirm AlertDialog, whose
+      // Radix focus management settles in effects. Firing bare leaves those
+      // updates outside act() and prints eight warnings per call.
+      await act(async () => {
+        fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
+      });
     }
 
     async function openReplaceAndType(user: ReturnType<typeof userEvent.setup>) {
@@ -1744,7 +1750,7 @@ describe('Transactions page', () => {
 
       // The input's Enter key reaches handleReplaceAll without touching the
       // button, so a disabled button alone would not hold this shut.
-      pressEnter(input);
+      await pressEnter(input);
 
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
       expect(bulkUpdateByFilter).not.toHaveBeenCalled();
@@ -1761,7 +1767,7 @@ describe('Transactions page', () => {
       await user.click(screen.getByRole('button', { name: 'Replace' }));
       const input = screen.getByPlaceholderText('New description...');
       await user.type(input, 'Spinneys');
-      pressEnter(input);
+      await pressEnter(input);
 
       expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
     });
@@ -1787,7 +1793,7 @@ describe('Transactions page', () => {
         screen.getByRole('button', { name: 'Replace All (4)' }),
       ).toBeDisabled();
 
-      pressEnter(input);
+      await pressEnter(input);
 
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
       expect(bulkUpdateByFilter).not.toHaveBeenCalled();
