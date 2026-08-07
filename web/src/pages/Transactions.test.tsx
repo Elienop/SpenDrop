@@ -83,8 +83,16 @@ vi.mock('@/lib/push-sw', () => ({
   getReadyRegistration: () => mockGetReadyRegistration(),
 }));
 
+// RefetchAfterMutationError must be exported alongside the mocked
+// useTransactions: dispatchReplaceAll/dispatchBulkEdit both do
+// `err instanceof RefetchAfterMutationError` in their catch blocks, and a
+// mock factory that omits it throws on that property access — turning a
+// plain rejection into an unhandled error instead of a toast. The class
+// is declared inside the factory since vi.mock is hoisted above any
+// top-level const/class in this file.
 vi.mock('../hooks/useTransactions', () => ({
   useTransactions: (...args: unknown[]) => mockUseTransactions(...args),
+  RefetchAfterMutationError: class MockRefetchAfterMutationError extends Error {},
 }));
 
 vi.mock('../hooks/useSavedFilters', () => ({
@@ -1220,6 +1228,104 @@ describe('Transactions page', () => {
       ).toBeInTheDocument();
       expect(screen.queryByText(/cannot be undone/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/permanently/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Replace All (B4)', () => {
+    const filtersWithSearch = {
+      ...defaultFilters,
+      search: 'spinney',
+      dateFrom: '2026-01-01',
+      categoryId: '2',
+    };
+    const FILTER_QS = 'date_from=2026-01-01&category_id=2&search=spinney';
+
+    function setupReplace(overrides = {}) {
+      const bulkUpdateByFilter = vi.fn().mockResolvedValue({ updated: 4 });
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          total: 4,
+          filters: filtersWithSearch,
+          buildFilterQuery: vi.fn().mockReturnValue(FILTER_QS),
+          bulkUpdateByFilter,
+          ...overrides,
+        }),
+      );
+      return { bulkUpdateByFilter };
+    }
+
+    async function openReplaceAndType(user: ReturnType<typeof userEvent.setup>) {
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      await user.type(
+        screen.getByPlaceholderText('New description...'),
+        'Spinneys',
+      );
+      await user.click(screen.getByRole('button', { name: 'Replace All (4)' }));
+    }
+
+    it('sends the full filter query to update-by-filter, only after confirmation', async () => {
+      const { bulkUpdateByFilter } = setupReplace();
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await openReplaceAndType(user);
+
+      // Confirmation gate: dialog visible, nothing sent yet.
+      expect(
+        screen.getByText('Apply changes to 4 transactions?'),
+      ).toBeInTheDocument();
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+
+      await user.click(
+        screen.getByRole('button', { name: 'Apply changes to 4 transactions' }),
+      );
+
+      await waitFor(() => {
+        expect(bulkUpdateByFilter).toHaveBeenCalledWith({
+          filterQuery: FILTER_QS,
+          patch: { description: 'Spinneys' },
+        });
+      });
+      expect(toastSuccess).toHaveBeenCalledWith('Renamed 4 transactions');
+      // Success closes the bar and clears the staged text (spec invariant).
+      expect(
+        screen.queryByPlaceholderText('New description...'),
+      ).not.toBeInTheDocument();
+      // The retired endpoint must never be hit.
+      expect(api.put).not.toHaveBeenCalled();
+    });
+
+    it('cancelling the confirmation sends nothing and keeps the bar', async () => {
+      const { bulkUpdateByFilter } = setupReplace();
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await openReplaceAndType(user);
+      await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+      expect(screen.getByPlaceholderText('New description...')).toHaveValue(
+        'Spinneys',
+      );
+    });
+
+    it('a failed rename keeps the bar and text for retry', async () => {
+      const { bulkUpdateByFilter } = setupReplace();
+      bulkUpdateByFilter.mockRejectedValue(new Error('boom'));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await openReplaceAndType(user);
+      await user.click(
+        screen.getByRole('button', { name: 'Apply changes to 4 transactions' }),
+      );
+
+      await waitFor(() => {
+        expect(toastError).toHaveBeenCalledWith('boom');
+      });
+      expect(screen.getByPlaceholderText('New description...')).toHaveValue(
+        'Spinneys',
+      );
     });
   });
 });

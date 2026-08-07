@@ -386,6 +386,11 @@ export function Transactions() {
   const [bulkConfirm, setBulkConfirm] = useState<ComputedPatchResult | null>(
     null,
   );
+  // Staged Replace All patch awaiting the BulkEditConfirmDialog. Mirrors
+  // `bulkConfirm` for bulk edit: the write is filter-scoped and can span
+  // the whole ledger, so it always confirms first (B4).
+  const [replaceConfirm, setReplaceConfirm] =
+    useState<ComputedPatchResult | null>(null);
   const [rowError, setRowError] = useState('');
   const cardRef = useRef<HTMLDivElement>(null);
   // Focus anchor for after a row delete: the deleted <TransactionRow> (and
@@ -470,24 +475,49 @@ export function Transactions() {
     window.open(url, '_blank');
   }, [filters]);
 
-  const handleReplaceAll = useCallback(async () => {
-    if (!replaceText.trim() || !filters.search.trim()) return;
-    setReplacing(true);
-    try {
-      const res = await api.put<{ updated: number }>('transactions/bulk-rename', {
-        search: filters.search,
-        new_description: replaceText.trim(),
-      });
-      toast.success(`Renamed ${res.updated} transaction${res.updated !== 1 ? 's' : ''}`);
-      setShowReplace(false);
-      setReplaceText('');
-      refetch();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Rename failed');
-    } finally {
-      setReplacing(false);
-    }
-  }, [replaceText, filters.search, refetch]);
+  // Replace All stages a description-only patch and confirms before
+  // sending. The write goes through update-by-filter with the SAME
+  // buildFilterQuery() serialization the list count uses — B4's bug was
+  // this path sending only the search text, so "Replace All (4)" could
+  // rewrite the whole ledger.
+  const handleReplaceAll = useCallback(() => {
+    const desc = replaceText.trim();
+    if (!desc || !filters.search.trim()) return;
+    setReplaceConfirm({ patch: { description: desc } });
+  }, [replaceText, filters.search]);
+
+  // Fires after the confirm click. Deliberately independent of
+  // dispatchBulkEdit: that path clears the row selection on success,
+  // which Replace All must not do (it is filter-scoped, not
+  // selection-scoped).
+  const dispatchReplaceAll = useCallback(
+    async (p: ComputedPatchResult) => {
+      setReplacing(true);
+      try {
+        const filterQuery = buildFilterQuery();
+        const { updated } = await bulkUpdateByFilter({ filterQuery, ...p });
+        toast.success(
+          `Renamed ${updated} transaction${updated !== 1 ? 's' : ''}`,
+        );
+        setShowReplace(false);
+        setReplaceText('');
+      } catch (err) {
+        if (err instanceof RefetchAfterMutationError) {
+          toast.error(
+            `Rename applied, but refresh failed — please reload to see the latest. (${err.message})`,
+          );
+          setShowReplace(false);
+          setReplaceText('');
+        } else {
+          toast.error(err instanceof Error ? err.message : 'Rename failed');
+          // Bar and text stay so the user can retry.
+        }
+      } finally {
+        setReplacing(false);
+      }
+    },
+    [buildFilterQuery, bulkUpdateByFilter],
+  );
 
   const handleSelect = useCallback((id: number, checked: boolean) => {
     setSelectedIds((prev) => {
@@ -802,7 +832,7 @@ export function Transactions() {
                 value={replaceText}
                 onChange={(e) => setReplaceText(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') void handleReplaceAll();
+                  if (e.key === 'Enter') handleReplaceAll();
                 }}
                 placeholder="New description..."
                 className="h-8 max-w-xs text-xs"
@@ -1161,6 +1191,23 @@ export function Transactions() {
           }}
           count={selectionCount}
           patch={bulkConfirm}
+          categoryName={(id) =>
+            categories.find((c) => c.id === id)?.name ?? ''
+          }
+        />
+      )}
+
+      {replaceConfirm && (
+        <BulkEditConfirmDialog
+          open={true}
+          onCancel={() => setReplaceConfirm(null)}
+          onConfirm={() => {
+            const p = replaceConfirm;
+            setReplaceConfirm(null);
+            void dispatchReplaceAll(p);
+          }}
+          count={total}
+          patch={replaceConfirm}
           categoryName={(id) =>
             categories.find((c) => c.id === id)?.name ?? ''
           }
