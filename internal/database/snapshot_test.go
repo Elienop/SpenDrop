@@ -47,16 +47,19 @@ func TestFormatMigrationSnapshotName_NoColons(t *testing.T) {
 }
 
 // TestParseMigrationSnapshotName_RoundTrip asserts format → parse
-// recovers the exact timestamp the formatter encoded.
+// recovers the exact timestamp AND version the formatter encoded.
 func TestParseMigrationSnapshotName_RoundTrip(t *testing.T) {
 	ts := time.Date(2026, 4, 13, 15, 30, 45, 0, time.UTC)
 	name := formatMigrationSnapshotName("005_foo", ts)
-	got, ok := parseMigrationSnapshotName(name)
+	ver, got, ok := parseMigrationSnapshotName(name)
 	if !ok {
 		t.Fatalf("parseMigrationSnapshotName(%q) returned !ok", name)
 	}
 	if !got.Equal(ts) {
-		t.Errorf("parseMigrationSnapshotName = %v, want %v", got, ts)
+		t.Errorf("parseMigrationSnapshotName ts = %v, want %v", got, ts)
+	}
+	if ver != "005_foo" {
+		t.Errorf("parseMigrationSnapshotName version = %q, want %q", ver, "005_foo")
 	}
 }
 
@@ -77,7 +80,7 @@ func TestParseMigrationSnapshotName_Rejects(t *testing.T) {
 		"pre-migration-v-zzzz-zz-zzTzzzzzzZ.db",        // valid shape but unparseable timestamp
 	}
 	for _, c := range cases {
-		if _, ok := parseMigrationSnapshotName(c); ok {
+		if _, _, ok := parseMigrationSnapshotName(c); ok {
 			t.Errorf("parseMigrationSnapshotName(%q) = ok, want !ok", c)
 		}
 	}

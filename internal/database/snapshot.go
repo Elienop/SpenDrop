@@ -109,9 +109,9 @@ func formatMigrationSnapshotName(version string, t time.Time) string {
 	return migrationSnapshotPrefix + version + "-" + t.UTC().Format(migrationSnapshotTimeLayout) + migrationSnapshotSuffix
 }
 
-// parseMigrationSnapshotName extracts the timestamp from a canonical
-// pre-migration snapshot filename. It returns (time, true) for names that
-// match the shape, and (zero, false) otherwise. pruneMigrationSnapshots
+// parseMigrationSnapshotName extracts the version and timestamp from a canonical
+// pre-migration snapshot filename. It returns (version, time, true) for names that
+// match the shape, and ("", zero, false) otherwise. pruneMigrationSnapshots
 // uses the ok predicate as a filter so operator files (or sibling Tier 1
 // scheduled backups that happen to share the directory) are left alone.
 //
@@ -127,30 +127,30 @@ func formatMigrationSnapshotName(version string, t time.Time) string {
 // treated as a prune candidate. Operators must not drop files with the
 // canonical prefix into the snapshot directory unless they intend them to
 // be managed by this module.
-func parseMigrationSnapshotName(name string) (time.Time, bool) {
+func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 	if !strings.HasPrefix(name, migrationSnapshotPrefix) {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	if !strings.HasSuffix(name, migrationSnapshotSuffix) {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	mid := name[len(migrationSnapshotPrefix) : len(name)-len(migrationSnapshotSuffix)]
 
 	const tsLen = len(migrationSnapshotTimeLayout)
 	// Minimum mid: at least one version char + "-" + timestamp.
 	if len(mid) < tsLen+2 {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	sep := len(mid) - tsLen - 1
 	if mid[sep] != '-' {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	ts := mid[sep+1:]
 	t, err := time.ParseInLocation(migrationSnapshotTimeLayout, ts, time.UTC)
 	if err != nil {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
-	return t, true
+	return mid[:sep], t, true
 }
 
 // pruneMigrationSnapshots removes all but the `keep` most recent
@@ -182,19 +182,20 @@ func pruneMigrationSnapshots(dir string, keep int) error {
 	}
 
 	type snapFile struct {
-		name string
-		ts   time.Time
+		name    string
+		version string
+		ts      time.Time
 	}
 	var snaps []snapFile
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		ts, ok := parseMigrationSnapshotName(e.Name())
+		ver, ts, ok := parseMigrationSnapshotName(e.Name())
 		if !ok {
 			continue
 		}
-		snaps = append(snaps, snapFile{name: e.Name(), ts: ts})
+		snaps = append(snaps, snapFile{name: e.Name(), version: ver, ts: ts})
 	}
 
 	if len(snaps) <= keep {
