@@ -95,6 +95,20 @@ for the riskiest operation the app performs, and is taken before anything has ch
 database on that boot.
 **Effort:** small — run the same check on both paths, and correct the README.
 
+### B12 — Bulk counts promise a member more than their write can touch
+**Verified: read** (found 2026-08-07 while designing the B4 fix; owner asked for the line).
+Every bulk surface shows the household-wide number while a member's write is scoped to rows
+they own: the selection bar, both confirm dialogs, and the Replace All button all display
+`total` from the list query (household-wide by design), but `update-by-filter` and
+`delete-by-filter` append `t.user_id = ?` for non-admins, and page-mode batch endpoints skip
+foreign rows. A member confirming "Apply changes to 10" may update 7; only the after-the-fact
+toast reports the real number. Accepted knowingly in the bulk-edit spec and again in the B4
+design — every path is consistent and honest after the fact, so this is a polish item, not a
+correctness bug. An honest fix needs a per-actor count (scoped count in the list response, or
+a count endpoint) applied to all bulk surfaces at once, not bolted onto one.
+**Effort:** small-medium — one scoped count, several consumers.
+**Owner ranking (2026-08-07): below B6.**
+
 ---
 
 ## Queued stages
