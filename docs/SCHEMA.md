@@ -1021,8 +1021,12 @@ CREATE UNIQUE INDEX idx_transactions_idempotency_key
 --    ~6/min indefinitely — so an append-only design would grow the database
 --    forever at a rate nobody is watching. With this constraint the table
 --    cannot hold a second row no matter what a later caller writes, and the
---    upsert in probeWritable rewrites the same row in place, so the file does
---    not grow after the first probe.
+--    upsert in probeWritable rewrites the same row in place, so the table
+--    never grows. The -wal file recycles frames up to SQLite's 1000-page
+--    autocheckpoint (~4 MiB measured) — EXCEPT while a concurrent reader
+--    pins a WAL snapshot, which is what VACUUM INTO holds during a backup;
+--    see the operational note at the /healthz/data registration in
+--    internal/api/router.go for the measured numbers.
 --
 --  * No foreign key and no reference to any user-facing table. The row is not
 --    data, it is evidence that a write committed. It must never appear in the
