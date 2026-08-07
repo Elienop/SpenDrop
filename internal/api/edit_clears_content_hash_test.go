@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elienop/spendrop/internal/database"
 )
@@ -503,6 +504,276 @@ func TestUpdateByFilter_NoTags_ClearsContentHash(t *testing.T) {
 	if hash := hashOf(t, h, id); hash.Valid {
 		t.Errorf("recategorised row kept content_hash %q — it now claims the identity it had under the old category",
 			hash.String)
+	}
+}
+
+// descriptionOf reads the description back so a "hash preserved" assertion on
+// the no-tags branch cannot pass against an update that never landed. That
+// branch has no tags column to inspect — its patch fields ARE the hash inputs.
+func descriptionOf(t *testing.T, h *Handler, id int64) string {
+	t.Helper()
+	var desc string
+	if err := h.db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, id).Scan(&desc); err != nil {
+		t.Fatalf("read description: %v", err)
+	}
+	return desc
+}
+
+// TestUpdateByFilter_NoTags_ClearsOnlyWhenAHashInputActuallyMoved is the
+// regression test for backlog B6h on runUpdateByFilterNoTags, the
+// single-statement branch of update-by-filter.
+//
+// The branch used to append a flat `content_hash = NULL` because a tags-free
+// patch is non-empty and therefore always names a hash input. Naming one is not
+// moving one: a filter update that resends the values the matched rows already
+// hold — a saved filter replayed over its own output, a Replace All whose rows
+// already carry the new description — moved nothing, and the unconditional
+// clear de-anchored the entire selection from import dedupe. Re-importing the
+// sheet those rows came from then doubles all of them, permanently, because
+// BackfillContentHashes only runs at boot and only WHERE content_hash IS NULL.
+//
+// The matrix mirrors its sibling on the tags branch
+// (TestUpdateByFilter_Tags_ClearsOnlyWhenAHashInputActuallyMoved) because the
+// two branches must answer the identity question identically — one endpoint,
+// one policy. The case-and-padding row is the one that separates "the patch
+// names this field" from "the field's value moved": ComputeContentHash
+// lowercases and trims, so the digest is unchanged even though the stored
+// description genuinely is not.
+//
+// Each case gets its own handler: clearing a hash is irreversible within a
+// test, so a shared row would let an earlier clear mask a later preserve.
+func TestUpdateByFilter_NoTags_ClearsOnlyWhenAHashInputActuallyMoved(t *testing.T) {
+	const (
+		seedDate = "2026-04-01"
+		seedDesc = "Coffee"
+	)
+
+	cases := []struct {
+		name string
+		// patch is rendered with the row's own category id (%[1]d) and an
+		// alternate category id (%[2]d) so the category cases can address both.
+		patch     string
+		wantDesc  string
+		wantClear bool
+		why       string
+	}{
+		{
+			name:      "same description",
+			patch:     `{"patch":{"description":"Coffee"}}`,
+			wantDesc:  "Coffee",
+			wantClear: false,
+			why:       "the description sent is the one the row already holds, so the identity did not move",
+		},
+		{
+			name: "description differing only by case and padding",
+			// validateDescription trims at the wire boundary, so what reaches
+			// the branch — and what lands in the column — is "COFFEE". The
+			// stored description genuinely changes; the digest does not.
+			patch:     `{"patch":{"description":"  COFFEE "}}`,
+			wantDesc:  "COFFEE",
+			wantClear: false,
+			why:       "ComputeContentHash lowercases and trims, so the digest is unchanged",
+		},
+		{
+			name:      "same date",
+			patch:     `{"patch":{"date":"2026-04-01"}}`,
+			wantDesc:  seedDesc,
+			wantClear: false,
+			why:       "the date sent is the one the row already holds",
+		},
+		{
+			name:      "same category",
+			patch:     `{"patch":{"category_id":%[1]d}}`,
+			wantDesc:  seedDesc,
+			wantClear: false,
+			why:       "the row is already in that category",
+		},
+		{
+			name:      "different description",
+			patch:     `{"patch":{"description":"Flat white"}}`,
+			wantDesc:  "Flat white",
+			wantClear: true,
+			why:       "the row would otherwise keep claiming the identity of the description it no longer has",
+		},
+		{
+			name:      "different date",
+			patch:     `{"patch":{"date":"2026-05-09"}}`,
+			wantDesc:  seedDesc,
+			wantClear: true,
+			why:       "date is a hash input",
+		},
+		{
+			name:      "different category",
+			patch:     `{"patch":{"category_id":%[2]d}}`,
+			wantDesc:  seedDesc,
+			wantClear: true,
+			why:       "the identity hashes the category name",
+		},
+		{
+			// A combined patch must decide on the UNION of its fields: one
+			// moved input is enough, even when the others are resent verbatim.
+			name:      "identical description alongside a moved date",
+			patch:     `{"patch":{"description":"Coffee","date":"2026-05-09"}}`,
+			wantDesc:  seedDesc,
+			wantClear: true,
+			why:       "the date moved even though the description was resent unchanged",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupHandler(t)
+			user := seedTestUser(t, h.queries, "alice", RoleMember)
+			cat := seedTestCategory(t, h.queries, "Cat-"+t.Name(), "expense")
+			other := seedTestCategory(t, h.queries, "Other-"+t.Name(), "expense")
+			id := seedHashedTransaction(t, h, user.ID, cat.ID, seedDate, seedDesc, 10.0)
+
+			before := hashOf(t, h, id)
+			if !before.Valid {
+				t.Fatal("precondition failed: the seeded row must anchor a content_hash")
+			}
+
+			body := tc.patch
+			if strings.Contains(body, "%[") {
+				body = fmt.Sprintf(body, cat.ID, other.ID)
+			}
+			// Filter by the row's own category so every case matches exactly
+			// the seeded row, including the ones that then move it elsewhere.
+			url := fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", cat.ID)
+			req := withUser(httptest.NewRequest(http.MethodPost, url, bytes.NewReader([]byte(body))), user)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			h.handleUpdateTransactionsByFilter(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("update-by-filter: status = %d; body = %s", rec.Code, rec.Body.String())
+			}
+
+			// Anti-vacuity: a filter that matched nothing would satisfy every
+			// "hash preserved" assertion below without exercising the branch.
+			var resp struct {
+				Updated int64 `json:"updated"`
+			}
+			decodeResponse(t, rec, &resp)
+			if resp.Updated != 1 {
+				t.Fatalf("updated = %d, want 1 — the filter did not reach the row, so the hash assertion proves nothing", resp.Updated)
+			}
+			// Anti-vacuity: prove the statement's other SET clauses landed, so
+			// a "preserved" result cannot come from an update that did nothing.
+			if got := descriptionOf(t, h, id); got != tc.wantDesc {
+				t.Fatalf("description = %q, want %q — the update did not land", got, tc.wantDesc)
+			}
+
+			after := hashOf(t, h, id)
+			switch {
+			case tc.wantClear && after.Valid:
+				t.Errorf("content_hash kept (%s) but %s", after.String, tc.why)
+			case !tc.wantClear && !after.Valid:
+				t.Errorf("content_hash cleared, dropping the row out of import dedupe, but %s", tc.why)
+			case !tc.wantClear && after.String != before.String:
+				t.Errorf("content_hash = %s, want %s (unchanged)", after.String, before.String)
+			}
+		})
+	}
+}
+
+// TestUpdateByFilter_NoTags_IdenticalResend_StillBlocksADuplicateImport is the
+// end-to-end half of B6h: the preserved hash is only worth preserving because
+// it is what makes a re-import of the same spreadsheet a no-op. With the
+// unconditional clear, the confirm below lands a second copy of every row the
+// filter touched and reports success.
+func TestUpdateByFilter_NoTags_IdenticalResend_StillBlocksADuplicateImport(t *testing.T) {
+	clearImportStore()
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "alice", RoleMember)
+	food := categoryIDByName(t, h, "Food")
+
+	createBody, _ := json.Marshal(map[string]any{
+		"date":        "2026-01-15",
+		"amount":      42.50,
+		"description": "Coffee",
+		"category_id": food,
+	})
+	createReq := withUser(
+		httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(createBody)), user)
+	createReq.Header.Set("Content-Type", "application/json")
+	createRec := httptest.NewRecorder()
+	h.handleCreateTransaction(createRec, createReq)
+	if createRec.Code != http.StatusCreated {
+		t.Fatalf("create: status = %d; body = %s", createRec.Code, createRec.Body.String())
+	}
+
+	// Bulk rename over a filter that already matches the target description —
+	// the "Replace All run twice" shape. Nothing about the row's identity moves.
+	url := fmt.Sprintf("/api/transactions/update-by-filter?category_id=%d", food)
+	req := withUser(httptest.NewRequest(http.MethodPost, url,
+		bytes.NewReader([]byte(`{"patch":{"description":"Coffee"}}`))), user)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleUpdateTransactionsByFilter(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update-by-filter: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+	var updResp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &updResp)
+	if updResp.Updated != 1 {
+		t.Fatalf("updated = %d, want 1 — the filter never reached the row", updResp.Updated)
+	}
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-01-15", "Coffee", "42.50", "Food"},
+	})
+	uploadReq := withUser(postMultipartFile(t, "/api/import/upload", xlsxData), user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: status = %d; body = %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	if groups, _ := uploadResp["collision_groups"].([]any); len(groups) != 1 {
+		t.Fatalf("preview reported %d collision_groups, want 1 — the bulk edit de-anchored the row from dedupe",
+			len(groups))
+	}
+
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           uploadResp["import_id"].(string),
+		"default_category_id": food,
+		"category_map":        map[string]float64{"Food": float64(food)},
+	})
+	confirmReq := withUser(
+		httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody)), user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusConflict {
+		t.Fatalf("re-importing the identical file was allowed through: confirm status = %d; body = %s",
+			confirmRec.Code, confirmRec.Body.String())
+	}
+
+	if got := countTransactionsForUser(t, h.db, user.ID); got != 1 {
+		t.Errorf("live rows = %d, want 1 (a bulk edit that changed nothing must not let the same file import twice)", got)
+	}
+}
+
+// TestContentHashClearClause_NoHashInput_ClearsNothing pins the defensive
+// branch the handler tests cannot reach. UpdatePatch's only non-identity field
+// is Tags, and a patch carrying Tags is routed to the other branch entirely, so
+// today no request can reach runUpdateByFilterNoTags without naming a hash
+// input. The next non-identity patch field (notes, say) must not clear the
+// identity by default — an empty clause is what makes that the default rather
+// than something the author of that field has to remember.
+func TestContentHashClearClause_NoHashInput_ClearsNothing(t *testing.T) {
+	tags := "health"
+	mode := "replace"
+	clause, args := contentHashClearClause(database.UpdatePatch{Tags: &tags, TagsMode: &mode}, time.Time{})
+	if clause != "" {
+		t.Errorf("clause = %q, want empty — a patch with no hash input must leave every row anchored", clause)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want none", args)
 	}
 }
 
