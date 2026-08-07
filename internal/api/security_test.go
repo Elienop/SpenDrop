@@ -503,16 +503,27 @@ func TestRequireJSONContentType_BearerAndCookieBothPresent_BearerWins_NoCSRF(t *
 
 // --- Search LIKE wildcard escaping ---
 
+// B6i widened search from description alone to description + notes + category
+// name. Escaping is asserted across EVERY text arm, not just the first: the
+// arms share one escaped pattern precisely so a term containing % or _ stays
+// literal on all of them, and a future arm built from the raw term would show
+// up here as an unescaped duplicate.
 func TestBuildTransactionWhereClause_SearchEscapesWildcards(t *testing.T) {
+	// The three LIKE arms of the search group, in the order they are emitted.
+	wantArms := []string{
+		`t.description LIKE ? ESCAPE '\'`,
+		`t.notes LIKE ? ESCAPE '\'`,
+		`c.name LIKE ? ESCAPE '\'`,
+	}
+
 	tests := []struct {
 		search        string
-		expectClause  string
 		expectArgLike string
 	}{
-		{"hello", `t.description LIKE ? ESCAPE '\'`, "%hello%"},
-		{"100%", `t.description LIKE ? ESCAPE '\'`, `%100\%%`},
-		{"under_score", `t.description LIKE ? ESCAPE '\'`, `%under\_score%`},
-		{`back\slash`, `t.description LIKE ? ESCAPE '\'`, `%back\\slash%`},
+		{"hello", "%hello%"},
+		{"100%", `%100\%%`},
+		{"under_score", `%under\_score%`},
+		{`back\slash`, `%back\\slash%`},
 	}
 
 	for _, tc := range tests {
@@ -523,15 +534,24 @@ func TestBuildTransactionWhereClause_SearchEscapesWildcards(t *testing.T) {
 			if !strings.Contains(clause, "ESCAPE") {
 				t.Errorf("expected ESCAPE clause, got %q", clause)
 			}
-			if len(args) != 1 {
-				t.Fatalf("expected 1 arg, got %d", len(args))
+			for _, arm := range wantArms {
+				if !strings.Contains(clause, arm) {
+					t.Errorf("clause %q is missing arm %q", clause, arm)
+				}
 			}
-			argStr, ok := args[0].(string)
-			if !ok {
-				t.Fatalf("expected string arg, got %T", args[0])
+			// None of these terms is a bare number, so the foreign-amount arm
+			// must not appear and the three text arms are the whole group.
+			if len(args) != len(wantArms) {
+				t.Fatalf("expected %d args (one per text arm), got %d: %#v", len(wantArms), len(args), args)
 			}
-			if argStr != tc.expectArgLike {
-				t.Errorf("expected arg %q, got %q", tc.expectArgLike, argStr)
+			for i, a := range args {
+				argStr, ok := a.(string)
+				if !ok {
+					t.Fatalf("arg %d: expected string, got %T", i, a)
+				}
+				if argStr != tc.expectArgLike {
+					t.Errorf("arg %d: expected %q, got %q", i, tc.expectArgLike, argStr)
+				}
 			}
 		})
 	}

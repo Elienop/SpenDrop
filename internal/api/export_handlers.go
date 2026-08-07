@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -51,9 +52,7 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 		}
 	}
 	if v := q.Get("search"); v != "" {
-		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(v)
-		conditions = append(conditions, "t.description LIKE ? ESCAPE '\\'")
-		args = append(args, "%"+escaped+"%")
+		conditions, args = appendSearchCondition(conditions, args, v)
 	}
 
 	// Amount range. Phase 3.1a: user-entered min/max arrive as float
@@ -114,6 +113,99 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 		return "", nil
 	}
 	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+// searchAmountPattern recognises a search term that is a bare positive decimal
+// number, optionally written with canonical three-digit thousands separators.
+// It anchors both ends, so a term with any other character in it — a currency
+// symbol, a minus sign, an exponent, a stray letter — is not a number and never
+// reaches the foreign-amount arm below.
+//
+// The alternation is what rejects "1,2,3": a comma-grouped number must be one
+// to three leading digits followed by groups of exactly three, while a plain
+// number carries no commas at all. Fractions are capped at two digits because
+// the column stores cents; "1500000.005" is not a value any row can hold.
+var searchAmountPattern = regexp.MustCompile(`^(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?$`)
+
+// searchAmountCents interprets a search term as a foreign-currency amount and
+// returns it in cents, reporting false for any term that is not a bare number.
+//
+// The term is trimmed and stripped of thousands separators for THIS test only —
+// the LIKE arms keep matching the term exactly as typed, so widening the search
+// cannot change which rows the text arms already matched.
+//
+// A term above MaxTransactionAmount is rejected rather than clamped, for the
+// same reason the amount_min/amount_max bounds are (see safeDollarsToCents): an
+// out-of-range float converts to int64 minimum and would turn the equality into
+// a match against a nonsense value. No storable row can carry such an amount
+// anyway — validateMoneyAmount bounds original_amount on the write path — so a
+// term past the cap has nothing to find.
+func searchAmountCents(term string) (int64, bool) {
+	trimmed := strings.TrimSpace(term)
+	if !searchAmountPattern.MatchString(trimmed) {
+		return 0, false
+	}
+	amount, err := strconv.ParseFloat(strings.ReplaceAll(trimmed, ",", ""), 64)
+	if err != nil {
+		return 0, false
+	}
+	return safeDollarsToCents(amount)
+}
+
+// appendSearchCondition renders the ?search= term as one parenthesised OR group
+// and appends it, with its args, to a set of conditions under construction.
+//
+// Scope: the free-text a user can read on a row — description, notes and the
+// category name — plus the foreign amount when the term is a bare number. TAGS
+// ARE DELIBERATELY OUT OF SCOPE: they have their own ?tags= filter, and folding
+// them in here would make one control silently widen the other with no way to
+// ask for description-only from the UI.
+//
+// Every text arm reuses the SAME escaped pattern, so LIKE-metacharacter
+// escaping and SQLite's ASCII-case-insensitive LIKE apply identically across
+// all of them — a term containing % or _ is as literal on notes and category
+// name as it already was on description.
+//
+// The OR arms are wrapped in parentheses before joining, because the caller
+// composes conditions with AND: unwrapped, the first OR would rebind every
+// other filter and a search combined with a date range would return rows
+// outside the range.
+//
+// Widening this predicate widens update-by-filter and delete-by-filter with it,
+// which is intended rather than incidental. Their preview count and their write
+// scope are both serialised from this one clause, so the number the confirm
+// dialog shows is by construction the number of rows the write touches; forking
+// a narrower predicate for the list would be what breaks that.
+func appendSearchCondition(conditions []string, args []any, term string) ([]string, []any) {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(term)
+	pattern := "%" + escaped + "%"
+
+	// t.notes is nullable and needs no COALESCE: `NULL LIKE ?` is NULL, which an
+	// OR treats as false, and a '%term%' pattern could never match '' anyway.
+	// Wrapping it would be behaviourally identical and unkillable by any test —
+	// the same unreachable-guard objection the foreign-amount arm below records.
+	arms := []string{
+		"t.description LIKE ? ESCAPE '\\'",
+		"t.notes LIKE ? ESCAPE '\\'",
+		"c.name LIKE ? ESCAPE '\\'",
+	}
+	args = append(args, pattern, pattern, pattern)
+
+	// Foreign amount, matched EXACTLY on the value in cents rather than as a
+	// substring of the digits. A substring match would make "1500" find every
+	// 21,500 and 1,500,000 in the ledger, which on delete-by-filter is a
+	// selection the user did not ask for.
+	//
+	// A base-currency row is excluded by the column, not by a guard:
+	// original_amount_cents is NULL there, and `NULL = ?` is NULL, which an OR
+	// treats as false. An explicit IS NOT NULL test would be unreachable code
+	// that no test could kill.
+	if cents, ok := searchAmountCents(term); ok {
+		arms = append(arms, "t.original_amount_cents = ?")
+		args = append(args, cents)
+	}
+
+	return append(conditions, "("+strings.Join(arms, " OR ")+")"), args
 }
 
 // appendLiveTransactionsFilter tacks the soft-delete predicate onto a WHERE
