@@ -3482,6 +3482,195 @@ func TestUpdateByFilter_RejectsEmptyPatch(t *testing.T) {
 	}
 }
 
+// TestUpdateByFilter_SearchAndCategoryFilter_DescriptionPatch is the B4
+// backend pin: a description-only patch scoped by search PLUS another
+// filter must rename only rows matching BOTH. Replace All rides this
+// path; the old bulk-rename endpoint dropped every filter but search.
+func TestUpdateByFilter_SearchAndCategoryFilter_DescriptionPatch(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	catGroceries := seedTestCategory(t, q, "Groceries", "expense")
+	catHousehold := seedTestCategory(t, q, "Household", "expense")
+	inScope := seedTestTransaction(t, q, user.ID, catGroceries.ID, "2026-01-05", 10.0, "spinney dbayeh")
+	wrongCat := seedTestTransaction(t, q, user.ID, catHousehold.ID, "2026-01-06", 20.0, "spinney household")
+	wrongSearch := seedTestTransaction(t, q, user.ID, catGroceries.ID, "2026-01-07", 30.0, "carrefour")
+
+	body := `{"patch":{"description":"Spinneys"}}`
+	rec := postUpdateByFilter(t, h, user,
+		fmt.Sprintf("search=spinney&category_id=%d", catGroceries.ID), body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (search AND category must both apply)", resp.Updated)
+	}
+	for _, tc := range []struct {
+		id   int64
+		want string
+	}{
+		{inScope.ID, "Spinneys"},
+		{wrongCat.ID, "spinney household"},
+		{wrongSearch.ID, "carrefour"},
+	} {
+		var desc string
+		if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, tc.id).Scan(&desc); err != nil {
+			t.Fatal(err)
+		}
+		if desc != tc.want {
+			t.Errorf("row %d: description=%q, want %q", tc.id, desc, tc.want)
+		}
+	}
+}
+
+// TestUpdateByFilter_SearchFilter_CaseInsensitive transfers
+// TestHandleBulkRename_CaseInsensitiveSearch before that endpoint is
+// retired: SQLite LIKE is case-insensitive for ASCII, and Replace All's
+// match set depends on it.
+func TestUpdateByFilter_SearchFilter_CaseInsensitive(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "MR BROWN COFFEE")
+
+	rec := postUpdateByFilter(t, h, user, "search=mr+brown", `{"patch":{"description":"Mr Brown"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (LIKE must match case-insensitively)", resp.Updated)
+	}
+}
+
+// TestUpdateByFilter_SearchFilter_EscapesSQLWildcards transfers
+// TestHandleBulkRename_EscapesSQLWildcards: a literal % in the search term
+// must not act as a wildcard. The term travels in the querystring, so it
+// is URL-encoded here exactly as the browser sends it.
+func TestUpdateByFilter_SearchFilter_EscapesSQLWildcards(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "100% discount store")
+	seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-02", 20.0, "100 percent store")
+
+	rec := postUpdateByFilter(t, h, user,
+		"search="+url.QueryEscape("100%"), `{"patch":{"description":"HUNDRED PERCENT"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 1 {
+		t.Errorf("updated=%d, want 1 (%% must match only the literal)", resp.Updated)
+	}
+}
+
+// TestUpdateByFilter_AdminDescriptionPatch_UpdatesAllUsers transfers
+// TestHandleBulkRename_AdminRenamesAllTransactions: an admin's
+// description patch reaches other members' rows (Transaction
+// Authorization Discipline — admins bypass row ownership on every
+// mutation path).
+func TestUpdateByFilter_AdminDescriptionPatch_UpdatesAllUsers(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedTestUser(t, q, "boss", "admin")
+	member := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	adminTxn := seedTestTransaction(t, q, admin.ID, cat.ID, "2026-04-01", 10.0, "shared shop")
+	memberTxn := seedTestTransaction(t, q, member.ID, cat.ID, "2026-04-02", 20.0, "shared shop too")
+
+	rec := postUpdateByFilter(t, h, admin, "search=shared+shop", `{"patch":{"description":"Shared Shop"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Updated int64 `json:"updated"`
+	}
+	decodeResponse(t, rec, &resp)
+	if resp.Updated != 2 {
+		t.Errorf("updated=%d, want 2 (admin scope is household-wide)", resp.Updated)
+	}
+	for _, id := range []int64{adminTxn.ID, memberTxn.ID} {
+		var desc string
+		if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, id).Scan(&desc); err != nil {
+			t.Fatal(err)
+		}
+		if desc != "Shared Shop" {
+			t.Errorf("row %d: description=%q, want %q", id, desc, "Shared Shop")
+		}
+	}
+}
+
+// TestUpdateByFilter_DescriptionPatch_UpdatesTimestamp transfers
+// TestHandleBulkRename_UpdatesTimestamp, including its backdating
+// technique: SQLite CURRENT_TIMESTAMP has second precision, so the seeded
+// row is pushed 10s into the past instead of sleeping.
+func TestUpdateByFilter_DescriptionPatch_UpdatesTimestamp(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "mr brown")
+
+	if _, err := db.ExecContext(context.Background(),
+		"UPDATE transactions SET updated_at = datetime('now', '-10 seconds') WHERE id = ?",
+		txn.ID); err != nil {
+		t.Fatalf("backdate updated_at: %v", err)
+	}
+	reread, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("reread transaction: %v", err)
+	}
+	origUpdatedAt := reread.UpdatedAt
+
+	rec := postUpdateByFilter(t, h, user, "search=mr+brown", `{"patch":{"description":"MR BROWN"}}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, body: %s", rec.Code, rec.Body.String())
+	}
+	updated, err := q.GetTransactionByID(context.Background(), txn.ID)
+	if err != nil {
+		t.Fatalf("get transaction: %v", err)
+	}
+	if updated.UpdatedAt == origUpdatedAt {
+		t.Errorf("updated_at not bumped: still %v", origUpdatedAt)
+	}
+}
+
+// TestUpdateByFilter_EmptyDescription_Returns400 pins validateDescription
+// on this path: a whitespace-only description in the patch must 400, not
+// blank every matching row. No existing test covered this.
+func TestUpdateByFilter_EmptyDescription_Returns400(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "alice", "member")
+	cat := seedTestCategory(t, q, "Cat", "expense")
+	txn := seedTestTransaction(t, q, user.ID, cat.ID, "2026-04-01", 10.0, "keep me")
+
+	rec := postUpdateByFilter(t, h, user, "search=keep", `{"patch":{"description":"   "}}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400; body: %s", rec.Code, rec.Body.String())
+	}
+	var desc string
+	if err := db.QueryRow(`SELECT description FROM transactions WHERE id = ?`, txn.ID).Scan(&desc); err != nil {
+		t.Fatal(err)
+	}
+	if desc != "keep me" {
+		t.Errorf("description mutated to %q despite 400", desc)
+	}
+}
+
 // TestUpdateByFilter_TagsAdd_PerRowReadThenWrite pins that the tags read-then-write
 // path enumerates each matching row, computes Add-mode set arithmetic per row,
 // and writes the merged tags back independently. Two rows seeded with different
