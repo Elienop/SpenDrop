@@ -34,7 +34,7 @@ RUN CGO_ENABLED=1 go build \
     -o spendrop ./cmd/spendrop
 
 # Build React frontend
-FROM node:20-alpine AS web-builder
+FROM node:25-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package*.json ./
 RUN npm ci
