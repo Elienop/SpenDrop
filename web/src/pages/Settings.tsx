@@ -1131,8 +1131,19 @@ function ApiTokensSection() {
     defaultValues: { name: '', expires: 'never' },
   });
 
+  // Wall-clock instant the token list was last read, used to decide which
+  // rows read "Expired". Captured here — in the async callback that owns
+  // the data — instead of during render: `Date.now()` is impure, so
+  // reading it while rendering a row makes the row's output depend on
+  // *when React happens to re-render*, and two renders of the same token
+  // can legitimately disagree. The 0 sentinel is never observable:
+  // `tokens` starts empty, so no row exists until the setState below
+  // lands the list and the instant together in one batch.
+  const [tokensReadAtMs, setTokensReadAtMs] = useState(0);
+
   const fetchTokens = useCallback(async () => {
     const data = await api.get<ListTokensResponse>('api-tokens');
+    setTokensReadAtMs(Date.now());
     setTokens(data.tokens);
   }, []);
 
@@ -1154,7 +1165,7 @@ function ApiTokensSection() {
   function formatExpires(t: ApiToken): string {
     if (!t.expires_at) return 'Never';
     const d = new Date(t.expires_at);
-    if (d.getTime() <= Date.now()) return 'Expired';
+    if (d.getTime() <= tokensReadAtMs) return 'Expired';
     return d.toLocaleDateString();
   }
 

@@ -75,7 +75,18 @@ export function TransactionRow({
     if (currenciesLoading) return;
     didInitEditCurrency.current = true;
     const resolved = toEditDefaults(transaction, baseCode);
+    // The setState pair below is the async-resolution pattern the
+    // eslint config already blesses for `src/hooks/**` and `src/pages/**`:
+    // the household base currency only exists once the `useCurrencies` fetch
+    // lands, and a user who opens Edit inside that window is holding fields
+    // seeded from the placeholder base. There is no render-time value to
+    // derive from — the correction cannot happen before the data does — and
+    // the `didInitEditCurrency` latch above bounds it to a single pass, so it
+    // cannot cascade. Suppressed per-line rather than by widening the config
+    // override to `src/components/**`, which would silence the rule for the
+    // many components that have no async source at all.
     if (resolved.currency !== editCurrency) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setEditCurrency(resolved.currency);
     }
     if (resolved.amount !== editAmount) {

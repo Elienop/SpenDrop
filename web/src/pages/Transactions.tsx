@@ -669,7 +669,12 @@ export function Transactions() {
       // selection bar, and with it the "Edit (N)" button the dialog will try
       // to restore focus to. Same failure as Replace All had: Radix aims at a
       // node that no longer exists and focus lands on <body>.
-      let selectionEmptied = false;
+      // Deliberately left uninitialised: both success branches below assign
+      // it before the only read, so an initialiser would be dead code — and
+      // without one, a future branch that forgets to set it is a TypeScript
+      // "used before assigned" error rather than a silent `false` that skips
+      // the focus restore.
+      let selectionEmptied: boolean;
       try {
         if (isFilterMode) {
           const filterQuery = buildFilterQuery();
