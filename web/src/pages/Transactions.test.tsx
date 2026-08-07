@@ -1,4 +1,5 @@
 import {
+  fireEvent,
   render as rtlRender,
   screen,
   waitFor,
@@ -140,6 +141,7 @@ import { api } from '../api/client';
 const mockSetPage = vi.fn();
 const mockSetPerPage = vi.fn();
 const mockSetSort = vi.fn();
+const mockSetSearchInput = vi.fn();
 
 function defaultHookReturn(overrides = {}) {
   return {
@@ -152,6 +154,11 @@ function defaultHookReturn(overrides = {}) {
     filters: { ...defaultFilters },
     setFilter: mockSetFilter,
     clearFilters: mockClearFilters,
+    // The live box vs the committed term. They agree at rest; `searchPending`
+    // is the window in which they do not (see the debounce in useTransactions).
+    searchInput: '',
+    setSearchInput: mockSetSearchInput,
+    searchPending: false,
     clearPanelFilters: mockClearPanelFilters,
     setPage: mockSetPage,
     setPerPage: mockSetPerPage,
@@ -193,6 +200,30 @@ describe('Transactions page', () => {
       expect(screen.getByRole('button', { name: 'Income' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Filters' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: '+ Add' })).toBeInTheDocument();
+    });
+
+    // B6n. The search box renders the LIVE text and never the committed
+    // term — wiring it to `filters.search` would make every keystroke appear
+    // 250ms late, which is the one thing the debounce must not cost.
+    it('shows what has been typed rather than the committed term', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ searchInput: 'coff', searchPending: true }),
+      );
+      render(<Transactions />);
+
+      const box = screen.getByLabelText('Search transactions');
+      expect(box).toHaveValue('coff');
+
+      await user.type(box, 'e');
+
+      // Keystrokes go to the debounced setter. Routing them back through
+      // setFilter would commit on every character and undo the debounce.
+      expect(mockSetSearchInput).toHaveBeenCalledWith('coffe');
+      expect(mockSetFilter).not.toHaveBeenCalledWith(
+        'search',
+        expect.anything(),
+      );
     });
 
     it('clicking Filters button opens the filter Sheet and shows Date tab content', async () => {
@@ -798,6 +829,32 @@ describe('Transactions page', () => {
       ).toBeInTheDocument();
     });
 
+    // Same gate, the debounce half. `total` counts the committed term, so
+    // escalating to all-matching here would opt the next delete/edit into a
+    // filter the user has already typed over.
+    it('hides "Select all matching" while the typed term has not reached the query', async () => {
+      const user = userEvent.setup();
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({
+          transactions: makeRows(2),
+          total: 9,
+          searchInput: 'coff',
+          searchPending: true,
+        }),
+      );
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('checkbox', { name: 'Select all' }));
+
+      expect(
+        screen.queryByRole('button', { name: /select all 9 matching/i }),
+      ).not.toBeInTheDocument();
+      // Page-scoped work on the ids actually on screen stays available.
+      expect(
+        screen.getByRole('button', { name: /^edit \(2\)$/i }),
+      ).toBeInTheDocument();
+    });
+
     it('offers "Select all matching" once the new page has landed', async () => {
       // The control is gated by the stale window, not removed outright.
       const user = userEvent.setup();
@@ -1279,6 +1336,47 @@ describe('Transactions page', () => {
     });
   });
 
+  // B6n. The table used to dim on ANY fetch, so every SSE live-refresh — one
+  // per save by the other household member — pulsed an open table. The dim
+  // now answers "are these rows still answering your question?", which only
+  // a query-key change makes false.
+  describe('table busy treatment', () => {
+    // findBy, not getBy: the page's mount effects (categories fetch,
+    // service-worker probe) settle after the synchronous render, and reading
+    // the DOM before they land leaves their state updates outside act().
+    // Anchored on the table so the query cannot drift onto some other
+    // transition-opacity element (the error banner's dismiss button has one).
+    async function tableCard(): Promise<HTMLElement> {
+      const card = (await screen.findByRole('table')).closest(
+        '.transition-opacity',
+      );
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    }
+
+    it('does not dim or mark busy for a same-key background refetch', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ fetching: true, showingPrevious: false }),
+      );
+      render(<Transactions />);
+
+      const card = await tableCard();
+      expect(card).not.toHaveClass('opacity-60');
+      expect(card).not.toHaveAttribute('aria-busy');
+    });
+
+    it('dims and marks busy while the rows belong to a previous query', async () => {
+      mockUseTransactions.mockReturnValue(
+        defaultHookReturn({ fetching: true, showingPrevious: true }),
+      );
+      render(<Transactions />);
+
+      const card = await tableCard();
+      expect(card).toHaveClass('opacity-60');
+      expect(card).toHaveAttribute('aria-busy', 'true');
+    });
+  });
+
   describe('app badge', () => {
     afterEach(() => {
       Reflect.deleteProperty(navigator, 'clearAppBadge');
@@ -1523,12 +1621,27 @@ describe('Transactions page', () => {
         defaultHookReturn({
           total: 4,
           filters: filtersWithSearch,
+          // At rest the box shows exactly the committed term. A fixture where
+          // these disagree while searchPending is false is a state the hook
+          // cannot produce.
+          searchInput: filtersWithSearch.search,
           buildFilterQuery: vi.fn().mockReturnValue(FILTER_QS),
           bulkUpdateByFilter,
           ...overrides,
         }),
       );
       return { bulkUpdateByFilter };
+    }
+
+    // fireEvent, NOT user.type(input, '{Enter}'): under happy-dom, userEvent's
+    // Enter never reaches React's onKeyDown, even with the input focused and
+    // filled (verified by probe — the confirm dialog never opened with the
+    // guard deleted outright). Every "Enter is inert" assertion written that
+    // way passes with the guard removed, which is how the original B6c guard
+    // test came to prove nothing. keyDown is precisely the event the handler
+    // listens for, so this exercises the real path.
+    function pressEnter(input: HTMLElement) {
+      fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
     }
 
     async function openReplaceAndType(user: ReturnType<typeof userEvent.setup>) {
@@ -1631,7 +1744,50 @@ describe('Transactions page', () => {
 
       // The input's Enter key reaches handleReplaceAll without touching the
       // button, so a disabled button alone would not hold this shut.
-      await user.type(input, '{Enter}');
+      pressEnter(input);
+
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      expect(bulkUpdateByFilter).not.toHaveBeenCalled();
+    });
+
+    // Positive control for the two Enter-key guard tests below. Both assert
+    // that Enter does NOT open the confirm dialog, which is worth nothing
+    // unless Enter opens it when the gate is open.
+    it('Enter in the replace box opens the confirmation when the gate is open', async () => {
+      setupReplace();
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      const input = screen.getByPlaceholderText('New description...');
+      await user.type(input, 'Spinneys');
+      pressEnter(input);
+
+      expect(await screen.findByRole('alertdialog')).toBeInTheDocument();
+    });
+
+    // B6n. The search debounce opens a SECOND window of the same shape: for
+    // 250ms after a keystroke the box shows one term while buildFilterQuery()
+    // still serializes the previous one. Enter reaches handleReplaceAll
+    // without touching the button, so type-then-Enter inside that window
+    // would rename the pre-keystroke match set under a label counting it.
+    it('does not fire a rename while the typed term has not reached the query', async () => {
+      const { bulkUpdateByFilter } = setupReplace({
+        searchInput: 'spinneys market',
+        searchPending: true,
+      });
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Replace' }));
+      const input = screen.getByPlaceholderText('New description...');
+      await user.type(input, 'Spinneys');
+
+      expect(
+        screen.getByRole('button', { name: 'Replace All (4)' }),
+      ).toBeDisabled();
+
+      pressEnter(input);
 
       expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
       expect(bulkUpdateByFilter).not.toHaveBeenCalled();

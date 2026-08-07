@@ -342,13 +342,15 @@ export function Transactions() {
     filters,
     setFilter,
     clearFilters,
+    searchInput,
+    setSearchInput,
     clearPanelFilters,
     setPage,
     setPerPage,
     setSort,
     initialLoad,
-    fetching,
     showingPrevious,
+    searchPending,
     error,
     createTransaction,
     updateTransaction,
@@ -359,6 +361,17 @@ export function Transactions() {
     buildFilterQuery,
     refetch,
   } = useTransactions();
+
+  // Every control whose scope is "everything matching the current filters"
+  // is gated on this one predicate. Two different windows put the visible
+  // numbers and the write's actual target out of step, and both are fatal in
+  // the same way (B4: a labelled count that describes a different set than
+  // the write touches):
+  //   showingPrevious — the term has reached the query key but the new page
+  //                     has not landed, so `total` still counts the old one.
+  //   searchPending   — the user has typed past the committed term, so
+  //                     buildFilterQuery() still serializes the old one.
+  const filterScopeUnsettled = showingPrevious || searchPending;
 
   const [suggestionsKey, setSuggestionsKey] = useState(0);
   const suggestions = useSuggestions(suggestionsKey);
@@ -489,10 +502,12 @@ export function Transactions() {
     // flight, but the write resolves buildFilterQuery() against the CURRENT
     // filters — firing here would rename a set the "Replace All (N)" label
     // never described. The guard lives in the handler, not just on the
-    // button: the text input's Enter key reaches this same path.
-    if (showingPrevious) return;
+    // button: the text input's Enter key reaches this same path, which is
+    // also the whole reason the debounce window has to be covered — type,
+    // then Enter inside 250ms, and the button never gets a say.
+    if (filterScopeUnsettled) return;
     setReplaceConfirm({ patch: { description: desc } });
-  }, [replaceText, filters.search, showingPrevious]);
+  }, [replaceText, filters.search, filterScopeUnsettled]);
 
   // Retiring the replace bar takes focus with it: the confirm dialog restored
   // focus to the "Replace All" button on close, and that button lives inside
@@ -566,9 +581,9 @@ export function Transactions() {
     // relying on its button being disabled: entering 'all-matching' is what
     // routes the next delete/edit through the filter endpoints, so the gate
     // belongs on the state transition, not only on the affordance.
-    if (showingPrevious) return;
+    if (filterScopeUnsettled) return;
     setSelectionScope('all-matching');
-  }, [showingPrevious]);
+  }, [filterScopeUnsettled]);
 
   const handleClearSelection = useCallback(() => {
     setSelectedIds(new Set());
@@ -819,12 +834,6 @@ export function Transactions() {
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
-  // Rows are held over from the previous filter while the new page loads
-  // (see `placeholderData` in useTransactions). Dim them and mark the region
-  // busy so the list reads as "updating" rather than as settled results —
-  // same treatment the Dashboard gives a refetch over existing data.
-  const refetching = fetching && !initialLoad;
-
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -841,8 +850,8 @@ export function Transactions() {
       </div>
 
       <TransactionToolbar
-        search={filters.search}
-        onSearchChange={(v) => setFilter('search', v)}
+        search={searchInput}
+        onSearchChange={setSearchInput}
         type={filters.type}
         onTypeChange={(v) => setFilter('type', v)}
         activeFilterCount={activeFilterCount}
@@ -886,7 +895,9 @@ export function Transactions() {
                 size="sm"
                 className="h-8 text-xs"
                 onClick={handleReplaceAll}
-                disabled={replacing || showingPrevious || !replaceText.trim()}
+                disabled={
+                  replacing || filterScopeUnsettled || !replaceText.trim()
+                }
               >
                 {replacing ? 'Replacing...' : `Replace All (${total})`}
               </Button>
@@ -1025,12 +1036,23 @@ export function Transactions() {
           No transactions found. Add one above to get started.
         </Card>
       ) : (
+        // Dim + aria-busy answer one question: does what you are looking at
+        // still answer what you asked for? Only `showingPrevious` makes it
+        // "no" — the rows are held over from the previous filter/page/sort
+        // while the new one loads (see `placeholderData` in useTransactions).
+        //
+        // Deliberately NOT keyed on `fetching`. Every household save reaches
+        // this tab as an SSE-driven same-key refetch, and those rows are
+        // correct and settled; pulsing the table on each one is noise about
+        // work the user neither asked for nor can act on. aria-busy moves
+        // with the dim rather than tracking `fetching`, for the same reason:
+        // flipping it on every partner save is that pulse in non-visual form.
         <Card
           ref={cardRef}
-          aria-busy={refetching || undefined}
+          aria-busy={showingPrevious || undefined}
           className={cn(
             'overflow-hidden transition-opacity duration-200',
-            refetching && 'opacity-60',
+            showingPrevious && 'opacity-60',
           )}
         >
           <PaginationBar
@@ -1086,13 +1108,14 @@ export function Transactions() {
                 current page. Clicking switches to the atomic filter-based
                 delete path. Hidden once scope is already 'all-matching'.
 
-                Also hidden — not merely disabled — while the held-over rows
-                are on screen: BOTH numbers it prints belong to the previous
-                filter, and the filter-scoped delete/edit it opts into would
-                resolve against the CURRENT one. Disabling would leave the
-                wrong count sitting there as if it were a fact.
+                Also hidden — not merely disabled — for the whole of
+                `filterScopeUnsettled`: BOTH numbers it prints belong to the
+                filter the rows were fetched under, and the filter-scoped
+                delete/edit it opts into resolves against whatever is
+                committed when it fires. Disabling would leave the wrong
+                count sitting there as if it were a fact.
               */}
-              {!showingPrevious &&
+              {!filterScopeUnsettled &&
                 selectionScope === 'page' &&
                 transactions.length > 0 &&
                 transactions.every((tx) => selectedIds.has(tx.id)) &&
