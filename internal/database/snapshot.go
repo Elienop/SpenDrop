@@ -5,8 +5,9 @@ package database
 // pending schema migration, SnapshotForMigration takes a VACUUM INTO copy
 // of the live database to a sibling directory so an operator can recover
 // by file-copy if the migration goes wrong. pruneMigrationSnapshots keeps
-// that directory bounded to a small, hardcoded number of most-recent
-// snapshots.
+// that directory bounded to a small, hardcoded number of snapshots: the
+// most recent ones, plus up to two files the failure path exempts so a
+// crash-looping migration cannot delete its own pristine pre-upgrade copy.
 //
 // The actual VACUUM INTO / sidecar write is delegated to backup.Run; we
 // deliberately avoid a second implementation of that logic here because a
@@ -109,9 +110,9 @@ func formatMigrationSnapshotName(version string, t time.Time) string {
 	return migrationSnapshotPrefix + version + "-" + t.UTC().Format(migrationSnapshotTimeLayout) + migrationSnapshotSuffix
 }
 
-// parseMigrationSnapshotName extracts the timestamp from a canonical
-// pre-migration snapshot filename. It returns (time, true) for names that
-// match the shape, and (zero, false) otherwise. pruneMigrationSnapshots
+// parseMigrationSnapshotName extracts the version and timestamp from a canonical
+// pre-migration snapshot filename. It returns (version, time, true) for names that
+// match the shape, and ("", zero, false) otherwise. pruneMigrationSnapshots
 // uses the ok predicate as a filter so operator files (or sibling Tier 1
 // scheduled backups that happen to share the directory) are left alone.
 //
@@ -127,36 +128,78 @@ func formatMigrationSnapshotName(version string, t time.Time) string {
 // treated as a prune candidate. Operators must not drop files with the
 // canonical prefix into the snapshot directory unless they intend them to
 // be managed by this module.
-func parseMigrationSnapshotName(name string) (time.Time, bool) {
+func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 	if !strings.HasPrefix(name, migrationSnapshotPrefix) {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	if !strings.HasSuffix(name, migrationSnapshotSuffix) {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	mid := name[len(migrationSnapshotPrefix) : len(name)-len(migrationSnapshotSuffix)]
 
 	const tsLen = len(migrationSnapshotTimeLayout)
 	// Minimum mid: at least one version char + "-" + timestamp.
 	if len(mid) < tsLen+2 {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	sep := len(mid) - tsLen - 1
 	if mid[sep] != '-' {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
 	ts := mid[sep+1:]
 	t, err := time.ParseInLocation(migrationSnapshotTimeLayout, ts, time.UTC)
 	if err != nil {
-		return time.Time{}, false
+		return "", time.Time{}, false
 	}
-	return t, true
+	return mid[:sep], t, true
+}
+
+// pruneExemptions names the two failure-path exemption inputs. A struct
+// rather than two positional strings: both are version labels, so a
+// swapped pair compiles and silently mis-pins files at a deletion
+// boundary — the same trap as a positional bool at a privilege boundary.
+// The zero value means "no exemptions" and is what the success path
+// passes.
+type pruneExemptions struct {
+	// Anchor exempts the oldest snapshot whose version EQUALS it.
+	Anchor string
+	// Floor exempts the oldest snapshot whose version is >= it.
+	Floor string
 }
 
 // pruneMigrationSnapshots removes all but the `keep` most recent
 // pre-migration snapshots from dir. "Most recent" is determined by the
 // timestamp encoded in the filename, not by filesystem mtime — mtime is
 // not a reliable ordering under tools like rsync or `cp -p`.
+//
+// Up to two snapshots are exempt from removal, identified by ex (the
+// zero value on the success path, which reproduces the original
+// newest-keep rule byte-for-byte):
+//
+//   - ex.Floor — the oldest snapshot whose encoded version is >=
+//     ex.Floor. RunMigrations passes the FIRST pending migration here,
+//     so this resolves to the pristine pre-upgrade copy and stays
+//     resolved to it even when a newly shipped migration rotates the
+//     bracket's target version mid-crash-loop.
+//   - ex.Anchor — the oldest snapshot encoding exactly that version:
+//     the current bracket's own pre-upgrade copy.
+//
+// The two frequently resolve to the same file, which then consumes a
+// single exemption. Remaining files compete for keep-|exemptions| slots
+// (floored at 0), so total retention never exceeds keep whenever
+// keep >= |exemptions|; an exemption is absolute and survives even
+// keep=0. A version matching no file simply contributes no exemption.
+//
+// Version comparison is lexical, which is correct here because every
+// migration filename carries a zero-padded numeric prefix
+// ("002_cascade_deletes" < "017_transactions_idempotency_key"), so
+// string order is apply order — the same property listPendingMigrations
+// relies on when it sorts pending migrations by filename. The floor rule
+// therefore assumes migration versions ship monotonically: never add a
+// migration numbered below one that may already be applied, or it becomes
+// the first pending migration and drops the floor beneath the crash
+// bracket, exempting an older unrelated snapshot instead of the pristine
+// copy.
 //
 // Files that do not match the canonical pre-migration-*Z.db shape are
 // ignored: operator files and the sibling Tier 1 scheduled backups both
@@ -168,7 +211,7 @@ func parseMigrationSnapshotName(name string) (time.Time, bool) {
 // bit-perfect cleanup. Only a read-dir failure surfaces as a return
 // error, because that indicates the prune logic couldn't even enumerate
 // its input.
-func pruneMigrationSnapshots(dir string, keep int) error {
+func pruneMigrationSnapshots(dir string, keep int, ex pruneExemptions) error {
 	if keep < 0 {
 		return fmt.Errorf("pruneMigrationSnapshots: keep must be non-negative (got %d)", keep)
 	}
@@ -182,22 +225,88 @@ func pruneMigrationSnapshots(dir string, keep int) error {
 	}
 
 	type snapFile struct {
-		name string
-		ts   time.Time
+		name    string
+		version string
+		ts      time.Time
 	}
 	var snaps []snapFile
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
 		}
-		ts, ok := parseMigrationSnapshotName(e.Name())
+		ver, ts, ok := parseMigrationSnapshotName(e.Name())
 		if !ok {
 			continue
 		}
-		snaps = append(snaps, snapFile{name: e.Name(), ts: ts})
+		snaps = append(snaps, snapFile{name: e.Name(), version: ver, ts: ts})
 	}
 
-	if len(snaps) <= keep {
+	// oldestMatching returns the index of the oldest snapshot satisfying
+	// match, or -1. The name tiebreaker keeps the choice deterministic
+	// when two snapshots share a second — unreachable for a single
+	// version (SnapshotForMigration refuses to overwrite an existing
+	// path) but kept so a future caller passing a predicate that spans
+	// versions cannot reintroduce the ambiguity.
+	oldestMatching := func(match func(snapFile) bool) int {
+		best := -1
+		for i, s := range snaps {
+			if !match(s) {
+				continue
+			}
+			if best == -1 {
+				best = i
+				continue
+			}
+			b := snaps[best]
+			if s.ts.Before(b.ts) || (s.ts.Equal(b.ts) && s.name < b.name) {
+				best = i
+			}
+		}
+		return best
+	}
+
+	// Exemptions (B3, amended 2026-08-07): the pristine pre-upgrade copy
+	// is the only full-rollback point once a partial apply has committed
+	// earlier migrations, so it must survive a crash loop absolutely —
+	// even at keep=0. Two rules identify it, deduped by index when they
+	// land on the same file:
+	//
+	//	ex.Floor — the oldest snapshot at or above the first pending
+	//	  migration. This is the rotation-proof rule: ex.Anchor is the
+	//	  HIGHEST pending migration, so a newly shipped migration rotates
+	//	  it and the pristine copy (named for the OLD target) would stop
+	//	  matching and be pruned mid-incident.
+	//	ex.Anchor — the oldest snapshot of the current bracket.
+	//
+	// The zero value (the success path) means no exemptions and behavior
+	// byte-identical to the original newest-keep rule.
+	exempt := map[int]struct{}{}
+	if ex.Floor != "" {
+		if i := oldestMatching(func(s snapFile) bool { return s.version >= ex.Floor }); i != -1 {
+			exempt[i] = struct{}{}
+		}
+	}
+	if ex.Anchor != "" {
+		if i := oldestMatching(func(s snapFile) bool { return s.version == ex.Anchor }); i != -1 {
+			exempt[i] = struct{}{}
+		}
+	}
+
+	candidates := snaps
+	slots := keep - len(exempt)
+	if slots < 0 {
+		slots = 0
+	}
+	if len(exempt) > 0 {
+		candidates = make([]snapFile, 0, len(snaps)-len(exempt))
+		for i, s := range snaps {
+			if _, ok := exempt[i]; !ok {
+				candidates = append(candidates, s)
+			}
+		}
+	}
+
+	if len(candidates) <= slots {
 		return nil
 	}
 
@@ -206,14 +315,14 @@ func pruneMigrationSnapshots(dir string, keep int) error {
 	// snapshots share the same second (distinct version strings can still
 	// produce distinct-but-same-second filenames), so prune decisions are
 	// reproducible across runs.
-	sort.SliceStable(snaps, func(i, j int) bool {
-		if snaps[i].ts.Equal(snaps[j].ts) {
-			return snaps[i].name < snaps[j].name
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].ts.Equal(candidates[j].ts) {
+			return candidates[i].name < candidates[j].name
 		}
-		return snaps[i].ts.Before(snaps[j].ts)
+		return candidates[i].ts.Before(candidates[j].ts)
 	})
 
-	toRemove := snaps[:len(snaps)-keep]
+	toRemove := candidates[:len(candidates)-slots]
 	for _, s := range toRemove {
 		dbPath := filepath.Join(dir, s.name)
 		sidecarPath := dbPath + ".sha256"

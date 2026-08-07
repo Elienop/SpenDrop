@@ -23,18 +23,10 @@ top items. Production figures in this file come from the owner's live database o
 
 *Numbers are discovery order, not priority. B11, B2 and B1 all shipped 2026-08-02 on
 `fix/reprice-guard-and-restore` — see Closed. B5 also shipped 2026-08-02, on
-`feat/delete-undo-member-trash` — see Closed.*
+`feat/delete-undo-member-trash` — see Closed. B3 shipped 2026-08-07, on
+`fix/migration-snapshot-crash-loop-prune` — see Closed.*
 
 ## Then
-
-### B3 — A failed upgrade fills the disk
-**Verified: reported.** `internal/database/migrate.go:94-104`. A full database snapshot is taken
-before every migration and old ones are pruned only after a *successful* run. A failing migration
-exits, Docker restarts, another snapshot is taken, nothing is pruned — roughly 60 copies an hour
-into the same volume as the live database and all backups. This exact crash-loop has happened
-before (the TrueNAS boot loop). Once the disk is full the database cannot be written even after
-the migration is fixed, turning a recoverable upgrade failure into a second incident.
-**Effort:** trivial — prune regardless of outcome, or cap the directory.
 
 ### B4 — "Replace All (4)" renames more than 4
 **Verified: reported.** The button counts rows matching the current filters
@@ -205,6 +197,32 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B3 — A failed upgrade fills the disk** (`08d25ab..201fec5`, 2026-08-07, unreleased, on
+  `fix/migration-snapshot-crash-loop-prune`, PR pending). **Verified: read** (was `reported`;
+  confirmed at `migrate.go:93-131` and `snapshot.go:42-53`). The failure path in `RunMigrations`
+  now prunes the snapshot directory too, not just the success path, so a crash-looping migration
+  under Docker restart converges instead of leaving one full DB copy per attempt.
+  **What was not obvious: the prune itself already existed and was correct — only its call site
+  was success-only.** The prune existed but was a plain newest-keep; the fix adds the
+  failure-path call and teaches the prune two exemptions (bracket anchor + version floor). And
+  the backlog's own suggested
+  fixes ("prune regardless of outcome, or cap the directory") would have made things worse mid-incident:
+  each migration commits in its own transaction and `applyPendingMigrations` applies them in
+  sorted order, stopping at the first failure — so a partial apply leaves the EARLIER migrations
+  committed while the failing one and everything after it stay pending, and only the snapshot
+  taken before the first attempt is still a pristine pre-upgrade copy. Pruning
+  indiscriminately on the failure path could delete exactly the file an operator needs to
+  recover with. The shipped fix pins that snapshot and prunes around it, bounding a crash-loop
+  at `migrationSnapshotKeep` (3) files total, one of which is the pinned pristine copy, instead
+  of unbounded growth. Reviewing the branch then found the first version of the pin could
+  rotate away from the file it was protecting — it keyed on the HIGHEST pending migration, so
+  shipping a new migration during a crash loop released the pristine copy to be pruned
+  mid-incident; amended in the same branch to additionally pin the oldest snapshot at or above
+  the FIRST pending migration, which a new migration cannot move.
+  `snapshot.go`'s seconds-precision filename layout was already deliberate for this: its comment
+  anticipates a same-minute restart on immediate Docker retry and exists specifically so
+  crash-loop snapshots don't collide and fail to write.
 
 - **B5 — Delete has no confirmation, and members have no Trash** (`ea5f51b..d84f5cd`,
   2026-08-02, unreleased, on `feat/delete-undo-member-trash`, PR pending). Desktop row delete now
