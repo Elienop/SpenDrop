@@ -104,6 +104,19 @@ is admin-only), but it is a second way to destroy state with no forensic trail. 
 all four verbs in one pass, not one.
 **Effort:** small-medium (a new audit surface, not a one-liner).
 
+### B15 — Nine test files use an Enter idiom that may prove nothing
+**Verified: read** (found 2026-08-07 during the B6 debounce work). Under happy-dom,
+`user.type(input, '{Enter}')` / `user.keyboard('{Enter}')` dispatch nothing React's
+`onKeyDown` sees — a committed guard test on the B6 branch passed with its guard DELETED
+until it was rebuilt on `fireEvent.keyDown` plus a positive control ("Enter opens the flow
+when the gate is open" — only the positive can catch the key going dead again). Nine other
+files use the same idiom and are unaudited: ImportPreviewTable, AmountCurrencyInput,
+TagInput, TransactionRow, password-input, AutocompleteInput, TransactionEntryRow,
+Transactions.BulkEditDialog, Transactions. Some uses may be legitimately handled by
+user-event (form-submit paths); each needs the delete-the-handler check before being
+trusted. Any that assert a NEGATIVE ("Enter does nothing") are the prime suspects.
+**Effort:** small-medium — nine audits, each a delete-run-restore cycle.
+
 ---
 
 ## Queued stages
@@ -208,8 +221,8 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
-- **B6 — Cheap batch, all 12 open items** (`e46af7e..6283a09`, eight commits, 2026-08-07, on
-  `fix/b6-cheap-batch`, PR pending). Built by five implementation agents in three waves, then a
+- **B6 — Cheap batch, all 12 open items** (`e46af7e..04fc60c`, twelve commits plus this
+  record, 2026-08-07, on `fix/b6-cheap-batch`, PR pending). Built by five implementation agents in three waves, then a
   five-reviewer battery (code / data-correctness / security / UI-UX / design), a two-part fix
   wave, an isolated-worktree deep review (verdict MERGEABLE, 8/8 kill-list mutants re-executed),
   and a browser pass on `:3535` (SW purged first). What each item became, and what was NOT obvious:
@@ -280,10 +293,24 @@ condition *and* move the predicate, believing one was safe because the other was
     anchored after any success that unmounts its own trigger — bulk edit had the identical
     focus-strand one door over (review catch), plus the dialog TITLE was still unpluralized.
   Also from the battery: security M1 independently rediscovered B12 (cross-referenced above);
-  M2 filed as B14. Accepted residuals, on the record: per-keystroke fetch (B6c), ~24px dismiss
-  target (matches the chip idiom; revisit in B9), the table dims on every SSE refetch
-  (Dashboard idiom; scope to key-changes if it proves noisy in daily use), B6h's one-directional
-  ASCII over-clear, and B6d's last-failure banner semantics.
+  M2 filed as B14. **Same-day follow-up on the owner's "fix now instead of waiting"
+  (`78745e1..04fc60c`):** the search term now debounces 250ms into the query key (one fetch
+  per typing pause; the input itself stays instant), and the window where the box and the
+  committed term disagree (`searchPending`) joins `showingPrevious` in a single
+  `filterScopeUnsettled` gate on every total-scoped control — a quick type-then-Enter can
+  never fire a filter write against a term the box no longer shows. The table dim and
+  aria-busy moved to key-changes only, so a partner's save no longer pulses an open table
+  (visually or to a screen reader). Building the Enter gate exposed that the committed
+  Enter-path guard test was VACUOUS — happy-dom never delivers user-event's `'{Enter}'` to
+  React `onKeyDown`, so the test passed with the guard deleted; rebuilt on
+  `fireEvent.keyDown` with a positive control, and the nine other files using the idiom are
+  filed as B15. An independent worktree re-execution of the full frontend mutant set
+  (12/12 killed; both directional pairs died to DIFFERENT tests) confirmed the frontend's
+  claimed mutation coverage is real; its one survivor was the deliberately-unreachable
+  Select-all-matching handler backstop, now documented as unreachable defence-in-depth
+  rather than claimed as the primary gate. Accepted residuals, on the record: ~24px dismiss
+  target (matches the chip idiom; revisit in B9), B6h's one-directional ASCII over-clear,
+  and B6d's last-failure banner semantics.
 - **B4 — "Replace All (4)" renamed more than 4** (`cb8cbc4..0902485`, merged 2026-08-07
   via PR #118, squash `923fe66`, released v0.37.2). **Verified: reproduced** in the browser
   before and after. Replace All now stages a description-only patch through the same
