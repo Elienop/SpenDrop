@@ -1035,14 +1035,17 @@ describe('Budgets page', () => {
     test('shows the budget as text with no input, save, or bulk controls', async () => {
       renderBudgets();
 
-      await waitFor(() => {
-        expect(screen.getByText(/monthly budgets/i)).toBeInTheDocument();
-      });
+      // Establish the April row before asserting any absence — same rule as
+      // the Category Limits member test below. The card title renders before
+      // the budgets fetch resolves, and a still-loading panel has no input
+      // and no Save button either, so gating on the title would let both
+      // absence assertions pass without ever seeing the read-only view.
+      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
+      expect(screen.getByText(/monthly budgets/i)).toBeInTheDocument();
       // The April budget renders as formatted text, not an editable field.
       expect(
         screen.queryByLabelText(/Budget for April 2026/i),
       ).not.toBeInTheDocument();
-      await waitFor(() => expect(aprilCell()).toBeInTheDocument());
       expect(
         screen.queryByRole('button', { name: /save budgets/i }),
       ).not.toBeInTheDocument();
@@ -1104,19 +1107,24 @@ describe('Budgets page', () => {
     test('shows limits but no editable inputs or save button', async () => {
       renderBudgets();
 
-      await waitFor(() => {
-        expect(screen.getByText(/category limits/i)).toBeInTheDocument();
-      });
-      // The existing Groceries limit is shown as text, not an input.
+      // Gate on a row, not on the card title. The title sits in the
+      // CardHeader and renders on the very first paint, while the rows wait
+      // on the limits fetch — so waiting for the title returns while the
+      // panel is still showing skeletons, and every absence assertion below
+      // would pass against a DOM that has no rows to be editable in.
+      await screen.findByText('Groceries');
+
+      // Category names and the existing limit render as read-only text.
+      expect(screen.getByText(/category limits/i)).toBeInTheDocument();
+      expect(screen.getByText('Rent')).toBeInTheDocument();
+      expect(screen.getByText('$400.00')).toBeInTheDocument();
+
+      // Only now do the absences mean anything: the rows are on screen, so
+      // an editable variant would be in the DOM if the member gate broke.
       expect(screen.queryByLabelText(/Limit for Groceries/i)).not.toBeInTheDocument();
       expect(
         screen.queryByRole('button', { name: /save category limits/i }),
       ).not.toBeInTheDocument();
-
-      // Category names and the existing limit still render as read-only text.
-      expect(screen.getByText('Groceries')).toBeInTheDocument();
-      expect(screen.getByText('Rent')).toBeInTheDocument();
-      expect(screen.getByText('$400.00')).toBeInTheDocument();
     });
 
     test('renders the read-only limit with font-mono tabular-nums', async () => {
