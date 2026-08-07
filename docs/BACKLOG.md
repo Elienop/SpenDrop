@@ -104,6 +104,18 @@ is admin-only), but it is a second way to destroy state with no forensic trail. 
 all four verbs in one pass, not one.
 **Effort:** small-medium (a new audit surface, not a one-liner).
 
+### B16 — Savings.test.tsx empty-state test passes without any API response
+**Verified: read** (found 2026-08-07 by the debugger during the Dependabot-#120 flake bisect,
+while sweeping all 32 test files for gate-then-assert races). `Savings.tsx` branches its empty
+state on `goals.length === 0` with no `loading` flag, so "No savings goals yet" renders on the
+FIRST paint; all three assertions in `Savings.test.tsx:80` pass before the mocked fetch
+resolves — the test would pass even if the API never responded. Not a flake risk (the shape it
+asserts is the pre-fetch shape), but vacuous as a guard of the loaded state. Fix is the same
+gate-on-data discipline the B6 member-Budgets tests got in `dd49a5c`, plus deciding whether
+the page itself should distinguish loading from empty (a UX question — currently a user with
+goals sees the empty state flash).
+**Effort:** small.
+
 ### B15 — Nine test files use an Enter idiom that may prove nothing
 **Verified: read** (found 2026-08-07 during the B6 debounce work). Under happy-dom,
 `user.type(input, '{Enter}')` / `user.keyboard('{Enter}')` dispatch nothing React's
@@ -222,7 +234,8 @@ condition *and* move the predicate, believing one was safe because the other was
 *(Move items here with their commit hash rather than deleting them.)*
 
 - **B6 — Cheap batch, all 12 open items** (`e46af7e..04fc60c`, twelve commits plus this
-  record, 2026-08-07, on `fix/b6-cheap-batch`, PR pending). Built by five implementation agents in three waves, then a
+  record, 2026-08-07, on `fix/b6-cheap-batch`; MERGED via PR #119, squash `f57a613`, released
+  as **v0.38.0**, branch deleted). Built by five implementation agents in three waves, then a
   five-reviewer battery (code / data-correctness / security / UI-UX / design), a two-part fix
   wave, an isolated-worktree deep review (verdict MERGEABLE, 8/8 kill-list mutants re-executed),
   and a browser pass on `:3535` (SW purged first). What each item became, and what was NOT obvious:
