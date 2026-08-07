@@ -172,8 +172,9 @@ func parseMigrationSnapshotName(name string) (string, time.Time, bool) {
 //
 // The two frequently resolve to the same file, which then consumes a
 // single exemption. Remaining files compete for keep-|exemptions| slots
-// (floored at 0), so total retention never exceeds keep. A version
-// matching no file simply contributes no exemption.
+// (floored at 0), so total retention never exceeds keep whenever
+// keep >= |exemptions|; an exemption is absolute and survives even
+// keep=0. A version matching no file simply contributes no exemption.
 //
 // Version comparison is lexical, which is correct here because every
 // migration filename carries a zero-padded numeric prefix

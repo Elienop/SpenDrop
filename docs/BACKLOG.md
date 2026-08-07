@@ -204,7 +204,9 @@ condition *and* move the predicate, believing one was safe because the other was
   now prunes the snapshot directory too, not just the success path, so a crash-looping migration
   under Docker restart converges instead of leaving one full DB copy per attempt.
   **What was not obvious: the prune itself already existed and was correct — only its call site
-  was success-only.** The fix is one added call, not a rewrite. And the backlog's own suggested
+  was success-only.** The prune existed but was a plain newest-keep; the fix adds the
+  failure-path call and teaches the prune two exemptions (bracket anchor + version floor). And
+  the backlog's own suggested
   fixes ("prune regardless of outcome, or cap the directory") would have made things worse mid-incident:
   each migration commits in its own transaction and `applyPendingMigrations` applies them in
   sorted order, stopping at the first failure — so a partial apply leaves the EARLIER migrations

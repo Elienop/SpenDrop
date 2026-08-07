@@ -457,13 +457,14 @@ func TestRunMigrations_RepeatedFailuresStayBounded(t *testing.T) {
 //
 // Pre-creating `transactions_new` is what splits the bracket. It is the
 // staging table 002_cascade_deletes.sql creates in its first statement
-// and renames away in its last, so it exists nowhere else in the
-// migration set and 001_initial_schema.sql never mentions it: 001
-// applies and COMMITS, 002 aborts at "table transactions_new already
-// exists". From that point the pre-upgrade snapshot is the only artifact
-// that can roll the database back past 001. The conflicting-index idiom
-// failMigrations uses cannot serve here — it fails the FIRST migration,
-// so nothing is ever committed and there is no partial apply.
+// (no IF NOT EXISTS), and 001_initial_schema.sql never mentions that
+// name: 001 applies and COMMITS, 002 aborts immediately at "table
+// transactions_new already exists". From that point the pre-upgrade
+// snapshot is the only artifact that can roll the database back past
+// 001. The conflicting-index idiom failMigrations uses cannot serve
+// here — it fails the FIRST migration, so nothing is ever committed and
+// there is no partial apply. (010 also uses the transactions_new
+// staging name, but 002's abort means it is never reached in this test.)
 //
 // The loop runs migrationSnapshotKeep+1 attempts because that is the
 // first count at which the prune must delete something; with fewer files
