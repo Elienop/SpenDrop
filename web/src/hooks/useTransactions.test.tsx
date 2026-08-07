@@ -47,6 +47,66 @@ beforeEach(() => {
   mockedApi.get.mockResolvedValue(emptyListResponse);
 });
 
+describe('useTransactions stale-while-filtering', () => {
+  // B6c. Every filter/page/sort value sits in the query key, so a keystroke
+  // in the search box mints a NEW key. Without placeholderData that key
+  // starts empty, `isLoading` flips true, and the page swaps the whole table
+  // for a skeleton on each keystroke.
+  test('keeps the previous rows and holds initialLoad false while a changed filter loads', async () => {
+    const firstPage = {
+      transactions: [{ id: 1, description: 'sdold' }],
+      total: 7,
+      page: 1,
+      per_page: 25,
+    };
+    const secondPage = {
+      transactions: [{ id: 2, description: 'sdnew' }],
+      total: 2,
+      page: 1,
+      per_page: 25,
+    };
+    // Hold the post-keystroke fetch open so the in-flight state is
+    // observable rather than raced past.
+    let releaseSecond: () => void = () => {};
+    mockedApi.get
+      .mockResolvedValueOnce(firstPage)
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseSecond = () => resolve(secondPage);
+          }),
+      )
+      .mockResolvedValue(secondPage);
+
+    const { result } = renderHook(() => useTransactions(), {
+      wrapper: makeWrapper(),
+    });
+    await waitFor(() =>
+      expect(result.current.transactions[0]?.description).toBe('sdold'),
+    );
+
+    act(() => result.current.setFilter('search', 'new'));
+
+    await waitFor(() => expect(result.current.fetching).toBe(true));
+    expect(result.current.initialLoad).toBe(false);
+    expect(result.current.transactions[0]?.description).toBe('sdold');
+    // `total` is held over too, which is why filter-scoped writes have to
+    // sit out this window — see the Replace All guard on the page.
+    expect(result.current.total).toBe(7);
+    expect(result.current.showingPrevious).toBe(true);
+
+    await act(async () => {
+      releaseSecond();
+    });
+
+    await waitFor(() =>
+      expect(result.current.transactions[0]?.description).toBe('sdnew'),
+    );
+    expect(result.current.total).toBe(2);
+    expect(result.current.showingPrevious).toBe(false);
+  });
+});
+
 describe('useTransactions bulkUpdate', () => {
   test('returns the visible IDs from the post-PATCH refetch', async () => {
     // First api.get is the mount fetch; second is the post-PATCH refetch.

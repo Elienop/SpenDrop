@@ -119,10 +119,14 @@ export function RecentlyAdded({
 
   const rows = [...pendingRows, ...savedRows].slice(0, MAX_ROWS);
 
-  if (rows.length === 0) return null;
-
   // Keep keyboard/screen-reader focus inside the panel after a row unmounts
   // (otherwise focus falls to <body>). The toast announces the result.
+  //
+  // This is why the panel renders its own empty state instead of bailing with
+  // `return null` on an empty list: deleting the LAST row would unmount the
+  // whole section, headingRef with it, and this call would land on nothing —
+  // stranding focus on <body> at the exact moment the Undo toast is offered,
+  // so the keyboard path to Undo is gone too.
   const restoreFocus = (): void => headingRef.current?.focus();
 
   const handleDelete = (row: RecentRow): void => {
@@ -187,52 +191,63 @@ export function RecentlyAdded({
       >
         Recently added
       </h2>
-      <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
-        {rows.map((row) => (
-          <li key={row.key} className="flex items-center gap-3 py-2 pl-3 pr-1">
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    'shrink-0 font-mono text-sm font-medium tabular-nums',
-                    row.type === TYPE_INCOME && 'text-emerald-500',
+      {rows.length === 0 ? (
+        // Deliberately NOT a live region. A role="status" that mounts at the
+        // same moment its text appears mostly does not announce at all, and
+        // when it does it doubles up against the delete toast. The real
+        // signals are the toast (what happened) and the heading taking focus
+        // (where you are); this line is what you read once you get there.
+        <p className="rounded-lg border border-border px-3 py-6 text-center text-sm text-muted-foreground">
+          No recent entries.
+        </p>
+      ) : (
+        <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border">
+          {rows.map((row) => (
+            <li key={row.key} className="flex items-center gap-3 py-2 pl-3 pr-1">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      'shrink-0 font-mono text-sm font-medium tabular-nums',
+                      row.type === TYPE_INCOME && 'text-emerald-500',
+                    )}
+                  >
+                    {row.type === TYPE_INCOME ? '+' : '-'}
+                    {formatCurrency(row.amount, row.currency)}
+                  </span>
+                  <span className="truncate text-sm">
+                    {row.description || '—'}
+                  </span>
+                  {row.kind === 'pending' && (
+                    <Badge variant="secondary" className="shrink-0">
+                      Not synced
+                    </Badge>
                   )}
-                >
-                  {row.type === TYPE_INCOME ? '+' : '-'}
-                  {formatCurrency(row.amount, row.currency)}
-                </span>
-                <span className="truncate text-sm">
-                  {row.description || '—'}
-                </span>
-                {row.kind === 'pending' && (
-                  <Badge variant="secondary" className="shrink-0">
-                    Not synced
-                  </Badge>
+                </div>
+                {row.categoryName && (
+                  <p className="truncate text-xs text-muted-foreground">
+                    {row.categoryName}
+                  </p>
                 )}
               </div>
-              {row.categoryName && (
-                <p className="truncate text-xs text-muted-foreground">
-                  {row.categoryName}
-                </p>
-              )}
-            </div>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="size-11 shrink-0 text-muted-foreground"
-              aria-label={
-                row.kind === 'pending'
-                  ? `Delete unsynced entry ${row.description || ''}`.trim()
-                  : `Delete ${row.description || 'entry'}`
-              }
-              onClick={() => handleDelete(row)}
-            >
-              <Trash2 />
-            </Button>
-          </li>
-        ))}
-      </ul>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="size-11 shrink-0 text-muted-foreground"
+                aria-label={
+                  row.kind === 'pending'
+                    ? `Delete unsynced entry ${row.description || ''}`.trim()
+                    : `Delete ${row.description || 'entry'}`
+                }
+                onClick={() => handleDelete(row)}
+              >
+                <Trash2 />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
       {!online && (
         <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <WifiOff className="size-3.5 shrink-0" aria-hidden="true" />

@@ -1,5 +1,9 @@
 import { useCallback, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query';
 import { api } from '../api/client';
 import type {
   Transaction,
@@ -84,6 +88,15 @@ interface UseTransactionsResult {
   setPerPage: (perPage: number) => void;
   setSort: (column: SortColumn) => void;
   initialLoad: boolean;
+  /** True during any fetch, including refetches over data already on screen. */
+  fetching: boolean;
+  /**
+   * True while the rows and `total` on screen belong to a previous query key
+   * (the user changed a filter and the new page has not landed). Callers must
+   * not fire a filter-scoped write while this is true — `total` labels the
+   * button but the write would target the NEW filters.
+   */
+  showingPrevious: boolean;
   error: string;
   refetch: () => void;
   createTransaction: (input: CreateTransactionInput) => Promise<Transaction>;
@@ -212,12 +225,28 @@ export function useTransactions(): UseTransactionsResult {
     ],
     queryFn: () =>
       api.get<PaginatedResponse<Transaction>>(`transactions?${buildQuery()}`),
+    // The filters/page/sort all sit IN the key, so every keystroke in the
+    // search box mints a new key. Without this, each one lands on an empty
+    // cache entry, `isLoading` flips true and the whole table is replaced by
+    // a skeleton mid-typing. Holding the previous key's rows keeps the list
+    // on screen and confines the skeleton to the genuine no-data-yet case.
+    // Same-key refetches (the SSE invalidate path) are unaffected: they keep
+    // their own data and leave `isPlaceholderData` false.
+    placeholderData: keepPreviousData,
   });
 
   const transactions = query.data?.transactions ?? [];
   const total = query.data?.total ?? 0;
   // `initialLoad` keeps the legacy contract: true until the first settle.
   const initialLoad = query.isLoading;
+  const fetching = query.isFetching;
+  // True while the rows/total on screen were loaded under a DIFFERENT key
+  // than the current filters — i.e. they are the held-over previous page.
+  // `total` is stale for exactly this window, so any control whose scope is
+  // "everything matching the current filters" has to sit out until it clears
+  // (see the Replace All button). A same-key background refetch never sets
+  // this, so live updates don't disable anything.
+  const showingPrevious = query.isPlaceholderData;
   const error = query.isError
     ? query.error instanceof Error
       ? query.error.message
@@ -399,6 +428,8 @@ export function useTransactions(): UseTransactionsResult {
     setPerPage,
     setSort,
     initialLoad,
+    fetching,
+    showingPrevious,
     error,
     refetch,
     createTransaction,

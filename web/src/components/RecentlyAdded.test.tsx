@@ -78,6 +78,7 @@ function savedTxn(over: Partial<Transaction> = {}): Transaction {
   return {
     id: 5,
     user_id: 1,
+    created_by: 'Elie',
     date: '2026-05-27',
     amount: 10,
     original_amount: null,
@@ -322,7 +323,7 @@ describe('RecentlyAdded', () => {
     expect(apiGet).not.toHaveBeenCalled();
   });
 
-  test('renders nothing when there is no recent or pending activity', async () => {
+  test('renders an empty state, not nothing, when there is no activity', async () => {
     apiGet.mockResolvedValue({
       transactions: [],
       total: 0,
@@ -332,8 +333,50 @@ describe('RecentlyAdded', () => {
     const { container } = renderPanel([]);
 
     await waitFor(() => expect(apiGet).toHaveBeenCalled());
-    expect(screen.queryByText(/recently added/i)).not.toBeInTheDocument();
-    expect(container.querySelector('section')).toBeNull();
+    // The heading is restoreFocus()'s target, so the panel has to survive an
+    // empty list — see the focus test below for what unmounting it costs.
+    expect(
+      screen.getByRole('heading', { name: 'Recently added' }),
+    ).toBeInTheDocument();
+    expect(screen.getByText('No recent entries.')).toBeInTheDocument();
+    expect(container.querySelector('ul')).toBeNull();
+  });
+
+  test('deleting the LAST row keeps focus on the heading, not <body>', async () => {
+    // One saved row, and the post-delete refetch returns an empty list — the
+    // exact moment the panel used to `return null` and unmount the heading
+    // that restoreFocus() had just aimed at, dropping focus onto <body> while
+    // the Undo toast was still being offered.
+    apiGet
+      .mockResolvedValueOnce({
+        transactions: [savedTxn()],
+        total: 1,
+        page: 1,
+        per_page: 5,
+      })
+      .mockResolvedValue({
+        transactions: [],
+        total: 0,
+        page: 1,
+        per_page: 5,
+      });
+    const user = userEvent.setup();
+    renderPanel([]);
+    await screen.findByText('sdsaved');
+
+    await user.click(screen.getByRole('button', { name: /delete sdsaved/i }));
+
+    // Wait on the ROW leaving, which happens either way — the old code
+    // unmounted the whole panel, the new one swaps in the empty state. So
+    // this gate clears under both and the focus assertions below are what
+    // actually distinguishes them.
+    await waitFor(() =>
+      expect(screen.queryByText('sdsaved')).not.toBeInTheDocument(),
+    );
+    expect(document.activeElement).not.toBe(document.body);
+    expect(
+      screen.getByRole('heading', { name: 'Recently added' }),
+    ).toHaveFocus();
   });
 
   test('Undo on a pending delete re-queues the captured payload', async () => {

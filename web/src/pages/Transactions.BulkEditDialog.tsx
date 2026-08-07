@@ -134,7 +134,9 @@ export function BulkEditDialog({
     >
       <DialogContent className="md:max-w-3xl">
         <DialogHeader>
-          <DialogTitle>Edit {count} transactions</DialogTitle>
+          <DialogTitle>
+            Edit {count} transaction{count === 1 ? '' : 's'}
+          </DialogTitle>
           <DialogDescription>
             Only the fields you change are applied. Leave a field untouched to
             keep its current value on every selected transaction.
@@ -291,15 +293,18 @@ export function BulkEditDialog({
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button
-              type="submit"
-              disabled={!canSubmit || isSubmitting}
-              // Spec §4.4 — full sentence for screen readers, compact visible
-              // text. Tests query the accessible name with a permissive
-              // /apply.*to N/i regex that matches the aria-label.
-              aria-label={`Apply changes to ${count} transactions`}
-            >
-              Apply to {count}
+            {/*
+              Spec §4.4 asked for a fuller sentence than the visible text, and
+              it was implemented as an aria-label — but that made the
+              accessible name "Apply changes to N transactions" over a visible
+              "Apply to N", which does not contain the visible label and so
+              fails WCAG 2.5.3. Speech control ("click Apply to 12") then
+              matches nothing. Spelling the noun out visibly satisfies both:
+              the name is a full phrase AND it is what the user can see. Same
+              change as the confirmation dialog's action button.
+            */}
+            <Button type="submit" disabled={!canSubmit || isSubmitting}>
+              Apply to {count} transaction{count === 1 ? '' : 's'}
             </Button>
           </DialogFooter>
         </form>

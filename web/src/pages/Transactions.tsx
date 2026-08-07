@@ -347,6 +347,8 @@ export function Transactions() {
     setPerPage,
     setSort,
     initialLoad,
+    fetching,
+    showingPrevious,
     error,
     createTransaction,
     updateTransaction,
@@ -483,8 +485,24 @@ export function Transactions() {
   const handleReplaceAll = useCallback(() => {
     const desc = replaceText.trim();
     if (!desc || !filters.search.trim()) return;
+    // `total` is still the previous filter's count while the new page is in
+    // flight, but the write resolves buildFilterQuery() against the CURRENT
+    // filters — firing here would rename a set the "Replace All (N)" label
+    // never described. The guard lives in the handler, not just on the
+    // button: the text input's Enter key reaches this same path.
+    if (showingPrevious) return;
     setReplaceConfirm({ patch: { description: desc } });
-  }, [replaceText, filters.search]);
+  }, [replaceText, filters.search, showingPrevious]);
+
+  // Retiring the replace bar takes focus with it: the confirm dialog restored
+  // focus to the "Replace All" button on close, and that button lives inside
+  // the bar we are about to unmount — so without a deliberate target, focus
+  // lands on <body>. The page heading is the same anchor a row delete uses.
+  const closeReplaceBar = useCallback(() => {
+    setShowReplace(false);
+    setReplaceText('');
+    pageHeadingRef.current?.focus();
+  }, []);
 
   // Fires after the confirm click. Deliberately independent of
   // dispatchBulkEdit: that path clears the row selection on success,
@@ -499,15 +517,13 @@ export function Transactions() {
         toast.success(
           `Renamed ${updated} transaction${updated !== 1 ? 's' : ''}`,
         );
-        setShowReplace(false);
-        setReplaceText('');
+        closeReplaceBar();
       } catch (err) {
         if (err instanceof RefetchAfterMutationError) {
           toast.error(
             `Rename applied, but refresh failed — please reload to see the latest. (${err.message})`,
           );
-          setShowReplace(false);
-          setReplaceText('');
+          closeReplaceBar();
         } else {
           toast.error(
             `Rename failed: ${err instanceof Error ? err.message : String(err)}`,
@@ -518,7 +534,7 @@ export function Transactions() {
         setReplacing(false);
       }
     },
-    [buildFilterQuery, bulkUpdateByFilter],
+    [buildFilterQuery, bulkUpdateByFilter, closeReplaceBar],
   );
 
   const handleSelect = useCallback((id: number, checked: boolean) => {
@@ -546,8 +562,13 @@ export function Transactions() {
   );
 
   const handleSelectAllMatching = useCallback(() => {
+    // Same reason the Replace All handler carries this guard rather than
+    // relying on its button being disabled: entering 'all-matching' is what
+    // routes the next delete/edit through the filter endpoints, so the gate
+    // belongs on the state transition, not only on the affordance.
+    if (showingPrevious) return;
     setSelectionScope('all-matching');
-  }, []);
+  }, [showingPrevious]);
 
   const handleClearSelection = useCallback(() => {
     setSelectedIds(new Set());
@@ -623,6 +644,11 @@ export function Transactions() {
   const dispatchBulkEdit = useCallback(
     async (p: ComputedPatchResult) => {
       const isFilterMode = selectionScope === 'all-matching';
+      // Whether this success leaves the selection empty — which unmounts the
+      // selection bar, and with it the "Edit (N)" button the dialog will try
+      // to restore focus to. Same failure as Replace All had: Radix aims at a
+      // node that no longer exists and focus lands on <body>.
+      let selectionEmptied = false;
       try {
         if (isFilterMode) {
           const filterQuery = buildFilterQuery();
@@ -631,6 +657,7 @@ export function Transactions() {
             `${n} transaction${n === 1 ? '' : 's'}`;
           toast.success(`Updated ${noun(updated)}`);
           handleClearSelection();
+          selectionEmptied = true;
         } else {
           const { updated, skipped, visibleIds } = await bulkUpdate({
             ids: [...selectedIds],
@@ -642,6 +669,7 @@ export function Transactions() {
             [...selectedIds].filter((id) => visible.has(id)),
           );
           setSelectedIds(newSelection);
+          selectionEmptied = newSelection.size === 0;
           const dropped = prevSize - newSelection.size;
           const noun = (n: number) =>
             `${n} transaction${n === 1 ? '' : 's'}`;
@@ -657,6 +685,13 @@ export function Transactions() {
         }
         setBulkEditOpen(false);
         setBulkConfirm(null);
+        // Only when the bar is going away. If a page-mode edit left rows
+        // selected, the "Edit (N)" trigger is still mounted and Radix's own
+        // restore puts focus back on it, which is the better target.
+        if (selectionEmptied) pageHeadingRef.current?.focus();
+        // Only when the bar is going away. If a page-mode edit left rows
+        // selected, the "Edit (N)" trigger is still mounted and Radix's own
+        // restore puts focus back on it, which is the better target.
       } catch (err) {
         if (err instanceof RefetchAfterMutationError) {
           toast.error(
@@ -784,6 +819,12 @@ export function Transactions() {
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
+  // Rows are held over from the previous filter while the new page loads
+  // (see `placeholderData` in useTransactions). Dim them and mark the region
+  // busy so the list reads as "updating" rather than as settled results —
+  // same treatment the Dashboard gives a refetch over existing data.
+  const refetching = fetching && !initialLoad;
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -845,7 +886,7 @@ export function Transactions() {
                 size="sm"
                 className="h-8 text-xs"
                 onClick={handleReplaceAll}
-                disabled={replacing || !replaceText.trim()}
+                disabled={replacing || showingPrevious || !replaceText.trim()}
               >
                 {replacing ? 'Replacing...' : `Replace All (${total})`}
               </Button>
@@ -948,7 +989,32 @@ export function Transactions() {
       {(error || rowError) && (
         <Alert variant="destructive">
           <AlertCircle className="size-4" />
-          <AlertDescription>{error || rowError}</AlertDescription>
+          <AlertDescription className="flex items-start justify-between gap-3">
+            <span>{error || rowError}</span>
+            {/*
+              Dismiss is offered only for `rowError` — a save failure, which
+              is a past event the user can acknowledge. `error` is the list
+              query's CURRENT state; hiding it would claim the table loaded
+              when it didn't, and the next render would bring it straight
+              back. A successful row save also clears rowError on its own
+              (TransactionRow.handleSave), so the banner can't outlive the
+              failure it describes.
+            */}
+            {!error && (
+              <button
+                type="button"
+                onClick={() => setRowError('')}
+                aria-label="Dismiss error"
+                className={cn(
+                  'shrink-0 rounded-sm opacity-70 ring-offset-background',
+                  'transition-opacity hover:opacity-100',
+                  'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+                )}
+              >
+                <X className="size-4" />
+              </button>
+            )}
+          </AlertDescription>
         </Alert>
       )}
 
@@ -959,7 +1025,14 @@ export function Transactions() {
           No transactions found. Add one above to get started.
         </Card>
       ) : (
-        <Card ref={cardRef} className="overflow-hidden">
+        <Card
+          ref={cardRef}
+          aria-busy={refetching || undefined}
+          className={cn(
+            'overflow-hidden transition-opacity duration-200',
+            refetching && 'opacity-60',
+          )}
+        >
           <PaginationBar
             page={page}
             totalPages={totalPages}
@@ -1012,8 +1085,15 @@ export function Transactions() {
                 visible row AND there are more matching rows beyond the
                 current page. Clicking switches to the atomic filter-based
                 delete path. Hidden once scope is already 'all-matching'.
+
+                Also hidden — not merely disabled — while the held-over rows
+                are on screen: BOTH numbers it prints belong to the previous
+                filter, and the filter-scoped delete/edit it opts into would
+                resolve against the CURRENT one. Disabling would leave the
+                wrong count sitting there as if it were a fact.
               */}
-              {selectionScope === 'page' &&
+              {!showingPrevious &&
+                selectionScope === 'page' &&
                 transactions.length > 0 &&
                 transactions.every((tx) => selectedIds.has(tx.id)) &&
                 total > transactions.length && (
@@ -1188,8 +1268,18 @@ export function Transactions() {
         <BulkEditConfirmDialog
           open={true}
           onCancel={() => setBulkConfirm(null)}
+          // Close-before-dispatch, matching the Replace All call site below.
+          // Both dialogs auto-close anyway — AlertDialogAction fires
+          // onOpenChange(false) right after onConfirm, which routes through
+          // onCancel — so relying on dispatchBulkEdit's own setBulkConfirm(null)
+          // meant the confirm-state lifetime was decided by Radix rather than
+          // here, and read as "stays open to retry" when it does not. Retry
+          // after a failure is offered by the BulkEditDialog underneath, which
+          // keeps the user's patch and closes only on success.
           onConfirm={() => {
-            void dispatchBulkEdit(bulkConfirm);
+            const p = bulkConfirm;
+            setBulkConfirm(null);
+            void dispatchBulkEdit(p);
           }}
           count={selectionCount}
           patch={bulkConfirm}

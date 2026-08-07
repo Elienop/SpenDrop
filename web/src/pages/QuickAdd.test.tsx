@@ -118,6 +118,7 @@ function savedTransaction(over: Partial<Transaction> = {}): Transaction {
   return {
     id: 99,
     user_id: 1,
+    created_by: 'Elie',
     date: '2026-05-27',
     amount: 43,
     original_amount: null,
