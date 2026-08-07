@@ -350,6 +350,48 @@ CREATE INDEX idx_sessions_user_id ON sessions(user_id);`); err != nil {
 	}
 }
 
+// TestFailurePruneExemptions_FieldsComeFromOppositeEnds pins WHICH end of
+// the pending list feeds WHICH exemption field. Both fields are version
+// labels, so a derivation that swapped them would compile, prune without
+// error, and only show up as a lost pristine snapshot mid-incident. The
+// expected literals name their fields so a swap cannot satisfy them.
+func TestFailurePruneExemptions_FieldsComeFromOppositeEnds(t *testing.T) {
+	cases := []struct {
+		name    string
+		pending []string
+		want    pruneExemptions
+	}{
+		{
+			// Anchor = LAST (highest) pending = the bracket's target
+			// version; Floor = FIRST (lowest) pending = the stuck
+			// migration, which is what survives a target rotation.
+			name:    "multi-migration bracket",
+			pending: []string{"020_a.sql", "021_b.sql", "022_c.sql"},
+			want:    pruneExemptions{Anchor: "022_c", Floor: "020_a"},
+		},
+		{
+			name:    "single pending migration collapses both onto it",
+			pending: []string{"020_a.sql"},
+			want:    pruneExemptions{Anchor: "020_a", Floor: "020_a"},
+		},
+		{
+			// Unreachable in production (RunMigrations returns early on
+			// an empty pending list) but the function stays total: the
+			// zero value means "no exemptions", never a panic.
+			name:    "empty list yields no exemptions",
+			pending: nil,
+			want:    pruneExemptions{},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := failurePruneExemptions(c.pending); got != c.want {
+				t.Errorf("failurePruneExemptions(%v) = %+v, want %+v", c.pending, got, c.want)
+			}
+		})
+	}
+}
+
 // TestRunMigrations_FailurePathPrunesSnapshots is the B3 regression: a
 // failing migration under a restart loop used to add one full DB copy
 // per attempt with nothing ever pruning. Seed the snapshot dir as if
@@ -527,6 +569,55 @@ func TestRunMigrations_PartialApplyBracketKeepsPristineAnchor(t *testing.T) {
 	// (the oldest non-exempt file) is what the prune consumed instead.
 	mustExist(t, opts.SnapshotDir, pristine)
 	mustBeGone(t, opts.SnapshotDir, secondAttempt)
+}
+
+// TestRunMigrations_SuccessPathTrimsToNewestKeep pins the "self-limiting
+// pin" claim in RunMigrations' doc comment at the CALL SITE: once a
+// migration finally succeeds, the exemptions are released and the
+// directory falls straight back to the plain newest-keep rule.
+//
+// The seeded files carry the bracket's real target version, i.e. they are
+// exactly the debris a crash loop leaves behind, and seeded[0] is the file
+// the FAILURE path would pin (both the floor and the anchor rule resolve
+// to it). Passing exemptions here — the whole mutation this test exists to
+// kill — would spare seeded[0] and consume a slot that seeded[2] should
+// have taken. Note the file COUNT still lands on migrationSnapshotKeep
+// either way, so the count assertion alone proves nothing; the
+// mustBeGone(seeded[0]) / mustExist(seeded[2]) pair is what fails.
+func TestRunMigrations_SuccessPathTrimsToNewestKeep(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	names := embeddedMigrationNames(t)
+	target := strings.TrimSuffix(names[len(names)-1], ".sql")
+
+	if err := os.MkdirAll(opts.SnapshotDir, 0o755); err != nil {
+		t.Fatalf("mkdir snapshot dir: %v", err)
+	}
+	// Timed RELATIVE to now (oldest first) so the real snapshot this run
+	// takes is always strictly the newest — a hardcoded date would make
+	// the ordering time-of-day dependent.
+	var seeded []string
+	for i := 0; i < 4; i++ {
+		ts := time.Now().UTC().Add(-time.Duration(10-i) * time.Minute)
+		name := formatMigrationSnapshotName(target, ts)
+		seeded = append(seeded, name)
+		writeSnapPair(t, opts.SnapshotDir, name)
+	}
+
+	// All migrations apply cleanly on a fresh DB, so this takes a real
+	// snapshot too: 5 files exist when the success-path prune runs.
+	if err := RunMigrations(db, opts); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n != migrationSnapshotKeep {
+		t.Errorf("snapshot dir holds %d snapshots after a successful migration, want exactly %d", n, migrationSnapshotKeep)
+	}
+	mustBeGone(t, opts.SnapshotDir, seeded[0])
+	mustBeGone(t, opts.SnapshotDir, seeded[1])
+	mustExist(t, opts.SnapshotDir, seeded[2])
+	mustExist(t, opts.SnapshotDir, seeded[3])
 }
 
 // assertMigrationApplied checks whether schema_migrations carries a row

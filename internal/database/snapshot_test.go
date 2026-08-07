@@ -114,7 +114,7 @@ func TestPruneMigrationSnapshots_KeepsMostRecent(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -165,7 +165,7 @@ func TestPruneMigrationSnapshots_IgnoresNonSnapshots(t *testing.T) {
 
 	// Prune to 0 (keep nothing prunable). Only the pre-migration file
 	// should be removed; the Tier 1 backup and operator file must survive.
-	if err := pruneMigrationSnapshots(dir, 0, "", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 0, pruneExemptions{}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -192,7 +192,7 @@ func TestPruneMigrationSnapshots_NoOpWhenFewerThanKeep(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -214,7 +214,7 @@ func TestPruneMigrationSnapshots_NoOpWhenFewerThanKeep(t *testing.T) {
 // with mkdir).
 func TestPruneMigrationSnapshots_MissingDirIsNotError(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "does-not-exist")
-	if err := pruneMigrationSnapshots(dir, 3, "", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{}); err != nil {
 		t.Errorf("expected nil for missing dir, got %v", err)
 	}
 }
@@ -225,7 +225,7 @@ func TestPruneMigrationSnapshots_MissingDirIsNotError(t *testing.T) {
 // on disk.
 func TestPruneMigrationSnapshots_NegativeKeepRejected(t *testing.T) {
 	dir := t.TempDir()
-	if err := pruneMigrationSnapshots(dir, -1, "", ""); err == nil {
+	if err := pruneMigrationSnapshots(dir, -1, pruneExemptions{}); err == nil {
 		t.Fatal("expected error for negative keep, got nil")
 	}
 }
@@ -411,7 +411,7 @@ func TestPruneMigrationSnapshots_AnchorSurvivesCrashLoop(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "021_target", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Anchor: "021_target"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -440,7 +440,7 @@ func TestPruneMigrationSnapshots_EmptyAnchorKeepsOldBehavior(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -452,7 +452,7 @@ func TestPruneMigrationSnapshots_EmptyAnchorKeepsOldBehavior(t *testing.T) {
 	mustExist(t, dir, names[5])
 }
 
-// TestPruneMigrationSnapshots_AbsentAnchorDegrades: an anchorVersion with
+// TestPruneMigrationSnapshots_AbsentAnchorDegrades: an ex.Anchor with
 // no matching snapshot (operator deleted the bracket's files mid-loop)
 // must degrade to the plain newest-keep rule, not error and not
 // accidentally protect anything else.
@@ -467,7 +467,7 @@ func TestPruneMigrationSnapshots_AbsentAnchorDegrades(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "021_missing", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Anchor: "021_missing"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -495,7 +495,7 @@ func TestPruneMigrationSnapshots_AnchorIsVersionScoped(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "021_target", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Anchor: "021_target"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -521,7 +521,7 @@ func TestPruneMigrationSnapshots_AnchorSurvivesKeepZero(t *testing.T) {
 	writeSnapPair(t, dir, a)
 	writeSnapPair(t, dir, b)
 
-	if err := pruneMigrationSnapshots(dir, 0, "021_target", ""); err != nil {
+	if err := pruneMigrationSnapshots(dir, 0, pruneExemptions{Anchor: "021_target"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -564,7 +564,7 @@ func TestPruneMigrationSnapshots_FloorSurvivesVersionRotation(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "022_newer", "021_target"); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Anchor: "022_newer", Floor: "021_target"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -594,7 +594,7 @@ func TestPruneMigrationSnapshots_FloorAndAnchorSameFile(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "021_target", "021_target"); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Anchor: "021_target", Floor: "021_target"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 
@@ -621,7 +621,7 @@ func TestPruneMigrationSnapshots_FloorAboveEverythingDegrades(t *testing.T) {
 		writeSnapPair(t, dir, name)
 	}
 
-	if err := pruneMigrationSnapshots(dir, 3, "", "099_future"); err != nil {
+	if err := pruneMigrationSnapshots(dir, 3, pruneExemptions{Floor: "099_future"}); err != nil {
 		t.Fatalf("pruneMigrationSnapshots: %v", err)
 	}
 

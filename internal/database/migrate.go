@@ -74,9 +74,9 @@ const migrationSnapshotKeep = 3
 // version. Prune failures are logged and never abort startup or mask
 // the migration error.
 //
-// The pin is self-limiting: the success path passes ("", ""), so the
-// first migration run that actually succeeds releases every pinned file
-// back into the ordinary newest-keep rule.
+// The pin is self-limiting: the success path passes the zero-value
+// pruneExemptions, so the first migration run that actually succeeds
+// releases every pinned file back into the ordinary newest-keep rule.
 func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 	if err := ensureMigrationsTable(db); err != nil {
 		return err
@@ -96,11 +96,6 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 	// upgrade bracket: the snapshot captures state *before* this version
 	// was applied.
 	targetVersion := strings.TrimSuffix(pending[len(pending)-1], ".sql")
-
-	// The first pending migration is the prune's floor: it is the
-	// migration that is actually stuck, so it stays put across restarts
-	// even when a newly shipped migration rotates targetVersion upward.
-	firstPending := strings.TrimSuffix(pending[0], ".sql")
 
 	// context.Background() is deliberate here: we are running at process
 	// start before any server context exists, and we specifically do NOT
@@ -124,20 +119,42 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 		// full DB copy per attempt. Prune here too, but never the
 		// pristine pre-upgrade copy: once a partial apply has committed
 		// earlier migrations it is the only full-rollback point. It is
-		// pinned by firstPending (a floor that survives targetVersion
-		// rotating when a new migration ships mid-loop) and, when that
-		// is a different file, by the bracket anchor. Best-effort — a
-		// prune error is logged and must never mask the migration error.
-		if perr := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, targetVersion, firstPending); perr != nil {
+		// pinned by the floor (which survives targetVersion rotating when
+		// a new migration ships mid-loop) and, when that is a different
+		// file, by the bracket anchor. Best-effort — a prune error is
+		// logged and must never mask the migration error.
+		if perr := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, failurePruneExemptions(pending)); perr != nil {
 			log.Printf("WARN: migration snapshot prune (failure path) failed: %v", perr)
 		}
 		return fmt.Errorf("migration failed (restore from %s): %w", snapPath, err)
 	}
 
-	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, "", ""); err != nil {
+	// Success releases every pin: the zero value is "no exemptions", so
+	// the directory falls straight back to the newest-keep rule.
+	if err := pruneMigrationSnapshots(opts.SnapshotDir, migrationSnapshotKeep, pruneExemptions{}); err != nil {
 		log.Printf("WARN: migration snapshot prune failed: %v", err)
 	}
 	return nil
+}
+
+// failurePruneExemptions derives the failure-path exemptions from the
+// pending list RunMigrations already holds: Floor is the FIRST (lowest)
+// pending version — the rotation-proof pin on the pristine pre-upgrade
+// copy — and Anchor is the LAST (highest) pending version, which is the
+// targetVersion the current bracket's snapshots are named for.
+//
+// An empty pending list yields the zero value (no exemptions). That is
+// unreachable in production, because RunMigrations returns early when
+// nothing is pending, but the function stays total so a future caller
+// cannot index a nil slice through it.
+func failurePruneExemptions(pending []string) pruneExemptions {
+	if len(pending) == 0 {
+		return pruneExemptions{}
+	}
+	return pruneExemptions{
+		Anchor: strings.TrimSuffix(pending[len(pending)-1], ".sql"),
+		Floor:  strings.TrimSuffix(pending[0], ".sql"),
+	}
 }
 
 // ensureMigrationsTable creates the schema_migrations tracking table if
