@@ -24,19 +24,9 @@ top items. Production figures in this file come from the owner's live database o
 *Numbers are discovery order, not priority. B11, B2 and B1 all shipped 2026-08-02 on
 `fix/reprice-guard-and-restore` — see Closed. B5 also shipped 2026-08-02, on
 `feat/delete-undo-member-trash` — see Closed. B3 shipped 2026-08-07, on
-`fix/migration-snapshot-crash-loop-prune` — see Closed.*
+`fix/migration-snapshot-crash-loop-prune` — see Closed. B4 shipped 2026-08-07, on `fix/b4-replace-all-honors-filters` — see Closed.*
 
 ## Then
-
-### B4 — "Replace All (4)" renames more than 4
-**Verified: reported.** The button counts rows matching the current filters
-(`web/src/pages/Transactions.tsx:751`); the request sends only the search text
-(`Transactions.tsx:418-435` → `internal/api/transaction_handlers.go:1319-1329`). Date range,
-category, amount, tags and type are dropped. Filter to Groceries in January, search "spinney",
-click **Replace All (4)**, and every matching description in the whole ledger is rewritten
-across all years and both members. No confirmation, no undo; the toast reports the real number
-afterwards. Descriptions feed import duplicate-detection, so it propagates.
-**Effort:** medium — send the filters, or make the count honest and add a confirmation.
 
 ### B6 — Cheap batch
 All **reported**, none independently verified, except B6k and B6l which are **read** (the code was
@@ -56,6 +46,7 @@ read and the mechanism confirmed, but not executed). Grouped because they are in
 | B6j | Nothing shows who entered a transaction, though the app knows | A member learns a row is her spouse's only after Save returns "forbidden" |
 | B6k | **Verified: read.** `web/src/components/RecentlyAdded.tsx` bails with `if (rows.length === 0) return null;`, so deleting the *last* visible row unmounts the whole panel — including the `headingRef` that `restoreFocus()` is supposed to return focus to. Pre-existing, but higher-stakes now that Undo lives on this panel: focus is lost at the exact moment the user might want to hit Undo. | A keyboard or screen-reader user loses the Undo they just earned |
 | B6l | **Verified: read.** `handleBatchRestoreTransactions` and `handleRestoreAllTransactions` both pass a zero `time.Time` to `verifyAffectedCheckpoints`, so every bulk restore walks *every* checkpoint. The old comments blamed a missing per-row date; that was false and is now corrected in place — both loops already call `qtx.GetTransactionByID` per id to build the cell set, so an accumulated `minDate` is available. What the bound still needs is a fallback for the admin path, where a row can restore even when that read failed (the ownership check is `!isAdminUser`-gated). Comments fixed on `feat/delete-undo-member-trash`; the bound itself not done. | Unbounded checkpoint walk on every bulk restore; grows with checkpoint count, not batch size |
+| B6m | BulkEditConfirmDialog polish, found by the B4 review battery: "1 transactions" pluralization; the confirm button's aria-label ("Apply changes to N transactions") does not contain its visible text ("Apply to N"), a WCAG 2.5.3 miss; focus drops to `<body>` after a successful Replace All; the two confirm call sites disagree on retry shape — align bulk edit to Replace All's safer close-before-dispatch. | Four one-liners in one shared component |
 
 ### B7 — No external signal when something breaks
 **Verified: reported.** The Docker health check only proves the web server is listening and never
@@ -211,6 +202,27 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B4 — "Replace All (4)" renamed more than 4** (`cb8cbc4..0902485`, 2026-08-07, unreleased, on
+  `fix/b4-replace-all-honors-filters`, PR pending). **Verified: reproduced** in the browser
+  before and after. Replace All now stages a description-only patch through the same
+  `update-by-filter` + `buildFilterQuery()` machinery bulk edit uses — the button's count and
+  the write's scope come from one serialization — and always confirms via the existing
+  BulkEditConfirmDialog before sending. The `bulk-rename` endpoint (which matched on search
+  alone and dropped every other filter) is deleted; its unique test coverage (search
+  case-insensitivity, LIKE wildcard escaping, admin household-wide description patch,
+  updated_at bump) was transferred onto update-by-filter FIRST, plus a previously-missing
+  empty-description 400 test. **What was not obvious: the fix needed no new backend behavior
+  at all** — update-by-filter already validated, scoped, hash-cleared, audited, and
+  checkpoint-skipped description patches correctly; B4 was purely the frontend talking to the
+  wrong endpoint. A six-reviewer battery (adversarial-deep, data-correctness, security, UI/UX,
+  design, final) found nothing blocking; its fix wave hardened three transferred tests
+  (control row, timestamp direction, and a previously-untested `runUpdateByFilterTags`
+  member-ownership path — a full-suite mutation survivor), prefixed the failure toast, and
+  removed a dead guard-map entry. A stale PWA bundle PUTting the deleted route falls into
+  chi's `{id}` sibling and gets a harmless 400 with no write — self-heals on the next launch.
+  Found while designing: B12 (bulk counts overstate a member's blast radius), filed
+  separately; dialog polish items went to B6m.
 
 - **B3 — A failed upgrade fills the disk** (`08d25ab..201fec5`, 2026-08-07, unreleased, on
   `fix/migration-snapshot-crash-loop-prune`, PR pending). **Verified: read** (was `reported`;
