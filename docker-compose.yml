@@ -34,7 +34,7 @@ services:
       # --- Web Push (optional, default OFF) ---------------------------------
       # Leave PUSH_ENABLED unset/false to keep push fully inert. To enable,
       # generate a VAPID keypair once — on any Docker host, no Go/Node install:
-      #   docker run --rm node:22-alpine npx -y web-push generate-vapid-keys
+      #   docker run --rm node:24-alpine npx -y web-push generate-vapid-keys
       # (or `npx web-push generate-vapid-keys`, or `go run ./cmd/vapidgen`) —
       # then set all three keys + a subject.
       # ROTATING THESE KEYS INVALIDATES EVERY EXISTING SUBSCRIPTION — every
