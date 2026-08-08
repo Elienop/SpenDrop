@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -240,10 +241,146 @@ func TestRun_RefusesOrphanSidecar(t *testing.T) {
 	}
 }
 
+// TestRun_VerifyFailureLeavesNothingBehind is the load-bearing test for B8:
+// before it, Run was Snapshot + WriteSidecar with no verification, so the
+// CLI subcommand and every pre-migration snapshot stamped the ".sha256"
+// trust marker onto a file nobody had checked.
+//
+// tinyPageSizeSourceDB is the package's deterministic verify failure: a
+// 512-byte page size makes VACUUM INTO emit ~1 KB, below Verify's one-page
+// floor. The snapshot itself succeeds, so a failure here can only come from
+// the verification step — which is exactly the splice under test.
+//
+// The three assertions are inseparable: an error alone would be satisfied
+// by a Run that failed for any reason, and a missing sidecar alone would be
+// satisfied by a Run that never got as far as writing one.
+func TestRun_VerifyFailureLeavesNothingBehind(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	tinyPageSizeSourceDB(t, src)
+
+	err := Run(context.Background(), src, testBusyTimeout, dst)
+	if err == nil {
+		t.Fatal("expected Run to fail verification, got nil")
+	}
+	// Names the failed check, and proves the failure came from Verify
+	// rather than from VACUUM INTO — Snapshot has no size opinion at all.
+	if !strings.Contains(err.Error(), "size too small") {
+		t.Errorf("error = %v, want the failed check named ('size too small')", err)
+	}
+	// The sentinel is what lets the pre-migration path and the CLI word a
+	// verification failure differently from a write failure.
+	if !errors.Is(err, ErrVerifyFailed) {
+		t.Errorf("error = %v, want it to wrap ErrVerifyFailed", err)
+	}
+
+	// No sidecar: an unverified file must never carry the trust marker.
+	if _, statErr := os.Stat(dst + ".sha256"); statErr == nil {
+		t.Error("sidecar written for a backup that failed verification")
+	}
+	// No .db either: Run's no-half-state contract. The scheduler keeps the
+	// file (renamed .corrupt) because it is a loop that would otherwise
+	// overwrite its own evidence; Run's callers are one-shot and want the
+	// filesystem to look untouched after a failed command.
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Error("failed backup left a .db behind")
+	}
+}
+
+// TestRun_SourceWithoutTransactionsTable covers the first-boot arm end to
+// end: migration 001 is what creates "transactions", and the pre-migration
+// snapshot runs before any migration applies, so on a brand-new install the
+// source legitimately has no such table.
+//
+// Verify's row-count check hard-codes that table name, so making Run verify
+// would have turned every first boot into "refusing to migrate" — the exact
+// B3-class crash loop this repo has shipped once already. The backup here
+// must be produced AND trusted.
+func TestRun_SourceWithoutTransactionsTable(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	srcDB, err := sql.Open("sqlite3", "file:"+src+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open src: %v", err)
+	}
+	defer srcDB.Close()
+	// The on-disk shape of a first boot: ensureMigrationsTable has run,
+	// nothing else has.
+	if _, err := srcDB.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at DATETIME)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	if err := Run(context.Background(), src, testBusyTimeout, dst); err != nil {
+		t.Fatalf("Run on a pre-migration source: %v", err)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		t.Errorf("backup not created: %v", err)
+	}
+	if _, err := os.Stat(dst + ".sha256"); err != nil {
+		t.Errorf("sidecar not created: %v", err)
+	}
+}
+
+// TestRun_MissingSourceIsRefusedAndNeverCreated closes the phantom-backup
+// hole: go-sqlite3 CREATES a missing database file on open, and the file it
+// creates is exactly one SQLite page with no tables in it — which clears
+// Verify's size floor (the test is <, not <=) and clears the absent-table
+// arm. A misconfigured DBPath therefore used to produce a verified,
+// sidecar'd backup of a database that never existed, and the restore drill
+// reads that sidecar as proof the file is trustworthy.
+//
+// The side-effect assertion is the load-bearing one. An error alone would
+// be satisfied by a guard placed anywhere in Run, including after the
+// source has already been opened and conjured into existence — which would
+// leave a stray empty database at the operator's typo'd path for the NEXT
+// run to back up successfully.
+func TestRun_MissingSourceIsRefusedAndNeverCreated(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "typo.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	err := Run(context.Background(), src, testBusyTimeout, dst)
+	if err == nil {
+		t.Fatal("expected Run to refuse a nonexistent source, got nil")
+	}
+	// Naming the path is the whole diagnostic: the operator has to be able
+	// to see WHICH path was wrong.
+	if !strings.Contains(err.Error(), src) {
+		t.Errorf("error = %v, want it to name the missing source %s", err, src)
+	}
+
+	if _, statErr := os.Stat(src); statErr == nil {
+		t.Error("Run created the missing source database — the guard must run before anything opens it")
+	}
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Error("backup written for a source that does not exist")
+	}
+	if _, statErr := os.Stat(dst + ".sha256"); statErr == nil {
+		t.Error("sidecar written for a source that does not exist")
+	}
+}
+
 func TestRun_EmptyDestRejected(t *testing.T) {
-	src := filepath.Join(t.TempDir(), "src.db")
-	if err := Run(context.Background(), src, testBusyTimeout, ""); err == nil {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	// The source must be REAL. This test used to pass a nonexistent path,
+	// which was harmless until Run gained its source-existence guard — from
+	// then on the guard, not the empty-destination check, would have been
+	// what produced the error, and the test would have kept passing with
+	// the destination check deleted.
+	srcDB := populateSourceDB(t, src)
+	defer srcDB.Close()
+
+	err := Run(context.Background(), src, testBusyTimeout, "")
+	if err == nil {
 		t.Fatal("expected empty destination to be rejected")
+	}
+	if !strings.Contains(err.Error(), "destination") {
+		t.Errorf("error = %v, want the destination named as the problem", err)
 	}
 }
 
@@ -265,6 +402,15 @@ func TestRun_CreatesParentDirectory(t *testing.T) {
 	}
 }
 
+// TestRun_ConcurrentWriteSnapshotIsConsistent proves VACUUM INTO produces an
+// internally consistent snapshot while a writer hammers the source.
+//
+// Its table is `rows`, NOT `transactions` — so since B8 this test travels
+// Verify's absent-table arm, where the row count is never consulted and an
+// unbounded concurrent writer therefore cannot perturb the result. That is
+// deliberate and is what keeps the writer loop below flake-free. The
+// count-parity arm needs its own fixture; see
+// TestRun_CountParityUnderAnOpenWriteTransaction.
 func TestRun_ConcurrentWriteSnapshotIsConsistent(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.db")
@@ -389,6 +535,105 @@ func TestRun_ConcurrentWriteSnapshotIsConsistent(t *testing.T) {
 	// nothing about consistency under contention.
 	if want <= 100 {
 		t.Errorf("concurrent writer never landed an insert during backup window: got %d rows, want > 100", want)
+	}
+}
+
+// TestRun_CountParityUnderAnOpenWriteTransaction exercises Verify's
+// count-parity arm end to end with a genuinely live writer on the source —
+// the scenario Run's baseline-before-Snapshot comment is written for, and
+// the one its sibling above cannot reach (that fixture's table is `rows`, so
+// it rides the absent-table arm and never counts anything).
+//
+// Flake-freedom comes from SQLite's isolation, not from timing. The writer
+// holds an OPEN, UNCOMMITTED transaction across the whole of Run, and
+// uncommitted rows are invisible to every reader — so Run's baseline count
+// and VACUUM INTO's snapshot point necessarily agree, and the one-row
+// tolerance is never even approached. There is no window to lose a race in,
+// which is what makes this deterministic by construction rather than by a
+// generous tolerance or a scheduling handshake.
+//
+// I chose this over pausing a background writer for the duration of Run:
+// both keep the count stable, but a paused writer proves only that a writer
+// EXISTED, while an open transaction means the database is genuinely being
+// written to throughout — closer to `docker exec … spendrop backup` against
+// a live server, and with no channels or polling to get wrong. Neither shape
+// can cover a write LANDING inside the baseline→snapshot window; that is
+// inherently non-deterministic here and is owned by
+// TestVerify_RowCountOffByOne{Below,Above}.
+func TestRun_CountParityUnderAnOpenWriteTransaction(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "src.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	srcDB, err := sql.Open("sqlite3", "file:"+src+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open source: %v", err)
+	}
+	defer srcDB.Close()
+
+	if _, err := srcDB.Exec(`CREATE TABLE transactions (id INTEGER PRIMARY KEY)`); err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+	for i := 0; i < 100; i++ {
+		if _, err := srcDB.Exec(`INSERT INTO transactions (id) VALUES (?)`, i); err != nil {
+			t.Fatalf("seed insert %d: %v", i, err)
+		}
+	}
+
+	// Open a write transaction and leave it open across Run.
+	tx, err := srcDB.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin writer tx: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	for i := 100; i < 150; i++ {
+		if _, err := tx.Exec(`INSERT INTO transactions (id) VALUES (?)`, i); err != nil {
+			t.Fatalf("in-flight insert %d: %v", i, err)
+		}
+	}
+
+	if err := Run(context.Background(), src, testBusyTimeout, dst); err != nil {
+		t.Fatalf("Run with an open write transaction on the source: %v", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit writer tx: %v", err)
+	}
+	committed = true
+
+	// The source moved on; the backup is the point-in-time copy. Asserting
+	// both halves is what makes this a snapshot test rather than a "did it
+	// error" test: 150 here proves the writer's work was real and did land,
+	// 100 there proves the backup excluded work that had not committed when
+	// it was taken.
+	var srcCount int
+	if err := srcDB.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&srcCount); err != nil {
+		t.Fatalf("count source after commit: %v", err)
+	}
+	if srcCount != 150 {
+		t.Errorf("source count = %d, want 150 — the in-flight writes did not land", srcCount)
+	}
+
+	backupDB, err := sql.Open("sqlite3", "file:"+dst+"?mode=ro&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open backup: %v", err)
+	}
+	defer backupDB.Close()
+	var backupCount int
+	if err := backupDB.QueryRow(`SELECT COUNT(*) FROM transactions`).Scan(&backupCount); err != nil {
+		t.Fatalf("count backup: %v", err)
+	}
+	if backupCount != 100 {
+		t.Errorf("backup count = %d, want 100 — uncommitted rows must not appear in a snapshot", backupCount)
+	}
+
+	if _, err := os.Stat(dst + ".sha256"); err != nil {
+		t.Errorf("sidecar not written for a backup that passed count parity: %v", err)
 	}
 }
 

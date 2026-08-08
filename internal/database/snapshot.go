@@ -66,9 +66,15 @@ const (
 // exist and returns the full path of the written .db file on success.
 //
 // This is a thin orchestration layer over backup.Run, the Tier 1 primitive
-// that performs the atomic snapshot + sidecar write with rollback on
-// failure. We do NOT re-implement VACUUM INTO here; a second copy would
+// that performs the atomic snapshot + verify + sidecar write with rollback
+// on failure. We do NOT re-implement VACUUM INTO here; a second copy would
 // drift from the verified Tier 1 path the moment either changed.
+//
+// Because Run verifies, a returned sidecar path means the snapshot passed
+// integrity_check and row parity against the live database — which is what
+// makes it usable as a rollback anchor. A verification failure surfaces as
+// an error wrapping backup.ErrVerifyFailed and leaves no file behind;
+// RunMigrations turns that into a distinct refusal-to-migrate.
 //
 // version must not contain the "-" character: the canonical filename uses
 // "-" as the separator between version and timestamp, and parseback

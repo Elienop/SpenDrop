@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -65,20 +66,45 @@ func dispatchSubcommand(ctx context.Context, cfg *config.Config) (handled bool, 
 			fmt.Fprintln(os.Stderr, "refusing 'spendrop-' prefix: that namespace is reserved for scheduled backups")
 			return true, 2
 		}
-		// Cap the run at 5 minutes. A VACUUM INTO on a typical
-		// household-sized SpenDrop database completes in well under a
-		// second; if we are still running after 5 minutes something is
-		// badly wrong (stuck writer, runaway DB growth, disk stall) and
-		// we want to surface it as a failed exit rather than hang the
-		// operator's shell indefinitely.
-		backupCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+		// Cap the copy so a stuck writer or a stalled disk surfaces as
+		// a failed exit rather than running unbounded. The cap is
+		// derived from the database's own size rather than hard-coded
+		// (it used to be a flat 5 minutes): Run now copies AND
+		// verifies, so a fixed wall clock that a legitimately large
+		// database can outgrow would turn "your backup takes a while"
+		// into "your backup is impossible". backup.RunTimeout floors at
+		// a generous value, so a household-sized DB — which finishes in
+		// well under a second — is unaffected.
+		//
+		// This does NOT guarantee the command always returns: it bounds
+		// VACUUM INTO only. Verify enforces its own budget, and the
+		// sidecar's SHA-256 pass is unbounded by anything. See
+		// backup.RunTimeout for the full accounting.
+		backupCtx, cancel := context.WithTimeout(ctx, backup.RunTimeout(cfg.DBPath))
 		defer cancel()
 		startedAt := time.Now()
 		if err := backup.Run(backupCtx, cfg.DBPath, cfg.SQLite.BusyTimeout, dst); err != nil {
+			// Verification failure is reported distinctly from a write
+			// failure, because it usually points somewhere else — at
+			// the copy or the live database rather than at the target
+			// disk. Deliberately not stated more strongly than that:
+			// Verify also fails when it could not CHECK (a stat/open
+			// failure, a deadline mid-read), which points back at the
+			// volume. The wrapped chain names the actual step, so it is
+			// printed rather than summarised.
+			//
+			// "No sidecar was written" is unconditionally true on this
+			// path. The fate of the .db is NOT asserted here: Run
+			// removes it, but if that removal failed the error text
+			// says so, which is why err is printed in full.
+			if errors.Is(err, backup.ErrVerifyFailed) {
+				fmt.Fprintf(os.Stderr, "backup failed verification; no sidecar was written: %v\n", err)
+				return true, 1
+			}
 			fmt.Fprintf(os.Stderr, "backup failed: %v\n", err)
 			return true, 1
 		}
-		fmt.Printf("backup ok: %s (%s)\n", dst, time.Since(startedAt).Round(time.Millisecond))
+		fmt.Printf("backup ok: %s (verified, %s)\n", dst, time.Since(startedAt).Round(time.Millisecond))
 		return true, 0
 	default:
 		return false, 0

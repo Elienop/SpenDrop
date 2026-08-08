@@ -515,11 +515,13 @@ After editing the Caddyfile, reload Caddy (`docker exec caddy caddy reload --con
 
 SpenDrop takes a consistent, WAL-aware backup of your database every 24 hours by default. Backups land in `/app/data/backups/` inside the `spendrop-data` volume as timestamped files like `spendrop-2026-04-13T0300Z.db` (ISO-8601, UTC, minute precision, no colons so they work on every filesystem). Each backup is accompanied by a `.sha256` sidecar that is **only** written after the file passes three checks:
 
-1. Size sanity — at least one SQLite page, and at most 10× the previous successful backup (the cheap check runs first so an obviously broken file never even opens SQLite)
+1. Size sanity — at least one SQLite page, and at most 10× the live database it was copied from (the cheap check runs first so an obviously broken file never even opens SQLite). The bound is deliberately measured against the *source*, not against the previous backup: a backup-relative bound could never advance past a failure, so one large jump used to wedge backups permanently. A backup more than 10× the *previous* one is still worth knowing about, so that comparison survives as a warning in the log with no power to reject the file.
 2. `PRAGMA integrity_check` returns `ok`
-3. Row-count parity against the live `transactions` table (tolerates a single in-flight write that landed between the count and the snapshot)
+3. Row-count parity against the live `transactions` table (tolerates a single in-flight write that landed between the count and the snapshot). On a brand-new install that table does not exist yet — migration 001 creates it — so a backup taken before then is checked the other way round: the copy must *also* have no `transactions` table.
 
-If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups. `.corrupt` files sit outside the GFS buckets but are **not** kept forever: the newest `BACKUP_KEEP_CORRUPT` (default 2) are retained for you to inspect and the rest are swept. Each one is a full-size copy of the database and `BACKUP_DIR` shares a volume with the live database, so an unbounded quarantine would eventually fill the disk and take the database down with it.
+**Every path that writes a sidecar runs those three checks first** — the scheduler above, the manual `spendrop backup` subcommand, and the pre-migration snapshots further down. There is no path that stamps the marker without earning it.
+
+If any check fails, the file is renamed to `<name>.db.corrupt`, no sidecar is written, and the scheduler loop survives so the next tick still fires. (The two on-demand paths differ only in what they do with the rejected file: they delete it, because a one-shot command should leave the filesystem as it found it. Neither writes a sidecar.) The **presence of a `.sha256` sidecar is the "this file is trusted" marker** — the restore drill below relies on it, and so does the prune logic that trims old backups. `.corrupt` files sit outside the GFS buckets but are **not** kept forever: the newest `BACKUP_KEEP_CORRUPT` (default 2) are retained for you to inspect and the rest are swept. Each one is a full-size copy of the database and `BACKUP_DIR` shares a volume with the live database, so an unbounded quarantine would eventually fill the disk and take the database down with it.
 
 Old backups are pruned on a grandfather-father-son schedule: by default, 7 daily, 4 weekly, 12 monthly — roughly 115 MB of backup history for a typical household database.
 
@@ -547,7 +549,7 @@ Every condition above also reaches [`GET /healthz/data`](#api-reference) under a
 }
 ```
 
-`last_outcome` is `success`, `verify_failed` (a snapshot was written and rejected), `error` (no snapshot was produced), or `""` (no tick has completed yet). `trusted_count` counts restore points — backups that have a `.sha256` sidecar — so a quarantined or sidecar-less file never inflates it. The values are read from the scheduler's in-memory snapshot, refreshed once per tick, so scraping this endpoint does not touch `BACKUP_DIR`.
+`last_outcome` is `success`, `verify_failed` (a snapshot was written and rejected by the checks above), `error` (the tick produced no trusted backup for any other reason — the source could not be read, `VACUUM INTO` failed, or the file was written and verified but its sidecar could not be), or `""` (no tick has completed yet). `trusted_count` counts restore points — backups that have a `.sha256` sidecar — so a quarantined or sidecar-less file never inflates it. The values are read from the scheduler's in-memory snapshot, refreshed once per tick, so scraping this endpoint does not touch `BACKUP_DIR`.
 
 **`trusted_count`, `quarantined_count` and `prune_failed_count` are absent until SpenDrop has actually read `BACKUP_DIR`.** All three come from the same directory scan, and an absent field means "unknown", which is not the same as `0`. If instead the directory could not be read, the block adds `"dir_unreadable": true`:
 
@@ -576,6 +578,16 @@ docker exec spendrop ./spendrop backup /app/data/backups/manual-$(date -u +%Y%m%
 ```
 
 The subcommand refuses to overwrite an existing file and writes both the `.db` and its `.sha256` sidecar atomically. Running it a second time with the same target exits non-zero without touching the existing file.
+
+It runs the **same three checks** the scheduled backups run, against the same live database it just copied, before writing the sidecar — so a manual backup carries exactly the trust its marker claims. On success it says so:
+
+```
+backup ok: /app/data/backups/manual-20260413T1200Z.db (verified, 96ms)
+```
+
+If verification fails, the command exits non-zero, prints which check failed, and removes the copy it made. No sidecar is ever written, so nothing is left that a later restore could mistake for a trusted backup. (If the cleanup itself fails — a read-only mount, say — the error says so and names the file it could not remove.)
+
+**Read the named check before deciding what to do.** A failed `integrity_check` or a row-count mismatch is usually a statement about your live database, and the [Integrity checks](#integrity-checks) section is the right place to go next. But a failure to *stat* or *open* the copy, or a timeout part-way through reading it, points at the volume you are writing to rather than at your data — that one is worth a single retry before you go looking for corruption.
 
 #### Tunables
 
@@ -687,9 +699,10 @@ curl -s http://localhost:3535/healthz/data
 
 Schema migrations are the riskiest thing SpenDrop does to your database — a bug in a new migration can corrupt data in ways the scheduled backup may not have captured yet if the last one was hours ago. Before applying **any** pending migration on startup, SpenDrop writes a dedicated `VACUUM INTO` snapshot to `/app/data/migration-snapshots/` so you always have a pre-upgrade anchor, no matter when the last scheduled backup ran.
 
-Snapshot filenames carry the migration version they are capturing *state before*, e.g. `pre-migration-004_drop_categories_color-2026-04-13T175643Z.db`. Each snapshot has a `.sha256` sidecar with the same trust semantics as the Tier 1 backups above — if the sidecar is present, the file passed the `PRAGMA integrity_check` and row-count checks before being committed.
+Snapshot filenames carry the migration version they are capturing *state before*, e.g. `pre-migration-004_drop_categories_color-2026-04-13T175643Z.db`. Each snapshot has a `.sha256` sidecar with the same trust semantics as the Tier 1 backups above — if the sidecar is present, the file passed the `PRAGMA integrity_check` and row-count checks before being committed. On a first boot the row check is the absent-table form described above, because migration 001 is what creates `transactions` and the snapshot is taken before it runs.
 
 - **Refuses to start if the snapshot fails.** If the snapshot directory is read-only, full, or missing, the server process exits non-zero with a "refusing to migrate" error and the database is left at its pre-migration version. Fix the disk condition and restart — the migration will retry from the same state.
+- **Refuses to start if the snapshot fails *verification*, too.** A rollback anchor nobody has checked is worth no more than one that could not be written, so a failed check is also a "refusing to migrate" exit — worded differently, and naming the specific check that failed, because the response depends on which one it was. A failed `integrity_check` or row-count mismatch says the copy did not match the live database: run the [restore drill](#backup-and-restore) against your most recent trusted backup rather than retrying the upgrade. A failure to stat or open the copy, or a timeout while reading it, points at the volume instead and is worth one restart first. The unusable snapshot is deleted, so it can never be picked up later as an anchor.
 - **Hardcoded retention.** The three most recent snapshots are kept; older ones are pruned automatically on the next successful migration. The count is not tunable by design: snapshots are short-term recovery anchors, not history, and the sibling Tier 1 scheduled backups cover the longer tail.
 - **No-op on clean boots.** If there are no pending migrations, no snapshot is written. A normal restart does not churn the directory.
 

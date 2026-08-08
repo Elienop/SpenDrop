@@ -338,6 +338,109 @@ func TestRunMigrations_RefusesWhenSnapshotFails(t *testing.T) {
 	}
 }
 
+// TestRunMigrations_RefusesWhenSnapshotFailsVerification is the sibling of
+// TestRunMigrations_RefusesWhenSnapshotFails for the OTHER way a
+// pre-migration anchor can be untrustworthy: the file was written fine, but
+// it does not match the live database.
+//
+// Before B8 this state was invisible — the snapshot path never verified, so
+// an unsound copy got its ".sha256" sidecar, RunMigrations logged it as the
+// file to "restore from", and the migration proceeded on the strength of an
+// anchor nobody had checked. Fail closed instead: a rollback point we
+// cannot trust is worth no more than one we could not write.
+func TestRunMigrations_RefusesWhenSnapshotFailsVerification(t *testing.T) {
+	db, dbPath := openUnverifiableTestDB(t)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	err := RunMigrations(db, opts)
+	if err == nil {
+		t.Fatal("expected RunMigrations to refuse an unverifiable snapshot, got nil")
+	}
+	// Assert the phrase the DEDICATED arm produces, not merely the word
+	// "verification". Deleting the errors.Is(backup.ErrVerifyFailed)
+	// branch sends this through the fallback arm, whose %w chain still
+	// contains "backup verification failed" from the sentinel's own text
+	// — so a bare Contains(…, "verification") passes with the branch
+	// GONE and proves nothing. Only the dedicated arm emits
+	// "failed verification (refusing to migrate)"; the fallback emits
+	// "failed (refusing to migrate)". This one substring covers both the
+	// refusal and the wording split.
+	if !strings.Contains(err.Error(), "failed verification (refusing to migrate)") {
+		t.Errorf("error should come from the dedicated verification arm, got %q", err.Error())
+	}
+
+	// No migration applied. schema_migrations exists because
+	// ensureMigrationsTable runs before the snapshot attempt, but it must
+	// be empty — that is the half of "refuses to start" this test owns.
+	var count int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
+		t.Fatalf("query schema_migrations: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("expected 0 applied migrations after a failed verify, got %d", count)
+	}
+
+	// And no anchor left on disk to mislead a later restore.
+	if n := countSnapshotFiles(t, opts.SnapshotDir); n != 0 {
+		t.Errorf("expected no snapshot files after a failed verify, got %d", n)
+	}
+}
+
+// TestRunMigrations_FirstBootSnapshotsBeforeTransactionsExists pins the arm
+// that makes verifying the pre-migration snapshot survivable at all.
+//
+// backup.Verify's row-count check hard-codes the "transactions" table, and
+// migration 001 is what creates it — but the pre-migration snapshot is
+// taken BEFORE any migration applies. On a brand-new install the source
+// therefore has no such table, and a verify that treated that as failure
+// would refuse to migrate on every first boot: a crash loop the user cannot
+// escape, on a container that has never worked once.
+//
+// The pre-condition assertion is the point. Without it this reads as an
+// ordinary happy-path migration test, and a future fixture that happened to
+// create "transactions" up front would silently stop covering first boot.
+func TestRunMigrations_FirstBootSnapshotsBeforeTransactionsExists(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	opts := defaultMigrationOptions(t, dbPath)
+
+	var before int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transactions'`,
+	).Scan(&before); err != nil {
+		t.Fatalf("probe source: %v", err)
+	}
+	if before != 0 {
+		t.Fatalf("fixture already has a transactions table — this is no longer the first-boot case")
+	}
+
+	if err := RunMigrations(db, opts); err != nil {
+		t.Fatalf("RunMigrations on a first boot: %v", err)
+	}
+
+	// The snapshot was taken AND trusted: a sidecar is the marker every
+	// later phase reads, so its absence would mean first boot silently
+	// produces an untrusted anchor.
+	names := snapshotNames(t, opts.SnapshotDir)
+	if len(names) != 1 {
+		t.Fatalf("expected exactly 1 pre-migration snapshot, got %d: %v", len(names), names)
+	}
+	if _, err := os.Stat(filepath.Join(opts.SnapshotDir, names[0]+".sha256")); err != nil {
+		t.Errorf("first-boot snapshot has no sidecar: %v", err)
+	}
+
+	// And the migration actually ran, so the arm is not being reached by
+	// short-circuiting the whole thing.
+	var after int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transactions'`,
+	).Scan(&after); err != nil {
+		t.Fatalf("probe after migration: %v", err)
+	}
+	if after != 1 {
+		t.Errorf("expected migrations to create the transactions table, found %d", after)
+	}
+}
+
 // failMigrations seeds the conflicting index that makes the initial
 // schema migration fail deterministically (same idiom as
 // TestRunMigrations_ErrorNamesSnapshotPath), so tests can drive
