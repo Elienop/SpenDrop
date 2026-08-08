@@ -1,17 +1,8 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { format } from 'date-fns';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { differenceInCalendarDays, format } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { toast } from 'sonner';
-import {
-  AlertCircle,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
-  RotateCcw,
-  Trash2,
-  User,
-} from 'lucide-react';
+import { AlertCircle, RotateCcw, Trash2, User } from 'lucide-react';
 import { api } from '../api/client';
 import type {
   DeletedTransaction,
@@ -19,6 +10,7 @@ import type {
 } from '../api/types';
 import { useAuth } from '../hooks/useAuth';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -32,14 +24,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
@@ -49,15 +33,16 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { AmountDisplay } from '@/components/AmountDisplay';
+import { PaginationBar } from '@/components/PaginationBar';
 import { CategoryBadge } from '@/components/CategoryBadge';
 import { formatCurrency } from '@/lib/format';
 import { isAdmin } from '@/lib/roles';
+import { TOUCH_TARGET_CHECKBOX } from '@/lib/touch-target';
+import { transactionLabel } from '@/lib/transaction-label';
 import { cn } from '@/lib/utils';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
-import {
-  DEFAULT_TRANSACTIONS_PER_PAGE,
-  TRANSACTION_PAGE_SIZES,
-} from '@/lib/constants';
+import { DEFAULT_TRANSACTIONS_PER_PAGE } from '@/lib/constants';
 
 /*
  * Trash view — recovery surface for soft-deleted transactions. Members
@@ -79,6 +64,14 @@ import {
  * would return is the real boundary; the UI gating is purely cosmetic.
  *
  * Design notes:
+ *   - Two presentations, one set of state. Below Tailwind's `md` the
+ *     eight-column table is replaced by a stacked card list
+ *     (<TrashCard>); from `md` up the table is what renders. The choice
+ *     is made in JS (`useIsMobileViewport`, shared with the transactions
+ *     list) so only one of them is ever in the tree — see that hook for
+ *     why not `md:hidden`. Everything either half touches (selection,
+ *     pagination, the confirm dialogs, the bulk toolbar) is shared and
+ *     width-agnostic.
  *   - No filters, no sorting. The backend pins ordering to
  *     `deleted_at DESC` because the common case is "I just nuked the
  *     wrong filter, undo it NOW" — anything else is noise on the
@@ -97,166 +90,47 @@ import {
  *     confirm dialog gives it teeth.
  */
 
-interface PaginationBarProps {
-  page: number;
-  totalPages: number;
-  perPage: number;
-  onPageChange: (page: number) => void;
-  onPerPageChange: (perPage: number) => void;
-  /**
-   * Optional content rendered on the leading (left) side of the bar,
-   * immediately after the "Rows per page" cluster. The Trash page uses
-   * this to surface whole-trash bulk actions (Restore all / Purge all)
-   * in the table toolbar rather than above the card — callers that
-   * omit it get the original two-cluster layout unchanged.
-   */
-  leadingActions?: ReactNode;
-}
-
-function getPageNumbers(page: number, totalPages: number): number[] {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-  const pages = new Set<number>();
-  pages.add(1);
-  pages.add(totalPages);
-  for (
-    let i = Math.max(2, page - 1);
-    i <= Math.min(totalPages - 1, page + 1);
-    i++
-  ) {
-    pages.add(i);
-  }
-  const sorted = [...pages].sort((a, b) => a - b);
-  const result: number[] = [];
-  for (let i = 0; i < sorted.length; i++) {
-    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
-      result.push(-1); // ellipsis sentinel
-    }
-    result.push(sorted[i]);
-  }
-  return result;
-}
-
-function PaginationBar({
-  page,
-  totalPages,
-  perPage,
-  onPageChange,
-  onPerPageChange,
-  leadingActions,
-}: PaginationBarProps) {
-  const pageNumbers = getPageNumbers(page, totalPages);
-
-  return (
-    // `flex-wrap` + row-gap keeps the toolbar legible once `leadingActions`
-    // adds buttons on narrow viewports — without it the page-nav cluster
-    // would spill past the card edge instead of wrapping to a new line.
-    <div className="flex flex-wrap items-center justify-between gap-y-2 px-4 py-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <p className="text-sm font-medium">Rows per page</p>
-        <Select
-          value={String(perPage)}
-          onValueChange={(v) => onPerPageChange(Number(v))}
-        >
-          <SelectTrigger className="h-8 w-[70px]" aria-label="Rows per page">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent side="top">
-            <SelectGroup>
-              {TRANSACTION_PAGE_SIZES.map((opt) => (
-                <SelectItem key={opt} value={String(opt)}>
-                  {opt}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-        {leadingActions}
-      </div>
-      <div className="flex items-center gap-1">
-        <Button
-          variant="outline"
-          size="icon"
-          className="hidden size-8 lg:flex"
-          onClick={() => onPageChange(1)}
-          disabled={page <= 1}
-          aria-label="Go to first page"
-        >
-          <ChevronsLeft />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-8"
-          onClick={() => onPageChange(page - 1)}
-          disabled={page <= 1}
-          aria-label="Go to previous page"
-        >
-          <ChevronLeft />
-        </Button>
-        {pageNumbers.map((p, i) =>
-          p === -1 ? (
-            <span
-              key={`ellipsis-${i}`}
-              className="flex size-8 items-center justify-center text-sm text-muted-foreground"
-              aria-hidden
-            >
-              ...
-            </span>
-          ) : (
-            <Button
-              key={p}
-              variant={p === page ? 'outline' : 'ghost'}
-              size="icon"
-              className="size-8 text-xs"
-              onClick={() => onPageChange(p)}
-              aria-current={p === page ? 'page' : undefined}
-            >
-              {p}
-            </Button>
-          ),
-        )}
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-8"
-          onClick={() => onPageChange(page + 1)}
-          disabled={page >= totalPages}
-          aria-label="Go to next page"
-        >
-          <ChevronRight />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="hidden size-8 lg:flex"
-          onClick={() => onPageChange(totalPages)}
-          disabled={page >= totalPages}
-          aria-label="Go to last page"
-        >
-          <ChevronsRight />
-        </Button>
-      </div>
-    </div>
-  );
-}
+/**
+ * The age at which a tombstone stops reading as an age and starts reading
+ * as a date. Below it the operator is triaging a mistake they remember
+ * making, and "3 days ago" is the fastest thing to scan. At or above it
+ * they are looking for a specific deletion, `formatDistanceToNowStrict`
+ * has gone vague ("2 months ago" locates nothing), and the absolute date
+ * is the only useful answer.
+ */
+const RELATIVE_DELETED_AT_MAX_DAYS = 7;
 
 /**
- * Render a tombstoned timestamp as both a relative ("3 minutes ago") and
- * absolute label. The relative phrase is what the recovery operator
- * actually scans for ("what did I just delete?"), but the absolute
- * date-time is kept as a tooltip so stale trash from last week is
- * still legible at a glance.
+ * Render a tombstoned timestamp as a relative phrase, an absolute label,
+ * and the phrase the card actually prints after the word "Deleted".
+ *
+ * `phrase` exists because the absolute date cannot live only in `title=`
+ * on this surface: tooltips never open on touch, and the phone card is the
+ * primary way this page gets used. Rather than always printing the date —
+ * which is noise in the fresh-mistake case the page exists for — it
+ * age-gates on RELATIVE_DELETED_AT_MAX_DAYS. `title` keeps the full
+ * date-time in both cases for anyone with a pointer.
  */
-function formatDeletedAt(iso: string): { relative: string; absolute: string } {
+function formatDeletedAt(iso: string): {
+  relative: string;
+  absolute: string;
+  phrase: string;
+} {
   const d = new Date(iso);
   // `formatDistanceToNowStrict` avoids the "about 3 minutes" / "less than
   // a minute" soft phrasing that the non-strict variant produces. On a
   // recovery surface the operator wants a crisp number, not "about".
   const relative = formatDistanceToNowStrict(d, { addSuffix: true });
   const absolute = format(d, 'PPpp');
-  return { relative, absolute };
+  // Calendar days, not elapsed 24h periods: "deleted 6 days ago" should
+  // flip to a date on the same calendar boundary the operator perceives,
+  // not at whatever hour the deletion happened to occur.
+  const age = differenceInCalendarDays(new Date(), d);
+  const phrase =
+    age < RELATIVE_DELETED_AT_MAX_DAYS
+      ? relative
+      : `on ${format(d, 'MMM d, yyyy')}`;
+  return { relative, absolute, phrase };
 }
 
 function TrashSkeleton() {
@@ -268,6 +142,196 @@ function TrashSkeleton() {
         ))}
       </div>
     </Card>
+  );
+}
+
+
+interface TrashCardProps {
+  row: DeletedTransaction;
+  selected: boolean;
+  isRestoring: boolean;
+  rowBusy: boolean;
+  admin: boolean;
+  baseCurrency: string;
+  onSelect: (id: number, checked: boolean) => void;
+  onRestore: (row: DeletedTransaction) => void;
+  onPurge: (row: DeletedTransaction) => void;
+}
+
+/**
+ * One tombstoned row as a stacked card — the below-`md` presentation of
+ * the same data the table renders to the right of this file. Eight
+ * columns do not survive a 390px viewport: the Date and Deleted columns
+ * alone eat half of it, and Restore (the whole point of the surface)
+ * ends up off-screen behind a horizontal scroll.
+ *
+ * Everything here is a re-arrangement, not a re-derivation — the amount
+ * sign/colour, the creator idiom and the description fallback are the
+ * table's expressions verbatim, so the two presentations cannot drift
+ * into disagreeing about the same row.
+ *
+ * Restore stays a visible button rather than collapsing into a menu:
+ * there is no detail view to tap through to on this surface, so a hidden
+ * primary action would leave the page with no reachable purpose.
+ *
+ * Deliberate differences from <TransactionCard>, so a future reviewer
+ * reads them as decisions rather than drift. They share the creator idiom
+ * and <AmountDisplay> verbatim; everything below diverges because the two
+ * surfaces answer different questions.
+ *
+ *   - ORDERING. The ledger card leads with what you spent. This one leads
+ *     with the description too, but carries a deletion age its sibling has
+ *     no field for, and that line is what the operator scans — "which of
+ *     these did I just nuke?" — so it sits last, closest to the actions.
+ *   - DENSITY. This card is looser (an actions row of its own rather than
+ *     a tap-through). The ledger card opens an edit sheet on tap, so its
+ *     whole body is one target and it can afford to be tight; here the two
+ *     actions are irreversible-ish and must be aimed at individually, so
+ *     they get their own 44px row instead of sharing the body's tap area.
+ *   - TAGS WRAP. The ledger truncates tags to one line to keep row height
+ *     uniform for scanning a long list. Trash wraps them: a page holds far
+ *     fewer rows, uniform height buys nothing here, and a hidden tag is
+ *     exactly the detail that distinguishes two otherwise identical rows
+ *     you are deciding between.
+ */
+function TrashCard({
+  row,
+  selected,
+  isRestoring,
+  rowBusy,
+  admin,
+  baseCurrency,
+  onSelect,
+  onRestore,
+  onPurge,
+}: TrashCardProps) {
+  const { absolute, phrase } = formatDeletedAt(row.deleted_at);
+
+  return (
+    <li
+      className={cn(
+        'flex flex-col gap-3 p-4',
+        selected && 'bg-muted/50',
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <Checkbox
+          checked={selected}
+          onCheckedChange={(v) => onSelect(row.id, v === true)}
+          disabled={rowBusy}
+          aria-label={`Select ${transactionLabel(row)}`}
+          className={cn('mt-1', TOUCH_TARGET_CHECKBOX)}
+        />
+        {/* min-w-0 is what lets the descendants' `truncate` do anything:
+            a flex item defaults to min-width:auto and would rather push
+            the amount off the card than clip a long imported
+            description. */}
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex items-start justify-between gap-3">
+            <div
+              className="min-w-0 truncate font-medium"
+              title={row.description || undefined}
+            >
+              {row.description || (
+                <span className="text-muted-foreground">
+                  (no description)
+                </span>
+              )}
+            </div>
+            {/*
+              The ledger's <AmountDisplay>, deliberately NOT the table's
+              bare base-currency figure. The table has never shown the
+              original currency, and copying that here was the wrong
+              parity to keep: this household books in LBP and USD daily,
+              so a card showing only the converted figure hides the number
+              the row was actually entered as — on the one surface where
+              you decide whether it was the row you meant to delete.
+            */}
+            <AmountDisplay
+              amount={row.amount}
+              originalAmount={row.original_amount}
+              originalCurrency={row.original_currency}
+              type={row.category_type}
+              baseCode={baseCurrency}
+              className="shrink-0"
+            />
+          </div>
+          <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <User className="size-3.5 shrink-0" aria-hidden="true" />
+            <span className="min-w-0 truncate">
+              {/* A bare name in a muted line does not announce
+                  what it IS, and the icon is aria-hidden
+                  decoration. */}
+              <span className="sr-only">Entered by </span>
+              {row.created_by || 'Unknown'}
+            </span>
+          </p>
+          <div className="flex flex-wrap items-center gap-1">
+            <CategoryBadge
+              category={{ id: row.category_id, name: row.category_name }}
+            />
+            {row.tags &&
+              row.tags.split(',').map((tag, i) => (
+                <Badge
+                  key={`${tag.trim()}-${i}`}
+                  variant="secondary"
+                  className="font-normal"
+                >
+                  {tag.trim()}
+                </Badge>
+              ))}
+          </div>
+          {/*
+            The table's Date and Deleted columns, merged into one muted
+            line. Both facts have to survive the fold: the transaction
+            date is how you tell two similar rows apart, and the deletion
+            age is how you find the batch you just fat-fingered. "Deleted"
+            is spelled out because, unlike in the table, there is no
+            column header left to say which date is which.
+          */}
+          <p
+            className="text-xs text-muted-foreground"
+            title={absolute}
+          >
+            {format(new Date(row.date), 'MMM d, yyyy')} · Deleted {phrase}
+          </p>
+        </div>
+      </div>
+      {/*
+        Full-width actions on their own line rather than squeezed beside
+        the amount: `min-h-11` is the 44px touch floor, and two of these
+        plus a 16px gutter do not fit next to a right-aligned amount at
+        390px.
+      */}
+      <div className="flex items-center gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="min-h-11 flex-1 gap-1.5"
+          onClick={() => onRestore(row)}
+          disabled={rowBusy}
+          aria-label={`Restore ${transactionLabel(row)}`}
+        >
+          <RotateCcw aria-hidden="true" />
+          {isRestoring ? 'Restoring...' : 'Restore'}
+        </Button>
+        {admin && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="min-h-11 flex-1 gap-1.5 text-destructive hover:text-destructive"
+            onClick={() => onPurge(row)}
+            disabled={rowBusy}
+            aria-label={`Purge ${transactionLabel(row)}`}
+          >
+            <Trash2 aria-hidden="true" />
+            Purge
+          </Button>
+        )}
+      </div>
+    </li>
   );
 }
 
@@ -317,6 +381,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="outline"
+            className="min-h-11 md:min-h-0"
             onClick={onCancel}
             disabled={busy}
           >
@@ -325,6 +390,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="destructive"
+            className="min-h-11 md:min-h-0"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -385,6 +451,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="outline"
+            className="min-h-11 md:min-h-0"
             onClick={onCancel}
             disabled={busy}
           >
@@ -393,6 +460,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="destructive"
+            className="min-h-11 md:min-h-0"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -413,6 +481,8 @@ function ConfirmPurgeAllDialog({
 export function Trash() {
   const { user, loading: authLoading } = useAuth();
   const baseCurrency = useBaseCurrency();
+  const isMobile = useIsMobileViewport();
+  const mobileSelectAllId = useId();
 
   const [rows, setRows] = useState<DeletedTransaction[]>([]);
   const [total, setTotal] = useState(0);
@@ -729,23 +799,54 @@ export function Trash() {
           type="button"
           variant="outline"
           size="sm"
-          className="h-8 gap-1.5 text-xs"
+          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
           onClick={() => void handleRestoreAll()}
           disabled={bulkBusy}
         >
-          <RotateCcw className="size-3.5" />
+          <RotateCcw aria-hidden="true" />
           {restoringAll ? 'Restoring...' : `Restore all ${total}`}
         </Button>
         <Button
           type="button"
           variant="destructive"
           size="sm"
-          className="h-8 gap-1.5 text-xs"
+          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
           onClick={() => setPendingPurgeAll(true)}
           disabled={bulkBusy}
         >
-          <Trash2 className="size-3.5" />
+          <Trash2 aria-hidden="true" />
           {purgingAll ? 'Purging...' : `Purge all ${total}`}
+        </Button>
+      </div>
+    ) : null;
+
+  // Page-scoped batch actions. Rendered in one of two places depending on
+  // width (see both call sites below), so it is built once here rather than
+  // duplicated into each branch — two copies would be two sets of accessible
+  // names for one selection.
+  const selectionBar =
+    selectionCount > 0 ? (
+      <div className="flex flex-wrap items-center gap-3 border-t bg-muted/50 px-4 py-2">
+        <span className="text-sm font-medium">{selectionCount} selected</span>
+        <Button
+          type="button"
+          size="sm"
+          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          onClick={() => void handleBatchRestore()}
+          disabled={batchRestoring}
+        >
+          <RotateCcw aria-hidden="true" />
+          {batchRestoring ? 'Restoring...' : `Restore ${selectionCount}`}
+        </Button>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-8 min-h-11 text-xs md:min-h-0"
+          onClick={() => setSelectedIds(new Set())}
+          disabled={batchRestoring}
+        >
+          Clear selection
         </Button>
       </div>
     ) : null;
@@ -796,40 +897,82 @@ export function Trash() {
             perPage={perPage}
             onPageChange={handlePageChange}
             onPerPageChange={handlePerPageChange}
+            compact={isMobile}
             leadingActions={bulkActions}
           />
 
-          {selectionCount > 0 && (
-            <div className="flex flex-wrap items-center gap-3 border-t bg-muted/50 px-4 py-2">
-              <span className="text-sm font-medium">
-                {selectionCount} selected
-              </span>
-              <Button
-                type="button"
-                size="sm"
-                className="h-8 gap-1.5 text-xs"
-                onClick={() => void handleBatchRestore()}
-                disabled={batchRestoring}
-              >
-                <RotateCcw className="size-3.5" />
-                {batchRestoring
-                  ? 'Restoring...'
-                  : `Restore ${selectionCount}`}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8 text-xs"
-                onClick={() => setSelectedIds(new Set())}
-                disabled={batchRestoring}
-              >
-                Clear selection
-              </Button>
-            </div>
-          )}
+          {!isMobile && selectionBar}
 
-          <Table>
+          {/*
+            --- The presentation fork ---------------------------------
+            The eight-column table below cannot be made to fit 390px by
+            hiding columns — that is Firefly's approach and the
+            documented failure mode — so below `md` it is replaced
+            wholesale by stacked cards. Everything above and below this
+            fork (selection, pagination, both confirm dialogs, the bulk
+            toolbar) is shared and already width-agnostic.
+
+            A flat list, deliberately: the backend pins ordering to
+            `deleted_at DESC` with no sort control, so day headers would
+            either group by a field that is not the sort key (the
+            transaction date, giving headers that jump around) or by the
+            deletion day, which every card already carries on its own
+            line — and in the common case of trash accumulated one
+            mistake at a time, that is one header per row.
+          */}
+          {isMobile ? (
+            <>
+              <div className="flex items-center border-t px-4">
+                {/*
+                  A phone has no column header to hang select-all off, so
+                  it gets its own strip. `htmlFor` targets Radix's
+                  checkbox button (a labelable element), which makes the
+                  whole 44px strip a tap target for it. The fuller
+                  `aria-label` wins as the accessible name and contains
+                  the visible text, so what a screen reader announces
+                  still starts with what the eye reads.
+                */}
+                <label
+                  htmlFor={mobileSelectAllId}
+                  className="flex min-h-11 flex-1 items-center gap-3"
+                >
+                  <Checkbox
+                    id={mobileSelectAllId}
+                    checked={allVisibleSelected}
+                    onCheckedChange={(v) => handleSelectAll(v === true)}
+                    aria-label="Select all on this page"
+                    className={TOUCH_TARGET_CHECKBOX}
+                  />
+                  <span className="text-sm font-medium">Select all</span>
+                </label>
+              </div>
+
+              {/* Tailwind's preflight strips the list-style and Safari
+                  drops the list role with it — hence the explicit
+                  `role`. */}
+              <ul
+                role="list"
+                aria-label="Deleted transactions"
+                className="flex flex-col divide-y border-t"
+              >
+                {rows.map((row) => (
+                  <TrashCard
+                    key={row.id}
+                    row={row}
+                    selected={selectedIds.has(row.id)}
+                    isRestoring={restoringIds.has(row.id)}
+                    rowBusy={isRowBusy(row.id)}
+                    admin={admin}
+                    baseCurrency={baseCurrency}
+                    onSelect={handleSelect}
+                    onRestore={(r) => void handleRestore(r)}
+                    onPurge={setPendingPurge}
+                  />
+                ))}
+              </ul>
+            </>
+          ) : (
+            <Table>
             <TableHeader>
               <TableRow>
                 <TableHead className="w-10">
@@ -869,7 +1012,7 @@ export function Trash() {
                           handleSelect(row.id, v === true)
                         }
                         disabled={rowBusy}
-                        aria-label={`Select ${row.description}`}
+                        aria-label={`Select ${transactionLabel(row)}`}
                       />
                     </TableCell>
                     <TableCell
@@ -888,12 +1031,14 @@ export function Trash() {
                         per-row edit route — so a spreadsheet cell can put a
                         far longer description into the ledger, and deleting
                         such a row lands it HERE. Unbounded, one of them
-                        stretches the table for every row and pushes
-                        Restore/Purge further off-screen at 390px, on the one
-                        surface where reaching those buttons is the whole
-                        point. title= keeps the full text on hover; max-w-md
-                        plus the inner truncate is what makes either truncate
-                        do anything at all.
+                        stretches the table for every row and pushes the
+                        Actions column — Restore and Purge, the whole point of
+                        the surface — off the right edge behind a horizontal
+                        scroll. (Phone width is no longer this cell's problem:
+                        below `md` the card list renders instead, and bounds
+                        the same text its own way.) title= keeps the full text
+                        on hover; max-w-md plus the inner truncate is what
+                        makes either truncate do anything at all.
 
                         The creator rides UNDER the description rather than in
                         a column of its own: a ninth always-on column would
@@ -964,9 +1109,9 @@ export function Trash() {
                           className="h-8 gap-1.5 text-xs"
                           onClick={() => void handleRestore(row)}
                           disabled={rowBusy}
-                          aria-label={`Restore ${row.description}`}
+                          aria-label={`Restore ${transactionLabel(row)}`}
                         >
-                          <RotateCcw className="size-3.5" />
+                          <RotateCcw aria-hidden="true" />
                           {isRestoring ? 'Restoring...' : 'Restore'}
                         </Button>
                         {admin && (
@@ -977,9 +1122,9 @@ export function Trash() {
                             className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
                             onClick={() => setPendingPurge(row)}
                             disabled={rowBusy}
-                            aria-label={`Purge ${row.description}`}
+                            aria-label={`Purge ${transactionLabel(row)}`}
                           >
-                            <Trash2 className="size-3.5" />
+                            <Trash2 aria-hidden="true" />
                             Purge
                           </Button>
                         )}
@@ -989,7 +1134,34 @@ export function Trash() {
                 );
               })}
             </TableBody>
-          </Table>
+            </Table>
+          )}
+
+          {isMobile && selectionBar && (
+            // In flow, so it contributes height and occludes nothing; sticky,
+            // so it stays on screen while the list scrolls under it. Sits
+            // before the pager, so reaching the pager is exactly what releases
+            // it. No shadow — app-chrome bars in this repo separate with a
+            // border.
+            //
+            // Carries NO border of its own: the strip inside already has
+            // `border-t`, and the two would sit flush against each other and
+            // render as one 2px line. (The Transactions bar does carry one,
+            // because its `p-2` gutter holds a rounded floating card away from
+            // it — two separate lines by design. This strip is full-bleed, so
+            // the same pair reads as a mistake.)
+            //
+            // `pb` only, and `max()` not a bare `env()`: the strip's own `py-2`
+            // supplies the 8px above the safe area, and the max() floor keeps
+            // that same 8px on a device reporting no inset — which is what
+            // makes the rendered bottom spacing equal to the Transactions bar's
+            // (its `py-2` + its `p-2` bottom) rather than half of it. No `p-2`
+            // here: that gutter belongs to a floating card, and adding it would
+            // inset a strip meant to run edge to edge.
+            <div className="sticky bottom-0 z-20 bg-background pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+              {selectionBar}
+            </div>
+          )}
 
           <div className="border-t">
             <PaginationBar
@@ -998,6 +1170,7 @@ export function Trash() {
               perPage={perPage}
               onPageChange={handlePageChange}
               onPerPageChange={handlePerPageChange}
+            compact={isMobile}
             />
           </div>
         </Card>
