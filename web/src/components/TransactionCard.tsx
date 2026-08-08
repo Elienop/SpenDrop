@@ -4,6 +4,7 @@ import { User } from 'lucide-react';
 import type { Transaction } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { CategoryBadge } from './CategoryBadge';
+import { TransactionDescription } from './TransactionDescription';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
 import { cn } from '@/lib/utils';
@@ -197,13 +198,11 @@ export function TransactionCard({
         )}
       >
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Bounded on purpose, same as the table cell: import does not
-              enforce the 500-character description limit the rest of the app
-              does, so a spreadsheet cell can put a far longer description into
-              the ledger. Unbounded, one such row stretches every card. */}
-          <div className="truncate font-medium" title={label}>
-            {label}
-          </div>
+          {/* Bound + title + empty-description fallback all come from the
+              shared component, so this surface and the Dashboard's cannot
+              drift apart on them — the Dashboard's table had none of the three
+              and panned to 3,269px because of it. */}
+          <TransactionDescription transaction={transaction} />
           <div className="mt-1 flex min-w-0 items-center gap-1.5 overflow-hidden">
             {showDate && (
               // Year included. This branch runs only when the list is NOT
