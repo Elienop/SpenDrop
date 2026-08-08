@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import type { ChangeEvent, FormEvent } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
 import * as z from 'zod';
@@ -47,6 +48,7 @@ import { cn, selectAllOnFocus } from '@/lib/utils';
 import {
   MAX_API_TOKEN_NAME_LENGTH,
   MAX_CURRENCY_SYMBOL_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
 } from '@/lib/constants';
 import { charCount } from '@/lib/text';
 import {
@@ -61,6 +63,7 @@ import {
   TabsContent,
   TabsList,
   TabsTrigger,
+  scrollableTabsList,
 } from '@/components/ui/tabs';
 import { ButtonGroup } from '@/components/ui/button-group';
 import {
@@ -638,6 +641,27 @@ const newUserSchema = z.object({
 });
 type NewUserValues = z.infer<typeof newUserSchema>;
 
+// Counted with charCount, not `.length`: MAX_DISPLAY_NAME_LENGTH mirrors the
+// server's `MaxDisplayNameLength`, which is applied through `charLen` (a rune
+// count), so `.length` would count an emoji as 2 and refuse a name the server
+// accepts.
+//
+// The PUT merges: a display_name of "" leaves the stored name untouched (and,
+// sent alone, 400s as "display_name or role is required"). So an empty box is a
+// validation error rather than a way to clear the name — there is no clearing
+// it, and letting the submit through would look like a save that did nothing.
+// Trim first so " " is empty here exactly as it is on the server.
+const displayNameSchema = z.object({
+  display_name: z
+    .string()
+    .trim()
+    .min(1, 'Display name is required')
+    .refine((value) => charCount(value) <= MAX_DISPLAY_NAME_LENGTH, {
+      message: `Display name must be ${MAX_DISPLAY_NAME_LENGTH} characters or fewer`,
+    }),
+});
+type DisplayNameValues = z.infer<typeof displayNameSchema>;
+
 const resetPasswordSchema = z
   .object({
     new_password: z
@@ -655,7 +679,8 @@ const resetPasswordSchema = z
 type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
 
 function UsersSection() {
-  const { user: currentUser } = useAuth();
+  const { user: currentUser, refreshUser } = useAuth();
+  const queryClient = useQueryClient();
   const [users, setUsers] = useState<User[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   // The user currently targeted by the reset-password dialog. Null = closed.
@@ -665,10 +690,28 @@ function UsersSection() {
   // null. Mirrors the revoke-one pattern in ApiTokensSection.
   const [resettingUserName, setResettingUserName] = useState('');
   const [resetting, setResetting] = useState(false);
+  // Same two-piece shape for the display-name editor: target row, plus the
+  // sticky name the dialog keeps reading while it animates out.
+  const [renamingUser, setRenamingUser] = useState<User | null>(null);
+  const [renamingUserName, setRenamingUserName] = useState('');
+  // Whether the open editor is pointed at the signed-in admin's own row. Sticky
+  // for the same reason the name is: deriving it from `renamingUser` would flip
+  // the dialog's copy to the third person mid close-animation.
+  const [renamingSelf, setRenamingSelf] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  // Delete confirmation, same two-piece shape again.
+  const [deletingUser, setDeletingUser] = useState<User | null>(null);
+  const [deletingUserName, setDeletingUserName] = useState('');
+  const [deleting, setDeleting] = useState(false);
 
   const resetForm = useForm<ResetPasswordValues>({
     resolver: zodResolver(resetPasswordSchema),
     defaultValues: { new_password: '', confirm_password: '' },
+  });
+
+  const renameForm = useForm<DisplayNameValues>({
+    resolver: zodResolver(displayNameSchema),
+    defaultValues: { display_name: '' },
   });
 
   const form = useForm<NewUserValues>({
@@ -727,13 +770,27 @@ function UsersSection() {
     }
   }
 
-  async function handleDeleteUser(userId: number) {
+  function openDelete(u: User) {
+    setDeletingUserName(u.display_name);
+    setDeletingUser(u);
+  }
+
+  async function onConfirmDelete() {
+    if (!deletingUser) return;
+    setDeleting(true);
     try {
-      await api.del(`users/${userId}`);
+      await api.del(`users/${deletingUser.id}`);
       toast.success('User deleted');
+      setDeletingUser(null);
       refreshUsers();
     } catch (err) {
+      // Stays open on failure, and the toast carries the server's own words.
+      // The likeliest failure here is the 409 refusing to delete somebody who
+      // has entered transactions, which is a sentence the admin needs to read
+      // rather than a dialog that simply vanished.
       toast.error(err instanceof Error ? err.message : 'Failed to delete user');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -741,6 +798,66 @@ function UsersSection() {
     resetForm.reset();
     setResettingUserName(u.display_name);
     setResettingUser(u);
+  }
+
+  // Prefilled with the current name: the motivating case is shortening a name
+  // that is already there, not inventing one.
+  function openRename(u: User) {
+    renameForm.reset({ display_name: u.display_name });
+    setRenamingUserName(u.display_name);
+    setRenamingSelf(currentUser !== null && u.id === currentUser.id);
+    setRenamingUser(u);
+  }
+
+  async function onRenameUser(values: DisplayNameValues) {
+    if (!renamingUser) return;
+    setRenaming(true);
+    try {
+      // display_name ALONE. The handler merges, so omitting `role` preserves
+      // it; sending the row's current role back would turn every rename into a
+      // role write, and a role write that differs from the stored one drops
+      // that user's sessions.
+      await api.put(`users/${renamingUser.id}`, {
+        display_name: values.display_name,
+      });
+      toast.success(`Display name updated to ${values.display_name}`);
+      setRenamingUser(null);
+      // The response is {"status":"updated"} — no user object — so the table
+      // can only be corrected by asking again.
+      refreshUsers();
+      // Display names are resolved server-side into every transaction's
+      // `created_by`, and a user PUT emits no SSE event. Without this the
+      // Transactions table and the /quick recently-added panel keep serving
+      // the old name from cache until something else invalidates them. The
+      // key is the prefix, so it also catches recent/suggestions/history.
+      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
+      // Renaming YOURSELF also moves the name the shell renders out of the
+      // auth context (Sidebar and MobileNav both read user.display_name), and
+      // nothing above touches that. Only for your own row: every other row is
+      // somebody else's identity, and a /auth/me round-trip would answer with
+      // your own unchanged profile.
+      if (currentUser && renamingUser.id === currentUser.id) {
+        void refreshUser();
+      }
+    } catch (err) {
+      // Two different failures, two different places to say so.
+      //
+      // A 400 is the server judging THIS VALUE — too long, or empty after its
+      // own trim — so it belongs on the field, next to the box the user has to
+      // fix. Anything else (a dropped request, a 500) is not about the name at
+      // all, and rendering "Failed to fetch" as field validation tells the
+      // admin their name is wrong when it is fine. That goes to a toast, where
+      // the page's other transient failures already live.
+      if (err instanceof ApiError && err.status === 400) {
+        renameForm.setError('display_name', { message: err.message });
+      } else {
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to update display name',
+        );
+      }
+    } finally {
+      setRenaming(false);
+    }
   }
 
   async function onConfirmReset(values: ResetPasswordValues) {
@@ -910,6 +1027,18 @@ function UsersSection() {
                 </TableCell>
                 <TableCell className="text-right">
                   <div className="flex items-center justify-end gap-2">
+                    {/* Offered on EVERY row, own included: the case this
+                        exists for is an admin shortening their own name now
+                        that it labels every transaction they enter. */}
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => openRename(u)}
+                      aria-label={`Edit display name for ${u.username}`}
+                    >
+                      Edit display name
+                    </Button>
                     {/* Reset is hidden on the admin's own row — they
                         rotate their own password from the Account tab,
                         which runs the same cascade with a current-password
@@ -925,11 +1054,15 @@ function UsersSection() {
                         Reset password
                       </Button>
                     )}
+                    {/* Confirmed, not immediate. This is the third button in
+                        a row on a surface whose primary input is a thumb, and
+                        it is the only one of the three that destroys an
+                        account. */}
                     <Button
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => void handleDeleteUser(u.id)}
+                      onClick={() => openDelete(u)}
                       aria-label={`Delete ${u.username}`}
                     >
                       Delete
@@ -1022,6 +1155,131 @@ function UsersSection() {
           </Form>
         </AlertDialogContent>
       </AlertDialog>
+      {/* AlertDialog, like the reset flow and unlike the rename one: this
+          destroys an account and cannot be undone, which is the register
+          role="alertdialog" exists for.
+
+          The copy says what the server ACTUALLY does, which is narrower than
+          the schema suggests. transactions.user_id is ON DELETE CASCADE
+          (migrations/002, re-declared in 010), but handleDeleteUser counts the
+          target's transactions FIRST and answers 409 when there are any —
+          tombstoned rows included — precisely so the cascade can never run.
+          Same for balance_checkpoints. So a mis-tap here cannot take a ledger
+          with it, and promising that it would would be a lie that reads as
+          diligence. What a successful delete really removes is everything else
+          hanging off users.id: sessions, api_tokens, push_subscriptions,
+          saved_filters. (transaction_audit.actor_user_id is ON DELETE SET
+          NULL, so their edit history survives, anonymised.) */}
+      <AlertDialog
+        open={deletingUser !== null}
+        onOpenChange={(open) => {
+          if (deleting) return;
+          if (!open) setDeletingUser(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Delete <span className="font-mono">{deletingUserName}</span>?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes their account, and with it their API
+              tokens, saved filters and any devices they had registered for
+              notifications. It cannot be undone. Anyone who has entered a
+              transaction — including rows still in the Trash — cannot be
+              deleted at all, so no ledger history is at stake here.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel type="button" disabled={deleting}>
+              Cancel
+            </AlertDialogCancel>
+            {/* Plain Button, not AlertDialogAction, for the same reason the
+                reset flow gives: the action component closes the dialog on
+                click, which would hide the pending state and leave a failed
+                delete with nowhere to report back to. */}
+            <Button
+              type="button"
+              disabled={deleting}
+              onClick={() => void onConfirmDelete()}
+              className={destructiveActionClass}
+            >
+              {deleting ? 'Deleting…' : 'Delete user'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {/* A plain Dialog, not the AlertDialog the reset flow uses: this edits a
+          label and is undone by editing it back, so it has nothing to confirm
+          and no reason to interrupt the way role="alertdialog" does. The form
+          wiring is the same one — react-hook-form + zodResolver, noValidate so
+          the browser's own bubbles never pre-empt the field message, and a
+          submit Button rather than any auto-closing action component. */}
+      <Dialog
+        open={renamingUser !== null}
+        onOpenChange={(open) => {
+          if (renaming) return;
+          if (!open) setRenamingUser(null);
+        }}
+      >
+        <DialogContent>
+          <Form {...renameForm}>
+            <form
+              onSubmit={(e) => void renameForm.handleSubmit(onRenameUser)(e)}
+              className="grid gap-4"
+              noValidate
+            >
+              <DialogHeader>
+                <DialogTitle>Edit display name</DialogTitle>
+                {/* Second person for your own row — which is the case this
+                    editor exists for, so the third-person wording was the
+                    one an admin would actually read. */}
+                <DialogDescription>
+                  {renamingSelf ? (
+                    <>
+                      This is the name SpenDrop shows for you, including on
+                      every transaction you enter. Your username and password
+                      are unchanged.
+                    </>
+                  ) : (
+                    <>
+                      This is the name SpenDrop shows for {renamingUserName},
+                      including on every transaction they enter. Their username
+                      and password are unchanged.
+                    </>
+                  )}
+                </DialogDescription>
+              </DialogHeader>
+              <FormField
+                control={renameForm.control}
+                name="display_name"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Display name</FormLabel>
+                    <FormControl>
+                      <Input autoComplete="off" {...field} />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setRenamingUser(null)}
+                  disabled={renaming}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={renaming}>
+                  {renaming ? 'Saving…' : 'Save'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </Form>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -2656,7 +2914,12 @@ export function Settings() {
         activationMode="manual"
         className="w-full"
       >
-        <TabsList>
+        {/* Six triggers for an admin come to roughly 550px of
+            whitespace-nowrap content, against ~358px of content width on a
+            390px phone. The strip scrolls sideways rather than widening the
+            page — see the note on `scrollableTabsList`, which explains why
+            `justify-start` is the half that must not be lost. */}
+        <TabsList className={scrollableTabsList}>
           <TabsTrigger value="account">Account</TabsTrigger>
           <TabsTrigger value="currencies">Currencies</TabsTrigger>
           {admin && <TabsTrigger value="users">Users</TabsTrigger>}

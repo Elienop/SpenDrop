@@ -91,6 +91,7 @@ function mockAuth(user: User) {
     user,
     loading: false,
     unverified: false,
+    refreshUser: vi.fn(),
     login: vi.fn(),
     register: vi.fn(),
     logout,

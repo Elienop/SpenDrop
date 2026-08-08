@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
 } from 'react';
 import type { ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -40,6 +41,12 @@ interface AuthContextType {
     displayName: string,
   ) => Promise<void>;
   logout: () => Promise<void>;
+  /**
+   * Re-read the signed-in user's own profile after something this session did
+   * has changed it. Cosmetic only — see the implementation for why it is not
+   * the session check.
+   */
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -49,6 +56,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
   const [unverified, setUnverified] = useState(false);
   const navigate = useNavigate();
+
+  /**
+   * Which identity this provider currently represents, as a counter.
+   *
+   * Every deliberate change of identity — sign-in, sign-up, sign-out — bumps
+   * it. A request that started before the bump is answering about a session
+   * that no longer exists here, so its result must be DISCARDED rather than
+   * written back. Without this, a `/auth/me` still in flight when logout
+   * finishes lands afterwards and undoes the teardown below: it re-remembers
+   * the departed identity and re-renders them as signed in, and because the
+   * shared queryClient is a module singleton that logout does not clear, their
+   * cached household data comes back with them.
+   *
+   * A ref, not state: it is read inside async closures that must see the
+   * CURRENT value rather than the one captured when they were created, and
+   * bumping it must never schedule a render of its own.
+   */
+  const sessionEpoch = useRef(0);
 
   /**
    * Ask the server who we are, and translate the answer honestly.
@@ -62,8 +87,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
    * never cancelled.
    */
   const verifySession = useCallback(async (): Promise<void> => {
+    const epoch = sessionEpoch.current;
     try {
       const data = await api.get<User>('auth/me');
+      // Same in-flight hazard as refreshUser, and the same answer: if the
+      // identity changed while this was outstanding, this answer is about the
+      // old one. Only the SUCCESS arm is guarded — the failure arms either
+      // clear state (harmless to repeat after a sign-out) or fall back to the
+      // remembered identity, which a sign-out has already forgotten. Returning
+      // here still runs the `finally`, so `loading` is released either way and
+      // the app can never hang on the splash screen.
+      if (epoch !== sessionEpoch.current) return;
       const previous = readRememberedUser();
       if (previous && previous.id !== data.id) {
         // This device now belongs to somebody else. Anything the previous
@@ -103,6 +137,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /**
+   * Re-read this session's own profile because something the app just did
+   * changed it. The case it exists for: an admin renames themselves in
+   * Settings, and the shell renders `user.display_name` — no SSE event fires
+   * on a user PUT, so nothing else would correct it before a reload.
+   *
+   * Deliberately NOT `verifySession`. That one is the session CHECK, and its
+   * failure modes are answers about WHO YOU ARE: a real 401 signs the user
+   * out, and anything else flags them `unverified`, which ProtectedRoute turns
+   * into a redirect away from the page they were on. Routing a cosmetic
+   * re-read through that machinery would let one dropped request throw an
+   * admin off Settings immediately after a save that SUCCEEDED. So this is
+   * inert when the request fails — the name stays stale until something else
+   * refreshes it, which is how a display detail should degrade — and it never
+   * writes `loading`, so nothing unmounts while it runs.
+   *
+   * On SUCCESS it does clear `unverified`, because a 200 from /auth/me is the
+   * server confirming this session — the same pairing every other writer of
+   * `user` keeps (verifySession, login, register, logout). Only the failure
+   * side is inert.
+   */
+  const refreshUser = useCallback(async (): Promise<void> => {
+    const epoch = sessionEpoch.current;
+    try {
+      const data = await api.get<User>('auth/me');
+      // A sign-out or a sign-in as somebody else completed while this was in
+      // flight. See `sessionEpoch`: writing this back would resurrect a
+      // session the app has already torn down.
+      if (epoch !== sessionEpoch.current) return;
+      // The remembered identity carries display_name as well, so without this
+      // the next cold start offline would show the old name again.
+      rememberUser(data);
+      setUser(data);
+      setUnverified(false);
+    } catch {
+      // Inert on purpose — see above.
+    }
+  }, []);
+
   useEffect(() => {
     void verifySession();
   }, [verifySession]);
@@ -134,6 +207,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         username,
         password,
       });
+      // A different person may now be signed in on this device; anything the
+      // previous session had in flight must not land on top of this one.
+      sessionEpoch.current += 1;
       rememberUser(data);
       // Signing back in as the same person releases their held captures, which
       // then drain on the next trigger (see useOfflineSync).
@@ -156,6 +232,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         password,
         display_name: displayName,
       });
+      // See login: a new identity invalidates whatever the old one had running.
+      sessionEpoch.current += 1;
       rememberUser(data);
       clearNeedsSignIn(data.id);
       setUser(data);
@@ -219,6 +297,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // the user re-runs that effect's cleanup (es.close()). Keep this state
       // clear unconditional — it is the single teardown point for the socket.
       //
+      // Retire this identity BEFORE tearing its state down, so that any
+      // /auth/me still in flight (a rename refresh, a reconnect re-verify)
+      // discards its answer instead of writing the departed user back over the
+      // three lines below. The await chain above is exactly the window in
+      // which such a response arrives.
+      sessionEpoch.current += 1;
       // Forget the remembered identity too: a deliberate sign-out must not
       // leave an offline capture screen reachable for the person who just
       // left. (Their queue was purged just above; the hold goes with it.)
@@ -231,7 +315,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, unverified, login, register, logout }}
+      value={{ user, loading, unverified, login, register, logout, refreshUser }}
     >
       {children}
     </AuthContext.Provider>
