@@ -170,6 +170,10 @@ export function TransactionCard({
       )}
       <button
         type="button"
+        // The page needs to find this button again to hand focus back when the
+        // edit sheet closes. An attribute rather than an `id` so nothing has to
+        // coordinate a prefix, and it doubles as a stable test hook.
+        data-transaction-id={transaction.id}
         onClick={handleClick}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}

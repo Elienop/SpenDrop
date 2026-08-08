@@ -110,6 +110,7 @@ function renderSheet(overrides: SheetHarness = {}) {
   );
   const onClose = vi.fn<() => void>(overrides.onClose ?? (() => {}));
   const onError = vi.fn<(message: string) => void>();
+  const onCloseFocus = vi.fn<() => void>();
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -125,12 +126,13 @@ function renderSheet(overrides: SheetHarness = {}) {
       onUpdate={onUpdate}
       onDelete={onDelete}
       onError={onError}
+      onCloseFocus={onCloseFocus}
       descriptionSuggestions={[]}
       tagSuggestions={[]}
     />,
     { wrapper },
   );
-  return { ...result, onUpdate, onDelete, onClose, onError };
+  return { ...result, onUpdate, onDelete, onClose, onError, onCloseFocus };
 }
 
 describe('TransactionEditSheet shell', () => {
@@ -247,9 +249,19 @@ describe('TransactionEditSheet — foreign money is not re-priced', () => {
 
   it('_SaveCarriesTheForeignMoneyThrough: an untouched re-save resends the booked amount', async () => {
     const { onUpdate } = renderSheet({ transaction: makeRepricedRow() });
-    await screen.findByRole('button', { name: /currency: lbp/i });
 
-    fireEvent.submit(screen.getByRole('button', { name: 'Save' }).closest('form')!);
+    // Sync on the state this test DEPENDS on, not on a value that renders
+    // before it. The currency trigger shows "LBP" immediately, straight from
+    // `toEditDefaults` — it says nothing about whether `useCurrencies` has
+    // resolved. Submit inside that window and `rateFor('LBP')` is still null,
+    // `toCreatePayload` throws, and `onUpdate` is never called: the test fails
+    // for a reason that has nothing to do with the freeze contract it exists
+    // to protect. The Save button's enabled state is the real signal, because
+    // `saveDisabled` folds in `currenciesLoading`.
+    const save = screen.getByRole('button', { name: 'Save' });
+    await waitFor(() => expect(save).toBeEnabled());
+
+    fireEvent.submit(save.closest('form')!);
 
     await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
     // original_* going out unchanged IS the condition the server freezes on.

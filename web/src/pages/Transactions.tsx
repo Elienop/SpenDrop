@@ -362,8 +362,31 @@ export function Transactions() {
     [transactions, updateTransaction],
   );
 
+  // Remembered separately from `editingId` because the sheet's close-focus
+  // hook runs AFTER `editingId` has already been cleared.
+  const lastEditedIdRef = useRef<number | null>(null);
+
   const handleCardOpen = useCallback((tx: Transaction) => {
+    lastEditedIdRef.current = tx.id;
     setEditingId(tx.id);
+  }, []);
+
+  // Where focus goes when the edit sheet closes on save, cancel, Escape or an
+  // overlay tap. Back to the card the user opened, which is where their
+  // attention was and where the next tap would land; the page heading is the
+  // fallback for the case where that row is no longer on the page (a filter
+  // moved it, the other member deleted it). Without this the sheet closes onto
+  // <body> — Radix's own restore targets a SheetTrigger this sheet does not
+  // have. Same heading anchor the delete, Replace-All and bulk-edit paths use.
+  const focusAfterSheetClose = useCallback(() => {
+    const id = lastEditedIdRef.current;
+    const card =
+      id == null
+        ? null
+        : cardRef.current?.querySelector<HTMLElement>(
+            `[data-transaction-id="${id}"]`,
+          );
+    (card ?? pageHeadingRef.current)?.focus();
   }, []);
 
   const closeEditSheet = useCallback(() => {
@@ -1316,6 +1339,7 @@ export function Transactions() {
         onUpdate={handleRowUpdate}
         onDelete={handleRowDelete}
         onError={setRowError}
+        onCloseFocus={focusAfterSheetClose}
         descriptionSuggestions={suggestions.descriptions}
         tagSuggestions={suggestions.tags}
       />

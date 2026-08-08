@@ -58,8 +58,12 @@ export function TransactionCardList({
         }
         selectionMode={selectionMode}
         // In all-matching scope individual cards are locked, exactly as the
-        // table rows are: undefined here disables the checkbox AND makes the
-        // whole-card tap inert.
+        // table rows are: undefined here disables the checkbox, and makes the
+        // whole-card tap inert *while selection mode is on*. Outside selection
+        // mode a tap still opens the edit sheet — which is the right
+        // behaviour, and reachable, because an all-matching scope can be built
+        // on the desktop table and carried below `md` by a rotation, where
+        // selection mode is off. Editing one row does not touch the scope.
         onSelect={selectionScope === 'all-matching' ? undefined : onSelect}
         onOpen={onOpen}
         // Withheld for two different reasons that must BOTH be checked.

@@ -34,6 +34,15 @@ export interface TransactionEditSheetProps {
   /** The page's row-delete choreography — undo toast and heading refocus. */
   onDelete: (id: number) => Promise<void>;
   onError: (message: string) => void;
+  /**
+   * Where focus goes when the sheet closes on any path OTHER than delete.
+   *
+   * Required, not optional: this sheet has no `SheetTrigger`, so Radix has
+   * nothing to restore focus to and every close would otherwise land on
+   * `<body>`. Making the caller supply a target is what stops that being
+   * silently re-introduced.
+   */
+  onCloseFocus: () => void;
   descriptionSuggestions?: string[];
   tagSuggestions?: string[];
 }
@@ -54,6 +63,7 @@ export function TransactionEditSheet({
   onUpdate,
   onDelete,
   onError,
+  onCloseFocus,
   descriptionSuggestions = [],
   tagSuggestions = [],
 }: TransactionEditSheetProps) {
@@ -68,8 +78,8 @@ export function TransactionEditSheet({
     setRendered(transaction);
   }
 
-  // Set for the one close that must NOT restore focus the way every other
-  // close does — see onCloseAutoFocus below.
+  // Selects between the two real focus destinations below. Load-bearing, not
+  // a guard against Radix.
   const deletingRef = useRef(false);
 
   return (
@@ -83,17 +93,26 @@ export function TransactionEditSheet({
         side="right"
         className="w-full sm:max-w-md"
         onCloseAutoFocus={(e) => {
-          // Radix restores focus to the element that opened the sheet. On the
-          // SAVE path that is the card, which is still there, and the restore
-          // is right. On the DELETE path the card is being unmounted, so the
-          // restore lands on nothing and focus falls to <body> — and because
-          // FocusScope runs it after the close animation, it happens AFTER the
-          // page's own heading refocus and silently undoes it. Declining the
-          // restore leaves the page's deliberate target standing.
+          // Radix's own restore is a NO-OP here, and it is worth being precise
+          // about why rather than assuming it works: DialogContentModal
+          // composes `preventDefault(); context.triggerRef.current?.focus()`
+          // (@radix-ui/react-dialog), and `triggerRef` is only populated by a
+          // `SheetTrigger`. This sheet is opened programmatically from a card
+          // tap and has no trigger, so there is nothing to focus and every
+          // close — save, cancel, Escape, overlay — lands on <body> unless
+          // something here says otherwise.
+          //
+          // `preventDefault` is belt-and-braces (Radix already calls it) so
+          // the outcome does not depend on that continuing to be true.
+          e.preventDefault();
           if (deletingRef.current) {
+            // The row is on its way out. Focusing the card that is about to
+            // unmount would just move focus somewhere doomed; the page parks
+            // it on the heading once the delete resolves.
             deletingRef.current = false;
-            e.preventDefault();
+            return;
           }
+          onCloseFocus();
         }}
       >
         <SheetHeader>
@@ -103,9 +122,14 @@ export function TransactionEditSheet({
           </SheetDescription>
         </SheetHeader>
         {rendered != null && (
-          // Keyed by id so switching rows starts a clean form, while a refetch
-          // that replaces the same row keeps the user's in-progress edits and
-          // still feeds the fresh values to the storedMoney comparison.
+          // Keyed by id so a refetch replacing the same row keeps the user's
+          // in-progress edits while still feeding the fresh values to the
+          // storedMoney comparison. The key cannot currently CHANGE in place:
+          // the sheet is modal, so there is no way to open a different row
+          // without closing this one first, and `rendered` only ever advances
+          // to a different id across a close. It is written this way so that
+          // stays true if a non-modal or swipe-between-rows variant ever
+          // lands, not because a live swap happens today.
           <TransactionEditSheetForm
             key={rendered.id}
             transaction={rendered}
@@ -127,7 +151,7 @@ export function TransactionEditSheet({
 }
 
 interface TransactionEditSheetFormProps
-  extends Omit<TransactionEditSheetProps, 'transaction'> {
+  extends Omit<TransactionEditSheetProps, 'transaction' | 'onCloseFocus'> {
   transaction: Transaction;
   /** Tells the shell that the close about to happen is the delete one. */
   markDeleting: () => void;
@@ -166,11 +190,11 @@ function TransactionEditSheetForm({
   });
 
   async function handleDelete() {
-    // Order matters twice over. `markDeleting` first, because the shell reads
-    // that flag during the close it is about to perform. Then close, because
-    // `onDelete` parks focus on the page heading once the row is gone and the
-    // sheet's focus trap would otherwise pull it straight back into a panel
-    // that is unmounting.
+    // `markDeleting` before `onClose` so the shell reads the flag during the
+    // close it is about to perform. This does not change where focus ENDS UP —
+    // the page's heading focus runs last either way — it avoids focus
+    // transiting through a card that is about to unmount, which a screen
+    // reader would announce on its way past.
     markDeleting();
     onClose();
     await onDelete(transaction.id);

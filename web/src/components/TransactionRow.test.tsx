@@ -598,8 +598,12 @@ describe('TransactionRow edit — in-flight cue', () => {
     const user = await openActionsMenu('Weekly groceries');
     await user.click(screen.getByRole('menuitem', { name: /edit/i }));
 
-    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
-    fireEvent.submit(form);
+    // Same discipline as the sheet's save tests: wait on Save's own enabled
+    // state, which folds in `currenciesLoading`, rather than on anything that
+    // renders from a placeholder before the fetch resolves.
+    const save = screen.getByRole('button', { name: /save/i });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.submit(save.closest('form')!);
 
     const busy = await screen.findByRole('button', { name: 'Saving…' });
     expect(busy).toHaveAttribute('aria-busy', 'true');

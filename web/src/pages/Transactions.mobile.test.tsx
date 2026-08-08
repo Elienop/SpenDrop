@@ -305,6 +305,29 @@ describe('Transactions at phone width — empty page', () => {
   });
 });
 
+describe('Transactions at phone width — card container', () => {
+  // I4. `overflow-hidden` clips the desktop table's corners, but on a phone it
+  // makes the card its own scrollport — and a scrollport that never scrolls is
+  // one the sticky day headers can never stick to. Both halves pinned: the
+  // phone must NOT carry it, the desktop must, and a mutant that turns it on
+  // unconditionally kills the headers silently.
+  it('drops overflow-hidden so the sticky day headers have a real scrollport', () => {
+    renderMobile();
+    const heading = screen
+      .getAllByRole('heading')
+      .find((h) => h.tagName === 'H2')!;
+    const card = heading.closest('[class*="rounded-lg"]')!;
+    expect(card.className).not.toMatch(/(^|\s)overflow-hidden(\s|$)/);
+  });
+
+  it('keeps overflow-hidden on the desktop table card', () => {
+    setViewportWidth(DESKTOP_WIDTH);
+    render(<Transactions />);
+    const card = screen.getByRole('table').closest('[class*="rounded-lg"]')!;
+    expect(card.className).toMatch(/(^|\s)overflow-hidden(\s|$)/);
+  });
+});
+
 describe('Transactions at phone width — sort control', () => {
   it('offers every sortable column the table headers do', async () => {
     const user = userEvent.setup();
@@ -650,6 +673,124 @@ describe('Transactions at phone width — long press then tap', () => {
   });
 });
 
+describe('Transactions at phone width — selection mode housekeeping', () => {
+  // I5. The strip's checkbox must read the SCOPE as well as the ids. Without
+  // the all-matching term, a scope built on desktop and carried across a
+  // rotation shows an UNCHECKED select-all beside a bar reading "All 137
+  // selected" — and tapping it demotes 137 rows to the 20 on this page.
+  it('shows select-all checked when the scope is all-matching', async () => {
+    const user = userEvent.setup();
+    // ONE `filters` object across both renders. The reset effect is keyed on
+    // filters identity, and `defaultHookReturn` spreads a fresh object every
+    // call — so without this the rerender below would clear the scope and the
+    // test would be exercising nothing.
+    const stableFilters = { ...defaultFilters };
+    const withRows = (transactions: unknown[]) =>
+      defaultHookReturn({ transactions, total: 137, filters: stableFilters });
+
+    mockUseTransactions.mockReturnValue(withRows(makeRows(2)));
+    setViewportWidth(DESKTOP_WIDTH);
+    const { rerender } = render(<Transactions />);
+    await user.click(screen.getByRole('checkbox', { name: 'Select Row 1' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select Row 2' }));
+    await user.click(
+      screen.getByRole('button', { name: /select all 137 matching/i }),
+    );
+
+    // The visible page turns over underneath the scope — an SSE-driven refetch
+    // while "all 137" is selected. This is what makes the assertion bite: with
+    // `selectedIds` still holding the OLD ids, an ids-only `checked` reads
+    // false while the bar says all 137 are selected. Escalating without this
+    // step leaves selectedIds covering every visible row, so both the correct
+    // and the broken expression answer "checked" and the pin proves nothing.
+    mockUseTransactions.mockReturnValue(
+      withRows([
+        { ...defaultTransaction, id: 90, description: 'Row 90' },
+        { ...defaultTransaction, id: 91, description: 'Row 91' },
+      ]),
+    );
+    act(() => {
+      setViewportWidth(PHONE_WIDTH);
+    });
+    rerender(<Transactions />);
+
+    expect(
+      screen.getByText('All 137 matching transactions selected'),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Select' }));
+
+    expect(
+      screen.getByRole('checkbox', { name: 'Select all on this page' }),
+    ).toBeChecked();
+  });
+
+  // M1. The bar's Clear button is a second exit from selection mode; only the
+  // toolbar toggle was pinned.
+  it('Clear selection also leaves selection mode', async () => {
+    const user = userEvent.setup();
+    renderMobile();
+
+    await user.click(screen.getByRole('button', { name: 'Select' }));
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select Groceries run' }),
+    );
+    await user.click(screen.getByRole('button', { name: /clear selection/i }));
+
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Select' }),
+    ).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  // M2. A filter or page change must not leave the checkboxes up over a set
+  // the user never picked.
+  it('a filter change leaves selection mode', async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderMobile();
+
+    await user.click(screen.getByRole('button', { name: 'Select' }));
+    expect(
+      screen.getByRole('checkbox', { name: 'Select all on this page' }),
+    ).toBeInTheDocument();
+
+    mockUseTransactions.mockReturnValue(
+      defaultHookReturn({ filters: { ...defaultFilters, type: 'expense' } }),
+    );
+    rerender(<Transactions />);
+
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument();
+  });
+
+  // M3. The live region is phone-only; on desktop the mode does not exist and
+  // announcing it would be a lie.
+  it('says nothing on the desktop table', async () => {
+    const user = userEvent.setup();
+    mockUseTransactions.mockReturnValue(
+      defaultHookReturn({ transactions: makeRows(2), total: 137 }),
+    );
+    setViewportWidth(DESKTOP_WIDTH);
+    const { container } = render(<Transactions />);
+
+    // Escalate all the way to all-matching. A plain row selection is the wrong
+    // probe: it leaves selectionMode false and the scope 'page', which the
+    // announcement declines to describe for its OWN reasons, so removing the
+    // isMobile gate would not move it. All-matching is the one desktop state
+    // that WOULD produce a sentence if the gate were gone.
+    await user.click(screen.getByRole('checkbox', { name: 'Select Row 1' }));
+    await user.click(screen.getByRole('checkbox', { name: 'Select Row 2' }));
+    await user.click(
+      screen.getByRole('button', { name: /select all 137 matching/i }),
+    );
+    expect(
+      screen.getByText('All 137 matching transactions selected'),
+    ).toBeInTheDocument();
+
+    expect(container.querySelector('[aria-live="polite"]')).toHaveTextContent(
+      '',
+    );
+  });
+});
+
 describe('Transactions at phone width — edit sheet lifecycle', () => {
   // data-M1. The sheet closing when its row leaves the page is intended
   // (documented desktop parity). The bug was the id surviving that close: the
@@ -682,6 +823,68 @@ describe('Transactions at phone width — edit sheet lifecycle', () => {
     expect(
       screen.queryByRole('dialog', { name: 'Edit transaction' }),
     ).not.toBeInTheDocument();
+  });
+});
+
+// I2/I3. This sheet has no SheetTrigger, so Radix's focus restore
+// (`triggerRef.current?.focus()`) has nothing to aim at and every close would
+// land on <body>. Each path therefore needs its own explicit destination, and
+// each is pinned separately — a single "focus is not body" assertion would
+// pass on a sheet that sent every close to the same wrong place.
+describe('Transactions at phone width — focus when the sheet closes', () => {
+  async function openSheet(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: /groceries run/i }));
+    return screen.findByRole('dialog', { name: 'Edit transaction' });
+  }
+
+  function card(): HTMLElement {
+    return screen.getByRole('button', { name: /groceries run/i });
+  }
+
+  it('returns focus to the card after Cancel', async () => {
+    const user = userEvent.setup();
+    renderMobile();
+    const dialog = await openSheet(user);
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => expect(document.activeElement).toBe(card()));
+  });
+
+  it('returns focus to the card after a save', async () => {
+    const user = userEvent.setup();
+    renderMobile();
+    const dialog = await openSheet(user);
+
+    const save = within(dialog).getByRole('button', { name: 'Save' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.submit(save.closest('form')!);
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('dialog', { name: 'Edit transaction' }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(document.activeElement).toBe(card()));
+  });
+
+  it('falls back to the page heading when the row has left the page', async () => {
+    const user = userEvent.setup();
+    const { rerender } = renderMobile();
+    await openSheet(user);
+
+    // The other member deletes it while the sheet is open: the page drops the
+    // row, the sheet closes, and there is no card left to return to.
+    mockUseTransactions.mockReturnValue(
+      defaultHookReturn({ transactions: [], total: 0 }),
+    );
+    rerender(<Transactions />);
+
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { name: 'Transactions', level: 1 }),
+      ),
+    );
   });
 });
 
