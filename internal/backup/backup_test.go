@@ -364,6 +364,77 @@ func TestRun_MissingSourceIsRefusedAndNeverCreated(t *testing.T) {
 	}
 }
 
+// TestRun_ZeroByteSourceIsRefused closes the last way to mint a fully
+// trusted backup of nothing.
+//
+// os.Stat proves a path EXISTS, not that it holds a database. SQLite treats
+// a 0-byte file as a valid empty database, so a DB_PATH aimed at a touch'd
+// file — a fresh bind mount, a volume that never got populated — passed the
+// existence guard, found no "transactions" table so rode the absence arm,
+// and produced a 4096-byte copy that cleared the size floor exactly (the
+// test is <, not <=). Measured end to end: every check passed and the file
+// earned a sidecar. The scheduler already fails closed on this input, so
+// Run was the only remaining leak.
+//
+// The assertion names the SPECIFIC message rather than settling for a
+// non-nil error: any later check failing would also produce an error, and
+// a bare err != nil would pass while the guard did nothing.
+func TestRun_ZeroByteSourceIsRefused(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "empty.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	if err := os.WriteFile(src, nil, 0o644); err != nil {
+		t.Fatalf("create 0-byte source: %v", err)
+	}
+
+	err := Run(context.Background(), src, testBusyTimeout, dst)
+	if err == nil {
+		t.Fatal("expected Run to refuse a 0-byte source, got nil")
+	}
+	if !strings.Contains(err.Error(), "is empty (0 bytes)") {
+		t.Errorf("error = %v, want the emptiness guard to be what fired", err)
+	}
+	if !strings.Contains(err.Error(), src) {
+		t.Errorf("error = %v, want it to name the source %s", err, src)
+	}
+
+	if _, statErr := os.Stat(dst); statErr == nil {
+		t.Error("backup written for a 0-byte source")
+	}
+	if _, statErr := os.Stat(dst + ".sha256"); statErr == nil {
+		t.Error("sidecar written for a 0-byte source — a trusted backup of no data")
+	}
+}
+
+// TestRun_TableLessButRealSourceIsAccepted is the guard's counterweight.
+// The emptiness check must not catch a legitimate first boot: at the moment
+// the pre-migration snapshot runs, the database is real but holds only
+// schema_migrations. Measured at 12 KB, comfortably non-zero — but that is
+// exactly the kind of "obviously fine" case a size guard breaks, and
+// breaking it would refuse to migrate on every new install.
+func TestRun_TableLessButRealSourceIsAccepted(t *testing.T) {
+	tmp := t.TempDir()
+	src := filepath.Join(tmp, "firstboot.db")
+	dst := filepath.Join(tmp, "dst.db")
+
+	srcDB, err := sql.Open("sqlite3", "file:"+src+"?_journal_mode=WAL&_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open src: %v", err)
+	}
+	defer srcDB.Close()
+	if _, err := srcDB.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+
+	if err := Run(context.Background(), src, testBusyTimeout, dst); err != nil {
+		t.Fatalf("Run on a real but table-less first-boot source: %v", err)
+	}
+	if _, err := os.Stat(dst + ".sha256"); err != nil {
+		t.Errorf("first-boot backup did not earn a sidecar: %v", err)
+	}
+}
+
 func TestRun_EmptyDestRejected(t *testing.T) {
 	tmp := t.TempDir()
 	src := filepath.Join(tmp, "src.db")
@@ -635,6 +706,110 @@ func TestRun_CountParityUnderAnOpenWriteTransaction(t *testing.T) {
 	if _, err := os.Stat(dst + ".sha256"); err != nil {
 		t.Errorf("sidecar not written for a backup that passed count parity: %v", err)
 	}
+}
+
+// TestSourceBaseline_WiresSizeDerivedParams pins the two assignments that
+// join sourceBaseline's measurements to the VerifyParams it hands Verify:
+//
+//	params.MaxSize     = 10 * srcSize
+//	params.QueryBudget = budgetForSize(srcSize)
+//
+// Both ends were already tested — budgetForSize has its own table test,
+// Verify honours whatever it is given — while the lines JOINING them were
+// deletable with the whole repo green. That is the wiring-seam shape this
+// repo has shipped before, and QueryBudget's wiring is specifically the
+// boot-loop guard: with that line gone, the pre-migration path silently
+// reverts to the fixed 30s default that a large legacy database can
+// outgrow, which is the exact fail-closed crash loop the sizing exists to
+// prevent.
+//
+// Deleting either assignment leaves the field at its zero value, and every
+// expectation below is non-zero, so each deletion fails this test alone.
+func TestSourceBaseline_WiresSizeDerivedParams(t *testing.T) {
+	// liveDBSize sums the main file and its -wal. Measuring the same way
+	// here, rather than hardcoding a number, keeps the assertion true as
+	// the fixture evolves — what is pinned is the RELATIONSHIP.
+	measure := func(t *testing.T, path string) int64 {
+		t.Helper()
+		fi, err := os.Stat(path)
+		if err != nil {
+			t.Fatalf("stat source: %v", err)
+		}
+		total := fi.Size()
+		if wal, err := os.Stat(path + "-wal"); err == nil {
+			total += wal.Size()
+		}
+		return total
+	}
+
+	t.Run("populated source takes the count arm and gets both derived params", func(t *testing.T) {
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "src.db")
+		// Held open on purpose: closing the last handle checkpoints the
+		// WAL away, and the -wal is what makes this cover the summation
+		// rather than just the main file's size.
+		srcDB := populateSourceDB(t, src)
+		defer srcDB.Close()
+
+		if wal, err := os.Stat(src + "-wal"); err != nil || wal.Size() == 0 {
+			t.Fatalf("fixture has no non-empty -wal (err=%v) — the summation would not be covered", err)
+		}
+
+		params, err := sourceBaseline(context.Background(), src, testBusyTimeout)
+		if err != nil {
+			t.Fatalf("sourceBaseline: %v", err)
+		}
+		size := measure(t, src)
+
+		if params.ExpectedTxCount != 3 {
+			t.Errorf("ExpectedTxCount = %d, want 3", params.ExpectedTxCount)
+		}
+		if params.ExpectTransactionsAbsent {
+			t.Error("ExpectTransactionsAbsent = true for a source that HAS the table")
+		}
+		if want := 10 * size; params.MaxSize != want {
+			t.Errorf("MaxSize = %d, want %d (10× main+wal) — the assignment is unwired", params.MaxSize, want)
+		}
+		if want := budgetForSize(size); params.QueryBudget != want {
+			t.Errorf("QueryBudget = %v, want %v — the assignment is unwired, so a fail-closed caller silently gets the 30s default", params.QueryBudget, want)
+		}
+	})
+
+	t.Run("table-less source takes the absence arm and still gets both derived params", func(t *testing.T) {
+		// The size wiring must not live inside the has-the-table branch.
+		// A first-boot source is exactly where an oversized legacy
+		// database would need the scaled budget most, so a mutant that
+		// moved either assignment under `if present` has to fail here.
+		tmp := t.TempDir()
+		src := filepath.Join(tmp, "firstboot.db")
+		srcDB, err := sql.Open("sqlite3", "file:"+src+"?_journal_mode=WAL&_busy_timeout=5000")
+		if err != nil {
+			t.Fatalf("open src: %v", err)
+		}
+		defer srcDB.Close()
+		if _, err := srcDB.Exec(`CREATE TABLE schema_migrations (version TEXT PRIMARY KEY)`); err != nil {
+			t.Fatalf("create schema_migrations: %v", err)
+		}
+
+		params, err := sourceBaseline(context.Background(), src, testBusyTimeout)
+		if err != nil {
+			t.Fatalf("sourceBaseline: %v", err)
+		}
+		size := measure(t, src)
+
+		if !params.ExpectTransactionsAbsent {
+			t.Error("ExpectTransactionsAbsent = false for a source without the table")
+		}
+		if params.ExpectedTxCount != 0 {
+			t.Errorf("ExpectedTxCount = %d, want 0 on the absence arm", params.ExpectedTxCount)
+		}
+		if want := 10 * size; params.MaxSize != want {
+			t.Errorf("MaxSize = %d, want %d — the size wiring must not be scoped to the count arm", params.MaxSize, want)
+		}
+		if want := budgetForSize(size); params.QueryBudget != want {
+			t.Errorf("QueryBudget = %v, want %v — the budget wiring must not be scoped to the count arm", params.QueryBudget, want)
+		}
+	})
 }
 
 func TestQuoteSQLiteString(t *testing.T) {

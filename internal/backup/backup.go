@@ -103,8 +103,27 @@ func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst stri
 	// TOCTOU between this stat and the opens below is accepted: a source
 	// that vanishes in that window fails the snapshot loudly, which is the
 	// safe direction.
-	if _, err := os.Stat(dbPath); err != nil {
+	srcInfo, err := os.Stat(dbPath)
+	if err != nil {
 		return fmt.Errorf("cannot read source database %s: %w", dbPath, err)
+	}
+
+	// Existence is not validity. SQLite treats a 0-byte file as a valid
+	// EMPTY database, so a DB_PATH pointing at a touch'd file — a fresh
+	// bind mount, a volume that never got populated — sails through the
+	// stat above, has no "transactions" table so it rides the absence arm,
+	// and VACUUM INTO emits a 4096-byte copy that clears the size floor
+	// (measured: exactly minBackupSize, and the test is <, not <=). Every
+	// check passes and the file gets a full trust sidecar for a backup
+	// containing nothing.
+	//
+	// The scheduler already fails closed on this input, so Run was the last
+	// way to mint the artifact B8 exists to prevent. The legitimate
+	// first-boot source is unaffected: a real but table-less SQLite file is
+	// at least one page, and in practice 12 KB by the time
+	// ensureMigrationsTable has run (measured).
+	if srcInfo.Size() == 0 {
+		return fmt.Errorf("source database %s is empty (0 bytes): refusing to write a backup that would contain no data", dbPath)
 	}
 
 	// Baseline the source BEFORE snapshotting. VACUUM INTO takes a
@@ -221,9 +240,18 @@ func sourceBaseline(ctx context.Context, dbPath string, busyTimeout time.Duratio
 }
 
 // sourceHasTransactionsTable reports whether the live database at dbPath
-// has a "transactions" table. It uses the same minimal, side-effect-free
-// DSN as Snapshot and countLiveTransactions (busy_timeout only, no
-// _journal_mode pragma) so probing a database never mutates it.
+// has a "transactions" table. It uses the same minimal DSN as Snapshot and
+// countLiveTransactions (busy_timeout only, no _journal_mode pragma), so
+// probing never changes the source's journal MODE — which is the actual
+// hazard documented at Snapshot, since the server has already put the
+// database in WAL and a pragma write here would silently take it out.
+//
+// That is a narrower claim than "the probe does not touch the source", and
+// deliberately so: closing the connection checkpoints on last close, so
+// probing a source that carries a -wal can absorb it into the main file and
+// delete the -wal/-shm. That is standard SQLite behaviour, loses no data,
+// and is what the parent process would do anyway — but it is a write, so do
+// not describe this function as side-effect-free.
 //
 // The table name is hard-coded to match Verify and countLiveTransactions
 // for the same reason those two hard-code it: the whole point is parity
@@ -252,10 +280,12 @@ func sourceHasTransactionsTable(ctx context.Context, dbPath string, busyTimeout 
 // see — so a caller that wants one (the CLI subcommand) derives it here
 // rather than hard-coding a constant a large database can outgrow.
 //
-// Run makes THREE O(file size) passes, and they are bounded differently —
-// be precise about this, because the gaps are real:
+// Run makes FOUR O(file size) passes, and they are bounded differently — be
+// precise about this, because the gaps are real:
 //
-//   - VACUUM INTO observes the caller's ctx, so this figure bounds it.
+//   - sourceBaseline's COUNT(*) over "transactions" observes the caller's
+//     ctx, so this figure bounds it.
+//   - VACUUM INTO observes the caller's ctx, so this figure bounds it too.
 //   - Verify runs on its own internal QueryBudget and never observes ctx.
 //   - WriteSidecar's SHA-256 hash (Sha256File's io.Copy) observes NEITHER.
 //     It is unbounded: a read stall there is not surfaced by any deadline,
