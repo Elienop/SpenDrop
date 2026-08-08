@@ -28,82 +28,27 @@ top items. Production figures in this file come from the owner's live database o
 
 ## Then
 
-*B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed. B7 is fully
-implemented on `fix/b7-healthcheck-data` (both pieces) and is awaiting merge, not work.*
-
-### B7 — No external signal when something breaks
-**Status: both pieces implemented on `fix/b7-healthcheck-data` (piece 1 2026-08-07, piece 2
-2026-08-08), unmerged. Nothing open.**
-The original finding is kept verbatim below — the "nothing in the deployment reads it" sentence
-describes the state at discovery, not today.
-
-**Verified: reported.** The Docker health check only proves the web server is listening and never
-touches the database. `/healthz/data` is thorough but nothing in the deployment reads it, and it
-reports "ok" while the database is unwritable for up to a day (the first thing that flips it is a
-failed backup, and backups run every 24h). Push notifications work to both phones; no operational
-failure uses them. If the container dies overnight, the first sign is someone opening the app and
-seeing what looks like an offline shell — while backups have silently stopped.
-**Effort:** small — the signal and the channel both exist and are simply not connected.
-
-**ANSWERED 2026-08-02: the owner runs Dockhand, which monitors every stack for uptime and
-container health.** So the alerting channel already exists and nothing needs to be chosen or
-installed. What it was watching is the problem: the Dockerfile's HEALTHCHECK pointed at
-`/api/health`, which only proves the web server answers. Dockhand faithfully reports a container
-as healthy while its database is unusable.
-
-**So B7 becomes two pieces of different size:**
-1. ~~*Small, do it:* point HEALTHCHECK at `/healthz/data` instead.~~ **Implemented 2026-08-07 on
-   `fix/b7-healthcheck-data`** (not yet merged — this entry moves to *Closed* with the squash hash
-   at merge). The probe is now
-   `wget -q -O /dev/null http://127.0.0.1:8080/healthz/data`, `--interval=30s --timeout=10s
-   --start-period=60s --retries=3`. Verified end to end on a throwaway container: healthy while
-   the endpoint returns 200, and after three data pages of `spendrop.db` were overwritten in the
-   *running* container, `/healthz/data` returned 503
-   (`quick_check: "database disk image is malformed"`) and the container reached `unhealthy` after
-   the 3-retry budget, with `RestartCount=0` — it reports, it does not crash-loop. The same boot
-   had `/api/health` still answering 200, which is the bug this closes, measured rather than
-   argued. Two details worth keeping: the timeout went 5s→10s because the probe now does real
-   reads against a pool capped at one connection, and the probe uses an explicit GET rather than
-   `--spider` because chi answers `HEAD /healthz/data` with 405 (verified) — today's busybox sends
-   GET for `--spider`, but a build that took the flag literally would pin the container unhealthy
-   forever.
-2. ~~*The subtler half:* **a read-only database would still report healthy.** Every sub-check in
-   `/healthz/data` is a READ — `quick_check` passes fine on a database that cannot be written.
-   That is exactly the failure mode B2's restore bug produced ("attempt to write a readonly
-   database"). The first thing that actually flips the endpoint is a failed backup, up to 24h
-   later.~~ **Implemented 2026-08-08 on `fix/b7-healthcheck-data`** (not yet merged — this entry
-   moves to *Closed* with the squash hash at merge).
-
-   Migration `018_health_write_probe.sql` adds a one-row table, and `probeWritable`
-   (`internal/api/health_handlers.go`) upserts it once per request from `h.clock.Now()`. Failure
-   surfaces as a new `write_probe` field carrying SQLite's own error string verbatim, flips the
-   endpoint to 503, and logs one line. With the container probing every 30s ×3 retries, a
-   read-only database now turns the container unhealthy in ~90s instead of ≤24h.
-
-   Three design points worth keeping:
-   - **A real write, not `BEGIN IMMEDIATE; ROLLBACK`.** The cheap gesture also fails on a
-     read-only handle but never puts a byte on the disk, so it cannot see `SQLITE_FULL` or
-     `SQLITE_IOERR`. A one-row upsert costs the same order of magnitude and answers the stronger
-     question.
-   - **Bounded by the schema, not by the caller.** `CHECK (id = 1)` means the table cannot gain a
-     second row no matter what a future caller writes, so an endpoint scraped ~6×/min forever
-     does not grow the database. The upsert's INSERT arm seeds row 1 on a fresh database, so
-     nothing needs pre-seeding and the first scrape after upgrade reports ok.
-   - **Per-request, not cached or ticker-driven.** Anything wired in `main()` is this repo's
-     known untestable seam; per-request keeps the reported writability exactly as fresh as the
-     scrape. It sits after `quick_check` because the pool is capped at one connection and a write
-     issued under a live `*sql.Rows` cursor would wait forever for the connection that cursor
-     holds.
-
-   Verified by `internal/api/health_write_probe_test.go`: a `mode=ro` second handle to the same
-   file makes writes fail with the real string while every read still succeeds, so the 503 is
-   attributable to the probe alone (the test asserts `quick_check` is still `"ok"` beside it).
-   Mutation-tested three ways — remove the call (read-only test returns 200 with `status: ok`,
-   i.e. the original bug reproduced), make the probe return nil without writing (the stored
-   marker never appears), and swap `DO UPDATE` for `DO NOTHING` (the marker stops advancing on
-   the second scrape). Container-level verification was deliberately deferred to after review.
+*B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed. B7 shipped
+2026-08-08 on `fix/b7-healthcheck-data`, merged via PR #124 and released as v0.39.0 — see
+Closed.*
 
 ### B8 — Backups carry a "verified" marker that two paths never earn
+**Status: implemented on `fix/b8-backup-verified-marker` (2026-08-08, commits
+`68e3ea6` + `62d52b5`, docs rider `bd510d0`), unmerged — this entry moves to Closed with the
+squash hash at merge. Nothing open.** What it became: `backup.Run` is now baseline → Snapshot
+→ Verify → sidecar, so the CLI and pre-migration paths earn the marker; an explicit
+absent-table assertion covers first boot; the Verify query budget is sized from the source
+(floor 5 min, ceiling 24 h) so the fail-closed migration path cannot boot-loop a large legacy
+DB; a missing or 0-byte `DB_PATH` is refused before SQLite can create or bless it (both holes
+produced verified sidecars for backups of nothing); verify failure refuses to migrate with
+wording distinct from a write failure and exits the CLI non-zero with no file left behind.
+Two-reviewer battery (8 findings, all fixed), isolated deep review MERGEABLE (10/10 kill-list
+mutants; its 3 findings fixed and their mutants re-executed post-commit), container e2e of
+the real `docker exec` flow (5 cases, all exact). Known-unpinned, disclosed: the
+baseline-before-Snapshot ordering (needs a mid-function hook) and the remove-failure arms
+(documented at the site).
+
+The original finding, kept verbatim:
 **Verified: reported.** Scheduled backups are genuinely checked. Pre-migration snapshots and
 manual backups get the same trust marker with no verification, and the README states the marker
 means integrity and row-count checks passed. The pre-migration snapshot is the rollback anchor
@@ -189,6 +134,28 @@ user-event (form-submit paths); each needs the delete-the-handler check before b
 trusted. Any that assert a NEGATIVE ("Enter does nothing") are the prime suspects.
 **Effort:** small-medium — nine audits, each a delete-run-restore cycle.
 
+### B18 — User account details can't be edited (owner request)
+**Verified: read** (owner request 2026-08-08, from the live v0.39.0 Settings → Users tab;
+endpoint and UI gap confirmed in code the same day). No UI edits a user's details anywhere.
+The motivating case: B6's attribution now shows the creator's display name on every
+transaction row, and the owner wants a shorter one ("maybe I want to use something shorter
+so it looks short in the transaction"). The asks, in the owner's framing: (1) edit display
+name; (2) password change belongs in the same edit flow, not somewhere else; (3) consider
+ONE common accounts page instead of the current two surfaces (Account tab for self, Users
+tab for admin-managing-others). The backend half of (1) already exists: `PUT /api/users/{id}`
+(admin-only, `handleUpdateUser`, `internal/api/user_handlers.go:142`) updates display_name
+and role with merge semantics — an empty/missing field keeps the existing value (verified:
+the role dropdown already PUTs `{ role }` alone, `Settings.tsx` `handleRoleChange`, and
+display_name survives), so a display-name editor can send its field alone with no round-trip
+concern. One consequence of the merge semantics: the endpoint cannot CLEAR a display name
+(empty string means keep) — fine for this feature, worth knowing. Password paths today:
+self-service `POST /api/auth/password` (Account tab) and admin
+`POST /api/users/{id}/reset-password` (member rows only in the UI). Open product decision
+for the build: whether a MEMBER may edit their own display name — it changes how their name
+renders on rows other people see. Ask (3) is a real design decision (admin-vs-member
+capability split on one surface) — brainstorm before building, rank with the owner.
+**Effort:** small for (1) as admin-only UI; the merged accounts page is its own design stage.
+
 ---
 
 ## Queued stages
@@ -246,7 +213,7 @@ case, six frontend sites. Expect one immediate visible break: a negative expense
 - ~~**Does anything already monitor the box from outside?** If yes, B7 shrinks considerably.~~
   **Answered 2026-08-02: yes, Dockhand watches every stack's container health.** That is what
   made B7 a two-line change to what the `HEALTHCHECK` scrapes rather than a new alerting
-  channel; both pieces are now implemented — see B7 above.
+  channel; both pieces shipped in v0.39.0 — see B7 in Closed.
 - **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
   back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
   has never moved); real once it does. Fixing it properly needs the rate column from B1 step 2
@@ -295,6 +262,44 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B7 — Container healthcheck catches a dead or read-only database** (piece 1 `a16b19d`
+  2026-08-07, piece 2 `3cff135` + SCHEMA.md regen `9cfe6d1` 2026-08-08, on
+  `fix/b7-healthcheck-data`; MERGED via PR #124, squash `b469651`, released as **v0.39.0**,
+  branch deleted). The finding: the Dockerfile HEALTHCHECK scraped `/api/health`, which proves
+  only that the web server answers — Dockhand faithfully reported the container healthy while
+  its database was corrupt or unwritable, and the first real signal was the daily backup tick,
+  up to 24h later.
+  - **Piece 1** — the HEALTHCHECK scrapes `/healthz/data`
+    (`wget -q -O /dev/null`, `--interval=30s --timeout=10s --start-period=60s --retries=3`),
+    pinned by a static Dockerfile test (`internal/api/healthcheck_pin_test.go`, same pattern
+    as the version-stamp pin). Measured on a throwaway container: three overwritten data pages
+    → 503 (`quick_check: "database disk image is malformed"`) → unhealthy after the retry
+    budget with `RestartCount=0` (reports, never crash-loops), while `/api/health` answered
+    200 on the same boot — the bug, measured rather than argued. Explicit GET, not `--spider`
+    (chi answers HEAD 405; the flag's contract never promises GET); timeout 5s→10s because the
+    probe now does real reads behind the one-connection pool.
+  - **Piece 2** — a write probe closes the read-only blind spot: migration
+    `018_health_write_probe.sql` adds a one-row table with `CHECK (id = 1)` (the storage bound
+    lives in the schema, not the caller), and `probeWritable` upserts it once per request
+    after the cursor-draining read sub-checks. Failure surfaces SQLite's error string verbatim
+    in a `write_probe` field, flips the endpoint to 503, and logs one line. A read-only
+    database — exactly the failure B2's restore bug produced — now turns the container
+    unhealthy in ~90s instead of hiding ≤24h behind the backup tick. A real write, not
+    `BEGIN IMMEDIATE; ROLLBACK`: the cheap gesture never puts a byte on disk, so it cannot see
+    `SQLITE_FULL` or `SQLITE_IOERR`. E2E on a throwaway container: chmod-0444 DB + restart →
+    503 `attempt to write a readonly database` with `quick_check: "ok"` beside it, pinning
+    attribution to the probe alone.
+  - **Not obvious, kept:** `/healthz/data` was ALREADY an unauthenticated write path before
+    the probe — the checkpoint sweep sets `last_verified_at`, so "this endpoint is read-only"
+    was a false premise; `quick_check` dominates the endpoint's DB cost (4.49 ms vs the
+    probe's 0.035 ms, ~0.7%); the entrypoint ownership guard self-heals a root-OWNED database
+    at boot, but a spendrop-owned mode-0444 file passes the guard — the write probe is what
+    catches that class. Three-reviewer battery (data/code/security), every finding fixed
+    in-branch or filed (**B17**, the pre-existing flood contention, was measured during this
+    work); 7 mutants killed post-commit; one CI red mid-PR (a migration-comment edit without
+    `make docs` — the SCHEMA.md drift gate works as designed). Untested, disclosed: the
+    `ctx.Err()` gate on the probe's log line has no log-output assertion.
 
 - **B6 — Cheap batch, all 12 open items** (`e46af7e..04fc60c`, twelve commits plus this
   record, 2026-08-07, on `fix/b6-cheap-batch`; MERGED via PR #119, squash `f57a613`, released

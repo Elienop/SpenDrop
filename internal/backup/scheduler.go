@@ -132,9 +132,11 @@ func (s *Scheduler) RunLoop(ctx context.Context) {
 //     BEFORE Snapshot is important: VACUUM INTO takes a point-in-time
 //     snapshot, and a write that lands between our count and the snapshot
 //     is exactly what RowCountTolerance exists to forgive.
-//  2. Measure the previous successful backup's size. Verify uses 10× that
-//     as the MaxSize cap; 0 means "no upper bound" which is correct for
-//     the first-ever backup in a new directory.
+//  2. Measure the LIVE SOURCE's size. Verify uses 10× that as the MaxSize
+//     cap; 0 means "no upper bound", which is what an unreadable stat
+//     degrades to. The cap used to derive from the previous successful
+//     backup instead — see the long comment at step 2 in the body for why
+//     that wedged backups permanently and became a warning-only log line.
 //  3. Snapshot.
 //  4. Verify. On failure, rename to *.corrupt for operator forensics and
 //     short-circuit — the next tick gets another shot at producing a

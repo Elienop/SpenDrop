@@ -4,11 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/elienop/spendrop/internal/backup"
 )
 
 //go:embed migrations/*.sql
@@ -107,6 +110,21 @@ func RunMigrations(db *sql.DB, opts MigrationOptions) error {
 	// completion.
 	snapPath, err := SnapshotForMigration(context.Background(), opts.DBPath, opts.SnapshotDir, targetVersion, opts.BusyTimeout)
 	if err != nil {
+		// Both arms refuse to migrate — a rollback anchor we cannot
+		// trust is worth no more than one we could not write. They are
+		// worded apart because the likely cause differs: a write
+		// failure is a disk or mount problem, while a verification
+		// failure usually means the copy did not match the live
+		// database. Only usually, though — Verify also fails when it
+		// could not check at all (stat/open failure, deadline mid-read),
+		// which points back at the volume. The wrapped chain names the
+		// step that failed, so the operator gets the specific cause
+		// rather than our guess at it. backup.Run attempts to remove
+		// the file in both cases and reports if it could not, so a
+		// bogus anchor cannot be left behind silently.
+		if errors.Is(err, backup.ErrVerifyFailed) {
+			return fmt.Errorf("pre-migration snapshot failed verification (refusing to migrate): %w", err)
+		}
 		return fmt.Errorf("pre-migration snapshot failed (refusing to migrate): %w", err)
 	}
 	log.Printf("Pre-migration snapshot: %s", snapPath)

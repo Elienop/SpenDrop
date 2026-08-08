@@ -1,10 +1,18 @@
 // Package backup implements SpenDrop's scheduled-and-on-demand database
 // snapshot primitive. Snapshot writes a consistent, WAL-aware copy of the
 // live SpenDrop database to a target path using SQLite's online-backup
-// primitive (VACUUM INTO). WriteSidecar writes a sidecar SHA-256 checksum
-// file at "<dst>.sha256". Run calls both in sequence and is the CLI entry
-// point; scheduled backups call Snapshot and WriteSidecar directly so they
-// can splice Verify between the two — see Scheduler.runOnce for that flow.
+// primitive (VACUUM INTO). Verify runs the three trust checks against a
+// written snapshot. WriteSidecar writes a sidecar SHA-256 checksum file at
+// "<dst>.sha256".
+//
+// THE PACKAGE INVARIANT: a "<dst>.sha256" sidecar is written only after
+// Verify has passed against that exact file. The sidecar is what every
+// later phase — prune, /healthz/data's trusted_count, the restore drill —
+// reads as "this file is trusted", so a sidecar on an unverified file is a
+// lie told to a future operator mid-incident. Both paths that produce a
+// backup honour it: Run (the CLI subcommand and pre-migration snapshots)
+// and Scheduler.runOnce (scheduled backups, which inline the same sequence
+// so they can quarantine a failure to *.corrupt rather than delete it).
 //
 // The package is also used by the `spendrop backup` CLI subcommand, which is
 // intended to be invoked from inside the running container:
@@ -22,6 +30,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,26 +38,135 @@ import (
 	"time"
 )
 
-// Run writes a snapshot of the live database at dbPath to dst, then writes a
-// sidecar SHA-256 checksum file at dst+".sha256". It refuses to overwrite an
-// existing destination so a misconfigured second invocation cannot silently
-// destroy a prior backup.
+// ErrVerifyFailed tags a Run failure that came from Verify rather than from
+// writing the snapshot: the copy was produced, and then it did not pass.
+// Callers use errors.Is to separate that from a write failure, which has a
+// different operator response.
+//
+// It does NOT mean "the copy is definitively wrong". Verify fails both when
+// it CHECKED and found a mismatch (integrity_check, row parity, size) and
+// when it could not check at all (stat backup, open backup, a QueryBudget
+// deadline mid-read) — the latter usually points at the volume, not the
+// data. The wrapped chain names the step that actually failed, which is the
+// signal an operator should act on; do not read the sentinel alone as a
+// verdict about the database. (A separate could-not-check sentinel was
+// considered and deliberately deferred: the wrapped step name already
+// carries it, and a second sentinel would need every caller to handle three
+// cases instead of two.)
+var ErrVerifyFailed = errors.New("backup verification failed")
+
+// Run writes a VERIFIED snapshot of the live database at dbPath to dst,
+// then writes a sidecar SHA-256 checksum file at dst+".sha256". It requires
+// dbPath to exist already, and refuses to overwrite an existing destination
+// so a misconfigured second invocation cannot silently destroy a prior
+// backup.
 //
 // Run takes primitive arguments rather than a *config.Config so the backup
 // package has zero dependency on internal/config. busyTimeout is the SQLite
 // busy-timeout to apply to the read connection; pass the same value your
 // server uses (cfg.SQLite.BusyTimeout is the typical source).
 //
-// Run is the CLI convenience wrapper around Snapshot + WriteSidecar, with
-// the additional semantic that a WriteSidecar failure rolls back the
-// snapshot file so an operator-invoked backup never leaves a partial result
-// on disk. Scheduled backups go through Snapshot and WriteSidecar directly
-// so they can splice Verify between the two — see Scheduler.runOnce for
-// that flow.
+// The sequence is baseline → Snapshot → Verify → WriteSidecar, the same
+// order Scheduler.runOnce runs inline. Run and runOnce now diverge ONLY in
+// how they handle failure, never in whether they verify:
+//
+//   - Verify failure: Run removes the .db; runOnce renames it to *.corrupt
+//     for operator forensics. Run's callers are one-shot (an operator at a
+//     terminal, a boot-time migration guard) and both want the filesystem
+//     to look untouched after a failed command; the scheduler is a loop
+//     whose evidence would otherwise be overwritten by the next tick.
+//   - Sidecar failure: Run removes the .db so an operator-invoked backup
+//     never leaves a half-state to clean up by hand; runOnce deliberately
+//     keeps the verified-but-unsidecar'd file.
+//
+// On any failure Run writes no sidecar and ATTEMPTS to remove the .db it
+// wrote. It cannot guarantee the removal succeeds — a read-only mount or a
+// vanished directory can defeat it — so if the remove fails, that failure is
+// appended to the returned error rather than swallowed. The guarantee is
+// therefore: no sidecar ever, and either no .db or an error that says a .db
+// was left and where. The returned error always names the step that failed;
+// Verify failures additionally wrap ErrVerifyFailed.
 func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst string) error {
+	// The source must already exist. go-sqlite3 CREATES a missing database
+	// file on open, and a brand-new table-less SQLite file is exactly one
+	// page — which clears Verify's floor (the test is <, not <=) and, having
+	// no "transactions" table, clears the absence arm too. So without this
+	// stat, a misconfigured DBPath produced a fully verified, sidecar'd
+	// backup of a database that never existed: the trust marker earned by
+	// nothing at all, which is precisely what verifying Run exists to stop.
+	//
+	// The check belongs to Run rather than to any one caller: both callers
+	// have a real source in every legitimate scenario, and doing it here —
+	// before sourceBaseline — means a missing source is never OPENED, so
+	// the create-on-open side effect cannot fire at all.
+	//
+	// TOCTOU between this stat and the opens below is accepted: a source
+	// that vanishes in that window fails the snapshot loudly, which is the
+	// safe direction.
+	srcInfo, err := os.Stat(dbPath)
+	if err != nil {
+		return fmt.Errorf("cannot read source database %s: %w", dbPath, err)
+	}
+
+	// Existence is not validity. SQLite treats a 0-byte file as a valid
+	// EMPTY database, so a DB_PATH pointing at a touch'd file — a fresh
+	// bind mount, a volume that never got populated — sails through the
+	// stat above, has no "transactions" table so it rides the absence arm,
+	// and VACUUM INTO emits a 4096-byte copy that clears the size floor
+	// (measured: exactly minBackupSize, and the test is <, not <=). Every
+	// check passes and the file gets a full trust sidecar for a backup
+	// containing nothing.
+	//
+	// The scheduler already fails closed on this input, so Run was the last
+	// way to mint the artifact B8 exists to prevent. The legitimate
+	// first-boot source is unaffected: a real but table-less SQLite file is
+	// at least one page, and in practice 12 KB by the time
+	// ensureMigrationsTable has run (measured).
+	if srcInfo.Size() == 0 {
+		return fmt.Errorf("source database %s is empty (0 bytes): refusing to write a backup that would contain no data", dbPath)
+	}
+
+	// Baseline the source BEFORE snapshotting. VACUUM INTO takes a
+	// point-in-time snapshot, and measuring first is what makes Verify's
+	// one-row tolerance the right shape: a write that lands between the
+	// measurement and the snapshot point is forgiven, a missing thousand
+	// rows is not. Measuring AFTER would compare the backup against a
+	// source that has moved on, which is not a check of the copy.
+	//
+	// This matters on the CLI path specifically: `docker exec spendrop
+	// ./spendrop backup ...` runs against a live server that is still
+	// accepting writes.
+	params, err := sourceBaseline(ctx, dbPath, busyTimeout)
+	if err != nil {
+		return err
+	}
+
 	if err := Snapshot(ctx, dbPath, busyTimeout, dst); err != nil {
 		return err
 	}
+
+	if verifyErr := Verify(dst, params); verifyErr != nil {
+		failure := fmt.Errorf("%w: %w", ErrVerifyFailed, verifyErr)
+		if rmErr := os.Remove(dst); rmErr != nil {
+			// Say so rather than dropping it. A rejected copy that
+			// survives on disk is the one thing worse than no backup:
+			// it has no sidecar, so nothing automatic will look at it
+			// again, and an operator reading `ls` sees a plausible
+			// file. errors.Is(…, ErrVerifyFailed) still holds through
+			// the added wrap.
+			//
+			// Not covered by a test: reaching it needs os.Remove to
+			// fail on a file Snapshot has just successfully created,
+			// which means flipping the parent directory to read-only
+			// midway through this function — there is no seam to do
+			// that without a hook existing purely for the test. What
+			// IS tested is the claim side: neither the doc comment nor
+			// the CLI asserts the cleanup succeeded.
+			failure = fmt.Errorf("%w; additionally, could not remove the rejected copy at %s: %w", failure, dst, rmErr)
+		}
+		return failure
+	}
+
 	if _, err := WriteSidecar(dst); err != nil {
 		// Roll back the snapshot. The sidecar's existence is the
 		// marker every later phase uses to decide whether a file is
@@ -57,13 +175,133 @@ func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst stri
 		// For the CLI path, "clean up manually" is exactly the
 		// friction we want to avoid: the operator just ran a command
 		// and got an error, so the filesystem should look the same
-		// as before the command ran. The scheduler path, in contrast,
-		// deliberately keeps the .db on sidecar failure so an operator
-		// can inspect it — that divergence is why runOnce bypasses Run.
-		_ = os.Remove(dst)
+		// as before the command ran. If the rollback itself fails we
+		// report that too — the half-state is exactly what the caller
+		// needs told, and silently claiming a clean failure would send
+		// them off without the one fact that matters.
+		if rmErr := os.Remove(dst); rmErr != nil {
+			return fmt.Errorf("%w; additionally, could not remove the unsidecar'd snapshot at %s: %w", err, dst, rmErr)
+		}
 		return err
 	}
 	return nil
+}
+
+// sourceBaseline measures everything Verify needs to know about the source
+// database before the snapshot is taken: what the row count should be (or
+// that there should be no "transactions" table at all), how large the
+// backup may legitimately be, and how long verification may take.
+//
+// It is a separate function from Run so the "measure the source" step
+// cannot drift into the middle of the snapshot sequence, where it would
+// stop being a baseline.
+func sourceBaseline(ctx context.Context, dbPath string, busyTimeout time.Duration) (VerifyParams, error) {
+	var params VerifyParams
+
+	present, err := sourceHasTransactionsTable(ctx, dbPath, busyTimeout)
+	if err != nil {
+		return VerifyParams{}, err
+	}
+	if present {
+		count, err := countLiveTransactions(ctx, dbPath, busyTimeout)
+		if err != nil {
+			return VerifyParams{}, err
+		}
+		params.ExpectedTxCount = count
+	} else {
+		// First boot: migration 001 creates "transactions" and the
+		// pre-migration snapshot runs before any migration applies.
+		// The backup is expected to lack the table too — see
+		// VerifyParams.ExpectTransactionsAbsent for why this is an
+		// assertion rather than a skip.
+		params.ExpectTransactionsAbsent = true
+	}
+
+	// Size the bound and the budget from the source. A stat failure here
+	// degrades both to their "unmeasured" values (no upper bound, floor
+	// budget) rather than failing the run: the source being unreadable is
+	// about to surface from Snapshot with a far better error, and neither
+	// degraded value can turn an unverified backup into a trusted one.
+	srcSize, sizeErr := liveDBSize(dbPath)
+	if sizeErr != nil {
+		srcSize = 0
+	}
+	if srcSize > 0 {
+		// Same derivation as the scheduler (see runOnce step 2): 10× the
+		// LIVE SOURCE, never the previous backup. VACUUM INTO output is
+		// normally smaller than its source, so a copy 10× the source is a
+		// copy bug — and a source-relative bound is stateless, so it
+		// cannot wedge the way a backup-relative one did.
+		params.MaxSize = 10 * srcSize
+	}
+	params.QueryBudget = budgetForSize(srcSize)
+
+	return params, nil
+}
+
+// sourceHasTransactionsTable reports whether the live database at dbPath
+// has a "transactions" table. It uses the same minimal DSN as Snapshot and
+// countLiveTransactions (busy_timeout only, no _journal_mode pragma), so
+// probing never changes the source's journal MODE — which is the actual
+// hazard documented at Snapshot, since the server has already put the
+// database in WAL and a pragma write here would silently take it out.
+//
+// That is a narrower claim than "the probe does not touch the source", and
+// deliberately so: closing the connection checkpoints on last close, so
+// probing a source that carries a -wal can absorb it into the main file and
+// delete the -wal/-shm. That is standard SQLite behaviour, loses no data,
+// and is what the parent process would do anyway — but it is a write, so do
+// not describe this function as side-effect-free.
+//
+// The table name is hard-coded to match Verify and countLiveTransactions
+// for the same reason those two hard-code it: the whole point is parity
+// between what the source has and what the backup has, and a parameter
+// would let a caller ask the two questions about different tables.
+func sourceHasTransactionsTable(ctx context.Context, dbPath string, busyTimeout time.Duration) (bool, error) {
+	dsn := fmt.Sprintf("%s?_busy_timeout=%d", dbPath, busyTimeout.Milliseconds())
+	db, err := sql.Open("sqlite3", dsn)
+	if err != nil {
+		return false, fmt.Errorf("open source database: %w", err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+
+	var n int64
+	const q = `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'transactions'`
+	if err := db.QueryRowContext(ctx, q).Scan(&n); err != nil {
+		return false, fmt.Errorf("probe source for transactions table: %w", err)
+	}
+	return n > 0, nil
+}
+
+// RunTimeout returns the wall-clock cap a caller should put on the context
+// it passes to Run against the database at dbPath. Run does not apply one
+// to itself — a primitive should not impose a deadline its caller cannot
+// see — so a caller that wants one (the CLI subcommand) derives it here
+// rather than hard-coding a constant a large database can outgrow.
+//
+// Run makes FOUR O(file size) passes, and they are bounded differently — be
+// precise about this, because the gaps are real:
+//
+//   - sourceBaseline's COUNT(*) over "transactions" observes the caller's
+//     ctx, so this figure bounds it.
+//   - VACUUM INTO observes the caller's ctx, so this figure bounds it too.
+//   - Verify runs on its own internal QueryBudget and never observes ctx.
+//   - WriteSidecar's SHA-256 hash (Sha256File's io.Copy) observes NEITHER.
+//     It is unbounded: a read stall there is not surfaced by any deadline,
+//     and no value returned here can change that. Bounding it would mean
+//     threading a ctx through the hash path, which is a separate change.
+//
+// The figure is twice budgetForSize so the caller's cap is comfortably the
+// looser of the constraints it does govern — a run that dies on a deadline
+// should die on the one sized for the work that stalled, not on an
+// operator-facing cap that happened to be tighter.
+func RunTimeout(dbPath string) time.Duration {
+	size, err := liveDBSize(dbPath)
+	if err != nil {
+		size = 0 // budgetForSize turns this into the floor
+	}
+	return 2 * budgetForSize(size)
 }
 
 // Snapshot writes a VACUUM INTO copy of the database at dbPath to dst. It
@@ -71,11 +309,12 @@ func Run(ctx context.Context, dbPath string, busyTimeout time.Duration, dst stri
 // On VACUUM INTO failure, it sweeps any stale companion files it may have
 // left behind at dst / dst-wal / dst-shm / dst-journal.
 //
-// This is the lower-level primitive that both Run (CLI) and the scheduler
-// use. The scheduler needs the snapshot and the sidecar write to be
-// separate operations because Phase 1.3 verification runs between them:
-// the sidecar is the "this file is trusted" marker and must not be written
-// for a file that failed verification.
+// This is the lower-level primitive that both Run and the scheduler use.
+// Both need the snapshot and the sidecar write to be separate operations
+// because Phase 1.3 verification runs between them: the sidecar is the
+// "this file is trusted" marker and must not be written for a file that
+// failed verification. Calling Snapshot + WriteSidecar with no Verify
+// between them breaks the package invariant — use Run.
 //
 // The function uses VACUUM INTO, which is the SQLite online backup
 // primitive: it acquires a read snapshot of the source, copies every page

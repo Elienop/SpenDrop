@@ -2,12 +2,15 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/elienop/spendrop/internal/backup"
 )
 
 // TestFormatMigrationSnapshotName_Shape asserts the generated filename
@@ -235,6 +238,15 @@ func TestPruneMigrationSnapshots_NegativeKeepRejected(t *testing.T) {
 // SnapshotForMigration, and verify the returned path points at a .db
 // file with an adjacent .sha256 sidecar. This is the happy path that
 // all the RunMigrations acceptance criteria build on.
+//
+// It keeps its table-less-of-"transactions" fixture on purpose. Now that
+// backup.Run verifies (B8), a source holding only table `t` IS the
+// production first-boot shape — the pre-migration snapshot runs before
+// migration 001 creates "transactions" — so this doubles as coverage that
+// the absent-table arm still yields a sidecar. The verification FAILURE
+// outcome is TestSnapshotForMigration_RefusesUnverifiableSnapshot below;
+// the count-parity pass is covered where a migrated database exists, in
+// migrate_test.go and cmd/spendrop, not in this file.
 func TestSnapshotForMigration_WritesFileAndSidecar(t *testing.T) {
 	db, dbPath := openTestDB(t)
 
@@ -265,6 +277,72 @@ func TestSnapshotForMigration_WritesFileAndSidecar(t *testing.T) {
 	}
 	if !strings.HasSuffix(name, "Z.db") {
 		t.Errorf("unexpected filename suffix: %q", name)
+	}
+}
+
+// openUnverifiableTestDB is openTestDB's evil twin: a file-backed source
+// whose snapshot cannot pass verification. A 512-byte page size makes
+// VACUUM INTO emit roughly 1 KB, below backup.Verify's one-SQLite-page
+// floor, so the snapshot is written and then rejected — a deterministic
+// verify failure with no timing games. (Same technique as
+// internal/backup's tinyPageSizeSourceDB.)
+//
+// It cannot use WAL: SQLite refuses to change page_size on a WAL database,
+// and the pragma has to land before anything writes the file header. The
+// pool is pinned to one connection for the same reason — a second
+// connection would create the header with the default 4096.
+func openUnverifiableTestDB(t *testing.T) (*sql.DB, string) {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+	db, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatalf("open test db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	if _, err := db.Exec("PRAGMA page_size=512"); err != nil {
+		t.Fatalf("set page_size: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db, dbPath
+}
+
+// TestSnapshotForMigration_RefusesUnverifiableSnapshot asserts the
+// pre-migration anchor is only handed back once it has been checked.
+//
+// The path used to be Snapshot + WriteSidecar with no Verify, so a snapshot
+// that did not match the live database still got the ".sha256" trust marker
+// and was announced in the log as the file to "restore from" — the one
+// moment an operator is most likely to act on that promise. Failure must
+// surface as an error tagged with backup.ErrVerifyFailed and leave nothing
+// on disk that a later restore could mistake for an anchor.
+func TestSnapshotForMigration_RefusesUnverifiableSnapshot(t *testing.T) {
+	db, dbPath := openUnverifiableTestDB(t)
+	if _, err := db.Exec("CREATE TABLE transactions (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatalf("create transactions: %v", err)
+	}
+
+	snapDir := filepath.Join(filepath.Dir(dbPath), "snapshots")
+	got, err := SnapshotForMigration(context.Background(), dbPath, snapDir, "005_foo", 5*time.Second)
+	if err == nil {
+		t.Fatalf("expected verification failure, got snapshot at %s", got)
+	}
+	if !errors.Is(err, backup.ErrVerifyFailed) {
+		t.Errorf("error = %v, want it to wrap backup.ErrVerifyFailed", err)
+	}
+	// Naming the failed check is what tells an operator whether to look at
+	// the disk or at the database.
+	if !strings.Contains(err.Error(), "size too small") {
+		t.Errorf("error = %v, want the failed check named", err)
+	}
+
+	// Nothing left behind — neither a bogus anchor nor its trust marker.
+	entries, readErr := os.ReadDir(snapDir)
+	if readErr != nil {
+		t.Fatalf("read snapshot dir: %v", readErr)
+	}
+	for _, e := range entries {
+		t.Errorf("snapshot dir should be empty, found %s", e.Name())
 	}
 }
 
