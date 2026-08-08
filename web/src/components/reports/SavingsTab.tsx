@@ -212,7 +212,18 @@ export function SavingsTab() {
                     config={SAVINGS_CONFIG}
                     className="h-[200px] w-[200px]"
                   >
+                    {/*
+                      recharts 3 flipped `accessibilityLayer` to default TRUE.
+                      Every other chart in the app opts in explicitly; this ring
+                      never did, so the bump would silently have made it a
+                      keyboard tab stop with `role="application"` and no
+                      accessible name — a decorative single-value ring with no
+                      data series to navigate. Opting out keeps the pre-bump
+                      behaviour, so this dependency change alters no UX. The
+                      figure it displays is already read from the text beside it.
+                    */}
                     <RadialBarChart
+                      accessibilityLayer={false}
                       innerRadius={70}
                       outerRadius={90}
                       data={radialData}
@@ -417,7 +428,18 @@ export function SavingsTab() {
                 <ChartTooltip
                   content={<ChartTooltipContent hideIndicator />}
                 />
-                <ChartLegend content={<ChartLegendContent />} />
+                {/*
+                  recharts 3's Legend sorts by `itemSorter` (default 'value')
+                  in its own selector, reaching custom content; recharts 2 never
+                  sorted. This legend's dataKeys (currentNet, previousNet)
+                  happen to sort into their declared order, so it does not move
+                  today — pinned anyway, because that is a coincidence and a
+                  future rename would silently reverse the two years.
+                */}
+                <ChartLegend
+                  content={<ChartLegendContent />}
+                  itemSorter={null}
+                />
                 {/* Symmetric radius (not [4, 4, 0, 0]) so negative-net bars,
                     which grow downward from the zero line, still render with
                     rounded outer corners — the array form rounds only the
