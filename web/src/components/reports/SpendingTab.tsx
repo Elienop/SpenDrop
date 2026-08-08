@@ -301,7 +301,15 @@ export function SpendingTab() {
                       dataKey="total"
                       position="right"
                       className="fill-muted-foreground text-xs"
-                      formatter={(value: number) => fmt(value)}
+                      // recharts 3 types LabelList's formatter as
+                      // `LabelFormatter`, whose argument is `RenderableText`
+                      // (string | number | boolean | null | undefined), so the
+                      // old `(value: number)` annotation no longer applies.
+                      // Only numbers are currency here; anything else renders
+                      // empty rather than being coerced into a bogus amount.
+                      formatter={(value) =>
+                        typeof value === 'number' ? fmt(value) : ''
+                      }
                     />
                     {breakdownSorted.map((entry) => (
                       <Cell
@@ -371,7 +379,22 @@ export function SpendingTab() {
                     <ChartTooltipContent labelFormatter={formatMonthLabel} />
                   }
                 />
-                <ChartLegend content={<ChartLegendContent />} />
+                {/*
+                  recharts 3 added `itemSorter` to Legend, defaulting to
+                  'value' and applied in its own selector, so it reaches CUSTOM
+                  legend content too; recharts 2 never sorted at all. Here the
+                  series are declared in descending-spend order (see
+                  `expenseCategories`, sorted above), and the dataKeys are
+                  `cat-<id>` — so the default sorter would re-order the chips
+                  lexicographically by id string (cat-11 before cat-2 before
+                  cat-4), destroying the spend ranking. `null` restores the v2
+                  behaviour: recharts' docs state a null sorter leaves the
+                  payload unsorted.
+                */}
+                <ChartLegend
+                  content={<ChartLegendContent />}
+                  itemSorter={null}
+                />
                 {expenseCategories.map((cat) => (
                   <Line
                     key={cat.id}
@@ -497,7 +520,16 @@ export function SpendingTab() {
                   tickMargin={10}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <ChartLegend content={<ChartLegendContent />} />
+                {/*
+                  See the note on the Category Trends legend above. This is the
+                  chart where the regression was observed live: declared
+                  current / previous / pace rendered as "Current Month, Budget
+                  Pace, Previous Month" under recharts 3's default sorter.
+                */}
+                <ChartLegend
+                  content={<ChartLegendContent />}
+                  itemSorter={null}
+                />
                 <Line
                   type="monotone"
                   dataKey="current"

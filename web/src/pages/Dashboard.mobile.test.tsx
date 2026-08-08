@@ -2,7 +2,12 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { createElement, type ReactNode } from 'react';
+import {
+  cloneElement,
+  createElement,
+  type ReactElement,
+  type ReactNode,
+} from 'react';
 import type { UseDashboardResult } from '../hooks/useDashboard';
 
 /**
@@ -109,25 +114,71 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: () => ({ user: { id: 1, display_name: 'Elie' }, loading: false }),
 }));
 
-// Recharts renders nothing useful without a ResizeObserver; every primitive
-// the shadcn chart helper touches via its namespace import has to exist or the
-// chart crashes on mount. Same stub set as Dashboard.test.tsx.
-vi.mock('recharts', () => ({
-  BarChart: ({ children }: { children: ReactNode }) => <div>{children}</div>,
-  Bar: () => <div />,
-  XAxis: () => <div />,
-  CartesianGrid: () => <div />,
-  ResponsiveContainer: ({ children }: { children: ReactNode }) => (
-    <div>{children}</div>
-  ),
-  YAxis: () => <div />,
-  Cell: () => <div />,
-  Tooltip: () => <div />,
-  Legend: () => <div />,
-  LabelList: () => <div />,
-  Customized: () => <div />,
-  ReferenceLine: () => <div />,
-}));
+// Recharts SIZING mock — deliberately not a wholesale stub.
+//
+// This file used to replace every recharts export with a passthrough `<div>`
+// (`Bar: () => <div />`, `XAxis: () => <div />`, …). That renders the Cash
+// Flow chart structurally invisible: the 2 -> 3 bump changed three library
+// DEFAULTS with no compile error and the suite stayed green throughout. A
+// stubbed `XAxis` cannot tell you the phone-width chart still labels every
+// month — which is the one chart property this file exists to defend, since
+// the whole point of the mobile pass was that nothing on this page may
+// silently drop content or pan off-screen at 390px.
+//
+// The ONLY thing that genuinely cannot work under happy-dom is
+// `ResponsiveContainer`: it measures its parent, gets 0x0 (there is no layout
+// engine), and recharts bails on a non-positive size. So mock exactly that,
+// and leave the real library everywhere else — the shape already proven in
+// `src/components/ui/chart.test.tsx`.
+//
+// The explicit `ReactElement<{ width?: number; height?: number }>` generic is
+// REQUIRED: `cloneElement` has no overload for an element whose props are
+// `unknown`, and `tsc -b` type-checks test files (unlike `--noEmit`), so
+// without it the suite stays green while types go red.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: ReactElement<{ width?: number; height?: number }>;
+    }) => cloneElement(children, { width: 400, height: 300 }),
+  };
+});
+
+/**
+ * Newest-first, exactly as `dashboard_handlers.go` returns it — the Dashboard
+ * reverses it into chronological order for the chart, and a fixture in the
+ * wrong order would hide that.
+ *
+ * SIX months, deliberately, and deliberately crossing a year boundary: the
+ * default Cash Flow view is 6M, so this fills the slice exactly, and Jan'26
+ * sitting next to Dec'25 is what makes the year-aware ISO `date` key
+ * observable at all. Against the two-month fixture this file used to carry
+ * (from when recharts was stubbed out entirely), a `slice` that kept the wrong
+ * count and a tick key that ignored the year both label correctly.
+ */
+const TREND = [
+  { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
+  { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
+  { year: 2026, month: 2, total_spent: 2600, total_income: 4100 },
+  { year: 2026, month: 1, total_spent: 2400, total_income: 4000 },
+  { year: 2025, month: 12, total_spent: 3900, total_income: 4300 },
+  { year: 2025, month: 11, total_spent: 2200, total_income: 3900 },
+];
+
+/** What the axis must read, left to right, at phone width. Written out rather
+ *  than derived from `TREND` through `formatMonthTick`: re-running the
+ *  formatter here would assert only that it equals itself. */
+const EXPECTED_MONTH_TICKS = [
+  "Nov'25",
+  "Dec'25",
+  "Jan'26",
+  "Feb'26",
+  "Mar'26",
+  "Apr'26",
+];
 
 vi.mock('../hooks/useDashboard', () => ({
   useDashboard: (): UseDashboardResult => ({
@@ -143,10 +194,7 @@ vi.mock('../hooks/useDashboard', () => ({
       savings_ytd: 7500,
       savings_goal_progress: 75,
     },
-    trend: [
-      { year: 2026, month: 4, total_spent: 3200, total_income: 4500 },
-      { year: 2026, month: 3, total_spent: 2800, total_income: 4200 },
-    ],
+    trend: TREND,
     categories: [{ id: 1, name: 'Food', total: 1200, limit: null, over: false }],
     loading: false,
     fetching: false,
@@ -271,6 +319,103 @@ describe('Dashboard recent transactions at phone width', () => {
     expect(within(list).queryByRole('checkbox')).not.toBeInTheDocument();
     expect(within(list).queryByRole('button')).not.toBeInTheDocument();
     expect(within(list).queryByText(/entered by/i)).not.toBeInTheDocument();
+  });
+
+  // ── Cash Flow chart ──
+  //
+  // The card list is why this file exists, but the same page draws a real
+  // chart at 390px and, until the recharts 3 bump, the whole suite mocked it
+  // away — so a dropped series or a dropped month bucket showed up only in the
+  // browser. These run inside the mobile file on purpose: the chart shares the
+  // page's narrow grid track, and phone width is where a bucket goes missing
+  // first.
+  //
+  // `ResponsiveContainer` is the one thing still mocked (happy-dom has no
+  // layout engine, so it measures 0x0 and recharts refuses to draw); every
+  // element queried below is drawn by the real library off the real config.
+
+  /**
+   * The chart's drawn SVG — the positive control the count assertions below
+   * rest on.
+   *
+   * `[data-chart]` here is a SCOPE, not the control: it is the shadcn
+   * `ChartContainer` div, which renders whether or not recharts draws
+   * anything. Neither is `.recharts-wrapper` — measured, not assumed, by
+   * neutralising this file's sizing shim to `cloneElement(children, {})` (the
+   * exact state the old wholesale recharts mock left this file in): the
+   * container AND the wrapper both still render, the wrapper surviving as an
+   * empty 81-byte shell (`<div class="recharts-wrapper" style="position:
+   * relative; cursor: default;"></div>`) with no `recharts-*` descendants at
+   * all. Only `.recharts-surface` and everything under it disappear.
+   *
+   * (An earlier version of this note said 336 bytes. That number was real but
+   * belonged to a different node — it is `[data-chart]`.innerHTML.length, which
+   * includes the shadcn `<ChartStyle>` <style> element from ui/chart.tsx. The
+   * wrapper itself is 81. Corrected rather than dropped, because a measurement
+   * attached to the wrong node is how a comment starts sounding authoritative
+   * while being wrong.)
+   *
+   * So the surface is the first node whose
+   * presence means the library actually laid the chart out, and asserting it
+   * is what makes "2 series, 6 bars, 6 ticks" a claim about a live chart
+   * rather than about a div.
+   */
+  function chartSurface(container: HTMLElement): Element {
+    const chart = container.querySelector('[data-chart]');
+    expect(chart).not.toBeNull();
+    const surface = chart!.querySelector('.recharts-surface');
+    expect(surface).not.toBeNull();
+    return surface!;
+  }
+
+  // The control, stated as its own test so a sizing shim that stops working
+  // fails by name rather than as an off-by-two count somewhere below. Verified
+  // by mutation: `cloneElement(children, {})` fails here on
+  // `expect(surface).not.toBeNull()`.
+  it('actually draws the cash-flow chart at phone width', async () => {
+    const { container } = await renderMobile();
+    const surface = chartSurface(container);
+    // A surface with nothing under it would still be a dead chart.
+    expect(surface.querySelectorAll('.recharts-layer').length).toBeGreaterThan(
+      0,
+    );
+  });
+
+  it('draws both cash-flow series, one bar per month', async () => {
+    const { container } = await renderMobile();
+    const series = chartSurface(container).querySelectorAll('.recharts-bar');
+
+    // Income and expense. One `<Bar>` silently dropped — or one rendering off
+    // a dataKey the data does not carry — is invisible to a stubbed `Bar`.
+    expect(series).toHaveLength(2);
+    for (const bar of series) {
+      expect(bar.querySelectorAll('.recharts-bar-rectangle')).toHaveLength(
+        TREND.length,
+      );
+    }
+  });
+
+  it('labels every month on the axis, chronologically and year-aware', async () => {
+    const { container } = await renderMobile();
+    const ticks = Array.from(
+      chartSurface(container).querySelectorAll(
+        '.recharts-cartesian-axis-tick-value',
+      ),
+    ).map((tick) => tick.textContent);
+
+    // Pins four things a passthrough `<XAxis />` said nothing about: the
+    // `date` dataKey, `formatMonthTick`, the `.reverse()` that puts the newest
+    // month on the right, and that the 6M slice keeps every bucket. Verified
+    // by mutation: dropping the `.reverse()` renders `Apr'26 … Nov'25` and
+    // fails here.
+    //
+    // What it does NOT cover, measured rather than assumed: deleting
+    // `interval={0}` from the axis leaves this green. Recharts culls
+    // overlapping ticks by measuring rendered text, happy-dom has no layout
+    // engine, so every tick always survives here regardless of the setting.
+    // A bucket lost to the DATA path (a wrong slice, a wrong key, a lost
+    // reverse) fails; a bucket lost to tick culling is a browser check.
+    expect(ticks).toEqual(EXPECTED_MONTH_TICKS);
   });
 
   it('keeps the month/Latest toggle and View All reachable', async () => {

@@ -26,41 +26,37 @@ import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { UseDashboardResult } from '../hooks/useDashboard';
 import type { CategoryBreakdownItem } from '../api/types';
 
-// Recharts mock — Recharts ships as ES modules that don't render in jsdom
-// without a ResizeObserver, so every component is stubbed to a passthrough.
+// Recharts sizing mock — NOT a wholesale stub.
 //
-// IMPORTANT: shadcn's `src/components/ui/chart.tsx` does:
+// This file used to replace every recharts export with a passthrough `<div>`
+// (`Bar: () => <div />`, `Tooltip: () => <div />`, …). That renders the Cash
+// Flow chart structurally invisible to the suite: the recharts 2 -> 3 bump
+// changed three library DEFAULTS with no compile error and the whole 1400-test
+// suite stayed green while a legend silently reordered in the browser. A
+// stubbed `Bar` cannot tell you the chart drew two series, in the right order,
+// off the right dataKeys.
 //
-//     import * as RechartsPrimitive from "recharts"
-//     const ChartLegend = RechartsPrimitive.Legend
-//     // and ChartStyle reads RechartsPrimitive.* directly
+// The ONLY thing that genuinely does not work under happy-dom is
+// `ResponsiveContainer`: it measures its parent, gets 0x0 (there is no layout
+// engine), and recharts bails on a non-positive size. So mock exactly that and
+// leave the real library everywhere else — the same shape already proven in
+// `src/components/ui/chart.test.tsx`.
 //
-// Because it's a namespace import, any name referenced at module-eval time
-// that's missing from this mock becomes `undefined` and React crashes with
-// "Element type is invalid: expected a string or a class/function but got:
-// undefined" as soon as ChartContainer mounts. The mock below therefore
-// declares *every* Recharts surface shadcn's chart helper can touch, not
-// just the ones Dashboard.tsx uses directly. Add new stubs here whenever a
-// future chart primitive starts pulling in more Recharts exports.
-vi.mock('recharts', () => ({
-  // Used by Dashboard.tsx
-  BarChart: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  Bar: () => <div />,
-  XAxis: () => <div />,
-  CartesianGrid: () => <div />,
-  // Referenced by shadcn's chart.tsx namespace import (ChartLegend, ChartStyle, tooltip plumbing)
-  ResponsiveContainer: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
-  YAxis: () => <div />,
-  Cell: () => <div />,
-  Tooltip: () => <div />,
-  Legend: () => <div />,
-  Surface: () => <div />,
-  Layer: () => <div />,
-  Sector: () => <div />,
-  LabelList: () => <div />,
-  Customized: () => <div />,
-  ReferenceLine: () => <div />,
-}));
+// The explicit `React.ReactElement<{ width?: number; height?: number }>`
+// generic is REQUIRED: `cloneElement` has no overload for an element whose
+// props are `unknown`, and `tsc -b` type-checks test files (unlike
+// `--noEmit`), so without it the suite stays green while types go red.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 400, height: 300 }),
+  };
+});
 
 const defaultDashboardData: UseDashboardResult = {
   summary: {
@@ -402,6 +398,203 @@ describe('Dashboard', () => {
     const cashFlowGroup = groups.find((g) => g.contains(btn6));
     expect(cashFlowGroup).toBeDefined();
     expect(cashFlowGroup).toContainElement(btn12);
+  });
+
+  // ── The Cash Flow chart, as the REAL recharts draws it ───────────────────
+  //
+  // Every other assertion in this file survives a stubbed recharts, which is
+  // exactly the problem the wholesale mock created: `Bar: () => <div />` and
+  // `XAxis: () => <div />` cannot tell you that the chart drew the wrong
+  // series, silently dropped one, ordered the months newest-first, or that a
+  // library default moved under the 2 -> 3 bump. These read the SVG recharts
+  // actually produced.
+  describe('the Cash Flow chart draws the trend', () => {
+    /** One drawn bar: the gradient identifies its series, `x` its month. */
+    type DrawnBar = { fill: string; x: number; height: number };
+
+    const drawnBars = (container: HTMLElement): DrawnBar[] =>
+      Array.from(
+        container.querySelectorAll<SVGPathElement>('path.recharts-rectangle'),
+      ).map((p) => ({
+        fill: p.getAttribute('fill') ?? '',
+        x: Number(p.getAttribute('x')),
+        height: Number(p.getAttribute('height')),
+      }));
+
+    /** Heights of one series, ordered oldest month → newest (left → right). */
+    const seriesHeights = (bars: DrawnBar[], fill: string): number[] =>
+      bars
+        .filter((b) => b.fill === fill)
+        .sort((a, b) => a.x - b.x)
+        .map((b) => b.height);
+
+    /** X-axis tick labels, in the order recharts laid them out. */
+    const tickLabels = (container: HTMLElement): string[] =>
+      Array.from(
+        container.querySelectorAll('text.recharts-cartesian-axis-tick-value'),
+      ).map((t) => t.textContent ?? '');
+
+    /**
+     * Resolve a `fill="url(#id)"` reference to the paint server it NAMES.
+     * Returns null when nothing carries that id — a DANGLING reference, which
+     * paints nothing on screen while the `fill` attribute string still reads
+     * exactly right.
+     *
+     * Scoped to the rendered container, not to the bar's own `<svg>`, and that
+     * is deliberate: a same-document `url(#id)` resolves against the DOCUMENT,
+     * so a paint server in a sibling `<svg>` is a legitimate reference and a
+     * same-`<svg>` assertion would reject working markup. Matching on
+     * `[id="…"]` rather than `#id` sidesteps CSS identifier escaping.
+     */
+    const resolvePaintServer = (
+      container: HTMLElement,
+      fill: string,
+    ): Element | null => {
+      const id = /^url\(#(.+)\)$/.exec(fill)?.[1];
+      if (id === undefined) return null;
+      return container.querySelector(`[id="${id}"]`);
+    };
+
+    test('draws one bar per month for BOTH series, each on its own gradient', async () => {
+      const { container } = render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      // Two assertions, and they cover different failures:
+      //
+      // 1. The `fill` STRINGS partition the bars two-and-two. The gradient
+      //    reference is the only thing in the DOM that names a series, so this
+      //    is what catches a lost <Bar> or a series drawn on the wrong fill.
+      // 2. Each of those references RESOLVES to a real <linearGradient> in the
+      //    rendered tree. Assertion 1 alone only compares literals, and that
+      //    gap is mutation-proven: renaming the def to `fillIncomeRENAMED`
+      //    while leaving `fill="url(#fillIncome)"` untouched points every
+      //    income bar at a paint server that does not exist — unpainted in a
+      //    browser — and assertion 1 still passes. Only assertion 2 fails.
+      await waitFor(() => {
+        const byFill: Record<string, number> = {};
+        for (const b of drawnBars(container)) {
+          byFill[b.fill] = (byFill[b.fill] ?? 0) + 1;
+        }
+        expect(byFill).toEqual({
+          'url(#fillIncome)': 2,
+          'url(#fillExpense)': 2,
+        });
+
+        // Positive control on the resolver itself: an id that is not in the
+        // SVG must come back null. Without it a resolver that returned the
+        // first node it found would wave the loop below through on any string.
+        // The sentinel is deliberately an id no def could ever plausibly be
+        // renamed TO — a near-miss like `fillIncomeRENAMED` collides with the
+        // mutant, and the mutation then dies HERE instead of on the assertion
+        // that is supposed to catch it.
+        expect(resolvePaintServer(container, 'url(#no-such-paint-server)')).toBeNull();
+
+        const defs = Object.keys(byFill).map((fill) => {
+          const def = resolvePaintServer(container, fill);
+          expect(def, `${fill} resolves to nothing — dangling paint server`).not.toBeNull();
+          expect(def?.tagName.toLowerCase()).toBe('lineargradient');
+          return def;
+        });
+        // Two references, two DISTINCT gradients — not both bars sharing one.
+        expect(new Set(defs).size).toBe(2);
+      });
+    });
+
+    test('bar heights encode the trend values against one shared axis', async () => {
+      const { container } = render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      // The fixture is newest-first, as the backend sends it; `chartData`
+      // reverses it, so left → right is Mar then Apr.
+      const expected = [4200, 4500, 2800, 3200]; // income Mar/Apr, expense Mar/Apr
+
+      // Bars grow in from zero height (recharts' `isAnimationActive` default,
+      // ~400ms for a Bar) and mid-flight the two series are NOT in step with
+      // each other — measured one frame in, income and expense sat 2% apart on
+      // a scale they must ultimately share. Asserting INSIDE waitFor is what
+      // makes that a retry rather than a flake: the only state that satisfies
+      // it is the settled one.
+      await waitFor(() => {
+        const bars = drawnBars(container);
+        const heights = [
+          ...seriesHeights(bars, 'url(#fillIncome)'),
+          ...seriesHeights(bars, 'url(#fillExpense)'),
+        ];
+
+        // Positive control FIRST: every comparison below is a RATIO, so an
+        // all-zero chart — bars that never drew, or a collapsed y-domain —
+        // would divide 0 by 0 and needs to be excluded explicitly rather than
+        // left to produce a NaN that happens to fail for the wrong reason.
+        expect(heights).toHaveLength(4);
+        for (const h of heights) expect(h).toBeGreaterThan(0);
+
+        // Both series share one y-axis, so ONE pixels-per-dollar scale has to
+        // explain all four bars. Compared as heights normalised against the
+        // first bar, not as absolute pixels: the pixel values depend on the
+        // mocked 400x300 box and recharts' margins, the proportions do not.
+        // Normalising also keeps the tolerance meaningful — the raw scale here
+        // is ~0.004 px/$, small enough that `toBeCloseTo(…, 3)` on it would
+        // wave through a 2% error, which is exactly the size of the
+        // mid-animation skew this has to reject.
+        const norm = (xs: number[]) => xs.map((x) => x / xs[0]);
+        norm(heights).forEach((ratio, i) => {
+          expect(ratio).toBeCloseTo(norm(expected)[i], 3);
+        });
+      });
+    });
+
+    test('the X axis labels every month bucket, oldest first', async () => {
+      const { container } = render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      // Pins `formatMonthTick` and the chronological order. What it does NOT
+      // pin, despite appearances, is `interval={0}`: verified by mutation —
+      // deleting it from the XAxis leaves this file 32/32 green, because
+      // recharts thins ticks by measured text width and happy-dom measures
+      // everything as zero, so its default keeps every tick anyway. Tick
+      // thinning is a browser-only behaviour and this is a browser-only check.
+      //
+      // `formatMonthTick` itself IS load-bearing here: a bare "Mar" collapsed
+      // same-month buckets from different years into one category on any 12M
+      // view that crossed a year boundary.
+      await waitFor(() => {
+        expect(tickLabels(container)).toEqual(["Mar'26", "Apr'26"]);
+      });
+    });
+
+    test('6M shows the LAST six months; 12M shows the whole trend', async () => {
+      // Newest-first, like the backend: Aug back to Jan.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        trend: [8, 7, 6, 5, 4, 3, 2, 1].map((month) => ({
+          year: 2026,
+          month,
+          total_spent: 1000 + month,
+          total_income: 2000 + month,
+        })),
+      });
+      const user = userEvent.setup();
+      const { container } = render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      // Default view is 6m. `slice(-6)` keeps the SIX MOST RECENT months —
+      // `slice(0, 6)` would keep Jan–Jun and look just as plausible in a
+      // screenshot, which is precisely why it needs pinning by label.
+      await waitFor(() => {
+        expect(tickLabels(container)).toEqual([
+          "Mar'26", "Apr'26", "May'26", "Jun'26", "Jul'26", "Aug'26",
+        ]);
+      });
+      // Positive control on the bar side: six buckets must mean twelve bars,
+      // otherwise the label list above could be describing an axis drawn over
+      // a chart that plotted nothing.
+      await waitFor(() => expect(drawnBars(container)).toHaveLength(12));
+
+      await user.click(screen.getByRole('button', { name: '12M' }));
+      await waitFor(() => {
+        expect(tickLabels(container)).toEqual([
+          "Jan'26", "Feb'26", "Mar'26", "Apr'26",
+          "May'26", "Jun'26", "Jul'26", "Aug'26",
+        ]);
+      });
+      await waitFor(() => expect(drawnBars(container)).toHaveLength(16));
+    });
   });
 
   test('does not show "Other" category or "Show more" when <= 6 categories', () => {

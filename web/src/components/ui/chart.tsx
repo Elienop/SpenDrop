@@ -1,7 +1,20 @@
 import * as React from "react"
 import * as RechartsPrimitive from "recharts"
+import type { TooltipValueType } from "recharts"
 
 import { cn } from "@/lib/utils"
+
+// recharts 3 reads `payload` and `label` from context rather than passing them
+// as props, so `ComponentProps<typeof Tooltip>` no longer carries them (they
+// live behind the library's internal `PropertiesReadFromContext`). The default
+// content components still declare them, so we intersect their prop types back
+// in. `accessibilityLayer` is omitted because it collides with the chart-level
+// prop of the same name.
+//
+// recharts does not export the tooltip's name type, and it is only ever a
+// series name here, so it is restated locally rather than reached for through
+// the library's internals.
+type TooltipNameType = number | string
 
 // Format: { THEME_NAME: CSS_SELECTOR }
 const THEMES = { light: "", dark: ".dark" } as const
@@ -103,6 +116,13 @@ const ChartTooltip = RechartsPrimitive.Tooltip
 const ChartTooltipContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<typeof RechartsPrimitive.Tooltip> &
+    Omit<
+      RechartsPrimitive.DefaultTooltipContentProps<
+        TooltipValueType,
+        TooltipNameType
+      >,
+      "accessibilityLayer"
+    > &
     React.ComponentProps<"div"> & {
       hideLabel?: boolean
       hideIndicator?: boolean
@@ -191,8 +211,12 @@ const ChartTooltipContent = React.forwardRef<
               const indicatorColor = color || item.payload.fill || item.color
 
               return (
+                // recharts 3 widened `dataKey` to include a function type,
+                // which is not a valid React key. The index is stable here:
+                // this list is a single tooltip's payload, rendered in place
+                // and never reordered.
                 <div
-                  key={item.dataKey}
+                  key={index}
                   className={cn(
                     "flex w-full items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:text-muted-foreground",
                     indicator === "dot" && "items-center"
@@ -264,7 +288,13 @@ const ChartLegend = RechartsPrimitive.Legend
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> &
-    Pick<RechartsPrimitive.LegendProps, "payload" | "verticalAlign"> & {
+    // recharts 3 removed `payload` and `verticalAlign` from `LegendProps`, so
+    // the old `Pick<LegendProps, …>` no longer type-checks — and while broken
+    // it made `payload` a REQUIRED prop at every `<ChartLegendContent />` call
+    // site. Intersecting the default legend content's own props restores both
+    // fields and makes `payload` optional again, which is what the call sites
+    // in SpendingTab and SavingsTab rely on.
+    RechartsPrimitive.DefaultLegendContentProps & {
       hideIcon?: boolean
       nameKey?: string
     }
