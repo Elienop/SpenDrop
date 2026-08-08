@@ -1182,9 +1182,10 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 }
 
 const listDeletedTransactions = `-- name: ListDeletedTransactions :many
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
+LEFT JOIN users u ON t.user_id = u.id
 WHERE t.deleted_at IS NOT NULL
 ORDER BY t.deleted_at DESC, t.id DESC
 LIMIT ? OFFSET ?
@@ -1211,6 +1212,12 @@ type ListDeletedTransactionsRow struct {
 	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
 	CategoryName        string         `json:"category_name"`
 	CategoryType        string         `json:"category_type"`
+	// CreatedBy is users.display_name for UserID, reached through a LEFT JOIN.
+	// Nullable because of that join, not because display names can be empty —
+	// the column is NOT NULL on users. A NULL here means the creator's user row
+	// is gone (a restored backup, or a connection that lost _foreign_keys=on),
+	// and the trash view must still show the row.
+	CreatedBy sql.NullString `json:"created_by"`
 }
 
 func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTransactionsParams) ([]ListDeletedTransactionsRow, error) {
@@ -1238,6 +1245,7 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 			&i.OriginalAmountCents,
 			&i.CategoryName,
 			&i.CategoryType,
+			&i.CreatedBy,
 		); err != nil {
 			return nil, err
 		}
@@ -1253,9 +1261,10 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 }
 
 const listDeletedTransactionsByUser = `-- name: ListDeletedTransactionsByUser :many
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
+LEFT JOIN users u ON t.user_id = u.id
 WHERE t.deleted_at IS NOT NULL AND t.user_id = ?
 ORDER BY t.deleted_at DESC, t.id DESC
 LIMIT ? OFFSET ?
@@ -1270,8 +1279,11 @@ type ListDeletedTransactionsByUserParams struct {
 // ListDeletedTransactionsByUser is the member-scoped twin of
 // ListDeletedTransactions. It reuses ListDeletedTransactionsRow instead of
 // the ...ByUserRow twin sqlc would emit: this file is hand-maintained
-// (codegen is broken) and a twin struct would only duplicate the same 15
+// (codegen is broken) and a twin struct would only duplicate the same 16
 // fields, forcing the trash handler to carry two identical mapping loops.
+// Both queries must stay projection-identical — the member and admin trash
+// views are compared field-by-field by
+// TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField.
 func (q *Queries) ListDeletedTransactionsByUser(ctx context.Context, arg ListDeletedTransactionsByUserParams) ([]ListDeletedTransactionsRow, error) {
 	rows, err := q.db.QueryContext(ctx, listDeletedTransactionsByUser, arg.UserID, arg.Limit, arg.Offset)
 	if err != nil {
@@ -1297,6 +1309,7 @@ func (q *Queries) ListDeletedTransactionsByUser(ctx context.Context, arg ListDel
 			&i.OriginalAmountCents,
 			&i.CategoryName,
 			&i.CategoryType,
+			&i.CreatedBy,
 		); err != nil {
 			return nil, err
 		}

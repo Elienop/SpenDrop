@@ -330,18 +330,26 @@ DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 -- NOT what runs. sqlc codegen is broken in this repo, so queries.sql.go is
 -- hand-maintained (despite its DO-NOT-EDIT header) and both queries execute
 -- an explicit 13-column projection of transactions that OMITS content_hash
--- and idempotency_key, plus the two category columns — 15 fields, matching
--- ListDeletedTransactionsRow and the two Scan calls in queries.sql.go.
+-- and idempotency_key, plus the two category columns and the creator's
+-- display name — 16 fields, matching ListDeletedTransactionsRow and the two
+-- Scan calls in queries.sql.go.
 -- If codegen is ever repaired and regenerated literally from this file,
 -- t.* expands to 15 transaction columns and both Scan blocks break on a
 -- field-count mismatch (and the two extra columns would start reaching the
 -- trash handler). Narrow these to the explicit column list at the same time
 -- as regenerating, or expect trash_handlers.go to need updating with it.
+--
+-- users is LEFT joined in both, never inner joined: transactions.user_id is
+-- NOT NULL REFERENCES users(id) ON DELETE CASCADE, so a row whose creator is
+-- gone should not exist — but a restored backup can produce one. An inner
+-- join would drop that row from the ONLY surface that can recover it. Same
+-- rationale as the live list's join (transaction_handlers.go).
 
 -- name: ListDeletedTransactions :many
-SELECT t.*, c.name AS category_name, c.type AS category_type
+SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
+LEFT JOIN users u ON t.user_id = u.id
 WHERE t.deleted_at IS NOT NULL
 ORDER BY t.deleted_at DESC, t.id DESC
 LIMIT ? OFFSET ?;
@@ -350,9 +358,10 @@ LIMIT ? OFFSET ?;
 SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL;
 
 -- name: ListDeletedTransactionsByUser :many
-SELECT t.*, c.name AS category_name, c.type AS category_type
+SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
+LEFT JOIN users u ON t.user_id = u.id
 WHERE t.deleted_at IS NOT NULL AND t.user_id = ?
 ORDER BY t.deleted_at DESC, t.id DESC
 LIMIT ? OFFSET ?;

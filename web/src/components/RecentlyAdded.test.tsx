@@ -448,3 +448,48 @@ describe('RecentlyAdded', () => {
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2));
   });
 });
+
+// B19. The panel lists the household's recent entries, not just this device's,
+// so a saved row here can be the other member's — the same reason the ledger
+// row names its creator. Pending rows are the reader's own un-sent queue and
+// carry no creator to name.
+describe('RecentlyAdded creator attribution', () => {
+  test('a saved row names who entered it', async () => {
+    renderPanel([]);
+
+    const creator = await screen.findByText('Elie');
+    // A bare name in a muted line does not announce what it is; the icon is
+    // aria-hidden decoration, so the sr-only prefix carries the meaning.
+    expect(creator.closest('p')).toHaveTextContent('Entered by Elie');
+  });
+
+  test('a pending row is not attributed while the saved row beside it is', async () => {
+    renderPanel([queued()]);
+    // Both kinds on screen at once: the count below is what makes this
+    // non-vacuous. Deleting the attribution entirely gives 0, rendering it on
+    // pending rows too gives 2 — only the real behaviour gives exactly 1.
+    expect(await screen.findByText('sdsaved')).toBeInTheDocument();
+    expect(screen.getByText('sdpending')).toBeInTheDocument();
+
+    // RTL matches an element's own text nodes, so this hits one sr-only
+    // prefix per attribution line and nothing else.
+    const attributions = screen.getAllByText(/entered by/i);
+    expect(attributions).toHaveLength(1);
+    expect(attributions[0].closest('li')).toHaveTextContent('sdsaved');
+  });
+
+  test('a saved row renders a neutral fallback when the creator account is gone', async () => {
+    // "" is the backend's documented "creator unknown" value (the list query's
+    // LEFT JOIN found no user row). It must never surface as a blank line.
+    apiGet.mockResolvedValue({
+      transactions: [savedTxn({ created_by: '' })],
+      total: 1,
+      page: 1,
+      per_page: 5,
+    });
+    renderPanel([]);
+
+    const fallback = await screen.findByText('Unknown');
+    expect(fallback.closest('p')).toHaveTextContent('Entered by Unknown');
+  });
+});

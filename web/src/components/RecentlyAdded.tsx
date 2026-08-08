@@ -1,6 +1,6 @@
 import { useRef } from 'react';
 import { toast } from 'sonner';
-import { Trash2, WifiOff } from 'lucide-react';
+import { Trash2, User, WifiOff } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/api/client';
@@ -36,6 +36,14 @@ interface RecentRow {
   /** Income vs expense, so the amount renders with the same +/− + color cue
    *  as the ledger (AmountDisplay) instead of a kind-ambiguous bare magnitude. */
   type: TransactionType;
+  /**
+   * Who entered a SAVED row (`Transaction.created_by`, a display name). Absent
+   * on pending rows: those are queued locally by the person reading the panel
+   * and the queue payload carries no creator, so there is nobody to name.
+   * Empty string is the wire's "creator account is gone" value, so the render
+   * branches on `kind` — never on this being truthy.
+   */
+  createdBy?: string;
   /** Present on pending rows so Undo re-queues the exact captured payload. */
   payload?: CreateTransactionInput;
 }
@@ -115,6 +123,7 @@ export function RecentlyAdded({
     description: t.description,
     categoryName: t.category_name,
     type: t.category_type,
+    createdBy: t.created_by,
   }));
 
   const rows = [...pendingRows, ...savedRows].slice(0, MAX_ROWS);
@@ -227,6 +236,27 @@ export function RecentlyAdded({
                 {row.categoryName && (
                   <p className="truncate text-xs text-muted-foreground">
                     {row.categoryName}
+                  </p>
+                )}
+                {/* Same attribution idiom as the ledger row (TransactionRow):
+                    the panel lists the household's recent entries, not just
+                    this device's, so a row here can be the other member's and
+                    has to say so without a hover or a tap. Its own line rather
+                    than sharing the category's, so neither text starves the
+                    other of width on a 390px phone.
+
+                    Saved rows only — a pending row has not left this device,
+                    so its creator is by construction whoever is reading the
+                    panel. Keyed on `kind`, not on the name being non-empty:
+                    "" is the wire's orphaned-creator value and must still
+                    render the fallback. */}
+                {row.kind === 'saved' && (
+                  <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                    <User className="size-3.5 shrink-0" aria-hidden="true" />
+                    <span className="min-w-0 truncate">
+                      <span className="sr-only">Entered by </span>
+                      {row.createdBy || 'Unknown'}
+                    </span>
                   </p>
                 )}
               </div>

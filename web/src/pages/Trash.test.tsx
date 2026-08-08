@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -41,6 +41,7 @@ vi.mock('sonner', () => ({
 
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import type { DeletedTransactionList } from '../api/types';
 import { toast } from 'sonner';
 import { Trash } from './Trash';
 
@@ -52,11 +53,21 @@ const mockedToast = vi.mocked(toast);
 // Fixtures
 // ---------------------------------------------------------------------------
 
-const defaultDeletedList = {
+// Typed against the wire contract on purpose: an untyped object literal
+// would let a newly-required field (`created_by` was exactly that) go
+// missing here while the fixture still compiled and the page rendered a
+// blank cell. The compile error IS the guard.
+//
+// An admin's trash spans the household, so the two rows have two different
+// creators — Alice (the admin herself, per `asAdmin`) and Bob (the member).
+// A render that named the logged-in user instead of the row's creator would
+// satisfy row 101 and fail row 102.
+const defaultDeletedList: DeletedTransactionList = {
   transactions: [
     {
       id: 101,
       user_id: 1,
+      created_by: 'Alice',
       date: '2026-04-10',
       amount: 25.5,
       original_amount: null,
@@ -73,7 +84,8 @@ const defaultDeletedList = {
     },
     {
       id: 102,
-      user_id: 1,
+      user_id: 2,
+      created_by: 'Bob',
       date: '2026-04-05',
       amount: 2500,
       original_amount: null,
@@ -90,6 +102,41 @@ const defaultDeletedList = {
     },
   ],
   total: 2,
+  page: 1,
+  per_page: 20,
+};
+
+// A member's trash is scoped by the backend to rows they created
+// (ListDeletedTransactionsByUser), so every row a member sees is their own.
+const memberOwnDeletedList: DeletedTransactionList = {
+  transactions: [
+    {
+      ...defaultDeletedList.transactions[0],
+      id: 201,
+      user_id: 2,
+      created_by: 'Bob',
+      description: 'Bus pass',
+    },
+  ],
+  total: 1,
+  page: 1,
+  per_page: 20,
+};
+
+// `created_by: ''` is the wire's documented "the creator's user row is
+// gone" value — the LEFT JOIN in ListDeletedTransactions found nothing,
+// e.g. after a restored backup dropped the user. It is the ONLY case the
+// 'Unknown' fallback exists for; the key itself is always present.
+const orphanedCreatorDeletedList: DeletedTransactionList = {
+  transactions: [
+    {
+      ...defaultDeletedList.transactions[0],
+      id: 301,
+      created_by: '',
+      description: 'Row from a restored backup',
+    },
+  ],
+  total: 1,
   page: 1,
   per_page: 20,
 };
@@ -113,6 +160,7 @@ function asAdmin() {
     },
     loading: false,
     unverified: false,
+    refreshUser: vi.fn(),
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
@@ -130,6 +178,7 @@ function asMember() {
     },
     loading: false,
     unverified: false,
+    refreshUser: vi.fn(),
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
@@ -141,6 +190,7 @@ function asLoading() {
     user: null,
     loading: true,
     unverified: false,
+    refreshUser: vi.fn(),
     login: vi.fn(),
     register: vi.fn(),
     logout: vi.fn(),
@@ -193,6 +243,67 @@ describe('Trash', () => {
       // Category column — from CategoryBadge
       expect(screen.getByText('Food')).toBeInTheDocument();
       expect(screen.getByText('Salary')).toBeInTheDocument();
+    });
+
+    test('each row names its own creator under the description', async () => {
+      renderTrash();
+      const groceriesRow = (
+        await screen.findByText('Weekly groceries')
+      ).closest('tr');
+      const salaryRow = screen.getByText('April salary').closest('tr');
+      expect(groceriesRow).not.toBeNull();
+      expect(salaryRow).not.toBeNull();
+
+      // Scoped per row rather than page-wide: a page-wide query would also
+      // pass for a render that hard-codes the logged-in user (Alice, here)
+      // or reuses the first row's creator for every row.
+      expect(within(groceriesRow!).getByText('Alice')).toBeInTheDocument();
+      expect(within(salaryRow!).getByText('Bob')).toBeInTheDocument();
+
+      // The person icon is aria-hidden decoration, so the name carries no
+      // meaning on its own to a screen reader. Assert the announced string,
+      // not just the presence of the name.
+      expect(within(salaryRow!).getByText('Bob').closest('p')).toHaveTextContent(
+        'Entered by Bob',
+      );
+    });
+
+    test('description cell is width-bounded and keeps the full text on hover', async () => {
+      renderTrash();
+      // Matches the inner description div: the cell itself no longer has a
+      // direct text child, the div does.
+      const description = await screen.findByText('Weekly groceries');
+
+      // The hover fallback is the piece a "simplify this cell" edit drops
+      // first, and it is the only route back to a long imported description
+      // once the cell clips it.
+      expect(description).toHaveAttribute('title', 'Weekly groceries');
+
+      // Exact tokens, not substrings — `expect(className).toContain('truncate')`
+      // also passes for `truncate-none` or any longer token containing it.
+      // Both halves are load-bearing and neither works alone: max-w-md bounds
+      // the cell, truncate clips inside it.
+      expect(description.className.split(/\s+/)).toContain('truncate');
+      expect(description.className.split(/\s+/)).toContain('font-medium');
+      const cell = description.closest('td');
+      expect(cell).not.toBeNull();
+      expect(cell!.className.split(/\s+/)).toContain('max-w-md');
+    });
+
+    test('renders "Unknown" when the creator\'s user row is gone', async () => {
+      mockedApi.get.mockResolvedValue(orphanedCreatorDeletedList);
+      renderTrash();
+      const row = (
+        await screen.findByText('Row from a restored backup')
+      ).closest('tr');
+      expect(row).not.toBeNull();
+
+      // The empty string must read as a neutral fallback, never as a blank
+      // line the operator has to interpret.
+      expect(within(row!).getByText('Unknown')).toBeInTheDocument();
+      expect(
+        within(row!).getByText('Unknown').closest('p'),
+      ).toHaveTextContent('Entered by Unknown');
     });
 
     test('renders the empty state when the trash list is empty', async () => {
@@ -690,6 +801,21 @@ describe('Trash', () => {
       expect(
         screen.queryByRole('button', { name: /Restore all/i }),
       ).not.toBeInTheDocument();
+    });
+
+    test('member view names the creator too — attribution is not admin-gated', async () => {
+      // Every row a member sees is their own, so the name here is always
+      // theirs. The point is that the line renders for a non-admin at all:
+      // gating it behind `admin` would leave a member's Trash inconsistent
+      // with the ledger, which shows attribution to everyone.
+      mockedApi.get.mockResolvedValue(memberOwnDeletedList);
+      renderTrash();
+      const row = (await screen.findByText('Bus pass')).closest('tr');
+      expect(row).not.toBeNull();
+      expect(within(row!).getByText('Bob')).toBeInTheDocument();
+      expect(within(row!).getByText('Bob').closest('p')).toHaveTextContent(
+        'Entered by Bob',
+      );
     });
   });
 

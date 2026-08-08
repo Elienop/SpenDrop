@@ -1626,8 +1626,11 @@ func TestHandleListDeletedTransactions_AdminStillSeesAllRows(t *testing.T) {
 func TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	admin := seedTestUser(t, q, "admin", "admin")
-	member := seedTestUser(t, q, "member", "member")
+	// Display names deliberately differ from usernames: created_by carries
+	// display_name, and users whose two names coincide would let a query that
+	// selected u.username pass.
+	admin := seedNamedUser(t, q, "admin", "Admin Name", RoleAdmin)
+	member := seedNamedUser(t, q, "member", "Member Name", RoleMember)
 
 	date, err := time.Parse("2006-01-02", "2026-04-01")
 	if err != nil {
@@ -1711,6 +1714,12 @@ func TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField(t *t
 		t.Errorf("category join name=%q type=%q, want both populated",
 			memberView.CategoryName, memberView.CategoryType)
 	}
+	// The creator join is the newest column in both hand-maintained Scan
+	// blocks, so it is the likeliest one to be added to a single side.
+	if memberView.CreatedBy != "Member Name" {
+		t.Errorf("CreatedBy=%q, want the creator's display name %q (their username is %q)",
+			memberView.CreatedBy, "Member Name", "member")
+	}
 
 	// Same row, two queries, two Scan blocks — one DTO.
 	if !reflect.DeepEqual(memberView, adminView) {
@@ -1721,11 +1730,12 @@ func TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField(t *t
 
 // Money wire-edge discipline: decode into maps so a renamed/missing dollar
 // field cannot hide behind a typed struct's zero-fill, and assert no
-// *_cents column leaks.
+// *_cents column leaks. created_by is asserted here for the same reason —
+// it is a string field the typed DTO would happily zero-fill.
 func TestHandleListDeletedTransactions_MemberList_DollarFieldNoCentsLeak(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
-	member := seedTestUser(t, q, "member", "member")
+	member := seedNamedUser(t, q, "member", "Member Name", RoleMember)
 	seedTombstonedTestTransaction(t, q, member.ID, 1, "2026-04-02", 42.0, "members deleted row")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil)
@@ -1753,9 +1763,100 @@ func TestHandleListDeletedTransactions_MemberList_DollarFieldNoCentsLeak(t *test
 	if amount != 42.0 {
 		t.Errorf("amount=%v, want 42 (dollars, not cents)", amount)
 	}
+	// created_by must be PRESENT (never omitempty) and carry the display name,
+	// not the username: the frontend distinguishes "absent" from "unknown" by
+	// the key's presence alone.
+	if got := createdByOf(t, row); got != "Member Name" {
+		t.Errorf("created_by=%q, want the display name %q (their username is %q)",
+			got, "Member Name", "member")
+	}
 	for k := range row {
 		if strings.Contains(k, "_cents") {
 			t.Errorf("raw cents column %q leaked onto the wire", k)
 		}
+	}
+}
+
+// listDeletedRaw performs GET /transactions/deleted as the given user and
+// returns the raw rows plus the reported total. Map decoding rather than the
+// typed DTO is deliberate and is the repo's rule for every wire-shape test: a
+// typed decode zero-fills a missing or renamed key and reports success.
+func listDeletedRaw(t *testing.T, h *Handler, user database.User) ([]map[string]any, int) {
+	t.Helper()
+	req := withUser(httptest.NewRequest(http.MethodGet, "/api/transactions/deleted", nil), user)
+	rec := httptest.NewRecorder()
+	h.handleListDeletedTransactions(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list deleted transactions as %q: expected 200, got %d; body: %s",
+			user.Role, rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Transactions []map[string]any `json:"transactions"`
+		Total        int              `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode deleted list body: %v", err)
+	}
+	return body.Transactions, body.Total
+}
+
+// TestHandleListDeletedTransactions_DeletedCreatorRendersEmptyName is the
+// LEFT-join pin for the trash view. transactions.user_id is NOT NULL
+// REFERENCES users(id) ON DELETE CASCADE, so an orphaned row cannot arise
+// while foreign keys are enforced — but a restored backup, or a connection
+// that lost _foreign_keys=on, produces exactly this shape. Under an INNER
+// join the row would vanish from the one surface that can still recover it:
+// the money would be absent from the ledger AND from the trash, with no error
+// raised anywhere. It must stay listed, with an empty creator.
+//
+// Both trash queries are pinned, because they are separate hand-maintained
+// SQL consts with separate Scan blocks (codegen is broken here) and an inner
+// join introduced into one of them survives a test that exercises only the
+// other:
+//   - the ADMIN path reads ListDeletedTransactions;
+//   - the MEMBER path reads ListDeletedTransactionsByUser, which filters on
+//     t.user_id = <the authenticated user>. Reaching a NULL join partner
+//     there requires the AUTHENTICATED user to be the one whose row is
+//     missing, so the second half authenticates as the ghost. That is a
+//     contrived session, but it is the only row shape that reaches this
+//     query's join, and it rests on the same premise as the fixture itself
+//     (sessions.user_id also cascades, so a session outliving its user
+//     already implies foreign keys were off).
+func TestHandleListDeletedTransactions_DeletedCreatorRendersEmptyName(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedNamedUser(t, q, "elienop", "Elie", RoleAdmin)
+	ghost := seedNamedUser(t, q, "ghost", "Ghost Name", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries")
+
+	orphan := seedTombstonedTestTransaction(t, q, ghost.ID, catID, "2026-04-01", 40, "Legacy deleted row")
+	adminRow := seedTombstonedTestTransaction(t, q, admin.ID, catID, "2026-04-02", 12, "Admins deleted row")
+
+	deleteUserWithoutCascade(t, h, ghost.ID)
+
+	// Admin path — ListDeletedTransactions. Total comes from a separate
+	// COUNT that carries no users join, so an inner join here shows up as a
+	// header that promises a row the list does not deliver.
+	rows, total := listDeletedRaw(t, h, admin)
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("admin view: the orphaned row must still be listed: total=%d rows=%d, want 2 and 2",
+			total, len(rows))
+	}
+	if got := createdByOf(t, rowByID(t, rows, orphan.ID)); got != "" {
+		t.Errorf("admin view, orphaned row: created_by=%q, want the empty string", got)
+	}
+	if got := createdByOf(t, rowByID(t, rows, adminRow.ID)); got != "Elie" {
+		t.Errorf("admin view, row with a live creator: created_by=%q, want %q", got, "Elie")
+	}
+
+	// Member path — ListDeletedTransactionsByUser, authenticated as the user
+	// whose own row is gone (see the header comment).
+	memberRows, memberTotal := listDeletedRaw(t, h, ghost)
+	if memberTotal != 1 || len(memberRows) != 1 {
+		t.Fatalf("member view: the orphaned row must still be listed: total=%d rows=%d, want 1 and 1",
+			memberTotal, len(memberRows))
+	}
+	if got := createdByOf(t, rowByID(t, memberRows, orphan.ID)); got != "" {
+		t.Errorf("member view, orphaned row: created_by=%q, want the empty string", got)
 	}
 }
