@@ -158,6 +158,18 @@ describe('overlay viewport bounds', () => {
       expect(renderSheet('bottom')).toHaveClass('max-h-[100dvh]');
     });
 
+    // The cap only bites because Content is a flex column and the scroller is
+    // its flex item. Make Content a block box and the scroller sizes to its
+    // content instead, spilling past the sheet's edge with no way to reach it —
+    // while every other assertion in this file stays green, which is why this
+    // one exists.
+    it.each(['right', 'bottom'] as const)(
+      'makes a %s sheet a flex column so the body scroller is bounded',
+      (side) => {
+        expect(renderSheet(side)).toHaveClass('flex', 'flex-col');
+      },
+    );
+
     it('scrolls the body of a side sheet', () => {
       renderSheet('right');
       const scroller = scrollerAround(screen.getByText('Filters'));

@@ -62,13 +62,18 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), className)}
       {...props}
     >
-      {/* Scrolls the body, not the whole sheet, so the Close button below —
-          absolutely positioned against Content — stays pinned. A plain block
-          box: the side variants stack their children with ordinary flow, and
-          `overflow-y-auto` is what lets this flex item shrink below its
-          content height (automatic minimum size becomes 0), so no `flex-1`
-          that would collapse an auto-height top/bottom sheet. `-m-1 p-1`
-          keeps focus rings on edge children out of the clipping box. */}
+      {/* Content is a flex column (`flex flex-col` in sheetVariants) and this
+          is its only in-flow child — that pairing is what bounds the scroll.
+          As a block child of a fixed-height sheet this div would instead size
+          to its content and spill past the sheet's edge, unreachable, with
+          `overflow-y-auto` never engaging. It needs no `flex-1` to shrink,
+          because `overflow-y-auto` already makes its automatic minimum size 0
+          — and `flex-1` would be wrong: a zero flex-basis collapses an
+          auto-height top/bottom sheet. Scrolling the body rather than the
+          whole sheet is also what keeps the Close button below, absolutely
+          positioned against Content, pinned. The div stays display:block so
+          the sections inside it stack in ordinary flow, and `-m-1 p-1` keeps
+          focus rings on edge children out of the clipping box. */}
       <div className="-m-1 overflow-y-auto p-1">{children}</div>
       {/* `-m-3.5 p-3.5` grows the 16px icon to a 44px touch target without
           moving it: the negative margin pulls the border box back out by the

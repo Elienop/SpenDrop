@@ -9,7 +9,13 @@ vi.mock('@/lib/queryClient', () => ({
 
 // The hook only reads `.user`; a mutable variable drives authed vs null cases.
 let currentUser: { id: number } | null = { id: 1 };
-vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: currentUser }) }));
+// refreshUser lives in the factory closure rather than being minted per call:
+// a fresh vi.fn() on every render would churn its identity, which is a trap for
+// the first consumer that puts it in a dependency array.
+vi.mock('@/hooks/useAuth', () => {
+  const refreshUser = vi.fn();
+  return { useAuth: () => ({ user: currentUser, refreshUser }) };
+});
 
 // --- EventSource test double (happy-dom ships none). Models NAMED events:
 // the server sends `event: invalidate`, which a real EventSource routes to

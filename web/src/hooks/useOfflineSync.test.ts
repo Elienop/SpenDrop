@@ -12,9 +12,16 @@ vi.mock('sonner', () => ({
 // The hook reads `.user` and `.unverified`; mutable variables drive the cases.
 let currentUser: { id: number } | null = { id: 1 };
 let currentUnverified = false;
-vi.mock('@/hooks/useAuth', () => ({
-  useAuth: () => ({ user: currentUser, unverified: currentUnverified }),
-}));
+vi.mock('@/hooks/useAuth', () => {
+  const refreshUser = vi.fn();
+  return {
+    useAuth: () => ({
+      user: currentUser,
+      unverified: currentUnverified,
+      refreshUser,
+    }),
+  };
+});
 
 import { useOfflineSync } from './useOfflineSync';
 

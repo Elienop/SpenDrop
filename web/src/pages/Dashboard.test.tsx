@@ -170,16 +170,28 @@ vi.mock('../api/client', () => ({
   },
 }));
 
-vi.mock('../hooks/useAuth', () => ({
-  useAuth: () => ({
-    user: { id: 1, username: 'elie', display_name: 'Elie' },
-    isAuthenticated: true,
-    loading: false,
-    login: vi.fn(),
-    register: vi.fn(),
-    logout: vi.fn(),
-  }),
-}));
+// An untyped factory, so nothing checks this against AuthContextType: it used
+// to offer `isAuthenticated`, which the context has never had, and to omit
+// `unverified`, which it does have. Both corrected here. The mocked functions
+// are minted once in the factory closure rather than per call, so their
+// identity is stable across renders.
+vi.mock('../hooks/useAuth', () => {
+  const login = vi.fn();
+  const register = vi.fn();
+  const logout = vi.fn();
+  const refreshUser = vi.fn();
+  return {
+    useAuth: () => ({
+      user: { id: 1, username: 'elie', display_name: 'Elie' },
+      loading: false,
+      unverified: false,
+      login,
+      register,
+      logout,
+      refreshUser,
+    }),
+  };
+});
 
 import { Dashboard } from './Dashboard';
 

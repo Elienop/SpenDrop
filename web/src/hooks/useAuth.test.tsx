@@ -644,6 +644,137 @@ describe('useAuth', () => {
     expect(readRememberedUser()).toBeNull();
   });
 
+  /**
+   * Park a re-verify in flight, then complete a sign-in over the top of it.
+   *
+   * Alice is remembered-but-unconfirmed (an offline cold start — the state
+   * ProtectedRoute sends to /login). Connectivity returns, the self-healing
+   * effect fires verifySession, and its /auth/me hangs on a slow link. Bob then
+   * signs in successfully on the same device, as an ADMIN so that a role
+   * downgrade is visible. The returned handle makes the parked request FAIL,
+   * which is the moment the unguarded catch used to write over Bob.
+   *
+   * `action` picks which entry point completes the sign-in: login and register
+   * bump the epoch identically, and each bump needs its own test or a mutant
+   * that removes just one of them survives.
+   */
+  async function parkReverifyThenSignIn(action: 'Login' | 'Register'): Promise<{
+    failReverify: (e: unknown) => Promise<void>;
+  }> {
+    rememberUser({
+      id: 5,
+      username: 'alice',
+      display_name: 'Alice',
+      role: 'admin',
+      created_at: '2024-01-01',
+    });
+    mockedApi.get.mockRejectedValueOnce(
+      new NetworkError('The device is offline', 'offline'),
+    );
+
+    const user = userEvent.setup();
+    renderWithProviders(<AuthDisplay />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('unverified')).toHaveTextContent('true');
+    });
+    await flushPendingEffects();
+
+    let reject: ((e: unknown) => void) | undefined;
+    const parked = new Promise<User>((_resolve, rej) => {
+      reject = rej;
+    });
+    // Claim the rejection now: an unhandled one fails the run on its own,
+    // which would look like the assertion failing.
+    parked.catch(() => {});
+    mockedApi.get.mockReturnValueOnce(parked);
+
+    await act(async () => {
+      window.dispatchEvent(new Event('online'));
+    });
+
+    mockedApi.post.mockResolvedValueOnce({
+      id: 9,
+      username: 'bob',
+      display_name: 'Bob',
+      role: 'admin',
+      created_at: '2024-02-02',
+    });
+    await user.click(screen.getByText(action));
+
+    // Preconditions, all load-bearing: Bob is fully signed in and CONFIRMED
+    // before the late failure lands, so anything that changes afterwards was
+    // written by the stale request rather than by the sign-in itself. And the
+    // re-verify really is still outstanding — two /auth/me calls, one parked.
+    await waitFor(() => {
+      expect(screen.getByTestId('user')).toHaveTextContent(/^Bob$/);
+    });
+    expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+    expect(screen.getByTestId('role')).toHaveTextContent('admin');
+    expect(mockedApi.get).toHaveBeenCalledTimes(2);
+
+    return {
+      failReverify: async (e: unknown) => {
+        await act(async () => {
+          reject?.(e);
+          await parked.catch(() => {});
+        });
+      },
+    };
+  }
+
+  // ARM A of the catch. A transport failure falls back to the remembered
+  // identity and flags it unverified — correct for its own session, ruinous
+  // over somebody else's: `toUnverifiedUser` hardcodes role 'member', so the
+  // admin who just signed in silently loses every admin surface, and
+  // `unverified` sends ProtectedRoute back to the sign-in screen.
+  test('a transport failure from a stale re-verify does not demote the user who just signed in', async () => {
+    const { failReverify } = await parkReverifyThenSignIn('Login');
+
+    const offline = new NetworkError('The device is offline', 'offline');
+    // Routes to Arm A only if it is NOT a 401 ApiError. Pinned so this test
+    // cannot quietly become a second copy of the one below.
+    expect(offline instanceof ApiError).toBe(false);
+    await failReverify(offline);
+
+    expect(screen.getByTestId('user')).toHaveTextContent(/^Bob$/);
+    expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+    expect(screen.getByTestId('role')).toHaveTextContent('admin');
+  });
+
+  // ARM B. The 401 is addressed to the session that has already ended, so
+  // acting on it signs out the person who just signed in — and files the queue
+  // hold against THEIR id, which is how one person's captures end up held under
+  // another's name.
+  test('a 401 meant for the departed session does not sign the new user out', async () => {
+    const { failReverify } = await parkReverifyThenSignIn('Login');
+
+    const unauthorized = new ApiError('unauthorized', 401);
+    // ApiError is (message, status). Reversed arguments make `err.status === 401`
+    // false and silently route this through Arm A, where the assertions below
+    // would still pass — so the fixture's own status is asserted first.
+    expect(unauthorized.status).toBe(401);
+    await failReverify(unauthorized);
+
+    expect(screen.getByTestId('user')).toHaveTextContent(/^Bob$/);
+    expect(readRememberedUser()?.id).toBe(9);
+    expect(markNeedsSignIn).not.toHaveBeenCalledWith(9);
+  });
+
+  // register bumps the epoch at its own call site. Without a test through that
+  // door, removing just that one bump leaves every other test green.
+  test('a stale re-verify does not demote a user who just registered', async () => {
+    const { failReverify } = await parkReverifyThenSignIn('Register');
+
+    const offline = new NetworkError('Could not reach the server', 'unreachable');
+    expect(offline instanceof ApiError).toBe(false);
+    await failReverify(offline);
+
+    expect(screen.getByTestId('user')).toHaveTextContent(/^Bob$/);
+    expect(screen.getByTestId('unverified')).toHaveTextContent('false');
+    expect(screen.getByTestId('role')).toHaveTextContent('admin');
+  });
+
   // Same reasoning, harsher failure: a 401 on this call must not sign anybody
   // out either. `verifySession` stays the only path that may, and it re-runs on
   // mount and on regained connectivity. Someone will read this as a missing

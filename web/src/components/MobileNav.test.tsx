@@ -91,6 +91,42 @@ function stubDesktopQuery() {
   };
 }
 
+/** Tailwind spacing token to px — 0.25rem steps against a 16px root. */
+function spacingPx(token: string): number {
+  const steps = Number(token.replace(/^(?:min-h|size|h|w)-/, ''));
+  if (!Number.isFinite(steps)) {
+    throw new Error(`unparseable spacing token: ${token}`);
+  }
+  return steps * 4;
+}
+
+/**
+ * The vertical touch floor of a control, in px, derived from its own class
+ * tokens. happy-dom runs no layout, so the pixels have to come from the
+ * classes — but deriving them beats asserting a literal token: shrink the row
+ * and this fails with the size it computed, rather than passing because some
+ * other token still matched.
+ *
+ * `min-h-*` is authoritative when present. CSS clamps a fixed `height` up to
+ * `min-height`, which is why shadcn Button's own `h-10` can sit alongside
+ * `min-h-11` and the row still renders 44px.
+ */
+function touchFloorPx(el: HTMLElement): number {
+  const tokens = Array.from(el.classList);
+  const minH = tokens.find((c) => /^min-h-[\d.]+$/.test(c));
+  if (minH) return spacingPx(minH);
+  const fixed = tokens.find((c) => /^(?:size|h)-[\d.]+$/.test(c));
+  if (!fixed) {
+    throw new Error(`no height token on: ${el.getAttribute('class')}`);
+  }
+  return spacingPx(fixed);
+}
+
+/** Class tokens of an element, for breakpoint-prefix assertions. */
+function classes(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
+}
+
 /** Opens the drawer and returns its dialog element. */
 async function openDrawer(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: 'Open navigation menu' }));
@@ -279,8 +315,10 @@ describe('MobileNav', () => {
     });
   });
 
-  // 44px floor. Both controls default to desktop sizes (32px select trigger,
-  // 40px icon button) and are the smallest targets on a touch-only surface.
+  // 44px floor on EVERY control of a surface that is only ever touched. The
+  // appearance controls default to desktop sizes (32px select trigger, 40px
+  // icon button); the nav rows, Log out and the home link carry their own
+  // min-height because their content alone would leave them at 36px.
   describe('touch targets', () => {
     test('the appearance controls are raised to 44px in the drawer', async () => {
       const user = userEvent.setup();
@@ -288,13 +326,48 @@ describe('MobileNav', () => {
       const dialog = await openDrawer(user);
 
       const themeSelect = within(dialog).getByRole('combobox');
-      expect(themeSelect.className.split(/\s+/)).toContain('h-11');
-      expect(themeSelect.className.split(/\s+/)).not.toContain('h-8');
+      expect(touchFloorPx(themeSelect)).toBeGreaterThanOrEqual(44);
+      // Precedence, not just presence: the 32px desktop default must be gone,
+      // or tailwind-merge kept the wrong one of the two.
+      expect(classes(themeSelect)).not.toContain('h-8');
 
       const modeToggle = within(dialog).getByRole('button', {
         name: 'Toggle theme',
       });
-      expect(modeToggle.className.split(/\s+/)).toContain('size-11');
+      expect(touchFloorPx(modeToggle)).toBeGreaterThanOrEqual(44);
+    });
+
+    // The nine destinations are the most-tapped controls on the phone.
+    test.each([
+      'Quick add',
+      'Dashboard',
+      'Transactions',
+      'Reports',
+      'Budgets',
+      'Savings',
+      'Categories',
+      'Trash',
+      'Settings',
+    ])('the "%s" row is a 44px target', async (label) => {
+      const user = userEvent.setup();
+      renderMobileNav();
+      const dialog = await openDrawer(user);
+      const row = within(dialog).getByRole('link', { name: label });
+      expect(touchFloorPx(row)).toBeGreaterThanOrEqual(44);
+    });
+
+    test('the Log out row is a 44px target', async () => {
+      const user = userEvent.setup();
+      renderMobileNav();
+      const dialog = await openDrawer(user);
+      const logout = within(dialog).getByRole('button', { name: /log\s*out/i });
+      expect(touchFloorPx(logout)).toBeGreaterThanOrEqual(44);
+    });
+
+    test('the wordmark home link is a 44px target', () => {
+      renderMobileNav();
+      const home = screen.getByRole('link', { name: 'SpenDrop dashboard' });
+      expect(touchFloorPx(home)).toBeGreaterThanOrEqual(44);
     });
 
     test('the desktop sidebar keeps its compact appearance controls', async () => {
@@ -319,7 +392,44 @@ describe('MobileNav', () => {
       const trigger = screen.getByRole('button', {
         name: 'Open navigation menu',
       });
-      expect(trigger.className.split(/\s+/)).toContain('size-11');
+      expect(touchFloorPx(trigger)).toBeGreaterThanOrEqual(44);
+    });
+  });
+
+  // happy-dom evaluates no breakpoints, so this is structural: the top bar and
+  // the desktop aside must be display:none on opposite sides of md. Without
+  // `md:hidden` the 56px sticky z-40 phone bar renders on every desktop page
+  // beside the sidebar.
+  describe('breakpoint swap', () => {
+    test('the top bar is removed at md and up', () => {
+      renderMobileNav();
+      const tokens = classes(screen.getByRole('banner'));
+      expect(tokens).toContain('md:hidden');
+      // Unprefixed `hidden` would hide the bar at EVERY width, leaving the
+      // phone with no way into navigation at all.
+      expect(tokens).not.toContain('hidden');
+    });
+
+    test('exactly one navigation surface is visible at any width', () => {
+      const sidebar = render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/']}>
+            <Sidebar />
+          </MemoryRouter>
+        </ThemeProvider>,
+      );
+      const aside = classes(screen.getByRole('complementary'));
+      sidebar.unmount();
+
+      renderMobileNav();
+      const bar = classes(screen.getByRole('banner'));
+
+      // Below md: the aside is display:none and the bar is not.
+      expect(aside).toContain('hidden');
+      expect(bar).not.toContain('hidden');
+      // From md up: exactly the reverse.
+      expect(aside).toContain('md:flex');
+      expect(bar).toContain('md:hidden');
     });
   });
 

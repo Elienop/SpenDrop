@@ -92,11 +92,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const data = await api.get<User>('auth/me');
       // Same in-flight hazard as refreshUser, and the same answer: if the
       // identity changed while this was outstanding, this answer is about the
-      // old one. Only the SUCCESS arm is guarded — the failure arms either
-      // clear state (harmless to repeat after a sign-out) or fall back to the
-      // remembered identity, which a sign-out has already forgotten. Returning
-      // here still runs the `finally`, so `loading` is released either way and
-      // the app can never hang on the splash screen.
+      // old one. Returning here still runs the `finally`, so `loading` is
+      // released either way and the app can never hang on the splash screen.
       if (epoch !== sessionEpoch.current) return;
       const previous = readRememberedUser();
       if (previous && previous.id !== data.id) {
@@ -112,6 +109,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(data);
       setUnverified(false);
     } catch (err) {
+      // Guarded for the same reason as the success arm, and it took an
+      // adversarial probe to see why. A FAILURE is a write path too, and what
+      // it writes is derived from the identity that has since departed.
+      //
+      // An earlier version of this comment certified these arms as safe
+      // because "a sign-out has already forgotten the remembered identity".
+      // That is true of logout and false of the sign-in paths, which bump the
+      // epoch as well: after a successful login or register, a /auth/me left
+      // over from before it lands in here and either demotes the person who
+      // just signed in — `toUnverifiedUser` hardcodes role 'member', so an
+      // admin silently loses every admin surface — or, on a 401 addressed to
+      // the session that ended, signs them out and files the queue hold
+      // against the NEW user's id. Returning still runs the `finally`.
+      if (epoch !== sessionEpoch.current) return;
       if (err instanceof ApiError && err.status === 401) {
         // The server answered, and the answer was no.
         const remembered = readRememberedUser();
