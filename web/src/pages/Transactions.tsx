@@ -1,14 +1,10 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback, useId, useMemo, useRef } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { format } from 'date-fns';
 import { toast } from 'sonner';
 import {
   AlertCircle,
   ArrowUpDown,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsLeft,
-  ChevronsRight,
   Pencil,
   Replace,
   Trash2,
@@ -16,11 +12,12 @@ import {
 } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { api } from '../api/client';
-import type { Category, SavedFilter } from '../api/types';
+import type { Category, SavedFilter, Transaction } from '../api/types';
 import { UNDO_TOAST_MS } from '../lib/undo';
 import { useTransactions } from '../hooks/useTransactions';
 import type { TransactionFilters } from '../hooks/useTransactions';
 import type { SortColumn } from '../hooks/useTransactions';
+import type { UpdateTransactionInput } from '../hooks/useTransactions';
 import { RefetchAfterMutationError } from '../hooks/useTransactions';
 import { BulkEditDialog } from './Transactions.BulkEditDialog';
 import { BulkEditConfirmDialog } from './Transactions.BulkEditConfirmDialog';
@@ -31,19 +28,14 @@ import { TransactionToolbar } from '../components/TransactionToolbar';
 import { FilterPanel } from '../components/FilterPanel';
 import { TransactionEntryRow } from '../components/TransactionEntryRow';
 import { TransactionRow } from '../components/TransactionRow';
+import { TransactionCardList } from '../components/TransactionCardList';
+import { PaginationBar } from '../components/PaginationBar';
+import { TransactionEditSheet } from '../components/TransactionEditSheet';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -72,7 +64,8 @@ import { FORMAT_DATE_SHORT } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { getReadyRegistration } from '@/lib/push-sw';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
-import { TRANSACTION_PAGE_SIZES } from '@/lib/constants';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { TOUCH_TARGET_CHECKBOX } from '@/lib/touch-target';
 
 interface ActiveChip {
   key: string;
@@ -154,142 +147,6 @@ function buildActiveChips(
   return chips;
 }
 
-interface PaginationBarProps {
-  page: number;
-  totalPages: number;
-  perPage: number;
-  onPageChange: (page: number) => void;
-  onPerPageChange: (perPage: number) => void;
-}
-
-/**
- * Compute which page numbers to show between prev/next arrows.
- * Always shows first, last, and up to 2 pages around the current page,
- * with -1 as a sentinel for ellipsis gaps.
- */
-function getPageNumbers(page: number, totalPages: number): number[] {
-  if (totalPages <= 7) {
-    return Array.from({ length: totalPages }, (_, i) => i + 1);
-  }
-  const pages = new Set<number>();
-  pages.add(1);
-  pages.add(totalPages);
-  for (let i = Math.max(2, page - 1); i <= Math.min(totalPages - 1, page + 1); i++) {
-    pages.add(i);
-  }
-  const sorted = [...pages].sort((a, b) => a - b);
-  const result: number[] = [];
-  for (let i = 0; i < sorted.length; i++) {
-    if (i > 0 && sorted[i] - sorted[i - 1] > 1) {
-      result.push(-1); // ellipsis
-    }
-    result.push(sorted[i]);
-  }
-  return result;
-}
-
-function PaginationBar({
-  page,
-  totalPages,
-  perPage,
-  onPageChange,
-  onPerPageChange,
-}: PaginationBarProps) {
-  const pageNumbers = getPageNumbers(page, totalPages);
-
-  return (
-    <div className="flex items-center justify-between px-4 py-3">
-      <div className="flex items-center gap-2">
-        <p className="text-sm font-medium">Rows per page</p>
-        <Select
-          value={String(perPage)}
-          onValueChange={(v) => onPerPageChange(Number(v))}
-        >
-          <SelectTrigger className="h-8 w-[70px]">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent side="top">
-            <SelectGroup>
-              {TRANSACTION_PAGE_SIZES.map((opt) => (
-                <SelectItem key={opt} value={String(opt)}>
-                  {opt}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="flex items-center gap-1">
-        <Button
-          variant="outline"
-          size="icon"
-          className="hidden size-8 lg:flex"
-          onClick={() => onPageChange(1)}
-          disabled={page <= 1}
-        >
-          <span className="sr-only">Go to first page</span>
-          <ChevronsLeft />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-8"
-          onClick={() => onPageChange(page - 1)}
-          disabled={page <= 1}
-        >
-          <span className="sr-only">Go to previous page</span>
-          <ChevronLeft />
-        </Button>
-
-        {pageNumbers.map((p, i) =>
-          p === -1 ? (
-            <span
-              key={`ellipsis-${i}`}
-              className="flex size-8 items-center justify-center text-sm text-muted-foreground"
-              aria-hidden
-            >
-              ...
-            </span>
-          ) : (
-            <Button
-              key={p}
-              variant={p === page ? 'outline' : 'ghost'}
-              size="icon"
-              className="size-8 text-xs"
-              onClick={() => onPageChange(p)}
-              aria-current={p === page ? 'page' : undefined}
-            >
-              {p}
-            </Button>
-          ),
-        )}
-
-        <Button
-          variant="outline"
-          size="icon"
-          className="size-8"
-          onClick={() => onPageChange(page + 1)}
-          disabled={page >= totalPages}
-        >
-          <span className="sr-only">Go to next page</span>
-          <ChevronRight />
-        </Button>
-        <Button
-          variant="outline"
-          size="icon"
-          className="hidden size-8 lg:flex"
-          onClick={() => onPageChange(totalPages)}
-          disabled={page >= totalPages}
-        >
-          <span className="sr-only">Go to last page</span>
-          <ChevronsRight />
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 interface SortableHeaderProps {
   label: string;
   column: SortColumn;
@@ -334,11 +191,20 @@ function TableSkeleton() {
 
 export function Transactions() {
   const baseCurrency = useBaseCurrency();
+  // Below `md` the seven-column table is replaced by a stacked card list.
+  // The two presentations are MOUNTED alternately rather than one being
+  // `md:hidden`: rendering both would put two "Select <description>"
+  // checkboxes in the a11y tree for every row and pay the render cost twice.
+  // Everything else on this page — filters, selection scopes, bulk machinery,
+  // pagination, toasts — is shared state that neither branch owns.
+  const isMobile = useIsMobileViewport();
   const {
     transactions,
     total,
     page,
     perPage,
+    sortBy,
+    sortDir,
     filters,
     setFilter,
     clearFilters,
@@ -381,6 +247,16 @@ export function Transactions() {
   const [replaceText, setReplaceText] = useState('');
   const [replacing, setReplacing] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  // Phone-only. The table shows a checkbox on every row at all times; a card
+  // does not, because the row is one big tap target and a permanent checkbox
+  // would eat the width the description needs. Selection mode is what reveals
+  // them — entered by a long press on a card or by the toolbar's Select
+  // toggle. Ignored entirely by the desktop table.
+  const [selectionMode, setSelectionMode] = useState(false);
+  // The row whose edit sheet is open (phone). Held as an ID and resolved
+  // against the live rows below, not stored as a snapshot.
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const mobileSelectAllId = useId();
   // Two selection modes:
   //   'page'         — selectedIds holds explicit IDs from the current page.
   //   'all-matching' — user clicked "Select all N matching", selectedIds is
@@ -461,6 +337,60 @@ export function Transactions() {
     },
     [deleteTransaction, queryClient],
   );
+
+  // Shared by both edit surfaces — the desktop inline row and the phone sheet.
+  const handleRowUpdate = useCallback(
+    async (input: UpdateTransactionInput) => {
+      // Capture before awaiting: updateTransaction kicks off
+      // a non-awaited refetch that can replace `transactions`
+      // in state mid-flight. Reading `original` after the
+      // await could race against the refetch.
+      const original = transactions.find((t) => t.id === input.id);
+      const descriptionChanged =
+        !original || original.description !== input.description;
+      const tagsChanged =
+        !original || (original.tags ?? '') !== (input.tags ?? '');
+      await updateTransaction(input);
+      // Only refresh the suggestions cache when description or
+      // tags actually changed — amount/category/date edits
+      // don't affect autocomplete, and refetching on every
+      // save is noise.
+      if (descriptionChanged || tagsChanged) {
+        setSuggestionsKey((k) => k + 1);
+      }
+    },
+    [transactions, updateTransaction],
+  );
+
+  const handleCardOpen = useCallback((tx: Transaction) => {
+    setEditingId(tx.id);
+  }, []);
+
+  const closeEditSheet = useCallback(() => {
+    setEditingId(null);
+  }, []);
+
+  // Resolved against the LIVE rows rather than snapshotting the transaction:
+  // a refetch landing mid-edit must feed the fresh values to the sheet's
+  // storedMoney comparison (which is what the server compares against), and a
+  // row that leaves the page — deleted, or filtered out — closes the sheet by
+  // disappearing instead of leaving the user editing a ghost.
+  const editingTx =
+    editingId == null
+      ? null
+      : (transactions.find((t) => t.id === editingId) ?? null);
+
+  // Retire the id once its row has left the page, rather than leaving it set
+  // against a row that is no longer there. The sheet closing when the row goes
+  // is intended (documented desktop parity); what is not is the id surviving
+  // that close — the other member deleting a row and then restoring it would
+  // bring the row back into `transactions` and spontaneously REOPEN the sheet
+  // over whatever the user had moved on to.
+  useEffect(() => {
+    if (editingId != null && editingTx == null) {
+      setEditingId(null);
+    }
+  }, [editingId, editingTx]);
 
   const handlePageChange = useCallback(
     (newPage: number) => {
@@ -594,7 +524,31 @@ export function Transactions() {
   const handleClearSelection = useCallback(() => {
     setSelectedIds(new Set());
     setSelectionScope('page');
+    // Clearing the selection is also the way out of the phone's selection
+    // mode: leaving the checkboxes on screen with nothing selected would
+    // strand the user in a mode whose only other exit is the toolbar toggle.
+    setSelectionMode(false);
   }, []);
+
+  const toggleSelectionMode = useCallback(() => {
+    if (selectionMode) {
+      setSelectionMode(false);
+      handleClearSelection();
+    } else {
+      setSelectionMode(true);
+    }
+  }, [selectionMode, handleClearSelection]);
+
+  // A long press is the touch dialect for entering selection mode, and it
+  // selects the card it started on — coming out of the gesture with an empty
+  // selection would read as nothing having happened.
+  const handleCardLongPress = useCallback(
+    (tx: Transaction) => {
+      setSelectionMode(true);
+      handleSelect(tx.id, true);
+    },
+    [handleSelect],
+  );
 
   const selectionCount =
     selectionScope === 'all-matching' ? total : selectedIds.size;
@@ -781,10 +735,13 @@ export function Transactions() {
 
   // Clear selection when page or data changes. Also drops
   // selectionScope back to 'page' so "all-matching" mode never
-  // silently survives a filter edit or page flip.
+  // silently survives a filter edit or page flip, and leaves the
+  // phone's selection mode — the checkboxes would otherwise stay on
+  // over a set of rows the user never picked.
   useEffect(() => {
     setSelectedIds(new Set());
     setSelectionScope('page');
+    setSelectionMode(false);
   }, [page, filters, perPage]);
 
   const handleSaveFilter = useCallback(
@@ -842,8 +799,132 @@ export function Transactions() {
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
 
+  // One selection bar, rendered in one of two places. Inside the card above
+  // the table on desktop; STICKY at the bottom of the phone card, in flow
+  // between the list and the bottom pager.
+  //
+  // Sticky rather than fixed, and this is the whole point: a fixed bar is
+  // outside flow, so it covers the last card and the bottom pager for the
+  // entire selection session — permanently, not just while scrolling — and
+  // compensating with page padding means hard-coding a height that changes
+  // when the two-line all-matching banner appears. In flow it contributes its
+  // own height, whatever that height happens to be, so it can never occlude
+  // anything; and `bottom-0` still pins it to the viewport for as long as its
+  // resting place is below the fold, which is the visibility the fixed version
+  // was there for. It stops sticking exactly when the pager scrolls into view,
+  // which is the moment it must stop covering it.
+  //
+  // Same trade the QuickAdd footer makes. Requires no `overflow-hidden`
+  // ancestor — the phone branch already drops the card's, for the day headers.
+  const selectionBar =
+    selectionCount > 0 ? (
+      <div className="flex flex-col gap-2 rounded-lg border bg-muted/50 px-4 py-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-medium">
+            {selectionScope === 'all-matching'
+              ? `All ${total} matching transactions selected`
+              : `${selectionCount} selected`}
+          </span>
+          <Button
+            type="button"
+            size="sm"
+            className="h-11 gap-1.5 text-xs md:h-8"
+            onClick={() => setBulkEditOpen(true)}
+            disabled={deleting}
+          >
+            <Pencil />
+            Edit ({selectionCount})
+          </Button>
+          <Button
+            type="button"
+            variant="destructive"
+            size="sm"
+            className="h-11 gap-1.5 text-xs md:h-8"
+            onClick={requestBulkDelete}
+            disabled={deleting}
+          >
+            <Trash2 />
+            {deleting ? 'Deleting...' : 'Delete'}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-11 text-xs md:h-8"
+            onClick={handleClearSelection}
+          >
+            Clear selection
+          </Button>
+        </div>
+        {/*
+          Banner prompt: appears only when the user has checked every
+          visible row AND there are more matching rows beyond the
+          current page. Clicking switches to the atomic filter-based
+          delete path. Hidden once scope is already 'all-matching'.
+
+          Also hidden — not merely disabled — for the whole of
+          `filterScopeUnsettled`: BOTH numbers it prints belong to the
+          filter the rows were fetched under, and the filter-scoped
+          delete/edit it opts into resolves against whatever is
+          committed when it fires. Disabling would leave the wrong
+          count sitting there as if it were a fact.
+        */}
+        {!filterScopeUnsettled &&
+          selectionScope === 'page' &&
+          transactions.length > 0 &&
+          transactions.every((tx) => selectedIds.has(tx.id)) &&
+          total > transactions.length && (
+            <div className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>All {transactions.length} on this page selected.</span>
+              <Button
+                type="button"
+                variant="link"
+                size="sm"
+                className="h-auto min-h-11 p-0 text-xs md:min-h-0"
+                onClick={handleSelectAllMatching}
+              >
+                Select all {total} matching
+              </Button>
+            </div>
+          )}
+      </div>
+    ) : null;
+
+  // Entering selection mode and every count change are purely visual otherwise
+  // — the checkboxes appear, the bar appears, and a screen-reader user is told
+  // nothing. Long-press entry needs this most: it has no button press to
+  // self-announce. Empty on desktop, where the mode does not exist.
+  //
+  // The wording deliberately does NOT repeat the bar's sentence verbatim.
+  // Identical sr-only text beside visible text is a duplicate the a11y tree
+  // and every future `getByText` on this page both have to disambiguate, and
+  // the announcement wants a verb anyway — it is reporting a transition, where
+  // the bar is reporting a state.
+  //
+  // Silent when the phone user did not drive the change: mobile with a page
+  // selection but selection mode off is a selection carried across a rotation
+  // from the desktop table, which the bar already shows and which nothing just
+  // happened to.
+  const selectionAnnouncement = !isMobile
+    ? ''
+    : selectionScope === 'all-matching'
+      ? `Selected all ${total} matching transactions`
+      : selectionMode
+        ? `Selection mode on, ${selectionCount} selected`
+        : '';
+
   return (
     <div className="flex flex-col gap-6">
+      {/*
+        Mounted unconditionally, and empty rather than absent when there is
+        nothing to say. A live region that mounts together with its first
+        message is not observed changing, so assistive tech announces nothing —
+        the region has to already exist for the text landing in it to register.
+      */}
+      <div aria-live="polite" className="sr-only">
+        {selectionAnnouncement}
+      </div>
+
       <div className="flex items-center justify-between">
         <h1
           ref={pageHeadingRef}
@@ -867,6 +948,19 @@ export function Transactions() {
         onToggleFilters={() => setShowFilters((p) => !p)}
         showEntry={showEntry}
         onToggleEntry={() => setShowEntry((p) => !p)}
+        // Only below `md`, where the table header that owns sorting and the
+        // always-visible row checkboxes are both gone.
+        mobile={
+          isMobile
+            ? {
+                sortBy,
+                sortDir,
+                onSort: setSort,
+                selectionMode,
+                onToggleSelectionMode: toggleSelectionMode,
+              }
+            : undefined
+        }
       />
 
       {filters.search && total > 0 && (
@@ -875,13 +969,13 @@ export function Transactions() {
             type="button"
             variant="ghost"
             size="sm"
-            className="h-8 gap-1.5 text-xs"
+            className="h-11 gap-1.5 text-xs md:h-8"
             onClick={() => {
               setShowReplace((p) => !p);
               if (showReplace) setReplaceText('');
             }}
           >
-            <Replace className="size-3.5" />
+            <Replace />
             Replace
           </Button>
           {showReplace && (
@@ -895,13 +989,13 @@ export function Transactions() {
                   if (e.key === 'Enter') handleReplaceAll();
                 }}
                 placeholder="New description..."
-                className="h-8 max-w-xs text-xs"
+                className="h-11 max-w-xs text-xs md:h-8"
                 disabled={replacing}
               />
               <Button
                 type="button"
                 size="sm"
-                className="h-8 text-xs"
+                className="h-11 text-xs md:h-8"
                 onClick={handleReplaceAll}
                 disabled={
                   replacing || filterScopeUnsettled || !replaceText.trim()
@@ -913,13 +1007,13 @@ export function Transactions() {
                 type="button"
                 variant="ghost"
                 size="icon"
-                className="size-8"
+                className="size-11 md:size-8"
                 onClick={() => {
                   setShowReplace(false);
                   setReplaceText('');
                 }}
               >
-                <X className="size-3.5" />
+                <X />
               </Button>
             </>
           )}
@@ -940,6 +1034,11 @@ export function Transactions() {
                 className={cn(
                   'text-muted-foreground hover:text-foreground',
                   'rounded-full p-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  // Grows the BOX rather than using the hit-area inset: chips
+                  // sit 6px apart, so a 44px invisible ring around each X would
+                  // overlap its neighbour and let one chip eat a tap meant for
+                  // the next. A taller chip row on a phone is the honest cost.
+                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
                 )}
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
@@ -1028,6 +1127,7 @@ export function Transactions() {
                   'shrink-0 rounded-sm opacity-70 ring-offset-background',
                   'transition-opacity hover:opacity-100',
                   'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
+                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
                 )}
               >
                 <X className="size-4" />
@@ -1059,7 +1159,12 @@ export function Transactions() {
           ref={cardRef}
           aria-busy={showingPrevious || undefined}
           className={cn(
-            'overflow-hidden transition-opacity duration-200',
+            'transition-opacity duration-200',
+            // Clips the desktop table's corners. Dropped on the phone: it
+            // would make this card the scrollport for the day headers'
+            // `sticky`, and a scrollport that never scrolls is one they never
+            // stick to. Below `md` the document is the scroller.
+            !isMobile && 'overflow-hidden',
             showingPrevious && 'opacity-60',
           )}
         >
@@ -1069,150 +1174,122 @@ export function Transactions() {
             perPage={perPage}
             onPageChange={handlePageChange}
             onPerPageChange={setPerPage}
+            compact={isMobile}
           />
 
-          {selectionCount > 0 && (
-            <div className="flex flex-col gap-2 rounded-lg border bg-muted/50 px-4 py-2">
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="text-sm font-medium">
-                  {selectionScope === 'all-matching'
-                    ? `All ${total} matching transactions selected`
-                    : `${selectionCount} selected`}
-                </span>
-                <Button
-                  type="button"
-                  size="sm"
-                  className="h-8 gap-1.5 text-xs"
-                  onClick={() => setBulkEditOpen(true)}
-                  disabled={deleting}
-                >
-                  <Pencil className="size-3.5" />
-                  Edit ({selectionCount})
-                </Button>
-                <Button
-                  type="button"
-                  variant="destructive"
-                  size="sm"
-                  className="h-8 gap-1.5 text-xs"
-                  onClick={requestBulkDelete}
-                  disabled={deleting}
-                >
-                  <Trash2 className="size-3.5" />
-                  {deleting ? 'Deleting...' : 'Delete'}
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="h-8 text-xs"
-                  onClick={handleClearSelection}
-                >
-                  Clear selection
-                </Button>
-              </div>
-              {/*
-                Banner prompt: appears only when the user has checked every
-                visible row AND there are more matching rows beyond the
-                current page. Clicking switches to the atomic filter-based
-                delete path. Hidden once scope is already 'all-matching'.
+          {!isMobile && selectionBar}
 
-                Also hidden — not merely disabled — for the whole of
-                `filterScopeUnsettled`: BOTH numbers it prints belong to the
-                filter the rows were fetched under, and the filter-scoped
-                delete/edit it opts into resolves against whatever is
-                committed when it fires. Disabling would leave the wrong
-                count sitting there as if it were a fact.
+          {isMobile && selectionMode && (
+            <div className="flex items-center border-t px-4">
+              {/*
+                A phone has no column header to hang select-all off, so it gets
+                its own strip — and it is mounted for the whole of selection
+                mode, not just once something is selected. The bar below
+                appears at count>0, which left the entry state with no
+                select-all and nothing saying what mode you were in.
+
+                `htmlFor` targets Radix's checkbox button (a labelable
+                element), which makes the whole 44px strip a tap target for it.
+                The fuller `aria-label` wins as the accessible name and
+                contains the visible text, so what a screen reader announces
+                still starts with what the eye reads.
               */}
-              {!filterScopeUnsettled &&
-                selectionScope === 'page' &&
-                transactions.length > 0 &&
-                transactions.every((tx) => selectedIds.has(tx.id)) &&
-                total > transactions.length && (
-                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
-                    <span>
-                      All {transactions.length} on this page selected.
-                    </span>
-                    <Button
-                      type="button"
-                      variant="link"
-                      size="sm"
-                      className="h-auto p-0 text-xs"
-                      onClick={handleSelectAllMatching}
-                    >
-                      Select all {total} matching
-                    </Button>
-                  </div>
-                )}
+              <label
+                htmlFor={mobileSelectAllId}
+                className="flex min-h-11 flex-1 items-center gap-3"
+              >
+                <Checkbox
+                  id={mobileSelectAllId}
+                  checked={
+                    selectionScope === 'all-matching' ||
+                    (transactions.length > 0 &&
+                      transactions.every((tx) => selectedIds.has(tx.id)))
+                  }
+                  onCheckedChange={(v) => handleSelectAll(v === true)}
+                  aria-label="Select all on this page"
+                  className={TOUCH_TARGET_CHECKBOX}
+                />
+                <span className="text-sm font-medium">Select all</span>
+              </label>
             </div>
           )}
 
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-10">
-                  <Checkbox
-                    checked={
+          {isMobile ? (
+            <TransactionCardList
+              transactions={transactions}
+              baseCode={baseCurrency}
+              selectedIds={selectedIds}
+              selectionScope={selectionScope}
+              selectionMode={selectionMode}
+              onSelect={handleSelect}
+              onOpen={handleCardOpen}
+              onLongPress={handleCardLongPress}
+              // A day header is a claim that the rows beneath it are that
+              // day's. Only the date ordering makes that true.
+              groupByDay={sortBy === 'date'}
+            />
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={
+                        selectionScope === 'all-matching' ||
+                        (transactions.length > 0 &&
+                          transactions.every((tx) => selectedIds.has(tx.id)))
+                      }
+                      onCheckedChange={(v) => handleSelectAll(v === true)}
+                      aria-label="Select all"
+                    />
+                  </TableHead>
+                  <SortableHeader label="Date" column="date" onSort={setSort} />
+                  <SortableHeader label="Description" column="description" onSort={setSort} />
+                  <SortableHeader label="Category" column="category" onSort={setSort} />
+                  <SortableHeader label="Tags" column="tags" onSort={setSort} />
+                  <SortableHeader label="Amount" column="amount" onSort={setSort} align="right" />
+                  <TableHead className="text-right">Actions</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {transactions.map((tx) => (
+                  <TransactionRow
+                    key={tx.id}
+                    transaction={tx}
+                    categories={categories}
+                    selected={
                       selectionScope === 'all-matching' ||
-                      (transactions.length > 0 &&
-                        transactions.every((tx) => selectedIds.has(tx.id)))
+                      selectedIds.has(tx.id)
                     }
-                    onCheckedChange={(v) => handleSelectAll(v === true)}
-                    aria-label="Select all"
+                    // In all-matching mode, individual row checkboxes are locked.
+                    // Toggling a single row can't express "all rows except this
+                    // one" cleanly — and silently demoting to page scope would
+                    // appear to clear the selection when selectedIds is empty.
+                    // The header checkbox still clears the full selection.
+                    onSelect={
+                      selectionScope === 'all-matching' ? undefined : handleSelect
+                    }
+                    onUpdate={handleRowUpdate}
+                    onDelete={handleRowDelete}
+                    onError={setRowError}
+                    descriptionSuggestions={suggestions.descriptions}
+                    tagSuggestions={suggestions.tags}
                   />
-                </TableHead>
-                <SortableHeader label="Date" column="date" onSort={setSort} />
-                <SortableHeader label="Description" column="description" onSort={setSort} />
-                <SortableHeader label="Category" column="category" onSort={setSort} />
-                <SortableHeader label="Tags" column="tags" onSort={setSort} />
-                <SortableHeader label="Amount" column="amount" onSort={setSort} align="right" />
-                <TableHead className="text-right">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {transactions.map((tx) => (
-                <TransactionRow
-                  key={tx.id}
-                  transaction={tx}
-                  categories={categories}
-                  selected={
-                    selectionScope === 'all-matching' ||
-                    selectedIds.has(tx.id)
-                  }
-                  // In all-matching mode, individual row checkboxes are locked.
-                  // Toggling a single row can't express "all rows except this
-                  // one" cleanly — and silently demoting to page scope would
-                  // appear to clear the selection when selectedIds is empty.
-                  // The header checkbox still clears the full selection.
-                  onSelect={
-                    selectionScope === 'all-matching' ? undefined : handleSelect
-                  }
-                  onUpdate={async (input) => {
-                    // Capture before awaiting: updateTransaction kicks off
-                    // a non-awaited refetch that can replace `transactions`
-                    // in state mid-flight. Reading `original` after the
-                    // await could race against the refetch.
-                    const original = transactions.find((t) => t.id === input.id);
-                    const descriptionChanged =
-                      !original || original.description !== input.description;
-                    const tagsChanged =
-                      !original || (original.tags ?? '') !== (input.tags ?? '');
-                    await updateTransaction(input);
-                    // Only refresh the suggestions cache when description or
-                    // tags actually changed — amount/category/date edits
-                    // don't affect autocomplete, and refetching on every
-                    // save is noise.
-                    if (descriptionChanged || tagsChanged) {
-                      setSuggestionsKey((k) => k + 1);
-                    }
-                  }}
-                  onDelete={handleRowDelete}
-                  onError={setRowError}
-                  descriptionSuggestions={suggestions.descriptions}
-                  tagSuggestions={suggestions.tags}
-                />
-              ))}
-            </TableBody>
-          </Table>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+
+          {isMobile && selectionBar && (
+            // In flow, so it contributes height and occludes nothing; sticky,
+            // so it stays on screen while the list scrolls under it. Sits
+            // before the pager, so reaching the pager is exactly what releases
+            // it. No shadow — app-chrome bars in this repo separate with a
+            // border, and `border-t` on the pager below already does that.
+            <div className="sticky bottom-0 z-20 border-t border-border bg-background p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
+              {selectionBar}
+            </div>
+          )}
 
           <div className="border-t">
             <PaginationBar
@@ -1221,10 +1298,27 @@ export function Transactions() {
               perPage={perPage}
               onPageChange={handlePageChange}
               onPerPageChange={setPerPage}
+              compact={isMobile}
             />
           </div>
         </Card>
       )}
+
+      {/*
+        Phone edit surface. Deliberately NOT gated on `isMobile`: it opens only
+        from a card tap, so it cannot appear on desktop — and leaving it mounted
+        means rotating a phone mid-edit does not discard what has been typed.
+      */}
+      <TransactionEditSheet
+        transaction={editingTx}
+        categories={categories}
+        onClose={closeEditSheet}
+        onUpdate={handleRowUpdate}
+        onDelete={handleRowDelete}
+        onError={setRowError}
+        descriptionSuggestions={suggestions.descriptions}
+        tagSuggestions={suggestions.tags}
+      />
 
       <Dialog
         open={confirmAllMatchingOpen}
