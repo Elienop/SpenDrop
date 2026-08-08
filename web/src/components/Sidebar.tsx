@@ -1,18 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import {
-  Zap,
-  LayoutGrid,
-  ArrowLeftRight,
-  Wallet,
-  PiggyBank,
-  ChartNoAxesColumnIncreasing,
-  Tag,
-  Settings as SettingsIcon,
-  Trash2,
-  ChevronLeft,
-  LogOut,
-} from 'lucide-react';
+import { ChevronLeft, LogOut } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { useTrashCount } from '../hooks/useTrashCount';
 import { Logo } from '@/components/Logo';
@@ -30,44 +18,16 @@ import { ColorThemePicker } from '@/components/ColorThemePicker';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
-
-interface MenuItem {
-  path: string;
-  label: string;
-  icon: React.ElementType;
-  end?: boolean;
-  /**
-   * Optional numeric badge rendered next to the label (expanded
-   * sidebar only). When undefined or 0, no badge is drawn — the
-   * sidebar stays calm by default.
-   */
-  badge?: number;
-}
-
-// Flat top-section nav. Reports moves between Transactions and Budgets
-// (was after Savings) — Reports is a daily-review surface and the older
-// Menu/Admin/General triple-grouping (with hidden titles in collapsed
-// mode) gave inconsistent vertical rhythm across modes. A single
-// Separator below splits this section from the bottom-section
-// Settings + Log out without touching icon spacing.
-const menuItems: MenuItem[] = [
-  // Fast-capture entry. Routes to the full-screen /quick screen, which lives
-  // OUTSIDE AppShell (no sidebar) — the "Full app" link there returns here.
-  { path: '/quick', label: 'Quick add', icon: Zap },
-  { path: '/', label: 'Dashboard', icon: LayoutGrid, end: true },
-  { path: '/transactions', label: 'Transactions', icon: ArrowLeftRight },
-  { path: '/reports', label: 'Reports', icon: ChartNoAxesColumnIncreasing },
-  { path: '/budgets', label: 'Budgets', icon: Wallet },
-  { path: '/savings', label: 'Savings', icon: PiggyBank },
-  { path: '/categories', label: 'Categories', icon: Tag },
-];
-
-// Settings lives in the bottom section, alongside the Log out button.
-// Kept as a separate constant so future bottom-section items (e.g. a
-// What's New link) slot in cleanly without restructuring the JSX.
-const bottomItems: MenuItem[] = [
-  { path: '/settings', label: 'Settings', icon: SettingsIcon },
-];
+import {
+  type MenuItem,
+  menuItems,
+  bottomItems,
+  buildTrashItems,
+  formatBadgeText,
+  navItemAriaLabel,
+  navBadgeClass,
+  avatarInitial,
+} from '@/components/nav-items';
 
 export function Sidebar() {
   const { user, logout } = useAuth();
@@ -82,20 +42,13 @@ export function Sidebar() {
   // group below the main menu so it sits visually adjacent to Settings —
   // both are housekeeping rather than day-to-day navigation.
   //
-  // Computed inside the component (vs module scope) because the Trash
-  // badge needs the live `trashCount` from the hook. `useMemo` keeps
-  // the array reference stable across renders that don't change the
-  // count — guards against a future `React.memo` on `SidebarLink`
-  // silently busting on a fresh-each-render `item` prop.
+  // Built inside the component (vs module scope) because the Trash badge
+  // needs the live `trashCount` from the hook. `useMemo` keeps the array
+  // reference stable across renders that don't change the count — guards
+  // against a future `React.memo` on `SidebarLink` silently busting on a
+  // fresh-each-render `item` prop.
   const trashItems: MenuItem[] = useMemo(
-    () => [
-      {
-        path: '/trash',
-        label: 'Trash',
-        icon: Trash2,
-        badge: trashCount,
-      },
-    ],
+    () => buildTrashItems(trashCount),
     [trashCount],
   );
   const [expanded, setExpanded] = useState(
@@ -112,14 +65,24 @@ export function Sidebar() {
     window.dispatchEvent(new Event('sidebar-toggle'));
   }, [expanded]);
 
-  const initial = user?.display_name?.[0]?.toUpperCase() ?? '?';
+  const initial = avatarInitial(user?.display_name);
 
   return (
     <TooltipProvider delayDuration={200}>
+      {/*
+        Desktop-only surface. Below `md` the fixed aside would eat 48–240px
+        of a 390px viewport, so it is removed from layout entirely and
+        `MobileNav` (a top bar + slide-out drawer) takes over. `hidden`
+        also drops it from the accessibility tree, so a phone never sees
+        two copies of the same navigation — and the persisted
+        expanded/collapsed state below cannot reach phone layout, because
+        every width and padding class that reads it is `md:`-gated (here
+        and in AppShell).
+      */}
       <aside
         role="complementary"
         className={cn(
-          'fixed left-0 top-0 flex h-screen flex-col border-r border-border bg-card transition-[width] duration-200 ease-linear',
+          'fixed left-0 top-0 hidden h-screen flex-col border-r border-border bg-card transition-[width] duration-200 ease-linear md:flex',
           expanded ? 'w-60' : 'w-12',
         )}
       >
@@ -227,7 +190,11 @@ export function Sidebar() {
                   variant="ghost"
                   onClick={() => void logout()}
                   className={cn(
-                    'flex items-center overflow-hidden text-muted-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+                    // font-normal: Log out is a nav row, not an emphasis
+                    // control, and the Button variant's font-medium made it
+                    // read heavier than the links above it. Matches the
+                    // mobile drawer's copy of this same control.
+                    'flex items-center overflow-hidden font-normal text-muted-foreground [&>svg]:size-4 [&>svg]:shrink-0',
                     expanded ? 'w-full justify-start gap-2 px-3 py-2' : 'size-8 p-2',
                   )}
                 >
@@ -298,18 +265,13 @@ function SidebarLink({
   // mode a tiny dot lives on the icon instead (no room for a number).
   const showPill = expanded && hasBadge;
   const showDot = !expanded && hasBadge;
-  // Visible value is capped at "99+" so a 3+ digit count can't widen
-  // the pill and push the row out of alignment. aria-label below
-  // keeps the real number so screen readers stay accurate.
-  const displayBadge =
-    item.badge !== undefined && item.badge > 99 ? '99+' : item.badge;
-  // aria-label overrides the link's text-derived accessible name so
-  // SR users hear "Trash, 7 items" instead of "Trash 7" or "Trash
-  // 99+". Active in BOTH collapsed and expanded modes so SR users
-  // get the count regardless of sidebar state.
-  const ariaLabel = hasBadge
-    ? `${item.label}, ${item.badge} item${item.badge === 1 ? '' : 's'}`
-    : undefined;
+  // Capped visible value and the un-capped screen-reader name both come
+  // from nav-items.ts, so the desktop sidebar and the mobile drawer can
+  // never drift on this contract. The aria-label is active in BOTH
+  // collapsed and expanded modes so SR users get the count regardless of
+  // sidebar state.
+  const displayBadge = formatBadgeText(item.badge);
+  const ariaLabel = navItemAriaLabel(item);
   // Compute isActive ourselves rather than via NavLink's className function
   // form. The function-form pattern (`className={({ isActive }) => ...}`)
   // does not survive Vite's prod minification on this stack — the function
@@ -339,15 +301,9 @@ function SidebarLink({
         {item.label}
       </span>
       {showPill && (
-        // Inline styled span rather than shadcn `Badge variant="secondary"`:
-        // on the active row (`bg-muted`) the secondary variant blends in.
-        // Using a solid `bg-primary` + `text-primary-foreground` follows
-        // the user's ColorThemePicker choice (Violet/Blue/etc.) AND keeps
-        // the number readable — a soft `bg-primary/15` tint was too pale
-        // to give the same-hue `text-primary` enough contrast.
-        <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-primary px-1.5 pt-px text-xs font-medium leading-none tabular-nums text-primary-foreground">
-          {displayBadge}
-        </span>
+        // Pill styling lives in nav-items.ts — the mobile drawer draws the
+        // same badge and the two must not drift.
+        <span className={navBadgeClass}>{displayBadge}</span>
       )}
       {showDot && (
         // Collapsed-mode "has content" indicator. Uses the primary accent
