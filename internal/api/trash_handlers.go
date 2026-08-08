@@ -23,8 +23,25 @@ import (
 // behaviour on a recovery surface where the user expects to see the
 // exact moment each row was tombstoned.
 type deletedTransactionResponse struct {
-	ID               int64    `json:"id"`
-	UserID           int64    `json:"user_id"`
+	ID     int64 `json:"id"`
+	UserID int64 `json:"user_id"`
+	// CreatedBy names UserID — who entered this row — so a member can tell
+	// their own rows from their household's, the same way the live list does
+	// (see transactionResponse.CreatedBy for the full rationale). It matters
+	// more here than there: an admin's trash view spans the whole household,
+	// and "restore" is a destructive-adjacent action to take on a row you
+	// cannot attribute.
+	//
+	// It carries users.display_name, NOT users.username, matching the live
+	// list and everywhere else this app names a person.
+	//
+	// Display-only. Ownership, the 404-oracle guard order on restore/purge,
+	// and audit attribution are all untouched by it.
+	//
+	// The key is ALWAYS emitted (no omitempty) so the frontend never has to
+	// tell "absent" from "unknown". An empty string means the creator's user
+	// row is gone — see the LEFT JOIN in ListDeletedTransactions.
+	CreatedBy        string   `json:"created_by"`
 	Date             string   `json:"date"`
 	Amount           float64  `json:"amount"`
 	OriginalAmount   *float64 `json:"original_amount,omitempty"`
@@ -60,8 +77,8 @@ type deletedTransactionListResponse struct {
 // The query goes through sqlc (ListDeletedTransactions) so the chokepoint
 // rule in CLAUDE.md — "all transactions reads live in queries.sql so the
 // deleted_at filter is reviewable in one place" — is respected. The
-// generated row projects both c.name and c.type so this handler has no
-// raw SQL.
+// generated row projects c.name, c.type and the creator's display name, so
+// this handler has no raw SQL.
 //
 // Pagination is identical to handleListTransactions so the frontend
 // trash view can reuse the same pager component — page + per_page
@@ -137,8 +154,11 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 	transactions := make([]deletedTransactionResponse, 0, len(rows))
 	for _, row := range rows {
 		tr := deletedTransactionResponse{
-			ID:           row.ID,
-			UserID:       row.UserID,
+			ID:     row.ID,
+			UserID: row.UserID,
+			// NULL only when the LEFT JOIN found no user row; the empty string
+			// it maps to is the documented "creator unknown" value on the wire.
+			CreatedBy:    row.CreatedBy.String,
 			Date:         row.Date.Format("2006-01-02"),
 			Amount:       centsToDollars(row.AmountCents),
 			Description:  row.Description,

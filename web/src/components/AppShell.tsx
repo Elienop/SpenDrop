@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
+import { MobileNav } from './MobileNav';
 import { Dashboard } from '../pages/Dashboard';
 import { Transactions } from '../pages/Transactions';
 import { Budgets } from '../pages/Budgets';
@@ -33,21 +34,34 @@ export function AppShell() {
   return (
     <div className="min-h-screen bg-background text-foreground">
       <Sidebar />
+      <MobileNav />
       {/*
-        Outer <main> covers the viewport area to the right of the fixed
-        sidebar (pl-60 / pl-12 = sidebar width when expanded / collapsed).
-        Inner wrapper centers the page content with `mx-auto max-w-[1400px]`
-        so on wide screens the content sits in the middle of the available
-        space instead of hugging the sidebar. The padding-left transitions
-        so toggling the sidebar slides the content over smoothly.
+        From `md` up, <main> covers the viewport area to the right of the
+        fixed sidebar (pl-60 / pl-12 = sidebar width when expanded /
+        collapsed), and the padding-left transitions so toggling the
+        sidebar slides the content over smoothly.
+
+        Below `md` there IS no fixed sidebar (Sidebar is `hidden`, MobileNav
+        takes over), so EVERY sidebar-width padding here is `md:`-gated —
+        that gate is what keeps a persisted `spendrop-sidebar` of 'true'
+        from stealing 240px of a 390px phone viewport. The transition is
+        md:-gated for the same reason: the phone drawer animates as a
+        transform, and nothing about the content column should move with it.
+
+        Inner wrapper centers page content with `mx-auto max-w-[1400px]`, on
+        a 16px phone gutter widening to 40px once there is room for it.
       */}
       <main
         className={cn(
-          'min-h-screen py-8 transition-[padding] duration-200 ease-linear',
-          sidebarExpanded ? 'pl-60' : 'pl-12',
+          // The 3.5rem subtrahend IS MobileNav's `h-14` top bar, which is
+          // sticky and therefore in normal flow above this element. Change
+          // the bar's height and this must change with it, or every phone
+          // page gains (or loses) that much scroll at the bottom.
+          'min-h-[calc(100dvh-3.5rem)] py-4 md:min-h-screen md:py-8 md:transition-[padding] md:duration-200 md:ease-linear',
+          sidebarExpanded ? 'md:pl-60' : 'md:pl-12',
         )}
       >
-        <div className="mx-auto max-w-[1400px] px-10">
+        <div className="mx-auto max-w-[1400px] px-4 md:px-10">
           <Routes>
             <Route path="/" element={<Dashboard />} />
             <Route path="/reports" element={<Reports />} />

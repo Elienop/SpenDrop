@@ -324,7 +324,7 @@ export function Dashboard() {
             Here's what's happening with your finances.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -472,10 +472,16 @@ export function Dashboard() {
         </ChartContainer>
       </ChartCard>
 
-      {/* Category breakdown + Recent Transactions — side by side */}
+      {/* Category breakdown + Recent Transactions — side by side.
+          Both cards carry `min-w-0`: a grid item defaults to min-width:auto, so
+          anything wide inside (the transactions table, a future chart) becomes
+          the track's min-content and widens the whole page. This grid happened
+          to measure clean at 390px with current data, but the report tabs with
+          the same shape did not — the class is what makes it not depend on the
+          data. See the note in OverviewTab. */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <Card className="min-w-0">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
             <div>
               <CardTitle className="text-base font-semibold">Spending by Category</CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
@@ -567,8 +573,8 @@ export function Dashboard() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <Card className="min-w-0">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
             <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
             <div className="flex items-center gap-2">
               <ButtonGroup>

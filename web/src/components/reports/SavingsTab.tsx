@@ -166,7 +166,7 @@ export function SavingsTab() {
     <div className="flex flex-col gap-6">
       {/* Savings Goal Progress */}
       <Card aria-labelledby="savings-goal-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <CardTitle
             id="savings-goal-heading"
             className="text-base font-semibold"
@@ -321,7 +321,7 @@ export function SavingsTab() {
 
       {/* Year-over-Year */}
       <Card aria-labelledby="yoy-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <CardTitle id="yoy-heading" className="text-base font-semibold">
             Year-over-Year Net Savings
           </CardTitle>

@@ -57,3 +57,8 @@ export const MAX_API_TOKEN_NAME_LENGTH = 100;
 /** Currency symbol. Backend: `MaxCurrencySymbolLength`. Wide enough for the
  *  multi-character symbols real currencies use ("ل.ل." is four). */
 export const MAX_CURRENCY_SYMBOL_LENGTH = 10;
+
+/** Household member display name. Backend: `MaxDisplayNameLength`, applied
+ *  through `charLen` (a rune count) in both the register and the admin-edit
+ *  handlers. */
+export const MAX_DISPLAY_NAME_LENGTH = 64;

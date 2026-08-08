@@ -30,31 +30,8 @@ top items. Production figures in this file come from the owner's live database o
 
 *B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed. B7 shipped
 2026-08-08 on `fix/b7-healthcheck-data`, merged via PR #124 and released as v0.39.0 — see
-Closed.*
-
-### B8 — Backups carry a "verified" marker that two paths never earn
-**Status: implemented on `fix/b8-backup-verified-marker` (2026-08-08, commits
-`68e3ea6` + `62d52b5`, docs rider `bd510d0`), unmerged — this entry moves to Closed with the
-squash hash at merge. Nothing open.** What it became: `backup.Run` is now baseline → Snapshot
-→ Verify → sidecar, so the CLI and pre-migration paths earn the marker; an explicit
-absent-table assertion covers first boot; the Verify query budget is sized from the source
-(floor 5 min, ceiling 24 h) so the fail-closed migration path cannot boot-loop a large legacy
-DB; a missing or 0-byte `DB_PATH` is refused before SQLite can create or bless it (both holes
-produced verified sidecars for backups of nothing); verify failure refuses to migrate with
-wording distinct from a write failure and exits the CLI non-zero with no file left behind.
-Two-reviewer battery (8 findings, all fixed), isolated deep review MERGEABLE (10/10 kill-list
-mutants; its 3 findings fixed and their mutants re-executed post-commit), container e2e of
-the real `docker exec` flow (5 cases, all exact). Known-unpinned, disclosed: the
-baseline-before-Snapshot ordering (needs a mid-function hook) and the remove-failure arms
-(documented at the site).
-
-The original finding, kept verbatim:
-**Verified: reported.** Scheduled backups are genuinely checked. Pre-migration snapshots and
-manual backups get the same trust marker with no verification, and the README states the marker
-means integrity and row-count checks passed. The pre-migration snapshot is the rollback anchor
-for the riskiest operation the app performs, and is taken before anything has checked the source
-database on that boot.
-**Effort:** small — run the same check on both paths, and correct the README.
+Closed. B8 shipped 2026-08-08 on `fix/b8-backup-verified-marker`, merged via PR #125 and
+released as v0.39.1 — see Closed.*
 
 ### B12 — Bulk counts promise a member more than their write can touch
 **Verified: read** (found 2026-08-07 while designing the B4 fix; owner asked for the line).
@@ -82,6 +59,8 @@ one-field change plus the same LEFT JOIN shape on the ListDeleted* queries. The 
 `DeletedTransaction` is deliberately `Omit<Transaction, 'created_by'>` (web/src/api/types.ts) so
 Trash code cannot silently read an undefined field — remove the Omit when the field ships.
 **Effort:** small.
+**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (both halves; the Omit is gone, the
+orphaned-creator LEFT-join is mutation-pinned on both queries) — moves to Closed at merge.
 
 ### B14 — Budget mutations write no audit trail
 **Verified: read** (B6 security audit M2, 2026-08-07). `handleSetBudget`, `handleDeleteBudget`,
@@ -155,12 +134,75 @@ for the build: whether a MEMBER may edit their own display name — it changes h
 renders on rows other people see. Ask (3) is a real design decision (admin-vs-member
 capability split on one surface) — brainstorm before building, rank with the owner.
 **Effort:** small for (1) as admin-only UI; the merged accounts page is its own design stage.
+**Ask (1) built 2026-08-08 on `feat/b9-mobile-shell-slice1`** — admin display-name editor
+(exact single-field PUT), a confirmation dialog on member Delete (whose copy is test-pinned to
+NOT claim a ledger cascade — the 409 guard makes that impossible), and a self-rename refresh
+path (`useAuth.refreshUser`, epoch-guarded). Asks (2)/(3) remain a separate design stage.
+Moves to Closed at merge.
+
+### B19 — Quick page shows no creator attribution (owner request)
+**Verified: read** (owner request 2026-08-08; confirmed in code the same day, v0.39.1 tree).
+The /quick Recently-added panel renders no creator while the Transactions page does
+(`web/src/components/TransactionRow.tsx:375`, the B6 attribution). Display-only gap:
+`Transaction.created_by` is already on the wire (`web/src/api/types.ts:31`) and
+`useRecentTransactions` fetches the household-wide list (`sort_by=created_at`, no user
+filter), so the panel already shows the other member's rows — attribution there is
+informative, not redundant. `RecentlyAdded.test.tsx` fixtures even set `created_by`; the
+component ignores the field. Scope: the rendered list rows only — the entry form has nothing
+to attribute.
+**Effort:** small — same metadata idiom as TransactionRow.
+**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (saved rows only; pending offline rows
+deliberately unattributed) — moves to Closed at merge.
+
+### B20 — users.role integrity rests on one handler
+**Verified: read** (found 2026-08-08 during B18 merge-semantics mutation testing; second half
+during the session-survival test work). Two hardening gaps in the same surface: (1)
+`users.role` has NO CHECK constraint — under a mutated handler, `role = ''` writes cleanly
+into SQLite; `handleUpdateUser`'s whitelist plus its merge fallback are the only guards of
+that column's well-formedness, and any future path writing role bypasses both. (2)
+`handleUpdateUser` discards `DeleteSessionsByUserID`'s error (`_ =`) — a failed DELETE after
+a demotion leaves admin-capable cookies alive and still returns 200; untestable today without
+a fault-injection seam.
+**Effort:** small — a migration adding the CHECK, plus an error check.
+
+### B21 — display_name has no charset gate, and it reaches push-notification bodies
+**Verified: read** (B9 security audit 2026-08-08; PRE-EXISTING — B18 only made renames
+routine). Unlike `username` (which has a charset gate), `display_name` is length-bounded
+only, at both write sites (register and the admin PUT): control characters, newlines, and
+bidi overrides are accepted. Every render site is safe (JSX text nodes; no export path
+carries it). The one non-text sink: Web Push — `internal/api/notifications.go:79` interpolates
+the actor's display name into the body via `fmt.Sprintf`, so a `\n` in a name forges extra
+notification lines. Fix in ONE pass: sanitize at both write sites; consider the notification
+builder too.
+**Effort:** small.
+
+### B22 — web tsconfig lacks `strict`
+**Verified: read** (B9 deep review 2026-08-08). `strict` is absent from `web/tsconfig.json`
+and `web/tsconfig.app.json`, while the project rule mandates strict type safety / no `any`.
+Enabling it is its own pass with an unknown error count — do not fold into another branch.
+**Effort:** unknown until tried; likely medium.
+
+### B23 — offline-capture hold filing on identity change is untested
+**Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
+files the queued-capture hold when the session identity changes. The race tests assert it is
+NOT called with the new user's id under a stale failure, but nothing pins the positive
+semantics — "the hold is filed against the DEPARTED id, if at all." A queue-semantics
+question, distinct from the auth race that exposed it.
+**Effort:** small.
 
 ---
 
 ## Queued stages
 
 ### B9 — Mobile shell (next stage, owner-decided)
+**Slice 1 BUILT 2026-08-08 on `feat/b9-mobile-shell-slice1`** (with the B13 / B18-ask-1 / B19
+riders — owner: "fit issues together"), browser-verified at 390×844 on the rebuilt container,
+PR pending; this entry moves to Closed with the squash hash at merge. Slice-2 re-measure
+notes collected during the build: the heatmap's 1fr cells shrink to ~2px untappable at 390
+(an explicit cell width would instead widen the page ~795px — needs its own scroll container);
+Users-row actions should collapse into a DropdownMenu; Reports/Settings tables pan with no
+scroll affordance hint.
+
 **Verified: reproduced** in a browser at 390×844 against the running container.
 The shell has zero responsive breakpoints: a permanent sidebar plus page padding leaves ~262px of
 content on a 390px phone, dropping to ~70px if the sidebar toggle is hit — effectively bricked,
@@ -262,6 +304,39 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B8 — Backups carry a "verified" marker that two paths never earn** (`68e3ea6` + docs
+  rider `bd510d0` + `62d52b5` + `54348c2` + ordering pin `16df627`, 2026-08-08, on
+  `fix/b8-backup-verified-marker`; MERGED via PR #125, squash `3262643`, released as
+  **v0.39.1**, branch deleted). The finding: pre-migration snapshots and manual CLI backups
+  received the `.sha256` trust sidecar with no verification — the rollback anchor for the
+  riskiest operation the app performs was blessed before anything had checked the source
+  database on that boot.
+  - **What shipped:** `backup.Run` is now stat-guard → baseline → Snapshot → Verify →
+    sidecar on every path. A missing source is refused before go-sqlite3 can create a
+    phantom on open; a 0-byte source is refused explicitly (an empty DB VACUUMs to exactly
+    4096 bytes — the size floor alone never catches the input side). The Verify query
+    budget is sized from the source (floor 5 min, 64 MiB/min, ceiling 24 h) so the
+    fail-closed migration path cannot boot-loop a large legacy DB — the B3-class hazard;
+    `MaxSize` = 10× the live source. First boot: `ExpectTransactionsAbsent` is an
+    ASSERTION (the backup must also lack the table; contradictory params rejected before
+    I/O), never a skip. Verify failure deletes the rejected copy, surfaces
+    `ErrVerifyFailed` through `SnapshotForMigration`'s re-wrap, refuses to migrate with
+    wording distinct from a write failure, and exits the CLI non-zero with no file left
+    behind. Newly DETECTED old failure: a `DB_PATH` pointing at an empty file went
+    exit-0 → exit-1.
+  - **Not obvious, kept:** existence guard ≠ validity guard — `os.Stat` proves presence,
+    not usability, and both holes produced verified sidecars for backups of nothing; the
+    params-struct builder assignments (`QueryBudget`, `MaxSize`) were each deletable
+    repo-green until `TestSourceBaseline_WiresSizeDerivedParams` (wiring-seam instance
+    seven); the baseline-before-Snapshot ordering has no behavioural seam and is pinned
+    via go/ast (`run_ordering_pin_test.go`, the repo's third source-pin precedent); a
+    build-failing mutant is not a kill (the 0-byte guard's first mutant left `srcInfo`
+    unused). Two-reviewer battery 8/8 findings fixed; isolated deep review MERGEABLE,
+    10/10 kill-list mutants plus 6 more re-executed post-commit; container e2e of the
+    real `docker exec` flow, 5/5 exact outputs. Disclosed, unpinned: the remove-failure
+    cleanup arms (no test seam — the claim side is pinned instead) and the stat guard's
+    permission-error arm.
 
 - **B7 — Container healthcheck catches a dead or read-only database** (piece 1 `a16b19d`
   2026-08-07, piece 2 `3cff135` + SCHEMA.md regen `9cfe6d1` 2026-08-08, on

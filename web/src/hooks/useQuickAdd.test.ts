@@ -19,7 +19,10 @@ vi.mock('@/lib/offline-queue', () => ({
 }));
 
 // useQuickAdd reads the authenticated user id; the hook only consumes `.user`.
-vi.mock('@/hooks/useAuth', () => ({ useAuth: () => ({ user: { id: 1 } }) }));
+vi.mock('@/hooks/useAuth', () => {
+  const refreshUser = vi.fn();
+  return { useAuth: () => ({ user: { id: 1 }, refreshUser }) };
+});
 
 import { useQuickAdd } from './useQuickAdd';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';

@@ -47,6 +47,7 @@ describe('Sidebar', () => {
       user: mockUser,
       loading: false,
       unverified: false,
+      refreshUser: vi.fn(),
       login: vi.fn(),
       register: vi.fn(),
       logout: mockLogout,
@@ -81,7 +82,11 @@ describe('Sidebar', () => {
     // contract, not just the ARIA contract.
     renderSidebar('/transactions');
     const link = screen.getByRole('link', { name: /transactions/i });
-    expect(link.className).toContain('bg-muted');
+    // Exact token, not a substring. Every row carries `hover:bg-muted` in
+    // its base classes, so the original `className.toContain('bg-muted')`
+    // passed with the `isActive &&` branch deleted — mutation-verified
+    // 2026-08-08, the assertion this test exists for was never firing.
+    expect(link.className.split(/\s+/)).toContain('bg-muted');
   });
 
   test('displays user display name when expanded', async () => {
@@ -94,6 +99,23 @@ describe('Sidebar', () => {
   test('displays user avatar initial', () => {
     renderSidebar();
     expect(screen.getByText('A')).toBeInTheDocument();
+  });
+
+  test('avatar initial takes a whole code point from an astral-plane name', () => {
+    // display_name is user-editable, so a leading emoji is easy to create.
+    // `name[0]` yields half a surrogate pair and renders as U+FFFD.
+    mockedUseAuth.mockReturnValue({
+      user: { ...mockUser, display_name: '😀mile' },
+      loading: false,
+      unverified: false,
+      refreshUser: vi.fn(),
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: mockLogout,
+    });
+    renderSidebar();
+    expect(screen.getByText('😀')).toBeInTheDocument();
+    expect(screen.queryByText('\ud83d')).not.toBeInTheDocument();
   });
 
   test('calls logout when logout button is clicked', async () => {
@@ -196,6 +218,7 @@ describe('Sidebar', () => {
         user: { ...mockUser, role: 'member' },
         loading: false,
         unverified: false,
+        refreshUser: vi.fn(),
         login: vi.fn(),
         register: vi.fn(),
         logout: mockLogout,
@@ -209,6 +232,7 @@ describe('Sidebar', () => {
         user: { ...mockUser, role: 'member' },
         loading: false,
         unverified: false,
+        refreshUser: vi.fn(),
         login: vi.fn(),
         register: vi.fn(),
         logout: mockLogout,
@@ -362,6 +386,7 @@ describe('Sidebar', () => {
       user: { ...mockUser, id: 2, role: 'member' as const },
       loading: false,
       unverified: false,
+      refreshUser: vi.fn(),
       login: vi.fn(),
       register: vi.fn(),
       logout: mockLogout,
@@ -380,6 +405,22 @@ describe('Sidebar', () => {
   });
 
   describe('layout', () => {
+    test('the fixed column is removed below md (MobileNav takes over there)', () => {
+      // happy-dom does not evaluate breakpoints, so this is a structural
+      // pin: unprefixed `flex` would leave a 48–240px fixed aside on top
+      // of a 390px phone viewport, and `hidden` is also what keeps the
+      // phone from seeing two copies of the same navigation in the
+      // accessibility tree.
+      renderSidebar();
+      const tokens = screen
+        .getByRole('complementary')
+        .className.split(/\s+/)
+        .filter(Boolean);
+      expect(tokens).toContain('hidden');
+      expect(tokens).toContain('md:flex');
+      expect(tokens).not.toContain('flex');
+    });
+
     test('renders a Separator between the nav sections', () => {
       // Separator divides the top section (nav + Trash) from the
       // bottom section (Settings + Logout). Shadcn's Separator

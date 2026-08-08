@@ -29,6 +29,7 @@ describe('Register', () => {
       user: null,
       loading: false,
       unverified: false,
+      refreshUser: vi.fn(),
       login: vi.fn(),
       register: mockRegister,
       logout: vi.fn(),

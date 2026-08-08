@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -9,16 +9,25 @@ vi.mock('../hooks/useAuth', () => ({
   useAuth: vi.fn(),
 }));
 
-vi.mock('../api/client', () => ({
-  api: {
-    get: vi.fn(),
-    post: vi.fn(),
-    put: vi.fn(),
-    patch: vi.fn(),
-    del: vi.fn(),
-    upload: vi.fn(),
-  },
-}));
+// Spread the real module and stub only `api`, matching Settings.password.test.tsx.
+// The real ApiError class has to survive: the page discriminates on
+// `err instanceof ApiError && err.status === 400` to decide whether a failure
+// belongs on the field or in a toast, and a factory that omits the class leaves
+// that check testing `instanceof undefined`, which throws.
+vi.mock('../api/client', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../api/client')>();
+  return {
+    ...actual,
+    api: {
+      get: vi.fn(),
+      post: vi.fn(),
+      put: vi.fn(),
+      patch: vi.fn(),
+      del: vi.fn(),
+      upload: vi.fn(),
+    },
+  };
+});
 
 vi.mock('sonner', () => ({
   toast: {
@@ -29,7 +38,7 @@ vi.mock('sonner', () => ({
 }));
 
 import { useAuth } from '../hooks/useAuth';
-import { api } from '../api/client';
+import { api, ApiError } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
 import { MAX_CURRENCY_SYMBOL_LENGTH } from '../lib/constants';
@@ -119,6 +128,11 @@ describe('Settings', () => {
   });
 
   describe('as admin', () => {
+    // Named rather than inline, because the display-name tests assert on it:
+    // it is the auth context's own re-read of GET /auth/me, and renaming
+    // yourself is the only thing on this page that may fire it.
+    const mockRefreshUser = vi.fn();
+
     beforeEach(() => {
       mockedUseAuth.mockReturnValue({
         user: {
@@ -130,6 +144,7 @@ describe('Settings', () => {
         },
         loading: false,
         unverified: false,
+        refreshUser: mockRefreshUser,
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),
@@ -162,6 +177,20 @@ describe('Settings', () => {
       expect(
         screen.getByRole('tab', { name: /import \/ export/i }),
       ).toBeInTheDocument();
+    });
+
+    // Six triggers for an admin come to roughly 550px of whitespace-nowrap
+    // content, against ~358px of content width on a 390px phone. The strip has
+    // to scroll rather than widen the page — and `justify-start` is the half
+    // that is easy to lose: TabsList's own `justify-center` centres the
+    // overflow, which parks Account past the left edge where scrollLeft cannot
+    // reach it. Whether it scrolls is a browser check; that it is not centred
+    // is pinnable here, and tailwind-merge really does drop justify-center.
+    test('lets the tab strip scroll sideways instead of centring its overflow', () => {
+      renderSettings();
+      const strip = screen.getByRole('tablist');
+      expect(strip).toHaveClass('overflow-x-auto', 'max-w-full', 'justify-start');
+      expect(strip).not.toHaveClass('justify-center');
     });
 
     test('does not render relocated Budgets or Savings tabs', () => {
@@ -439,6 +468,418 @@ describe('Settings', () => {
         });
       });
     });
+
+    // B18. `alice` in the shared fixture IS the signed-in admin, so every test
+    // here doubles as the motivating case: an admin shortening their own name
+    // now that it labels every transaction they enter.
+    describe('display name editor', () => {
+      // The server's own cap, `MaxDisplayNameLength` in internal/api/limits.go,
+      // written out rather than imported: the number is what has to agree
+      // across the wire, and a test that reads the same constant the page reads
+      // would still pass if both moved away from the server's.
+      const LIMIT = 64;
+
+      // alice is the signed-in admin; bob is somebody else. The shared fixture
+      // lists alice alone, so the second row is seeded only where it is needed.
+      const BOB = {
+        id: 2,
+        username: 'bob',
+        display_name: 'Bob',
+        role: 'member',
+        created_at: '2024-01-01',
+      };
+
+      function seedUsers(list: unknown[]) {
+        mockedApi.get.mockImplementation((path: string) =>
+          path === 'users' ? Promise.resolve(list) : Promise.resolve([]),
+        );
+      }
+
+      function renderUsersTab() {
+        return render(
+          <MemoryRouter initialEntries={['/settings?tab=users']}>
+            <Settings />
+          </MemoryRouter>,
+          { wrapper: withQueryClient },
+        );
+      }
+
+      async function openEditor(
+        user: ReturnType<typeof userEvent.setup>,
+        username = 'alice',
+      ) {
+        renderUsersTab();
+        await waitFor(() => {
+          expect(screen.getByText(username)).toBeInTheDocument();
+        });
+        await user.click(
+          screen.getByRole('button', {
+            name: new RegExp(`edit display name for ${username}`, 'i'),
+          }),
+        );
+        return await screen.findByRole('dialog');
+      }
+
+      // Reset password is deliberately hidden on the admin's own row. This one
+      // must NOT copy that rule, or the feature misses the case it exists for.
+      test("offers the editor on the admin's own row", async () => {
+        renderUsersTab();
+        await waitFor(() => {
+          expect(screen.getByText('alice')).toBeInTheDocument();
+        });
+        expect(
+          screen.getByRole('button', { name: /edit display name for alice/i }),
+        ).toBeInTheDocument();
+        expect(
+          screen.queryByRole('button', { name: /reset password for alice/i }),
+        ).not.toBeInTheDocument();
+      });
+
+      test('PUTs display_name alone, never the role', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        const field = within(dialog).getByLabelText('Display name');
+        // Prefilled: the case this exists for is editing a name that is
+        // already there, not typing one from scratch.
+        expect(field).toHaveValue('Alice');
+        await user.clear(field);
+        await user.type(field, 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          // Exact object, not objectContaining: the handler merges, so a
+          // payload that also carried `role` would still succeed against the
+          // server while turning every rename into a role write — and a role
+          // write that differs from the stored one drops that user's sessions.
+          expect(mockedApi.put).toHaveBeenCalledWith('users/1', {
+            display_name: 'Ali',
+          });
+        });
+        expect(mockedApi.put).toHaveBeenCalledTimes(1);
+      });
+
+      test('refetches the user list and invalidates cached transactions', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        const usersFetchesBefore = mockedApi.get.mock.calls.filter(
+          (call) => call[0] === 'users',
+        ).length;
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          expect(mockedApi.put).toHaveBeenCalled();
+        });
+
+        // The response is {"status":"updated"} and carries no user object, so
+        // the table is only correct again if the page asks the server again.
+        await waitFor(() => {
+          const after = mockedApi.get.mock.calls.filter(
+            (call) => call[0] === 'users',
+          ).length;
+          expect(after).toBeGreaterThan(usersFetchesBefore);
+        });
+
+        // Display names are baked server-side into every transaction's
+        // `created_by`, and a user PUT emits no SSE event — without this the
+        // Transactions table and the /quick recently-added panel keep serving
+        // the old name from cache. This is the assertion someone will
+        // "simplify" away.
+        await waitFor(() => {
+          expect(invalidate).toHaveBeenCalledWith({
+            queryKey: ['transactions'],
+          });
+        });
+        invalidate.mockRestore();
+      });
+
+      test('refuses an empty name without calling the API', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        expect(
+          await within(dialog).findByText(/display name is required/i),
+        ).toBeInTheDocument();
+        expect(mockedApi.put).not.toHaveBeenCalled();
+      });
+
+      // Whitespace-only is the case the server would answer with a 400 that
+      // reads "display_name or role is required" — its own trim empties the
+      // field, and the merge then leaves the old name in place. Caught here so
+      // it never looks like a save that quietly did nothing.
+      test('refuses a whitespace-only name without calling the API', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        const field = within(dialog).getByLabelText('Display name');
+        await user.clear(field);
+        await user.type(field, '   ');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        expect(
+          await within(dialog).findByText(/display name is required/i),
+        ).toBeInTheDocument();
+        expect(mockedApi.put).not.toHaveBeenCalled();
+      });
+
+      // Astral-plane characters, so the pair discriminates the UNIT as well as
+      // the number: 64 of these are 128 UTF-16 code units, which `.length` or
+      // Zod's `.max()` would refuse while the server's rune count accepts them.
+      test('refuses a display name one character over the limit', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        const field = within(dialog).getByLabelText('Display name');
+        // fireEvent: typing 65 characters one at a time proves nothing extra,
+        // and the input carries no maxLength to stop it.
+        fireEvent.change(field, { target: { value: '𝟙'.repeat(LIMIT + 1) } });
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        expect(
+          await within(dialog).findByText(
+            `Display name must be ${LIMIT} characters or fewer`,
+          ),
+        ).toBeInTheDocument();
+        expect(mockedApi.put).not.toHaveBeenCalled();
+      });
+
+      test('accepts a display name of exactly the limit in astral-plane characters', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+        const atLimit = '𝟙'.repeat(LIMIT);
+
+        fireEvent.change(within(dialog).getByLabelText('Display name'), {
+          target: { value: atLimit },
+        });
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          expect(mockedApi.put).toHaveBeenCalledWith('users/1', {
+            display_name: atLimit,
+          });
+        });
+      });
+
+      // The pair below is the whole point of gating the refresh. Renaming
+      // YOURSELF has to move the name the shell renders out of the auth
+      // context; renaming anyone else must not spend a /auth/me round-trip
+      // that could only answer with your own unchanged profile.
+      // Delete sits third in a row of three on a surface whose primary input is
+      // a thumb, and it is the only one that destroys an account. Both halves
+      // matter: the first click must NOT delete, and the confirm must.
+      test('deletes only after the confirmation is accepted', async () => {
+        mockedApi.del.mockResolvedValue({});
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderUsersTab();
+        await waitFor(() => {
+          expect(screen.getByText('alice')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: /delete alice/i }));
+        const confirm = await screen.findByRole('alertdialog');
+        // Opening the confirmation is not the deletion.
+        expect(mockedApi.del).not.toHaveBeenCalled();
+
+        await user.click(
+          within(confirm).getByRole('button', { name: /^delete user$/i }),
+        );
+
+        await waitFor(() => {
+          expect(mockedApi.del).toHaveBeenCalledWith('users/1');
+        });
+      });
+
+      test('deletes nothing when the confirmation is cancelled', async () => {
+        mockedApi.del.mockResolvedValue({});
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderUsersTab();
+        await waitFor(() => {
+          expect(screen.getByText('alice')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: /delete alice/i }));
+        const confirm = await screen.findByRole('alertdialog');
+        await user.click(
+          within(confirm).getByRole('button', { name: /^cancel$/i }),
+        );
+
+        await waitFor(() => {
+          expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+        });
+        expect(mockedApi.del).not.toHaveBeenCalled();
+      });
+
+      // The cascade the dialog must NOT promise. transactions.user_id is ON
+      // DELETE CASCADE, but the handler refuses with 409 before it can fire, so
+      // copy claiming the ledger goes too would be false.
+      test('the confirmation says the ledger is not at stake', async () => {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        renderUsersTab();
+        await waitFor(() => {
+          expect(screen.getByText('alice')).toBeInTheDocument();
+        });
+
+        await user.click(screen.getByRole('button', { name: /delete alice/i }));
+        const confirm = await screen.findByRole('alertdialog');
+
+        expect(
+          within(confirm).getByText(/no ledger history is at stake/i),
+        ).toBeInTheDocument();
+        expect(
+          within(confirm).queryByText(/transactions will be deleted/i),
+        ).not.toBeInTheDocument();
+      });
+
+      test('re-reads your own profile after you rename yourself', async () => {
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          expect(mockRefreshUser).toHaveBeenCalledTimes(1);
+        });
+      });
+
+      test('does NOT re-read your profile when you rename somebody else', async () => {
+        seedUsers([
+          {
+            id: 1,
+            username: 'alice',
+            display_name: 'Alice',
+            role: 'admin',
+            created_at: '2024-01-01',
+          },
+          BOB,
+        ]);
+        mockedApi.put.mockResolvedValue({ status: 'updated' });
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user, 'bob');
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Bobby');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        // The rename itself still went through — otherwise this test would
+        // pass on a page that simply never saves.
+        await waitFor(() => {
+          expect(mockedApi.put).toHaveBeenCalledWith('users/2', {
+            display_name: 'Bobby',
+          });
+        });
+        expect(mockRefreshUser).not.toHaveBeenCalled();
+      });
+
+      // A 400 is the server judging this VALUE, so it belongs on the field.
+      test('puts a 400 from the server on the field, not in a toast', async () => {
+        mockedApi.put.mockRejectedValue(
+          new ApiError('display name must be 64 characters or less', 400),
+        );
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        expect(
+          await within(dialog).findByText(/64 characters or less/i),
+        ).toBeInTheDocument();
+        expect(mockedToast.error).not.toHaveBeenCalled();
+        expect(mockedToast.success).not.toHaveBeenCalled();
+      });
+
+      // A transport failure is not a verdict on the name. Rendering "Failed to
+      // fetch" as field validation tells the admin their name is wrong when it
+      // is fine, and leaves them retyping a value the server never saw.
+      test('sends a transport failure to a toast, not onto the field', async () => {
+        mockedApi.put.mockRejectedValue(new Error('Failed to fetch'));
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          expect(mockedToast.error).toHaveBeenCalledWith('Failed to fetch');
+        });
+        expect(
+          within(dialog).queryByText(/failed to fetch/i),
+        ).not.toBeInTheDocument();
+      });
+
+      // A 500 is the server answering, but not about this value either.
+      test('sends a 500 to a toast, not onto the field', async () => {
+        mockedApi.put.mockRejectedValue(new ApiError('internal error', 500));
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        await user.clear(within(dialog).getByLabelText('Display name'));
+        await user.type(within(dialog).getByLabelText('Display name'), 'Ali');
+        await user.click(within(dialog).getByRole('button', { name: /^save$/i }));
+
+        await waitFor(() => {
+          expect(mockedToast.error).toHaveBeenCalledWith('internal error');
+        });
+        expect(
+          within(dialog).queryByText(/internal error/i),
+        ).not.toBeInTheDocument();
+      });
+
+      // Renaming yourself is the case this editor exists for, so the copy has
+      // to address the person doing it rather than describe them.
+      test('addresses you in the second person on your own row', async () => {
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user);
+
+        expect(
+          within(dialog).getByText(/this is the name spendrop shows for you/i),
+        ).toBeInTheDocument();
+        expect(
+          within(dialog).queryByText(/every transaction they enter/i),
+        ).not.toBeInTheDocument();
+      });
+
+      test("keeps the third person on somebody else's row", async () => {
+        seedUsers([
+          {
+            id: 1,
+            username: 'alice',
+            display_name: 'Alice',
+            role: 'admin',
+            created_at: '2024-01-01',
+          },
+          BOB,
+        ]);
+        const user = userEvent.setup({ pointerEventsCheck: 0 });
+        const dialog = await openEditor(user, 'bob');
+
+        expect(
+          within(dialog).getByText(/every transaction they enter/i),
+        ).toBeInTheDocument();
+        expect(
+          within(dialog).queryByText(/shows for you/i),
+        ).not.toBeInTheDocument();
+      });
+    });
   });
 
   describe('forwarding toast for moved tabs', () => {
@@ -462,6 +903,7 @@ describe('Settings', () => {
         },
         loading: false,
         unverified: false,
+        refreshUser: vi.fn(),
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),
@@ -535,6 +977,7 @@ describe('Settings', () => {
         },
         loading: false,
         unverified: false,
+        refreshUser: vi.fn(),
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),
@@ -543,6 +986,16 @@ describe('Settings', () => {
 
     afterEach(() => {
       globalThis.fetch = originalFetch;
+    });
+
+    // A member sees one trigger fewer, which is still wider than a phone. The
+    // strip is on the container, not per-role, so this is the check that it
+    // was not attached to the admin branch by accident.
+    test('scrolls the tab strip for a member too', () => {
+      renderSettings();
+      const strip = screen.getByRole('tablist');
+      expect(strip).toHaveClass('overflow-x-auto', 'max-w-full', 'justify-start');
+      expect(strip).not.toHaveClass('justify-center');
     });
 
     test('hides users tab for non-admin', () => {
@@ -691,6 +1144,7 @@ describe('Settings', () => {
         },
         loading: false,
         unverified: false,
+        refreshUser: vi.fn(),
         login: vi.fn(),
         register: vi.fn(),
         logout: vi.fn(),

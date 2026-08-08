@@ -53,14 +53,20 @@ export interface Transaction {
  * `omitempty` on this field so the recovery surface always shows the
  * exact moment each row was tombstoned, even for the zero-value case.
  *
- * `created_by` is omitted on purpose: `deletedTransactionResponse` is a
- * SEPARATE struct from `transactionResponse` (see the comment above it) and
- * has not grown the attribution field. Inheriting it would let Trash code
- * read `tx.created_by`, type-check clean, and get `undefined` at runtime —
- * the same shape as the migration-010 money regression. Delete the `Omit`
- * when the trash endpoints start emitting it.
+ * `created_by` is inherited and REQUIRED: `deletedTransactionResponse` is a
+ * SEPARATE struct from `transactionResponse` (see the comment above it), and
+ * it now emits the attribution field on both list paths — the admin-wide
+ * `ListDeletedTransactions` and the member-scoped
+ * `ListDeletedTransactionsByUser` — via a `LEFT JOIN users`, without
+ * `omitempty`. Until it did, this interface `Omit`-ed the field so Trash code
+ * could not read `tx.created_by`, type-check clean, and get `undefined` at
+ * runtime — the same shape as the migration-010 money regression. Keep the
+ * field required rather than optional: an optional field would restore
+ * exactly that hole. As on `Transaction`, the empty string means the
+ * creator's user row is gone (the LEFT JOIN found nothing) and must render a
+ * neutral fallback, never a blank.
  */
-export interface DeletedTransaction extends Omit<Transaction, 'created_by'> {
+export interface DeletedTransaction extends Transaction {
   deleted_at: string;
 }
 

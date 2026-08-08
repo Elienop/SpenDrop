@@ -304,3 +304,45 @@ describe('OverviewTab chart axes', () => {
     expect(Math.ceil(516 / (interval + 1))).toBeLessThanOrEqual(MAX_AXIS_TICKS);
   });
 });
+
+// A grid item defaults to min-width:auto, so the width of the Recharts SVG in
+// a card becomes the track's min-content and widens the page — measured live at
+// a 390px viewport, this tab rendered 599px (Spending, same shape, 3530px). The
+// loop also latches: ResponsiveContainer then measures the widened track and
+// grows to match, so only a fresh mount with the fix present loads correctly.
+// `min-w-0` on the chart itself does NOT break it; it has to be on the item.
+describe('OverviewTab phone width', () => {
+  beforeEach(() => {
+    useReportYears.mockReturnValue(yearsResult);
+    useIncomeExpenses.mockReturnValue({
+      data: [],
+      loading: false,
+      fetching: false,
+      error: '',
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  // Asserted over every child the grid actually has, not a counted few, so a
+  // new chart card added without the class fails here.
+  test('every card in the root grid may shrink below its content', () => {
+    const { container } = render(<OverviewTab />);
+    const root = container.firstElementChild;
+    if (!root) throw new Error('OverviewTab rendered nothing');
+
+    // Premise. A flex column would be safe for a different reason (no
+    // min-width:auto trap in the cross axis), so if the layout ever changes
+    // this fails and the invariant below gets re-derived rather than skipped.
+    expect(root).toHaveClass('grid');
+
+    const cards = Array.from(root.children);
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) {
+      expect(card).toHaveClass('min-w-0');
+    }
+  });
+});

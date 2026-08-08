@@ -10,6 +10,7 @@ import {
   ChevronsRight,
   RotateCcw,
   Trash2,
+  User,
 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
@@ -880,12 +881,48 @@ export function Trash() {
                     <TableCell className="whitespace-nowrap">
                       {format(new Date(row.date), 'MMM d, yyyy')}
                     </TableCell>
-                    <TableCell className="font-medium">
-                      {row.description || (
-                        <span className="text-muted-foreground">
-                          (no description)
+                    {/* Width-bounded on purpose, exactly as in
+                        TransactionRow's description cell: import does not
+                        enforce the 500-character description limit the rest of
+                        the app does — validateImportField runs only on the
+                        per-row edit route — so a spreadsheet cell can put a
+                        far longer description into the ledger, and deleting
+                        such a row lands it HERE. Unbounded, one of them
+                        stretches the table for every row and pushes
+                        Restore/Purge further off-screen at 390px, on the one
+                        surface where reaching those buttons is the whole
+                        point. title= keeps the full text on hover; max-w-md
+                        plus the inner truncate is what makes either truncate
+                        do anything at all.
+
+                        The creator rides UNDER the description rather than in
+                        a column of its own: a ninth always-on column would
+                        cost width this table does not have, and tooltips are
+                        dead on touch. It matters more here than in the ledger
+                        — an admin's trash spans the whole household, and
+                        Restore/Purge are poor things to aim at a row you
+                        cannot attribute. */}
+                    <TableCell className="max-w-md">
+                      <div
+                        className="truncate font-medium"
+                        title={row.description || undefined}
+                      >
+                        {row.description || (
+                          <span className="text-muted-foreground">
+                            (no description)
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                        <User className="size-3.5 shrink-0" aria-hidden="true" />
+                        <span className="min-w-0 truncate">
+                          {/* A bare name in a muted line does not announce
+                              what it IS, and the icon is aria-hidden
+                              decoration. */}
+                          <span className="sr-only">Entered by </span>
+                          {row.created_by || 'Unknown'}
                         </span>
-                      )}
+                      </p>
                     </TableCell>
                     <TableCell>
                       <CategoryBadge

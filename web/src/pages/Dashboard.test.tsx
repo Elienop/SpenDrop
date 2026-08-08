@@ -170,16 +170,28 @@ vi.mock('../api/client', () => ({
   },
 }));
 
-vi.mock('../hooks/useAuth', () => ({
-  useAuth: () => ({
-    user: { id: 1, username: 'elie', display_name: 'Elie' },
-    isAuthenticated: true,
-    loading: false,
-    login: vi.fn(),
-    register: vi.fn(),
-    logout: vi.fn(),
-  }),
-}));
+// An untyped factory, so nothing checks this against AuthContextType: it used
+// to offer `isAuthenticated`, which the context has never had, and to omit
+// `unverified`, which it does have. Both corrected here. The mocked functions
+// are minted once in the factory closure rather than per call, so their
+// identity is stable across renders.
+vi.mock('../hooks/useAuth', () => {
+  const login = vi.fn();
+  const register = vi.fn();
+  const logout = vi.fn();
+  const refreshUser = vi.fn();
+  return {
+    useAuth: () => ({
+      user: { id: 1, username: 'elie', display_name: 'Elie' },
+      loading: false,
+      unverified: false,
+      login,
+      register,
+      logout,
+      refreshUser,
+    }),
+  };
+});
 
 import { Dashboard } from './Dashboard';
 
@@ -200,6 +212,36 @@ describe('Dashboard', () => {
     render(<MemoryRouter><Dashboard /></MemoryRouter>);
     expect(screen.getByLabelText(/month/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
+  });
+
+  // Today + a 140px month picker + a 100px year picker is ~318px of rigid
+  // controls, against ~358px of content on a 390px phone. It fits, but with
+  // nothing to spare and nothing to give: the row has no shrinkable item, so
+  // one more control or a wider locale pushes the page into horizontal
+  // scroll. Wrapping is the degrade. Verified as a class contract only —
+  // happy-dom lays nothing out.
+  test('the header controls can wrap instead of widening the page', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const controls = screen.getByRole('button', { name: 'Today' }).parentElement;
+    expect(controls).toHaveClass('flex', 'flex-wrap');
+  });
+
+  // A grid item defaults to min-width:auto, so anything wide inside a card —
+  // the transactions table, a future chart — becomes the track's min-content
+  // and widens the whole page. Both report tabs with this shape did exactly
+  // that at a 390px viewport (599px and 3530px); this grid measured clean with
+  // current dev data, which is a property of the data, not of the layout.
+  // Asserted over every child the grid has, so a new card fails here too.
+  test('every card in the chart/table grid may shrink below its content', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const grid = screen.getByText('Recent Transactions').closest('.grid');
+    if (!grid) throw new Error('Recent Transactions card is not inside a grid');
+
+    const cards = Array.from(grid.children);
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) {
+      expect(card).toHaveClass('min-w-0');
+    }
   });
 
   // The KPI delta badges only render when the trend contains the month BEFORE

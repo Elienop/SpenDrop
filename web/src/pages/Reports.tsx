@@ -1,7 +1,13 @@
 import { useState } from 'react';
 import { Info } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+  scrollableTabsList,
+} from '@/components/ui/tabs';
 import { OverviewTab } from '@/components/reports/OverviewTab';
 import { SpendingTab } from '@/components/reports/SpendingTab';
 import { SavingsTab } from '@/components/reports/SavingsTab';
@@ -109,7 +115,7 @@ export function Reports() {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
+        <TabsList className={scrollableTabsList}>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="spending">Spending</TabsTrigger>
           <TabsTrigger value="savings">Savings</TabsTrigger>

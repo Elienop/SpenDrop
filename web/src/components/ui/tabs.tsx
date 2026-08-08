@@ -22,6 +22,16 @@ const TabsList = React.forwardRef<
 ))
 TabsList.displayName = TabsPrimitive.List.displayName
 
+/**
+ * TabsList className for a strip that must survive a phone-width viewport:
+ * it caps at the container and scrolls sideways rather than pushing the page
+ * wider. `justify-start` is load-bearing — the base `justify-center` centres
+ * the overflow, which pushes the FIRST trigger past the left edge, where
+ * scrollLeft cannot reach it. Where the strip fits (every viewport from `sm`
+ * up) none of the three classes has any effect.
+ */
+const scrollableTabsList = "max-w-full justify-start overflow-x-auto"
+
 const TabsTrigger = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.Trigger>
@@ -52,4 +62,4 @@ const TabsContent = React.forwardRef<
 ))
 TabsContent.displayName = TabsPrimitive.Content.displayName
 
-export { Tabs, TabsList, TabsTrigger, TabsContent }
+export { Tabs, TabsList, TabsTrigger, TabsContent, scrollableTabsList }
