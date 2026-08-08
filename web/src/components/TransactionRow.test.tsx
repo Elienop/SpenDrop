@@ -583,6 +583,33 @@ describe('TransactionRow — keyboard shortcuts', () => {
   });
 });
 
+describe('TransactionRow edit — in-flight cue', () => {
+  // Parity with the phone edit sheet. The two surfaces run on one hook and
+  // should not report the same request differently — a button that stays
+  // "Save" while dimmed reads as refusal, not progress.
+  it('reads Saving… while the update is in flight', async () => {
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const onUpdate = vi.fn().mockReturnValueOnce(pending);
+    renderRow(makeTx(), onUpdate);
+
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    const busy = await screen.findByRole('button', { name: 'Saving…' });
+    expect(busy).toHaveAttribute('aria-busy', 'true');
+    expect(busy).toBeDisabled();
+
+    release!();
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+  });
+});
+
 describe('TransactionRow edit — preview after a rate change', () => {
   // The mocked currencies list prices LBP at 90,000/USD today. This row was
   // booked at 89,000, so it stores $16.85 for its 1,500,000 LBP — and it keeps

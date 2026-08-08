@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type KeyboardEvent } from 'react';
+import { useCallback, useState, type KeyboardEvent } from 'react';
 import { format } from 'date-fns';
 import { MoreHorizontal, User } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
@@ -27,8 +27,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
-import { useCurrencies } from '@/hooks/useCurrencies';
-import { toCreatePayload, toEditDefaults } from '@/lib/currency';
+import { transactionLabel } from '@/lib/transaction-label';
+import { useTransactionEditForm } from '@/hooks/useTransactionEditForm';
 import type { UpdateTransactionInput } from '@/hooks/useTransactions';
 
 export interface TransactionRowProps {
@@ -54,94 +54,37 @@ export function TransactionRow({
   descriptionSuggestions = [],
   tagSuggestions = [],
 }: TransactionRowProps) {
-  const { list: currencies, baseCode, rateFor, loading: currenciesLoading } = useCurrencies();
+  // Import bypasses the description checks, so a row can carry an empty one;
+  // `Select ` naming no object is the result. Shared with the phone card so
+  // one selection test covers whichever presentation is mounted.
+  const label = transactionLabel(transaction);
   const [editing, setEditing] = useState(false);
-  const [date, setDate] = useState(transaction.date);
-  // `baseCode` is `DEFAULT_CURRENCY` ("USD") until the useCurrencies fetch
-  // resolves. For rows with original_* === null and a non-USD household
-  // base, the initial defaults capture "USD"; the didInitEditCurrency
-  // effect below rehydrates once the fetch lands.
-  const initialDefaults = toEditDefaults(transaction, baseCode);
-  const [editAmount, setEditAmount] = useState<number>(initialDefaults.amount);
-  const [editCurrency, setEditCurrency] = useState<string>(initialDefaults.currency);
-  const [description, setDescription] = useState(transaction.description);
-  const [categoryId, setCategoryId] = useState(String(transaction.category_id));
-  const [tags, setTags] = useState(transaction.tags ?? '');
-  const [saving, setSaving] = useState(false);
-
-  const didInitEditCurrency = useRef(false);
-  useEffect(() => {
-    if (didInitEditCurrency.current) return;
-    if (currenciesLoading) return;
-    didInitEditCurrency.current = true;
-    const resolved = toEditDefaults(transaction, baseCode);
-    // The setState pair below is the async-resolution pattern the
-    // eslint config already blesses for `src/hooks/**` and `src/pages/**`:
-    // the household base currency only exists once the `useCurrencies` fetch
-    // lands, and a user who opens Edit inside that window is holding fields
-    // seeded from the placeholder base. There is no render-time value to
-    // derive from — the correction cannot happen before the data does — and
-    // the `didInitEditCurrency` latch above bounds it to a single pass, so it
-    // cannot cascade. Suppressed per-line rather than by widening the config
-    // override to `src/components/**`, which would silence the rule for the
-    // many components that have no async source at all.
-    if (resolved.currency !== editCurrency) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setEditCurrency(resolved.currency);
-    }
-    if (resolved.amount !== editAmount) {
-      setEditAmount(resolved.amount);
-    }
-    // editAmount/editCurrency intentionally excluded: this effect must run
-    // exactly once per mount, gated by didInitEditCurrency.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currenciesLoading, baseCode, transaction]);
-
-  async function handleSave() {
-    setSaving(true);
-    let payload: UpdateTransactionInput;
-    try {
-      const wire = toCreatePayload(
-        {
-          amount: editAmount,
-          currency: editCurrency,
-          date,
-          description,
-          category_id: parseInt(categoryId, 10),
-          tags,
-        },
-        baseCode,
-        rateFor,
-      );
-      payload = { id: transaction.id, ...wire };
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Invalid currency rate');
-      setSaving(false);
-      return;
-    }
-    try {
-      await onUpdate(payload);
-      // Retire whatever the last failed save left on the page-level banner.
-      // Cleared on SUCCESS, not before the request: clearing up front would
-      // blank the banner for the duration of a retry and then re-raise it.
-      onError('');
-      setEditing(false);
-    } catch (err) {
-      onError(err instanceof Error ? err.message : 'Failed to save');
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  function resetEditFields() {
-    const resolved = toEditDefaults(transaction, baseCode);
-    setDate(transaction.date);
-    setEditAmount(resolved.amount);
-    setEditCurrency(resolved.currency);
-    setDescription(transaction.description);
-    setCategoryId(String(transaction.category_id));
-    setTags(transaction.tags ?? '');
-  }
+  const stopEditing = useCallback(() => setEditing(false), []);
+  // Field state, the currency rehydration race, the save payload and the
+  // storedMoney contract all live in the shared hook — the phone edit Sheet
+  // runs on the same one, and every one of those is a place two copies would
+  // drift apart. This component owns only the layout below.
+  const {
+    date,
+    setDate,
+    description,
+    setDescription,
+    categoryId,
+    setCategoryId,
+    tags,
+    setTags,
+    saving,
+    baseCode,
+    reset: resetEditFields,
+    save: handleSave,
+    amountProps,
+    saveDisabled,
+  } = useTransactionEditForm({
+    transaction,
+    onUpdate,
+    onError,
+    onSaved: stopEditing,
+  });
 
   // Reseed edit fields from the current `transaction` prop on every
   // Edit-open, not just mount. Without this, `useState` captures the
@@ -192,7 +135,7 @@ export function TransactionRow({
               checked={selected}
               disabled={!onSelect}
               onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
-              aria-label={`Select ${transaction.description}`}
+              aria-label={`Select ${label}`}
             />
           </div>
         </TableCell>
@@ -269,34 +212,11 @@ export function TransactionRow({
           />
         </TableCell>
         <TableCell className="text-right font-mono tabular-nums">
-          <AmountCurrencyInput
-            value={editAmount}
-            onValueChange={setEditAmount}
-            currency={editCurrency}
-            onCurrencyChange={setEditCurrency}
-            baseCode={baseCode}
-            currencies={currencies}
-            hideInactive={false}
-            rateFor={rateFor}
-            loading={currenciesLoading}
-            // The money this row already stores. Saving an edit that merely
-            // restates the same foreign amount in the same currency keeps that
-            // stored value instead of re-pricing at today's rate, so the `≈`
-            // preview needs it to promise the number the save will produce.
-            // This is the only edit surface — the other two consumers of this
-            // component (TransactionEntryRow, QuickAdd) create rows, and a new
-            // row genuinely is priced at today's rate.
-            storedMoney={{
-              amount: transaction.amount,
-              original_amount: transaction.original_amount,
-              original_currency: transaction.original_currency,
-            }}
-            error={
-              editCurrency !== baseCode && rateFor(editCurrency) == null
-                ? 'No rate configured for this currency. Set one in Settings.'
-                : null
-            }
-          />
+          {/* `amountProps` carries the storedMoney freeze contract — see
+              useTransactionEditForm. The create surfaces (TransactionEntryRow,
+              QuickAdd) deliberately omit storedMoney, because a row that does
+              not exist yet genuinely is priced at today's rate. */}
+          <AmountCurrencyInput {...amountProps} />
         </TableCell>
         <TableCell>
           {/* `h-10` on the form matches peer TableCell input height so that
@@ -311,16 +231,18 @@ export function TransactionRow({
             }}
             className="flex h-10 items-center justify-end gap-1"
           >
+            {/* Same in-flight cue as the phone sheet. A dimmed control that
+                still reads "Save" says "you cannot do this", not "this is
+                happening" — and the two edit surfaces giving different
+                feedback for the same request is the sibling asymmetry this
+                slice kept turning up. Repo idiom: "Saving…" / "Resetting…". */}
             <Button
               type="submit"
               size="sm"
-              disabled={
-                saving ||
-                currenciesLoading ||
-                (editCurrency !== baseCode && rateFor(editCurrency) == null)
-              }
+              disabled={saveDisabled}
+              aria-busy={saving}
             >
-              Save
+              {saving ? 'Saving…' : 'Save'}
             </Button>
             <Button
               type="button"
@@ -343,7 +265,7 @@ export function TransactionRow({
           checked={selected}
           disabled={!onSelect}
           onCheckedChange={(v) => onSelect?.(transaction.id, v === true)}
-          aria-label={`Select ${transaction.description}`}
+          aria-label={`Select ${label}`}
         />
       </TableCell>
       <TableCell className="whitespace-nowrap">
@@ -410,7 +332,7 @@ export function TransactionRow({
               variant="ghost"
               size="icon"
               className="size-8 data-[state=open]:bg-accent"
-              aria-label={`Actions for ${transaction.description}`}
+              aria-label={`Actions for ${label}`}
             >
               <MoreHorizontal />
               <span className="sr-only">Open menu</span>
