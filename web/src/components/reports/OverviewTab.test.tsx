@@ -1,7 +1,7 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { ReactNode } from 'react';
+import React from 'react';
 
 const CURRENT_YEAR = 2026;
 
@@ -31,47 +31,35 @@ vi.mock('@/hooks/useReports', () => ({
 
 vi.mock('@/hooks/useBaseCurrency', () => ({ useBaseCurrency: () => 'USD' }));
 
-// Recharts is stubbed so the XAxis configuration is inspectable. shadcn's
-// `ui/chart.tsx` does `import * as RechartsPrimitive from "recharts"` and
-// reads names at module-eval time, so every surface it can touch must be
-// declared here or ChartContainer crashes with "Element type is invalid".
-vi.mock('recharts', () => ({
-  BarChart: ({ children }: { children: ReactNode }) => (
-    <div data-chart="bar">{children}</div>
-  ),
-  AreaChart: ({ children }: { children: ReactNode }) => (
-    <div data-chart="area">{children}</div>
-  ),
-  Bar: () => <div />,
-  Area: () => <div />,
-  XAxis: ({
-    interval,
-    minTickGap,
-  }: {
-    interval?: number | string;
-    minTickGap?: number;
-  }) => (
-    <div
-      data-testid="xaxis"
-      data-interval={String(interval)}
-      data-min-tick-gap={String(minTickGap)}
-    />
-  ),
-  YAxis: () => <div />,
-  CartesianGrid: () => <div />,
-  ReferenceLine: () => <div />,
-  ResponsiveContainer: ({ children }: { children: ReactNode }) => (
-    <div>{children}</div>
-  ),
-  Cell: () => <div />,
-  Tooltip: () => <div />,
-  Legend: () => <div />,
-  Surface: () => <div />,
-  Layer: () => <div />,
-  Sector: () => <div />,
-  LabelList: () => <div />,
-  Customized: () => <div />,
-}));
+// SIZING-ONLY recharts mock — the pattern proven in `components/ui/chart.test.tsx`.
+//
+// This file used to stub recharts WHOLESALE (`XAxis: () => <div
+// data-interval={...} />`, `Tooltip: () => <div />`, …). That made it
+// structurally blind: it could read back the props we passed, which only ever
+// proved that we passed them. The recharts 2 -> 3 bump changed three library
+// DEFAULTS with no compile error and this file — like the other five wholesale
+// mocks — stayed green while a real chart misrendered in the browser.
+//
+// `ResponsiveContainer` measures its parent, which is 0x0 under happy-dom, and
+// recharts bails on a non-positive size. A fixed size is therefore the ONLY
+// thing standing between us and real charts in tests, so it is the only thing
+// mocked here. Everything else below is the genuine library, which is the
+// point: the axis assertions now read the <text> nodes recharts actually
+// emitted, not the number we handed it.
+vi.mock('recharts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('recharts')>();
+  return {
+    ...actual,
+    // Typed explicitly: `cloneElement` has no overload for an element whose
+    // props are unknown, so the size props must be declared for `tsc -b` —
+    // which type-checks test files, unlike `--noEmit`.
+    ResponsiveContainer: ({
+      children,
+    }: {
+      children: React.ReactElement<{ width?: number; height?: number }>;
+    }) => React.cloneElement(children, { width: 400, height: 300 }),
+  };
+});
 
 import { OverviewTab } from './OverviewTab';
 import { monthsToCoverYear, MAX_AXIS_TICKS, MAX_REPORT_MONTHS } from './utils';
@@ -281,27 +269,153 @@ describe('OverviewTab chart axes', () => {
     });
   }
 
-  function cashFlowInterval(): number {
+  /**
+   * The x-axis tick labels the Net Cash Flow chart ACTUALLY rendered, in
+   * document order.
+   *
+   * This used to read `data-interval` back off a stubbed `<XAxis>`, i.e. it
+   * asserted the argument we passed to a component that did not exist. The
+   * bug this suite exists for — a labelled bucket silently vanishing — lives
+   * entirely on the other side of that stub, in recharts' own tick selection.
+   * So query recharts' real output instead: `.recharts-cartesian-axis-tick-value`
+   * is the `<text>` node it emits per rendered tick.
+   *
+   * Scoped by the card's `aria-labelledby`, because the tab renders three
+   * charts and only this one is the AreaChart whose point scale dropped June.
+   *
+   * NOTE the selector: recharts 3 no longer nests the label `<text>` inside
+   * `.recharts-xAxis`. It emits the tick LINES there and hoists the tick
+   * LABELS into a separate `recharts-zIndex-layer_2000` group, so
+   * `.recharts-xAxis .recharts-cartesian-axis-tick-value` matches NOTHING on
+   * this version — it reads as "the axis rendered no labels", which is
+   * indistinguishable from the regression this file is meant to catch. Query
+   * the label group by its own class instead. (Found by dumping the real DOM
+   * during this conversion; a wholesale mock cannot see a reparent like this
+   * at all, which is the case for doing the conversion.)
+   */
+  function netCashFlowTicks(): string[] {
     const { container } = render(<OverviewTab />);
-    const areaChart = container.querySelector('[data-chart="area"]');
-    expect(areaChart).not.toBeNull();
-    const axis = within(areaChart as HTMLElement).getByTestId('xaxis');
-    return Number(axis.getAttribute('data-interval'));
+    const card = container.querySelector(
+      '[aria-labelledby="net-cash-flow-heading"]',
+    );
+    if (!card) throw new Error('Net Cash Flow card did not render');
+
+    // Positive control on the fixture itself: prove recharts drew SOMETHING
+    // before reading labels off it, so "the chart did not render" reports as
+    // itself rather than as an axis with nothing to thin.
+    //
+    // It is the bound-style assertions that need this. `toBeLessThan(516)` is
+    // satisfied by an empty axis (0 < 516), so on its own it reads a blank
+    // chart as a well-thinned one. The two `toEqual` literal-array assertions
+    // do NOT need it — an empty list fails them outright — so this control is
+    // the thing keeping the length bounds honest, not the label assertions.
+    expect(card.querySelector('.recharts-surface')).not.toBeNull();
+
+    const labels = card.querySelector('.recharts-xAxis-tick-labels');
+    if (!labels) throw new Error('Net Cash Flow chart rendered no x-axis labels');
+
+    return Array.from(
+      labels.querySelectorAll('.recharts-cartesian-axis-tick-value'),
+    ).map((el) => el.textContent?.trim() ?? '');
   }
 
   test('the Net Cash Flow axis labels every month of a 12-month window', () => {
     seedMonths(12);
-    // interval 0 = every bucket. This is the assertion the old test inverted,
-    // and the one that would have caught the missing June.
-    expect(cashFlowInterval()).toBe(0);
+
+    // The requirement, stated as the labels a reader sees: all twelve months,
+    // in order, none skipped. `preserveStartEnd` rendered eleven of these and
+    // jumped May'26 -> Jul'26; the data point was still there and still
+    // hoverable, which is why nothing looked broken.
+    //
+    // The expectation is written out LITERALLY, and that is the whole point of
+    // it. It used to be built by calling `formatMonthTick` — the same function
+    // `<XAxis tickFormatter>` calls — so the oracle was the subject: mutating
+    // `formatMonthTick` to `return 'XXX'` collapsed all twelve labels AND all
+    // twelve expectations to the same string and this file stayed green at
+    // 10/10. Literals derived by hand from the fixture (twelve buckets, months
+    // 1-12, all of 2026 per `seedMonths`) are independent of it, so month
+    // identity, ordering, distinctness and the `'YY` suffix are all actually
+    // asserted rather than cancelling out.
+    //
+    // CAVEAT, measured during the conversion: this test alone does NOT kill an
+    // `interval="preserveStartEnd"` mutant. That bug is width-driven — recharts
+    // drops the neighbour that loses the `minTickGap` contest — and happy-dom
+    // measures every <text> as zero-wide, so no collision ever fires here and
+    // all twelve labels render either way. The All-time test below is what
+    // kills that mutant (58 labels instead of 24). Do not read a green 12-month
+    // case as proof the thinning strategy is right; only a browser can show
+    // that, which is why `axisTickInterval` is derived rather than heuristic.
+    expect(netCashFlowTicks()).toEqual([
+      "Jan'26",
+      "Feb'26",
+      "Mar'26",
+      "Apr'26",
+      "May'26",
+      "Jun'26",
+      "Jul'26",
+      "Aug'26",
+      "Sep'26",
+      "Oct'26",
+      "Nov'26",
+      "Dec'26",
+    ]);
   });
 
   test('the Net Cash Flow axis thins its ticks for an All-time window', () => {
     seedMonths(516);
-    const interval = cashFlowInterval();
-    expect(interval).toBeGreaterThan(0);
-    // Bounded, not merely thinned: at most MAX_AXIS_TICKS labels render.
-    expect(Math.ceil(516 / (interval + 1))).toBeLessThanOrEqual(MAX_AXIS_TICKS);
+
+    const ticks = netCashFlowTicks();
+
+    // Thinned — 516 rotated <text> nodes is the dominant render cost of this
+    // tab at All time — but bounded to a derivable NUMBER, not merely to a
+    // ceiling. 516 buckets under a 24-label cap gives `axisTickInterval` 21,
+    // i.e. a stride of 22 and ceil(516 / 22) = 24 labels. Asserting the exact
+    // count rather than `<= MAX_AXIS_TICKS` matters because an axis thinned
+    // down to two labels also satisfies the ceiling, and recharts' own tick
+    // selection — which changed shape between 2 and 3 — is the thing this file
+    // exists to watch.
+    expect(ticks.length).toBe(MAX_AXIS_TICKS);
+    expect(ticks.length).toBeLessThan(516);
+
+    // Anchored at the oldest bucket and still reaching the present, so the
+    // axis says which era each end of the curve belongs to — and every label
+    // between them names its own month, so a stride that drifted, doubled back
+    // or repeated a bucket shows up here.
+    //
+    // LITERAL, not computed. `expect(ticks[0]).toBe(formatMonthTick(...))`
+    // called the function under test on both sides of the assertion, so
+    // `formatMonthTick` -> `return 'XXX'` satisfied it. These 24 strings are
+    // derived by hand from the fixture instead: `seedMonths(516)` numbers
+    // bucket i as month (i % 12) + 1 of year 2026 - floor((515 - i) / 12), and
+    // `axisTickInterval(516)` is 21, i.e. a stride of 22 from index 0 — so the
+    // rendered indices are 0, 22, … 506, which is where Jan'84 … Mar'26 comes
+    // from. Nothing on the expected side can move when the formatter does.
+    expect(ticks).toEqual([
+      "Jan'84",
+      "Nov'85",
+      "Sep'87",
+      "Jul'89",
+      "May'91",
+      "Mar'93",
+      "Jan'95",
+      "Nov'96",
+      "Sep'98",
+      "Jul'00",
+      "May'02",
+      "Mar'04",
+      "Jan'06",
+      "Nov'07",
+      "Sep'09",
+      "Jul'11",
+      "May'13",
+      "Mar'15",
+      "Jan'17",
+      "Nov'18",
+      "Sep'20",
+      "Jul'22",
+      "May'24",
+      "Mar'26",
+    ]);
   });
 });
 
