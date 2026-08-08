@@ -33,6 +33,22 @@ top items. Production figures in this file come from the owner's live database o
 Closed.*
 
 ### B8 — Backups carry a "verified" marker that two paths never earn
+**Status: implemented on `fix/b8-backup-verified-marker` (2026-08-08, commits
+`68e3ea6` + `62d52b5`, docs rider `bd510d0`), unmerged — this entry moves to Closed with the
+squash hash at merge. Nothing open.** What it became: `backup.Run` is now baseline → Snapshot
+→ Verify → sidecar, so the CLI and pre-migration paths earn the marker; an explicit
+absent-table assertion covers first boot; the Verify query budget is sized from the source
+(floor 5 min, ceiling 24 h) so the fail-closed migration path cannot boot-loop a large legacy
+DB; a missing or 0-byte `DB_PATH` is refused before SQLite can create or bless it (both holes
+produced verified sidecars for backups of nothing); verify failure refuses to migrate with
+wording distinct from a write failure and exits the CLI non-zero with no file left behind.
+Two-reviewer battery (8 findings, all fixed), isolated deep review MERGEABLE (10/10 kill-list
+mutants; its 3 findings fixed and their mutants re-executed post-commit), container e2e of
+the real `docker exec` flow (5 cases, all exact). Known-unpinned, disclosed: the
+baseline-before-Snapshot ordering (needs a mid-function hook) and the remove-failure arms
+(documented at the site).
+
+The original finding, kept verbatim:
 **Verified: reported.** Scheduled backups are genuinely checked. Pre-migration snapshots and
 manual backups get the same trust marker with no verification, and the README states the marker
 means integrity and row-count checks passed. The pre-migration snapshot is the rollback anchor
