@@ -131,9 +131,16 @@ export function OverviewTab() {
   );
 
   return (
+    // Every card in this grid carries `min-w-0`. A grid item defaults to
+    // min-width:auto, so the width of the Recharts SVG inside propagates up as
+    // the track's min-content and widens the page — measured live at a 390px
+    // viewport: this tab rendered 599px, Spending 3530px. It also latches,
+    // because ResponsiveContainer then measures the widened track and grows to
+    // match. A `min-width:0` on the chart itself does NOT break the loop; it
+    // has to sit on the grid item.
     <div className="grid gap-6 md:grid-cols-2">
       {/* Income vs Expenses */}
-      <Card aria-labelledby="income-expenses-heading">
+      <Card aria-labelledby="income-expenses-heading" className="min-w-0">
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <div className="flex flex-col gap-0.5">
             <CardTitle
@@ -255,7 +262,7 @@ export function OverviewTab() {
       </Card>
 
       {/* Net Cash Flow */}
-      <Card aria-labelledby="net-cash-flow-heading">
+      <Card aria-labelledby="net-cash-flow-heading" className="min-w-0">
         <CardHeader className="pb-4">
           <CardTitle
             id="net-cash-flow-heading"
@@ -340,7 +347,10 @@ export function OverviewTab() {
       </Card>
 
       {/* Budget vs Actual — full width */}
-      <Card aria-labelledby="budget-vs-actual-heading" className="md:col-span-2">
+      <Card
+        aria-labelledby="budget-vs-actual-heading"
+        className="min-w-0 md:col-span-2"
+      >
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <div className="flex flex-col gap-0.5">
             <CardTitle

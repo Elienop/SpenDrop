@@ -85,3 +85,31 @@ describe('SavingsTab report window', () => {
     expect(useIncomeExpenses).toHaveBeenCalledWith(36);
   });
 });
+
+// SavingsTab needs no `min-w-0`: its cards are children of a flex COLUMN, and
+// the automatic-minimum-size trap that let a Recharts SVG widen the page in
+// OverviewTab and SpendingTab (599px and 3530px at a 390px viewport) applies
+// to a grid track and to a flex MAIN axis — not to the cross axis, where a
+// column item is stretched to the container instead of sized by its content.
+// This pins that premise: turn the root into a grid and this fails, which is
+// the moment min-w-0 becomes required here too.
+describe('SavingsTab phone width', () => {
+  beforeEach(() => {
+    useIncomeExpenses.mockReturnValue(reportResult(emptyIncExp));
+    useYearOverYear.mockReturnValue(reportResult(emptyYoY));
+    apiGet.mockResolvedValue([]);
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  test('lays its cards out in a flex column, not a grid', () => {
+    const { container } = render(<SavingsTab />);
+    const root = container.firstElementChild;
+    if (!root) throw new Error('SavingsTab rendered nothing');
+    expect(root).toHaveClass('flex', 'flex-col');
+    expect(root).not.toHaveClass('grid');
+  });
+});

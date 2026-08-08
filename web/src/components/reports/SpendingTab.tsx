@@ -203,9 +203,14 @@ export function SpendingTab() {
   const velocityData = useMemo(() => buildVelocityData(velocity.data), [velocity.data]);
 
   return (
+    // Every card in this grid carries `min-w-0` — without it this tab measured
+    // 3530px wide at a 390px viewport. A grid item defaults to min-width:auto,
+    // so the Recharts SVG's width becomes the track's min-content, and
+    // ResponsiveContainer then measures the widened track and grows to match.
+    // See the longer note in OverviewTab.
     <div className="grid gap-6 md:grid-cols-2">
       {/* Category Breakdown (bar chart) */}
-      <Card aria-labelledby="category-breakdown-heading">
+      <Card aria-labelledby="category-breakdown-heading" className="min-w-0">
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <div className="flex flex-col gap-0.5">
             <CardTitle
@@ -319,7 +324,10 @@ export function SpendingTab() {
       </Card>
 
       {/* Category Trends */}
-      <Card aria-labelledby="category-trends-heading" className="flex flex-col">
+      <Card
+        aria-labelledby="category-trends-heading"
+        className="flex min-w-0 flex-col"
+      >
         <CardHeader className="pb-4">
           <CardTitle
             id="category-trends-heading"
@@ -381,7 +389,7 @@ export function SpendingTab() {
       </Card>
 
       {/* Top Merchants */}
-      <Card aria-labelledby="top-merchants-heading">
+      <Card aria-labelledby="top-merchants-heading" className="min-w-0">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle
             id="top-merchants-heading"
@@ -448,7 +456,10 @@ export function SpendingTab() {
       </Card>
 
       {/* Expense Velocity */}
-      <Card aria-labelledby="expense-velocity-heading" className="flex flex-col">
+      <Card
+        aria-labelledby="expense-velocity-heading"
+        className="flex min-w-0 flex-col"
+      >
         <CardHeader className="pb-4">
           <CardTitle
             id="expense-velocity-heading"

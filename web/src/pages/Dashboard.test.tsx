@@ -214,6 +214,24 @@ describe('Dashboard', () => {
     expect(controls).toHaveClass('flex', 'flex-wrap');
   });
 
+  // A grid item defaults to min-width:auto, so anything wide inside a card —
+  // the transactions table, a future chart — becomes the track's min-content
+  // and widens the whole page. Both report tabs with this shape did exactly
+  // that at a 390px viewport (599px and 3530px); this grid measured clean with
+  // current dev data, which is a property of the data, not of the layout.
+  // Asserted over every child the grid has, so a new card fails here too.
+  test('every card in the chart/table grid may shrink below its content', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const grid = screen.getByText('Recent Transactions').closest('.grid');
+    if (!grid) throw new Error('Recent Transactions card is not inside a grid');
+
+    const cards = Array.from(grid.children);
+    expect(cards.length).toBeGreaterThan(0);
+    for (const card of cards) {
+      expect(card).toHaveClass('min-w-0');
+    }
+  });
+
   // The KPI delta badges only render when the trend contains the month BEFORE
   // the one the Dashboard has selected, and the Dashboard defaults to today.
   // These helpers build a fixture anchored to the current date so the badge
