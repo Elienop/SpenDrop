@@ -57,6 +57,8 @@ import {
 } from '@/lib/constants';
 import { TYPE_INCOME } from '@/lib/transaction-types';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import { RecentTransactionCard } from '@/components/RecentTransactionCard';
 
 /* ── Pure helpers ── */
 
@@ -85,6 +87,10 @@ const cashFlowConfig: ChartConfig = {
 export function Dashboard() {
   const { user } = useAuth();
   const baseCurrency = useBaseCurrency();
+  // Below `md` the recent-transactions table becomes a card list. Same gate and
+  // same one-presentation-mounted rule as the Transactions and Trash lists —
+  // this was the last table left panning on a phone.
+  const isMobile = useIsMobileViewport();
   const now = new Date();
   const [selectedYear, setSelectedYear] = useState(() => {
     const stored = localStorage.getItem(STORAGE_KEYS.dashboardYear);
@@ -605,6 +611,26 @@ export function Dashboard() {
               <div className="flex items-center justify-center p-8 text-sm text-muted-foreground">
                 No transactions yet.
               </div>
+            ) : isMobile ? (
+              /*
+                A four-column table in a 293px box is the pattern the research
+                says nobody ships, and this is the first screen the owner lands
+                on. `role="list"` is explicit because Tailwind's preflight
+                strips the marker and Safari/VoiceOver drop the role with it.
+              */
+              <ul
+                role="list"
+                aria-label="Recent transactions"
+                className="flex flex-col divide-y divide-border"
+              >
+                {recentTransactions.map((tx) => (
+                  <RecentTransactionCard
+                    key={tx.id}
+                    transaction={tx}
+                    baseCode={baseCurrency}
+                  />
+                ))}
+              </ul>
             ) : (
               <Table>
                 <TableBody>
