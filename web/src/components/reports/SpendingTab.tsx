@@ -206,7 +206,7 @@ export function SpendingTab() {
     <div className="grid gap-6 md:grid-cols-2">
       {/* Category Breakdown (bar chart) */}
       <Card aria-labelledby="category-breakdown-heading">
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <div className="flex flex-col gap-0.5">
             <CardTitle
               id="category-breakdown-heading"

@@ -202,6 +202,18 @@ describe('Dashboard', () => {
     expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
   });
 
+  // Today + a 140px month picker + a 100px year picker is ~318px of rigid
+  // controls, against ~358px of content on a 390px phone. It fits, but with
+  // nothing to spare and nothing to give: the row has no shrinkable item, so
+  // one more control or a wider locale pushes the page into horizontal
+  // scroll. Wrapping is the degrade. Verified as a class contract only —
+  // happy-dom lays nothing out.
+  test('the header controls can wrap instead of widening the page', () => {
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const controls = screen.getByRole('button', { name: 'Today' }).parentElement;
+    expect(controls).toHaveClass('flex', 'flex-wrap');
+  });
+
   // The KPI delta badges only render when the trend contains the month BEFORE
   // the one the Dashboard has selected, and the Dashboard defaults to today.
   // These helpers build a fixture anchored to the current date so the badge

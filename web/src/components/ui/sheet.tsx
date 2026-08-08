@@ -29,7 +29,7 @@ const SheetOverlay = React.forwardRef<
 SheetOverlay.displayName = SheetPrimitive.Overlay.displayName
 
 const sheetVariants = cva(
-  "fixed z-50 gap-4 bg-background p-6 shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500",
+  "fixed z-50 flex max-h-[100dvh] flex-col gap-4 bg-background p-6 shadow-lg transition ease-in-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:duration-300 data-[state=open]:duration-500",
   {
     variants: {
       side: {
@@ -62,8 +62,19 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), className)}
       {...props}
     >
-      {children}
-      <SheetPrimitive.Close className="absolute right-4 top-4 rounded-sm opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary">
+      {/* Scrolls the body, not the whole sheet, so the Close button below —
+          absolutely positioned against Content — stays pinned. A plain block
+          box: the side variants stack their children with ordinary flow, and
+          `overflow-y-auto` is what lets this flex item shrink below its
+          content height (automatic minimum size becomes 0), so no `flex-1`
+          that would collapse an auto-height top/bottom sheet. `-m-1 p-1`
+          keeps focus rings on edge children out of the clipping box. */}
+      <div className="-m-1 overflow-y-auto p-1">{children}</div>
+      {/* `-m-3.5 p-3.5` grows the 16px icon to a 44px touch target without
+          moving it: the negative margin pulls the border box back out by the
+          same 14px the padding adds, so the icon still sits 16px from the top
+          and right. The two tokens must stay equal or the icon shifts. */}
+      <SheetPrimitive.Close className="absolute right-4 top-4 -m-3.5 rounded-sm p-3.5 opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-secondary">
         <X className="h-4 w-4" />
         <span className="sr-only">Close</span>
       </SheetPrimitive.Close>

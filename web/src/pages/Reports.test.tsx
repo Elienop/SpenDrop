@@ -60,6 +60,20 @@ describe('Reports', () => {
     expect(screen.getByRole('tab', { name: 'Patterns' })).toBeInTheDocument();
   });
 
+  // Four triggers come to ~346px, which clears a 390px phone by a dozen
+  // pixels and clears nothing at all on a 360px one. The strip therefore has
+  // to scroll rather than widen the page — and `justify-start` is the half
+  // that is easy to lose: TabsList's own `justify-center` centres the
+  // overflow, so Overview ends up past the left edge where scrollLeft cannot
+  // follow it. Whether it actually scrolls is a browser check; that the strip
+  // is not centred is pinnable here.
+  it('lets the tab strip scroll sideways instead of centring its overflow', () => {
+    renderReports();
+    const strip = screen.getByRole('tablist');
+    expect(strip).toHaveClass('overflow-x-auto', 'max-w-full', 'justify-start');
+    expect(strip).not.toHaveClass('justify-center');
+  });
+
   it('shows Overview tab by default', () => {
     renderReports();
     expect(screen.getByTestId('overview-tab')).toBeInTheDocument();

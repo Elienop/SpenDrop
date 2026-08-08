@@ -324,7 +324,7 @@ export function Dashboard() {
             Here's what's happening with your finances.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -475,7 +475,7 @@ export function Dashboard() {
       {/* Category breakdown + Recent Transactions — side by side */}
       <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
             <div>
               <CardTitle className="text-base font-semibold">Spending by Category</CardTitle>
               <CardDescription className="text-xs text-muted-foreground">
@@ -568,7 +568,7 @@ export function Dashboard() {
         </Card>
 
         <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
             <CardTitle className="text-base font-semibold">Recent Transactions</CardTitle>
             <div className="flex items-center gap-2">
               <ButtonGroup>
