@@ -32,15 +32,3 @@
  */
 export const TOUCH_TARGET_CHECKBOX =
   "relative before:absolute before:-inset-3.5 before:content-['']";
-
-/**
- * The same trick sized for a 24px icon button (24 + 2×10 = 44).
- *
- * `before:` draws nothing — it has no background and no border — so this adds
- * hit area and zero pixels. It does NOT establish a stacking context beyond
- * the `relative`, so the expanded area sits under any sibling that paints
- * later; keep it off controls packed tighter than 44px apart, where the
- * overlap would let one control steal a tap aimed at its neighbour.
- */
-export const TOUCH_TARGET_ICON =
-  "relative before:absolute before:-inset-2.5 before:content-['']";

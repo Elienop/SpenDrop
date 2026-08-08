@@ -346,6 +346,24 @@ describe('TransactionCard long press', () => {
     expect(onSelect).toHaveBeenCalledWith(1, true);
   });
 
+  // M4. Android raises contextmenu at the end of a long press, which would
+  // drop a text-selection menu on top of the selection the gesture just made.
+  // Suppressed for TOUCH only — right-click must stay normal for a mouse at a
+  // narrow window width.
+  it('suppresses the Android long-press context menu, but only for touch', () => {
+    renderCard({ onLongPress: vi.fn() });
+    const row = rowButton();
+
+    press(row, { pointerType: 'touch' });
+    const touchMenu = fireEvent.contextMenu(row);
+    // fireEvent returns false when a handler called preventDefault.
+    expect(touchMenu).toBe(false);
+
+    press(row, { pointerType: 'mouse' });
+    const mouseMenu = fireEvent.contextMenu(row);
+    expect(mouseMenu).toBe(true);
+  });
+
   it('a slow mouse click stays an ordinary click', () => {
     const onLongPress = vi.fn();
     renderCard({ onLongPress });
