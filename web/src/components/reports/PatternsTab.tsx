@@ -149,7 +149,10 @@ export function PatternsTab() {
                   recurring.fetching && !recurring.loading && 'opacity-60',
                 )}
               >
-                <Table>
+                {/* Same phone-width density as Top Merchants in SpendingTab —
+                    see the note there. Five columns here, so 160px of padding
+                    before any content. */}
+                <Table className="[&_td]:px-2 [&_th]:px-2 sm:[&_td]:px-4 sm:[&_th]:px-4">
                   <TableHeader>
                     <TableRow>
                       <TableHead>Description</TableHead>
@@ -164,7 +167,21 @@ export function PatternsTab() {
                   <TableBody>
                     {recurring.data.map((entry) => (
                       <TableRow key={entry.description}>
-                        <TableCell>{entry.description}</TableCell>
+                        {/* Same exposure and same treatment as Top Merchants
+                            in SpendingTab — see the note there for why
+                            `overflow-wrap:anywhere` (not `break-words`) is the
+                            class that bounds a table cell's WIDTH, why
+                            `line-clamp-3` is needed to bound its HEIGHT, and
+                            why three clamped lines beat one truncated one on a
+                            surface with no row expansion. */}
+                        <TableCell className="max-w-[12rem] md:max-w-md">
+                          <div
+                            className="line-clamp-3 [overflow-wrap:anywhere]"
+                            title={entry.description}
+                          >
+                            {entry.description}
+                          </div>
+                        </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
                           {fmt(entry.monthly_avg)}
                         </TableCell>

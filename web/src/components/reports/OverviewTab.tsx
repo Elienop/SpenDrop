@@ -36,7 +36,15 @@ import {
   formatMonthTick,
   formatMonthLabel,
 } from '@/lib/dates';
-import { INCEXP_CONFIG, axisTickInterval, monthsToCoverYear } from './utils';
+import {
+  INCEXP_CONFIG,
+  monthsToCoverYear,
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING,
+  ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS,
+} from './utils';
 import { cn } from '@/lib/utils';
 
 const NET_FLOW_CONFIG = {
@@ -227,15 +235,60 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
+                {/* THE ROTATED-AXIS RULE, written here once and referenced from
+                    the other three (Net Cash Flow below, Category Trends in
+                    SpendingTab, Cash Flow on the Dashboard).
+
+                    Rotated labels are parallel strips: they clear each other
+                    only when `spacing × sin(30°)` — half the spacing — exceeds
+                    their INK height, measured at 11px for `Sep'25` in the tick
+                    font. So they need 22px of spacing, and label width has
+                    nothing to do with it: shortening `Sep'25` to `Sep` would
+                    not move the number at all. Fewer labels is the only lever.
+
+                    That number depends on the CHART's width, which is not a
+                    function of the viewport's — this grid is `md:grid-cols-2`,
+                    so every chart on it halves at 768px. Measured here with a
+                    derived interval forcing twelve: 8.5px of gap at 360px, then
+                    22.8px at 700px, then 6.8px at 768px where the second column
+                    appears. A viewport-keyed cap was built for this and thrown
+                    away for exactly that reading; the full clearance table is
+                    in the header of `chartAxis.seam.test.ts`.
+
+                    `equidistantPreserveStart` is the only kind of strategy that
+                    reads the real plot: it takes the smallest stride for which
+                    every Nth tick clears its neighbour, so the set is uniform
+                    at every width by construction and never collides.
+
+                    START, not End, and this is measured rather than preferred.
+                    `equidistantPreserveEnd` would anchor the most recent month,
+                    which is the better one to anchor on a trailing window — but
+                    it was built and it DEGENERATES on a point scale: every
+                    stepsize failed its visibility walk and it fell through to
+                    the terminal one, rendering exactly ONE label on Net Cash
+                    Flow at every width from 640 to 1280. Start has no such
+                    edge, because it never has to prove the last tick visible.
+
+                    KNOWN COST, stated so nobody reads it as an accident:
+                    recharts models a rotated label's footprint as its
+                    axis-aligned projection — `39.9·cos30 + 16·sin30 + 5` ≈
+                    47.6px — where two of them actually clear at 22px. It is
+                    about twice as conservative as the geometry, so at 1280px
+                    this axis shows six evenly-spaced months where twelve would
+                    have been legible. Six correct labels beat twelve overlapping
+                    ones, and the alternative was a viewport cap that measurement
+                    disproved, but it IS a density loss on desktop. */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  interval={axisTickInterval(incExpData.length)}
-                  angle={-30}
+                  interval={monthAxisInterval(incExpData.length)}
+                  angle={MONTH_TICK_ANGLE}
                   textAnchor="end"
                   height={48}
+                  tick={MONTH_TICK}
+                  padding={ROTATED_MONTH_TICK_PADDING}
                   tickFormatter={formatMonthTick}
                 />
                 <ChartTooltip
@@ -310,18 +363,29 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
-                {/* Tick thinning is DERIVED, not a fixed strategy — see
-                    axisTickInterval. `preserveStartEnd` dropped June from a
-                    12-month window here while the sibling BarChart kept it. */}
+                {/* Same rotated-axis rule as Income vs Expenses above. This is
+                    the TIGHTEST of the four, because 80px of currency YAxis
+                    comes off the plot: it was the chart measuring 6.8px of gap
+                    at 768px and 8.5px at 360px.
+
+                    Being a point scale is also why the End-anchored variant is
+                    not used: this is the chart it collapsed to a single label
+                    on. `preserveStartEnd` remains wrong here for the reason it
+                    always was — it pins both ends and thins between them, and
+                    on a point scale the last tick sits hard against the right
+                    edge, so its neighbour loses the minTickGap contest and
+                    vanishes (measured: 11 of 12, jumping May'26 -> Jul'26). */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  interval={axisTickInterval(cashFlowData.length)}
-                  angle={-30}
+                  interval={monthAxisInterval(cashFlowData.length)}
+                  angle={MONTH_TICK_ANGLE}
                   textAnchor="end"
                   height={48}
+                  tick={MONTH_TICK}
+                  padding={ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS}
                   tickFormatter={formatMonthTick}
                 />
                 <YAxis
@@ -433,11 +497,41 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
+                {/* Without an explicit `interval` recharts falls back to
+                    `preserveEnd`, which drops whichever labels its collision
+                    walk happens to reach — and the result is not evenly
+                    spaced. Measured on this chart, same data, three widths:
+                    1440 → all 12; 420 → NINE, `Jan Feb Mar Apr Jun Jul Sep Oct
+                    Dec` (May, Aug and Nov gone); 390 → six, `Feb Apr Jun Aug
+                    Oct Dec`. The 420 reading is the damaging one: the cadence
+                    changes mid-axis, so counting bars off a label lands on the
+                    wrong month with nothing on screen saying so.
+
+                    `equidistantPreserveStart` is recharts' only strategy that
+                    picks a STRIDE rather than dropping individuals, so the
+                    label set is uniform at every width by construction, and it
+                    pins January.
+
+                    DERIVED HERE, not copied from the rotated charts above. This
+                    axis is flat, so it needs 23.7px of spacing where a rotated
+                    one needs 22px of PERPENDICULAR clearance; and its plot is
+                    283px at the narrowest layout where Year-over-Year's is
+                    203px and cumulative savings' is 133px. Three twelve-month
+                    axes on this page, three different plots, and they arrive at
+                    the same strategy for three separate reasons — a future
+                    reader who wants to unify them has to re-derive all three.
+
+                    An earlier revision forced all twelve here — measured, they
+                    fit at 390 with 1px to spare — but 23.6px per band against a
+                    23.7px widest label is not a margin, and the household's
+                    main phone is 360px, where the same twelve overlap. */}
                 <XAxis
                   dataKey="name"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
+                  tick={MONTH_TICK}
+                  interval={monthAxisInterval(bvaData.length)}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
                 <Bar

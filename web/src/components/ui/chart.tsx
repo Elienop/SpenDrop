@@ -313,22 +313,66 @@ const ChartLegendContent = React.forwardRef<
       <div
         ref={ref}
         className={cn(
-          "flex items-center justify-center gap-4",
+          // `flex-wrap` is load-bearing, not tidiness. Recharts gives the
+          // legend wrapper a FIXED pixel width and this row defaulted to
+          // `nowrap`, so once the series outnumbered the space —
+          // ~10 expense categories on the owner's ledger, against the two in a
+          // dev database — `justify-center` pushed the overflow out of BOTH
+          // edges at once and the first and last chips were clipped in half.
+          // Wrapping to a second line is the only outcome that keeps every
+          // series named. `gap-y` is smaller than `gap-x` because the vertical
+          // gap only exists once wrapping happens.
+          "flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5",
           verticalAlign === "top" ? "pb-3" : "pt-3",
           className
         )}
       >
         {payload
           .filter((item) => item.type !== "none")
-          .map((item) => {
+          .map((item, index) => {
             const key = `${nameKey || item.dataKey || "value"}`
             const itemConfig = getPayloadConfigFromPayload(config, item, key)
+            // `item.color` is the series' own fill/stroke, which for a
+            // gradient-filled series is the literal string `"url(#…)"` — not a
+            // CSS colour, so React drops the declaration and the swatch renders
+            // fully transparent. Browser-verified on Savings' Year-over-Year:
+            // both swatches computed to `rgba(0, 0, 0, 0)` beside three
+            // gradient shapes. The config is the same source `ChartStyle` uses
+            // to emit `--color-<key>`, so it always holds a real colour when
+            // one was declared.
+            //
+            // `||` rather than `??` on purpose: an empty-string colour is
+            // absent, which is how `ChartStyle` treats it (chart.tsx:83). A
+            // series with no config colour falls through to exactly the old
+            // behaviour.
+            //
+            // A `{ theme: { light, dark } }` config still renders transparent
+            // here; nothing in this app uses that form.
+            const swatchColor = itemConfig?.color || item.color
 
             return (
+              // recharts 3 widened `dataKey` to include a function type, and
+              // `item.value` — the series NAME, which two series may legitimately
+              // share — is not a key either. Same reasoning as
+              // `ChartTooltipContent` above: this list is one legend's payload,
+              // rendered in place and never reordered.
+              //
+              // `whitespace-nowrap` keeps a label on one line — but on its own
+              // it also makes the chip UNSHRINKABLE, because a flex item's
+              // automatic minimum size is its min-content and nowrap raises
+              // that to the whole string. Category names are user-supplied and
+              // capped at 100 characters server-side, so one long one became a
+              // chip wider than the fixed-width legend wrapper and painted
+              // outside the card — the same overflow the wrapping above exists
+              // to fix, reintroduced for exactly the data that triggers it.
+              // `min-w-0` lifts that floor, `max-w-full` caps the chip at the
+              // wrapper, `overflow-hidden` contains what is left, and the
+              // `truncate` span turns it into an ellipsis rather than a
+              // clipped half-glyph.
               <div
-                key={item.value}
+                key={index}
                 className={cn(
-                  "flex items-center gap-1.5 [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground"
+                  "flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden whitespace-nowrap [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground"
                 )}
               >
                 {itemConfig?.icon && !hideIcon ? (
@@ -337,11 +381,11 @@ const ChartLegendContent = React.forwardRef<
                   <div
                     className="h-2 w-2 shrink-0 rounded-[2px]"
                     style={{
-                      backgroundColor: item.color,
+                      backgroundColor: swatchColor,
                     }}
                   />
                 )}
-                {itemConfig?.label}
+                <span className="truncate">{itemConfig?.label}</span>
               </div>
             )
           })}

@@ -62,7 +62,7 @@ vi.mock('recharts', async (importOriginal) => {
 });
 
 import { OverviewTab } from './OverviewTab';
-import { monthsToCoverYear, MAX_AXIS_TICKS, MAX_REPORT_MONTHS } from './utils';
+import { monthsToCoverYear, MAX_REPORT_MONTHS } from './utils';
 
 function setup() {
   return userEvent.setup({
@@ -344,7 +344,8 @@ describe('OverviewTab chart axes', () => {
     // all twelve labels render either way. The All-time test below is what
     // kills that mutant (58 labels instead of 24). Do not read a green 12-month
     // case as proof the thinning strategy is right; only a browser can show
-    // that, which is why `axisTickInterval` is derived rather than heuristic.
+    // that. The browser measurements live in the header of
+    // `chartAxis.seam.test.ts`.
     expect(netCashFlowTicks()).toEqual([
       "Jan'26",
       "Feb'26",
@@ -364,58 +365,79 @@ describe('OverviewTab chart axes', () => {
   test('the Net Cash Flow axis thins its ticks for an All-time window', () => {
     seedMonths(516);
 
+    // WHAT THIS USED TO ASSERT, AND WHY IT CANNOT ANY MORE. Until this batch
+    // the axis passed a DERIVED numeric interval, so 516 buckets under a
+    // 24-label cap produced exactly 24 labels on a stride of 22 — a number this
+    // harness could check, and it did, against 24 hand-derived month strings.
+    //
+    // The axis now passes `interval="equidistantPreserveStart"`, which asks
+    // recharts to measure the plot and pick the largest stride that fits. That
+    // is the fix for a defect this harness could never have seen: a fixed cap
+    // is blind to the container, and `md:grid-cols-2` halves every chart on
+    // this tab at 768px, so twelve labels measured 6.8px of clearance there
+    // against the 11px their ink needs — worse than the phone. Measurements are
+    // in the header of `chartAxis.seam.test.ts`.
+    //
+    // happy-dom performs no layout, so recharts measures every tick as 0x0, no
+    // collision ever fires, and ALL 516 render here. That is an artefact of the
+    // environment, not the behaviour: the same build renders 6 of 516 at 360px
+    // and 12 at 700px in Chrome. So the count is asserted as the artefact it is
+    // — proof the data still reaches the axis — and the thinning itself is
+    // pinned as source text in `chartAxis.seam.test.ts` and measured in a
+    // browser. Do NOT restore an assertion on the rendered count: under this
+    // strategy it can only ever repeat what happy-dom failed to lay out.
     const ticks = netCashFlowTicks();
 
-    // Thinned — 516 rotated <text> nodes is the dominant render cost of this
-    // tab at All time — but bounded to a derivable NUMBER, not merely to a
-    // ceiling. 516 buckets under a 24-label cap gives `axisTickInterval` 21,
-    // i.e. a stride of 22 and ceil(516 / 22) = 24 labels. Asserting the exact
-    // count rather than `<= MAX_AXIS_TICKS` matters because an axis thinned
-    // down to two labels also satisfies the ceiling, and recharts' own tick
-    // selection — which changed shape between 2 and 3 — is the thing this file
-    // exists to watch.
-    expect(ticks.length).toBe(MAX_AXIS_TICKS);
+    // happy-dom performs no layout, so recharts measures every tick as 0x0 and
+    // its collision arithmetic degenerates to `minTickGap` alone — it renders 52
+    // of the 516 here, where the same build renders 6 at 360px and 12 at 700px
+    // in Chrome. So the COUNT is an artefact of the environment and is not
+    // asserted; what is asserted is the property that made this strategy the
+    // right one, and it survives the degeneracy: the rendered set is a UNIFORM
+    // stride anchored at the oldest bucket.
+    //
+    // That is the whole defect. `preserveEnd` — recharts' default, and what this
+    // axis falls back to with the interval deleted — walks the ticks and drops
+    // whichever ones its collision pass reaches, so the cadence changes mid-axis
+    // and counting points off a label lands on the wrong month. Measured on the
+    // sibling Budget vs Actual chart at 420px: nine of twelve, `Jan Feb Mar Apr
+    // Jun Jul Sep Oct Dec`.
+    expect(ticks.length).toBeGreaterThan(1);
     expect(ticks.length).toBeLessThan(516);
 
-    // Anchored at the oldest bucket and still reaching the present, so the
-    // axis says which era each end of the curve belongs to — and every label
-    // between them names its own month, so a stride that drifted, doubled back
-    // or repeated a bucket shows up here.
-    //
-    // LITERAL, not computed. `expect(ticks[0]).toBe(formatMonthTick(...))`
-    // called the function under test on both sides of the assertion, so
-    // `formatMonthTick` -> `return 'XXX'` satisfied it. These 24 strings are
-    // derived by hand from the fixture instead: `seedMonths(516)` numbers
-    // bucket i as month (i % 12) + 1 of year 2026 - floor((515 - i) / 12), and
-    // `axisTickInterval(516)` is 21, i.e. a stride of 22 from index 0 — so the
-    // rendered indices are 0, 22, … 506, which is where Jan'84 … Mar'26 comes
-    // from. Nothing on the expected side can move when the formatter does.
-    expect(ticks).toEqual([
-      "Jan'84",
-      "Nov'85",
-      "Sep'87",
-      "Jul'89",
-      "May'91",
-      "Mar'93",
-      "Jan'95",
-      "Nov'96",
-      "Sep'98",
-      "Jul'00",
-      "May'02",
-      "Mar'04",
-      "Jan'06",
-      "Nov'07",
-      "Sep'09",
-      "Jul'11",
-      "May'13",
-      "Mar'15",
-      "Jan'17",
-      "Nov'18",
-      "Sep'20",
-      "Jul'22",
-      "May'24",
-      "Mar'26",
-    ]);
+    // `seedMonths(516)` numbers bucket i as month (i % 12) + 1 of year
+    // 2026 - floor((515 - i) / 12), so the buckets run Jan 1984 -> Dec 2026 and
+    // no two-digit year is ambiguous: 84..99 is the 1900s, 00..26 the 2000s.
+    // Decoding the LABELS back to bucket numbers is what makes this a check on
+    // the axis rather than on the fixture.
+    const SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                   'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const bucketOf = (label: string): number => {
+      const month = SHORT.indexOf(label.slice(0, 3));
+      const yy = Number(label.slice(4));
+      expect(month).toBeGreaterThanOrEqual(0);
+      const year = yy >= 84 ? 1900 + yy : 2000 + yy;
+      return (year - 1984) * 12 + month;
+    };
+    const buckets = ticks.map(bucketOf);
+
+    // Anchored at the oldest bucket. `equidistantPreserveStart` pins index 0;
+    // the End-anchored variant would not, which is one of the two mutants this
+    // distinguishes.
+    expect(buckets[0]).toBe(0);
+
+    // And every gap identical — the assertion `preserveEnd` and
+    // `preserveStartEnd` both fail, because they drop individuals rather than
+    // striding.
+    const strides = buckets.slice(1).map((b, i) => b - buckets[i]);
+    expect(new Set(strides).size).toBe(1);
+    expect(strides[0]).toBeGreaterThan(0);
+
+    // The formatter is still pinned at the oldest end — a `formatMonthTick` that
+    // stopped applying renders a raw ISO key here — and every label is distinct,
+    // so a stride that doubled back or repeated a bucket shows up.
+    expect(ticks[0]).toBe("Jan'84");
+    expect(new Set(ticks).size).toBe(ticks.length);
   });
 });
 

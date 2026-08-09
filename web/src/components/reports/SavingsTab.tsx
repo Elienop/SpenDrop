@@ -36,7 +36,13 @@ import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useReportYears } from '@/hooks/useReportYears';
 import { cn } from '@/lib/utils';
-import { monthsToCoverYear } from './utils';
+import {
+  monthsToCoverYear,
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS,
+} from './utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
 import { api } from '@/api/client';
 
@@ -207,7 +213,16 @@ export function SavingsTab() {
               )}
             >
               {goal ? (
-                <div className="flex items-center gap-6">
+                /* STACKED below `sm`, side by side above it. At 360px the ring
+                   is a fixed 200px square, so the figures beside it were left
+                   with ~90px and "Remaining: $17,151.23" wrapped onto three
+                   cramped lines. The owner asked for the percentage on one line
+                   and the goal/saved figures on another; a column does that and
+                   gives the figures the full card width. `items-center` only
+                   applies once they are side by side — a centred column would
+                   leave the three figures floating away from the card's left
+                   edge, out of line with every other block on the tab. */
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
                   <ChartContainer
                     config={SAVINGS_CONFIG}
                     className="h-[200px] w-[200px]"
@@ -299,13 +314,35 @@ export function SavingsTab() {
                     </linearGradient>
                   </defs>
                   <CartesianGrid vertical={false} />
+                  {/* The TIGHTEST of the three twelve-month axes in Reports,
+                      and it was the one forcing every tick. Its 80px YAxis and
+                      its own 40px of padding leave a 133px plot at a 360px
+                      viewport — 11.1px per band against a 23.7px widest label,
+                      where Year-over-Year next door has 203px and Budget vs
+                      Actual has 283px. Forcing twelve here was worse than the
+                      case rejected on Year-over-Year, by that chart's own
+                      numbers, and it was only invisible because a partial year
+                      renders fewer than twelve: eight months in August, twelve
+                      every December.
+
+                      Same strategy as its two siblings and the same reason —
+                      the bucket count is fixed at 12, so there is no render
+                      cost to bound, and recharts measuring THIS plot beats a
+                      shared constant when the three plots are 150px apart. The
+                      padding stays: it is what keeps the first and last points
+                      off the axis ends, and dropping it would widen the plot by
+                      only 40px, nowhere near the 284px twelve labels need. */}
                   <XAxis
                     dataKey="name"
                     tickLine={false}
                     axisLine={false}
                     tickMargin={10}
-                    interval={0}
-                    padding={{ left: 20, right: 20 }}
+                    tick={MONTH_TICK}
+                    angle={MONTH_TICK_ANGLE}
+                    textAnchor="end"
+                    height={48}
+                    interval={monthAxisInterval(savingsData.length)}
+                    padding={ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS}
                   />
                   <YAxis
                     tickLine={false}
@@ -411,11 +448,43 @@ export function SavingsTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
+                {/* Recharts' default `preserveEnd` walk drops whichever labels
+                    its collision pass reaches, so the stride is not uniform and
+                    changes with the container width.
+
+                    THIS chart's own numbers, which are not Budget vs Actual's
+                    and must not be merged with them: an 80px currency YAxis
+                    leaves a 203px plot, so twelve 3-letter months (widest
+                    23.7px) sit 16.9px apart. Forcing every tick was built and
+                    measured here first, and adjacent months overlapped by
+                    2.3–5.8px of ink at a 390px viewport — never mind 360.
+
+                    `equidistantPreserveStart` is recharts' one strategy that
+                    picks a STRIDE rather than walking and dropping individuals:
+                    it takes the smallest N for which every Nth tick clears its
+                    neighbour, so the label set is uniform at every width by
+                    construction, and it pins index 0 — January, which the old
+                    `preserveEnd` result hid.
+
+                    Budget vs Actual and the cumulative-savings chart now use
+                    the same strategy, and the three agreeing is a COINCIDENCE
+                    OF THE DEVICE FLEET, not one rule: each was decided against
+                    its own plot width (283px, 203px, 133px), and the widest of
+                    them only stopped fitting twelve because the household's
+                    main phone turned out to be 360px rather than 390px. If a
+                    future reader wants to unify them, they have to re-derive
+                    all three, not copy one. */}
                 <XAxis
                   dataKey="name"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
+                  tick={MONTH_TICK}
+                  angle={MONTH_TICK_ANGLE}
+                  textAnchor="end"
+                  height={48}
+                  interval={monthAxisInterval(yoyData.length)}
+                  padding={ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS}
                 />
                 <YAxis
                   tickLine={false}

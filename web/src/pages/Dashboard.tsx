@@ -59,6 +59,13 @@ import { TYPE_INCOME } from '@/lib/transaction-types';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { RecentTransactionCard } from '@/components/RecentTransactionCard';
+import { transactionLabel } from '@/lib/transaction-label';
+import {
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING,
+} from '@/components/reports/utils';
 
 /* ── Pure helpers ── */
 
@@ -458,10 +465,17 @@ export function Dashboard() {
               tickLine={false}
               axisLine={false}
               tickMargin={8}
-              interval={0}
-              angle={-30}
+              // Was a hardcoded `0`. 6M is the default and six rotated labels
+              // clear each other at any width, but the 12M toggle puts twelve
+              // into a 208px plot at phone width. Same rotated-axis rule as the
+              // Reports charts — see the long note on Income vs Expenses in
+              // OverviewTab.
+              interval={monthAxisInterval(chartData.length)}
+              angle={MONTH_TICK_ANGLE}
               textAnchor="end"
               height={48}
+              tick={MONTH_TICK}
+              padding={ROTATED_MONTH_TICK_PADDING}
               tickFormatter={formatMonthTick}
             />
             <ChartTooltip
@@ -650,10 +664,70 @@ export function Dashboard() {
                             </span>
                           </div>
                         </TableCell>
+                        {/* The phone branch above renders
+                            `TransactionDescription`; this desktop branch was
+                            left rendering a bare span, so one imported row with
+                            an unbroken token still stretched the table.
+
+                            NOT that component: its mechanism is `min-w-0` +
+                            `truncate`, which works in a FLEX row (the
+                            component's own docblock says so) and not in a
+                            table, because a `white-space: nowrap` cell
+                            contributes its full text width as the column's
+                            min-content. Measured with that idiom here,
+                            `max-w-md` became the column's FLOOR at 448px inside
+                            a card 384.5px wide at 1024 — 302px of overflow,
+                            worse than the bug.
+
+                            AND NO `max-w-*` HERE, unlike the two Reports tables
+                            — re-measured rather than reasoned about, because
+                            the obvious argument is wrong. `overflow-wrap:
+                            anywhere` drops MIN-content to one character, so a
+                            cap "cannot floor anything"; measured, it still
+                            does. Chrome's auto table layout sizes this column
+                            from its max-content capped by `max-width`, and a
+                            long token makes that the cap itself: adding
+                            `max-w-md` back pinned the column at exactly 448px
+                            and the table overflowed its card by 302px at 1024,
+                            174px at 1280, 87px at 1440. Without it the same
+                            table measures 0px of overflow at 768, 900, 1024,
+                            1150, 1280, 1440 and 1920, with the column adapting
+                            145px -> 465px.
+
+                            The Reports cells keep their caps because theirs
+                            never bind — 12rem at phone width against a 107px
+                            column, and 28rem at desktop against 383px. This
+                            card is the narrow one (384.5px at 1024), which is
+                            the whole difference.
+
+                            `line-clamp-2` bounds the height that wrapping would
+                            otherwise trade the width problem for, and
+                            `transactionLabel` is the shared empty-description
+                            fallback this branch never had. */}
                         <TableCell>
                           <div className="flex flex-col">
-                            <span className="font-medium">{tx.description}</span>
-                            <span className="text-sm text-muted-foreground">{tx.category_name}</span>
+                            <div
+                              className="line-clamp-2 font-medium [overflow-wrap:anywhere]"
+                              title={transactionLabel(tx)}
+                            >
+                              {transactionLabel(tx)}
+                            </div>
+                            {/* The CATEGORY name needs the same bound as the
+                                description above it, and this was found by
+                                measurement rather than reasoning: with the
+                                description bounded, the column still pinned at
+                                473.7px and the table overflowed its card by
+                                119px at 1440. The cause was this line — a
+                                category name is user-supplied and the server
+                                caps it at 100 characters
+                                (`internal/api/limits.go`), so one long one
+                                sets the column's min-content on its own and
+                                the fix one line up does nothing. One clamped
+                                line, because a category name is an
+                                identifier rather than a sentence. */}
+                            <span className="line-clamp-1 text-sm text-muted-foreground [overflow-wrap:anywhere]">
+                              {tx.category_name}
+                            </span>
                           </div>
                         </TableCell>
                         <TableCell className="text-sm text-muted-foreground">

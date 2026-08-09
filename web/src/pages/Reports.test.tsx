@@ -74,6 +74,74 @@ describe('Reports', () => {
     expect(strip).not.toHaveClass('justify-center');
   });
 
+  // The comment above is still true and the classes it pins must stay — but
+  // scrolling had become the EVERYDAY experience rather than the fallback.
+  // Measured on the built container at a 360px viewport, the width of the
+  // household's main phone: the four triggers needed 334px against 298px of
+  // usable width, so Patterns was cut off and reachable only by dragging the
+  // strip sideways. Owner: "the scroll is not good for the nav bar top."
+  //
+  // happy-dom lays nothing out, so NONE of that is observable here — these are
+  // class pins, and the widths that justify them are browser measurements
+  // recorded at the call site. After: 269px of content, the last tab's right
+  // edge 4px inside the scroller's, and no strip overflow at 320, 344, 360,
+  // 390, 411, 720 or 1440.
+  describe('the tab strip fits a 360px phone without scrolling', () => {
+    const TABS = ['Overview', 'Spending', 'Savings', 'Patterns'];
+
+    it('every trigger is squeezed at phone width and restored from sm up', () => {
+      renderReports();
+
+      for (const name of TABS) {
+        const tab = screen.getByRole('tab', { name });
+        // BOTH halves of the responsive pair. Pinning only the phone half
+        // would pass against a change that shrinks every viewport, and only
+        // the `sm:` half would pass against one that shrinks none.
+        expect(tab).toHaveClass('px-2', 'text-xs', 'sm:px-3', 'sm:text-sm');
+        // `px-2` alone came to 302px against 298px of usable width, so the
+        // smaller type is not cosmetic — it is the last 4px.
+      }
+    });
+
+    it('tailwind-merge really drops the shared trigger sizing', () => {
+      // The mechanism the fix rests on. If the merge stopped resolving the
+      // conflict, `px-3 px-2` would both survive and stylesheet order would
+      // decide the width — which is not something the classes above can show.
+      renderReports();
+      const tab = screen.getByRole('tab', { name: 'Overview' });
+      expect(tab).not.toHaveClass('px-3');
+      expect(tab).not.toHaveClass('text-sm');
+    });
+
+    it('every trigger keeps a 44px touch target, at every width', () => {
+      renderReports();
+
+      // Asserted over all four rather than a sampled one, so a fifth tab added
+      // without the class fails here.
+      for (const name of TABS) {
+        expect(screen.getByRole('tab', { name })).toHaveClass('min-h-11');
+      }
+      // NOT gated on a breakpoint: the household's tablet is ~720px in
+      // portrait, below `md`, so it takes the phone layout and is still a
+      // touch device. A `sm:`-gated floor would drop it back to 32px there.
+      for (const name of TABS) {
+        const cls = screen.getByRole('tab', { name }).className;
+        expect(cls).not.toMatch(/:min-h-/);
+      }
+    });
+
+    it('the list does not fix a height that would clip the taller trigger', () => {
+      // The stock `TabsList` was `h-10` — 40px, which CLIPS a 44px trigger, so
+      // the touch floor does nothing without this half. It now lives on the
+      // shared component as `min-h-10` (a floor, not a fixed height) rather
+      // than at this call site, because all five tablists in the app wanted it.
+      renderReports();
+      const strip = screen.getByRole('tablist');
+      expect(strip).not.toHaveClass('h-10');
+      expect(strip).toHaveClass('min-h-10');
+    });
+  });
+
   it('shows Overview tab by default', () => {
     renderReports();
     expect(screen.getByTestId('overview-tab')).toBeInTheDocument();

@@ -14,7 +14,13 @@ const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      "inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
+      // `h-auto`, not the stock `h-10`. 40px of list minus 8px of padding left
+      // every trigger 32px tall — under the 44px touch floor the rest of the
+      // phone shell keeps (`MobileNav`, `CategoryChips`, `TransactionEditSheet`)
+      // — and a fixed height CLIPS the taller trigger rather than growing with
+      // it. `min-h-10` keeps an empty or single-trigger strip from collapsing
+      // below the size it used to be.
+      "inline-flex min-h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground",
       className
     )}
     {...props}
@@ -39,7 +45,16 @@ const TabsTrigger = React.forwardRef<
   <TabsPrimitive.Trigger
     ref={ref}
     className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm",
+      // `min-h-11` is the 44px touch target, and it is NOT gated on a
+      // breakpoint. Both ends of the range are the reason: the household's
+      // tablet is ~720px in portrait, below `md`, so an `md:`-gated floor would
+      // miss it — and the same tablet in LANDSCAPE is ~1152px, so an
+      // `sm:`-gated one would miss it there. No breakpoint separates "touch"
+      // from "pointer", so every consumer gets the floor. Verified in the
+      // browser against all five tablists (Reports, Settings, FilterPanel and
+      // QuickAdd's two) at 360 and 1440; none of them sized anything off the
+      // old 40px.
+      "inline-flex min-h-11 items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 data-[state=active]:bg-background data-[state=active]:text-foreground data-[state=active]:shadow-sm",
       className
     )}
     {...props}

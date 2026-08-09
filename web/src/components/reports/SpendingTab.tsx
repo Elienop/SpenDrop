@@ -55,6 +55,14 @@ import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useReportYears } from '@/hooks/useReportYears';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { cn } from '@/lib/utils';
+import {
+  categoryChartHeightPx,
+  shortenCategoryLabel,
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING,
+} from './utils';
 import type { ExpenseVelocityData } from '@/api/types';
 
 interface VelocityPoint {
@@ -202,6 +210,7 @@ export function SpendingTab() {
   // Expense velocity - cumulative lines
   const velocityData = useMemo(() => buildVelocityData(velocity.data), [velocity.data]);
 
+
   return (
     // Every card in this grid carries `min-w-0` — without it this tab measured
     // 3530px wide at a 390px viewport. A grid item defaults to min-width:auto,
@@ -274,11 +283,16 @@ export function SpendingTab() {
               <ChartContainer
                 config={breakdownConfig}
                 className={cn(
-                  'h-[300px] w-full transition-opacity duration-200',
+                  'w-full transition-opacity duration-200',
                   catBreakdown.fetching &&
                     !catBreakdown.loading &&
                     'opacity-60',
                 )}
+                // Inline because the height is DATA, not a design token — one
+                // row per category, like Patterns' tag chart. A Tailwind class
+                // cannot express it and an arbitrary `h-[Npx]` would not be
+                // generated for a value only known at runtime.
+                style={{ height: categoryChartHeightPx(breakdownSorted.length) }}
               >
                 <BarChart
                   accessibilityLayer
@@ -295,6 +309,15 @@ export function SpendingTab() {
                     axisLine={false}
                     width={100}
                     className="text-xs"
+                    // Every category gets its label. Without this the axis is on
+                    // recharts' default collision strategy over an UNCAPPED list,
+                    // so it silently drops names — and the height above is what
+                    // makes rendering them all safe.
+                    interval={0}
+                    // ...but only once each label is ONE line: recharts wraps a
+                    // category label that overruns `width`, and the extra lines
+                    // grow into the next row. See `shortenCategoryLabel`.
+                    tickFormatter={shortenCategoryLabel}
                   />
                   <Bar dataKey="total" radius={4}>
                     <LabelList
@@ -367,11 +390,22 @@ export function SpendingTab() {
                   tickLine={false}
                   axisLine={false}
                   tickMargin={8}
-                  interval={0}
-                  angle={-30}
+                  // Was a hardcoded `0`, which forces every bucket regardless of
+                  // whether they fit. Same rotated-axis rule as the two Overview
+                  // charts — see the long note on Income vs Expenses. The dev
+                  // ledger only reached back six months when this was written,
+                  // so the collision was invisible locally and would have
+                  // arrived with the twelfth month of data.
+                  interval={monthAxisInterval(catTrendData.length)}
+                  angle={MONTH_TICK_ANGLE}
                   textAnchor="end"
                   height={48}
-                  padding={{ left: 20, right: 20 }}
+                  tick={MONTH_TICK}
+                  // Was `{ left: 20, right: 20 }`, which is not enough for a
+                  // rotated month label: `Mar'26` still started at -9.8px, at
+                  // 390 AND at 1440. The shared constant is sized from the
+                  // measured overhang instead of guessed.
+                  padding={ROTATED_MONTH_TICK_PADDING}
                   tickFormatter={formatMonthTick}
                 />
                 <ChartTooltip
@@ -445,7 +479,22 @@ export function SpendingTab() {
                   merchants.fetching && !merchants.loading && 'opacity-60',
                 )}
               >
-                <Table>
+                <Table
+                    // Phone-width column density. The shared `TableCell` is `p-4` and
+                    // `TableHead` `px-4`, so four columns spend 128px on
+                    // padding alone — measured, this table wanted 318.5px inside
+                    // a 293px card and the amount column was clipped. Halving the
+                    // HORIZONTAL padding below `sm` gives 64px back, which is more
+                    // than the overflow; vertical padding is untouched, so rows
+                    // keep their tap height.
+                    //
+                    // Scoped to this table rather than to `ui/table.tsx`: the
+                    // shared component is used by the ledger, Trash, the import
+                    // preview and Settings, and none of those asked for it. A
+                    // descendant selector rather than a class on every cell so a
+                    // new column cannot be added without it.
+                    className="[&_td]:px-2 [&_th]:px-2 sm:[&_td]:px-4 sm:[&_th]:px-4"
+                >
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-10">#</TableHead>
@@ -460,8 +509,46 @@ export function SpendingTab() {
                         <TableCell className="font-mono tabular-nums text-muted-foreground">
                           {i + 1}
                         </TableCell>
-                        <TableCell className="font-medium">
-                          {m.description}
+                        {/* BOUNDED IN BOTH DIRECTIONS, and each class is doing
+                            a different job — none of them is decoration.
+
+                            WIDTH: `overflow-wrap:anywhere`. Tailwind's
+                            `break-words` (`overflow-wrap:break-word`) breaks a
+                            long token for PAINTING but leaves the element's
+                            min-content contribution at the token's full width,
+                            so a table cell keeps sizing itself to it;
+                            `anywhere` counts the break when computing
+                            min-content, which is what actually collapses the
+                            column. Measured before: one row with an unbroken
+                            token drove this table to 3464px inside a 293px
+                            card, widest cell 3269px. After: 310px, widest cell
+                            107px. `max-w-*` then keeps an ordinary long
+                            description from eating the amount column on a wide
+                            screen.
+
+                            HEIGHT: `line-clamp-3`, and it is not cosmetic.
+                            Wrapping alone trades a horizontal overflow for a
+                            vertical one — measured, a 500-character token
+                            wrapped into a 932px-tall row at 390px. 500 is the
+                            per-row edit ceiling, but IMPORT does not enforce
+                            it (the body cap is 256 KiB), so the unclamped
+                            height is bounded by nothing a user cannot reach
+                            with a spreadsheet.
+
+                            Three lines rather than `truncate`'s one because
+                            this surface has no way back to the full string on
+                            the primary platform: no row expansion, and `title`
+                            is dead on touch. Three lines is ~27 characters at
+                            phone width and ~150 at desktop, against ~14 for a
+                            single truncated line. `title` is still set, for
+                            the pointer case where it does work. */}
+                        <TableCell className="max-w-[12rem] font-medium md:max-w-md">
+                          <div
+                            className="line-clamp-3 [overflow-wrap:anywhere]"
+                            title={m.description}
+                          >
+                            {m.description}
+                          </div>
                         </TableCell>
                         <TableCell className="text-right text-muted-foreground">
                           {m.tx_count}
