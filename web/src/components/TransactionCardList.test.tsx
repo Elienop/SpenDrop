@@ -1,6 +1,5 @@
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi } from 'vitest';
-import { format } from 'date-fns';
 import {
   TransactionCardList,
   type TransactionCardListProps,
@@ -36,11 +35,25 @@ const twoDays: Transaction[] = [
   makeTx({ id: 3, date: '2026-04-01', description: 'Weekly groceries' }),
 ];
 
-// Day labels are derived with the same expression the component uses rather
-// than hardcoded, so the test does not fail in a timezone where a UTC-midnight
-// date string renders as the previous day.
+// HARDCODED, deliberately. This used to derive the label with the SAME
+// `new Date(iso)` expression the component used, with a comment saying that
+// kept the test from failing in a timezone where a UTC-midnight date string
+// renders as the previous day. It did — and it made the test immune to the
+// defect at the same time, because both sides moved together. The component
+// really did render 2026-04-01 as "Mar 31, 2026" for every user west of GMT,
+// under a green suite, in every timezone.
+//
+// A test that recomputes the answer the way the code computes it pins the
+// mechanism, not the answer.
+const DAY_LABELS: Record<string, string> = {
+  '2026-04-01': 'Apr 1, 2026',
+  '2026-04-02': 'Apr 2, 2026',
+};
+
 function dayLabel(iso: string): string {
-  return format(new Date(iso), 'MMM d, yyyy');
+  const label = DAY_LABELS[iso];
+  if (label === undefined) throw new Error(`no expected label for ${iso}`);
+  return label;
 }
 
 function renderList(props: Partial<TransactionCardListProps> = {}) {
@@ -116,7 +129,7 @@ describe('TransactionCardList day headers', () => {
   it('drops the per-card date, which the header now carries', () => {
     renderList();
     expect(
-      screen.queryAllByText(format(new Date('2026-04-02'), 'MMM d, yyyy')),
+      screen.queryAllByText(dayLabel('2026-04-02')),
     ).toHaveLength(1); // the header itself, and no card repeating it
   });
 });
@@ -183,10 +196,10 @@ describe('TransactionCardList without day grouping', () => {
     // Year included — sorted by amount, "Apr 3" beside "Apr 3" from another
     // year would be a wrong answer rather than a terse one.
     expect(
-      screen.getAllByText(format(new Date('2026-04-02'), 'MMM d, yyyy')),
+      screen.getAllByText(dayLabel('2026-04-02')),
     ).toHaveLength(2);
     expect(
-      screen.getByText(format(new Date('2026-04-01'), 'MMM d, yyyy')),
+      screen.getByText(dayLabel('2026-04-01')),
     ).toBeInTheDocument();
   });
 });

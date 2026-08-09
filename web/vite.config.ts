@@ -66,6 +66,12 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'happy-dom',
+    // A NEGATIVE-OFFSET zone, on purpose. The date tests exist to catch
+    // `new Date('2026-01-01')` (UTC midnight) being used where a local-time
+    // parse is required — and that bug is INVISIBLE anywhere at or east of
+    // GMT. The dev host runs EEST and CI runners run UTC, so without this the
+    // assertions pass no matter which parse the code uses.
+    env: { TZ: 'America/Los_Angeles' },
     setupFiles: ['./src/test/setup.ts'],
     css: {
       modules: {

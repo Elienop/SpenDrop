@@ -1,6 +1,5 @@
 import { render, screen, fireEvent, within, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { format } from 'date-fns';
 import { TransactionCard, type TransactionCardProps } from './TransactionCard';
 import type { Transaction } from '../api/types';
 
@@ -124,7 +123,10 @@ describe('TransactionCard anatomy', () => {
   it('shows the date inline only when the list is not grouping by day', () => {
     // With the year: this branch runs only when the list is NOT grouped by
     // day, which is exactly when neighbouring rows can be years apart.
-    const expected = format(new Date('2026-04-01'), 'MMM d, yyyy');
+    // The literal, not `format(new Date('2026-04-01'), …)`: deriving it the
+    // way the component derives it made this assertion agree with the
+    // UTC-midnight off-by-one instead of catching it.
+    const expected = 'Apr 1, 2026';
 
     const { unmount } = renderCard({ showDate: true });
     expect(screen.getByText(expected)).toBeInTheDocument();

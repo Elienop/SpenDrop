@@ -1,4 +1,4 @@
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import type { Transaction } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { TransactionDescription } from './TransactionDescription';
@@ -67,7 +67,7 @@ export function RecentTransactionCard({
         */}
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
           {transaction.category_name} ·{' '}
-          {format(new Date(transaction.date), 'MMM d, yyyy')}
+          {format(parseISO(transaction.date), 'MMM d, yyyy')}
         </p>
       </div>
 

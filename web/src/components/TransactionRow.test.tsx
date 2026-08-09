@@ -96,6 +96,20 @@ async function openActionsMenu(description: string) {
   return user;
 }
 
+describe('TransactionRow date rendering', () => {
+  it('renders the stored day, not the day before it', () => {
+    // The desktop table's date cell had NO assertion at all, which is how a
+    // UTC-midnight parse survived here while its four siblings were caught:
+    // `new Date('2026-04-01')` is midnight UTC, which is March 31st for every
+    // user west of GMT. The literal is deliberate — deriving the expectation
+    // with the same call the component makes is what let this class of bug
+    // hide everywhere else.
+    renderRow(makeTx());
+    expect(screen.getByText('Apr 1, 2026')).toBeInTheDocument();
+    expect(screen.queryByText('Mar 31, 2026')).not.toBeInTheDocument();
+  });
+});
+
 describe('TransactionRow tags display', () => {
   it('renders tag pills when transaction has tags', () => {
     renderRow(makeTx({ tags: 'groceries,weekly' }));
