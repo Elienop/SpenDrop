@@ -299,7 +299,7 @@ that to argue only the option was wrong. **That claim was false.** `SelectTrigge
 
 | Trigger | Height | Where |
 |---|---|---|
-| ColorThemePicker | **32px** | app header, every page |
+| ColorThemePicker | **32px** | desktop Sidebar footer only (`Sidebar.tsx:224`, `hidden md:flex`, and only when expanded) — NOT the app header, and NOT every page. Its other mount, `MobileNav.tsx:248`, already passes `h-11`. Corrected 2026-08-09; the original "app header, every page" was wrong. |
 | PaginationBar "Rows per page" | **32px** at 1440, 44px at 360 | Transactions |
 | Reports "Time Period" / "Budget Year" | **36px** | all four Reports tabs |
 | Dashboard "Month" / "Year" | **36px** | `/` |
@@ -347,6 +347,55 @@ someone reproduces it.
 **Verified: reported by the build agent, NOT independently reproduced by me.** A
 `whitespace-nowrap` Button with its right edge at 396 against a 360 viewport. Pre-existing and
 unrelated to the Select work. **Effort:** small.
+
+### B36 — a member can take another member's display name, and attribution follows
+**Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
+mechanism confirmed independently: `created_by` **is** the display name
+(`internal/api/transaction_handlers.go:150`) and is the only attribution the ledger renders —
+`TransactionRow.tsx:297`, `TransactionCard.tsx:245`, `Trash.tsx:266`/`:1068`,
+`HeatmapDaySheet.tsx:262` all render `{transaction.created_by || 'Unknown'}` and nothing else.
+
+**Introduced by the self-service rename.** Before it, `display_name` was admin-written only, so a
+member could not self-select an impersonating label. Now a member can read the admin's exact string
+off the household-wide ledger and PATCH to it; because `created_by` comes from a live JOIN, the
+relabel applies **retroactively** to every row they have ever entered, and reverts instantly on
+rename-back. Observed: two ledger rows reading `Elie Abdelahad`, `user_id` 1 and 2.
+
+Low severity — needs an insider already trusted with the ledger, grants no privilege or data access,
+fully reversible, and the admin can disambiguate in Settings, where a Username column sits beside
+Display Name. It becomes Medium if the household grows past two, or if attribution is ever used for
+reimbursement.
+
+**Fix is frontend-only and NOT a server-side uniqueness check** — a uniqueness error leaks the set
+of existing display names to a member. `user_id` is already on the wire in `transactionResponse`, so
+render `@username` (or mark the current user's own rows) wherever `created_by` appears.
+**Effort:** small. **Owner has not yet decided whether to take it.**
+
+### B37 — `Button` has no touch floor; most tap targets miss 44px on a tablet in landscape
+**Verified: measured** (Chrome, true device metrics, `(pointer: coarse)` confirmed `true` in-page,
+2026-08-09), at 1130px — the Galaxy Tab S10 FE in landscape, which is above `md` and therefore
+renders the DESKTOP tree while still being a touch screen.
+
+| Page | buttons under 44px |
+|---|---|
+| `/transactions` | **115 of 132** |
+| `/categories` | 25 of 26 |
+| `/` (Dashboard) | 9 of 12 — incl. "Today" at 36px beside a now-44px Select, tops misaligned 4px |
+| `/budgets` | 7 of 11 |
+
+At 360 the phone tree is largely fine (**1 of 65** on `/transactions`), so this is specifically the
+tablet-landscape gap. The B31 Select floor made it visible rather than causing it: a floored Select
+beside an unfloored Button is where the raggedness shows.
+**Owner approved taking it on the B36/B37 branch, 2026-08-09.** Mechanism is the same `coarse:`
+variant B31 registered; the hard part is `Button`'s several size variants and the icon buttons,
+which need BOTH axes.
+
+### B38 — the Categories page never got the B9 phone treatment
+**Verified: measured** at 360 (2026-08-09). **22 of 23 buttons under 44px**, row actions at
+**32px**, and its table hides **394px** behind a sideways scroll (`Name`, `Type`, `Actions`) —
+worse than the Users table that prompted this work. B9 slice 2 converted the main app's tables to
+phone card lists and Settings was the known gap; Categories was missed by both.
+**Owner approved taking it on this branch, 2026-08-09** — same card-list treatment as Users.
 
 ### B32 — an unknown route renders a blank shell, not a 404
 **Verified: reproduced** (2026-08-09). The dashboard lives at `/`; navigating to `/dashboard` — a
