@@ -259,6 +259,31 @@ overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is la
 two were not measured.
 **Effort:** small per consumer — the opt-in is one prop.
 
+### B29 — every Select in the app has 32px options
+**Verified: reproduced** (measured at a 360px viewport, 2026-08-09, while building the Settings
+phone picker). `SelectItem`'s stock `py-1.5` around `text-sm` gives a **32px** option row. The
+TRIGGER meets the 44px floor everywhere; the option that is actually tapped to choose does not —
+the wrong half to get right.
+
+Fixed at the Settings call site only. It is app-wide: **QuickAdd's category picker is the one to
+check first**, since it is on the daily capture surface and its options are the primary
+interaction. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
+not folded into a branch that had already been reviewed.
+
+Related and worth doing in the same pass: **Radix Select drops focus to `<body>` on selection** —
+verified three ways (user-event, a 2s `waitFor` to rule out late arrival, and real Chrome key
+events), and reproduced on a bare Select with nothing to swap, so it is the primitive rather than
+any consumer. Settings' picker now restores focus explicitly via `onCloseAutoFocus`; **every other
+Select in the app still drops it.** Same shape as the recorded Sheet-without-a-Trigger finding.
+**Effort:** small — one component, but verify every consumer at 360 and 1440.
+
+### B30 — the Settings section is not reflected in the URL
+**Verified: read** (2026-08-09). `location.search` stays empty when a section is chosen, on both
+the desktop tab strip and the new phone picker. A `?tab=` value is honoured *into* the page but
+never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
+not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
+**Effort:** small.
+
 ---
 
 ## Queued stages
@@ -273,7 +298,7 @@ Browser-verified at 390×844 on the rebuilt container.
 tables became card lists, including the dashboard. **There are no panning tables left on the
 phone.** The slice-2 re-measure had said it "may prove unnecessary"; measuring said otherwise.
 
-**Slice 3 BUILT 2026-08-09** on `feat/reports-mobile-heatmap`, six commits, awaiting the owner's
+**Slice 3 BUILT 2026-08-09** on `feat/reports-mobile-heatmap`, eight commits, awaiting the owner's
 push/PR go. All thirteen defects below shipped, plus the heatmap rebuild. Moves to Closed with
 the squash hash at merge. The recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129,
 squash `222caba`, **v0.41.1**), deliberately unbundled: the bump's only real evidence is a
