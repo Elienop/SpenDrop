@@ -291,6 +291,37 @@ never written *out* of it, so a section cannot be bookmarked or shared and a bac
 not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
 **Effort:** small.
 
+### B31 — Select TRIGGERS are 32–40px, app-wide
+**Verified: measured** (Chrome, 2026-08-09, true device metrics at 360px and 1440px, after B29's
+option fix landed). B29's own filing claimed "the TRIGGER meets the 44px floor everywhere" and used
+that to argue only the option was wrong. **That claim was false.** `SelectTrigger`'s stock class is
+`h-10` = 40px, and several call sites shrink it further:
+
+| Trigger | Height | Where |
+|---|---|---|
+| ColorThemePicker | **32px** | app header, every page |
+| PaginationBar "Rows per page" | **32px** at 1440, 44px at 360 | Transactions |
+| Reports "Time Period" / "Budget Year" | **36px** | all four Reports tabs |
+| Dashboard "Month" / "Year" | **36px** | `/` |
+| Budgets year/month | **40px** | Budgets |
+| Categories type, BulkEdit category, TransactionRow inline, TransactionEditSheet | **40px** | various |
+| Settings section picker | 44px | the only one that meets the floor (`h-11`, set in B9 slice 3) |
+
+So the touch-floor gap was *both* halves, not just the option. Deliberately NOT folded into the
+B29 branch: `SelectTrigger` carries `h-10` as a fixed height that call sites override with their
+own `h-9`/`h-11`, so moving it to a floor changes chrome density on nine surfaces at two widths
+and needs its own verification pass — the same reasoning that kept the option fix off the slice-3
+branch. **Effort:** medium. Do not fix by adding `min-h-11` blindly; several of these sit in tight
+toolbars where a taller control reflows the row.
+
+### B32 — an unknown route renders a blank shell, not a 404
+**Verified: reproduced** (2026-08-09). The dashboard lives at `/`; navigating to `/dashboard` — a
+plausible URL a user would type or bookmark — renders the full app chrome with an **empty** main
+container: no content, no 404, no redirect, and no console error. Found by walking into it while
+verifying B29 and briefly mistaking it for a rendering defect in the branch.
+**Effort:** small — a catch-all route. **Note:** worth checking whether the SW precache serves the
+shell for arbitrary paths, since that is what makes the blank state look like a successful load.
+
 ---
 
 ## Queued stages
