@@ -64,6 +64,17 @@ export const FORMAT_ISO_DATE = 'yyyy-MM-dd';
 export const FORMAT_DATE_SHORT = 'MMM d';
 /** Full human-readable date like "January 3, 2026". */
 export const FORMAT_DATE_LONG = 'PPP';
+/**
+ * `FORMAT_DATE_LONG` plus the weekday — "Saturday, January 3rd, 2026".
+ *
+ * The weekday is not decoration where it is used: the heatmap's rows ARE
+ * weekdays and the card is a weekday/weekend pattern tool, so a cell's
+ * accessible name has to carry the day of the week that its position encodes
+ * visually. Localized (`PPPP`) rather than hand-assembled from
+ * `'EEEE, MMMM d, yyyy'` so it stays in the same family as `PPP` above and
+ * follows the locale's own ordering.
+ */
+export const FORMAT_DATE_FULL = 'PPPP';
 
 // --- Chart month-axis formatters ---
 //

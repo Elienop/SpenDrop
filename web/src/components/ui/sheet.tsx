@@ -49,12 +49,27 @@ const sheetVariants = cva(
 
 interface SheetContentProps
   extends React.ComponentPropsWithoutRef<typeof SheetPrimitive.Content>,
-    VariantProps<typeof sheetVariants> {}
+    VariantProps<typeof sheetVariants> {
+  /**
+   * Rendered ABOVE the body scroller instead of inside it, so it stays put
+   * while the body scrolls. Opt-in: omit it and the DOM is exactly what it
+   * was — `{undefined}` renders no node, so no extra flex child and no extra
+   * `gap-4`.
+   *
+   * For a sheet whose title names WHICH thing you are looking at, or that
+   * carries a summary figure, this is not polish. Measured on the heatmap's
+   * day sheet at 360px with 20 rows: with the header inside the scroller the
+   * "$290.30 spent" total left the box after 60px of scroll, with 8 of the 20
+   * rows still on screen — so from row 9 on, the sheet explaining one day
+   * showed neither the day nor its total.
+   */
+  header?: React.ReactNode
+}
 
 const SheetContent = React.forwardRef<
   React.ElementRef<typeof SheetPrimitive.Content>,
   SheetContentProps
->(({ side = "right", className, children, ...props }, ref) => (
+>(({ side = "right", className, header, children, ...props }, ref) => (
   <SheetPortal>
     <SheetOverlay />
     <SheetPrimitive.Content
@@ -62,18 +77,28 @@ const SheetContent = React.forwardRef<
       className={cn(sheetVariants({ side }), className)}
       {...props}
     >
+      {header}
       {/* Content is a flex column (`flex flex-col` in sheetVariants) and this
-          is its only in-flow child — that pairing is what bounds the scroll.
-          As a block child of a fixed-height sheet this div would instead size
-          to its content and spill past the sheet's edge, unreachable, with
-          `overflow-y-auto` never engaging. It needs no `flex-1` to shrink,
-          because `overflow-y-auto` already makes its automatic minimum size 0
-          — and `flex-1` would be wrong: a zero flex-basis collapses an
-          auto-height top/bottom sheet. Scrolling the body rather than the
-          whole sheet is also what keeps the Close button below, absolutely
-          positioned against Content, pinned. The div stays display:block so
-          the sections inside it stack in ordinary flow, and `-m-1 p-1` keeps
-          focus rings on edge children out of the clipping box. */}
+          is the only in-flow child that can grow — that pairing is what bounds
+          the scroll. As a block child of a fixed-height sheet this div would
+          instead size to its content and spill past the sheet's edge,
+          unreachable, with `overflow-y-auto` never engaging. It needs no
+          `flex-1` to shrink, because `overflow-y-auto` already makes its
+          automatic minimum size 0 — and `flex-1` would be wrong: a zero
+          flex-basis collapses an auto-height top/bottom sheet.
+
+          `header` above adds a SECOND in-flow child, and the same property is
+          what makes that safe: the header's automatic minimum size is its own
+          content, so it cannot shrink, while this div's is 0 — every pixel of
+          overflow is therefore taken out of the scroller and none out of the
+          header. Do not give the header `flex-1` or a `min-h-0` either; both
+          would let it start absorbing the shrink instead.
+
+          Scrolling the body rather than the whole sheet is also what keeps the
+          Close button below, absolutely positioned against Content, pinned.
+          The div stays display:block so the sections inside it stack in
+          ordinary flow, and `-m-1 p-1` keeps focus rings on edge children out
+          of the clipping box. */}
       <div className="-m-1 overflow-y-auto p-1">{children}</div>
       {/* `-m-3.5 p-3.5` grows the 16px icon to a 44px touch target without
           moving it: the negative margin pulls the border box back out by the
