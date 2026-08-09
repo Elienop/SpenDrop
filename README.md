@@ -962,6 +962,7 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | POST | `/api/auth/login` | Log in |
 | POST | `/api/auth/logout` | Log out |
 | GET | `/api/auth/me` | Get current user info |
+| PATCH | `/api/auth/me` | Change the caller's own display name. Body `{"display_name":"<=64 chars"}`; returns the same profile object `GET /api/auth/me` does. Open to members and admins alike — the target is always the session's own user, so there is no id to name someone else with. `display_name` is the only writable field, and nothing is revoked: sessions, API tokens and push subscriptions all survive a rename. Renaming *another* user stays on the admin-only `PUT /api/users/{id}`. |
 | POST | `/api/auth/password` | Change the caller's own password. Body `{"current_password","new_password"}`. Verifies the current password, then in one transaction updates the hash, revokes the caller's API tokens, and deletes all their sessions (logout-everywhere). Rate-limited per user. |
 
 ### API Tokens

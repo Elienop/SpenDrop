@@ -490,6 +490,47 @@ func TestHandleRegister_DisplayNameLimitIsCharacters(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateMe_DisplayNameLimitIsCharacters. The self-service rename is
+// the THIRD path that writes display_name, after handleRegister and
+// handleCreateUser, and it carries its own check — so like those two it needs
+// its own boundary here. It is also the likeliest of the three to be used in
+// Arabic: registration and admin-create are one-time acts, while this is the
+// field a member comes back to and adjusts.
+func TestHandleUpdateMe_DisplayNameLimitIsCharacters(t *testing.T) {
+	h := setupHandler(t)
+	_, cookie := seedProfileUser(t, h, "dn-self-charlimit", "Original Ledger Label", RoleMember)
+
+	rename := func(displayName string) *httptest.ResponseRecorder {
+		return patchMe(t, h, jsonBody(map[string]any{"display_name": displayName}), cookie)
+	}
+
+	// The AT-THE-LIMIT case is the load-bearing one: 64 Arabic characters are
+	// 128 bytes, so a check that slipped back to len() refuses this and only
+	// this. The over-limit case is refused under either unit.
+	rec := rename(repeatTo(arabicLetter, MaxDisplayNameLength))
+	if rec.Code != http.StatusOK {
+		t.Errorf("a %d-character display name got %d, want 200: %s",
+			MaxDisplayNameLength, rec.Code, rec.Body.String())
+	}
+	rec = rename(repeatTo(arabicLetter, MaxDisplayNameLength+1))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("a %d-character display name got %d, want 400", MaxDisplayNameLength+1, rec.Code)
+	}
+
+	// An astral emoji is 4 bytes and 1 character, and 2 UTF-16 code units — the
+	// case where a naive frontend .length check disagrees with the server. The
+	// server's answer is the one that decides, so it is pinned here too.
+	rec = rename(repeatTo(astralEmoji, MaxDisplayNameLength))
+	if rec.Code != http.StatusOK {
+		t.Errorf("a %d-emoji display name got %d, want 200: %s",
+			MaxDisplayNameLength, rec.Code, rec.Body.String())
+	}
+	rec = rename(repeatTo(astralEmoji, MaxDisplayNameLength+1))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("a %d-emoji display name got %d, want 400", MaxDisplayNameLength+1, rec.Code)
+	}
+}
+
 // TestPasswordBounds_StayByteBounded is a CARVE-OUT guard, not a limit test.
 // It exists to fail if someone sweeps the password bounds into charLen along
 // with everything else in this change.

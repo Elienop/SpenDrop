@@ -31,6 +31,25 @@ UPDATE users
 SET display_name = ?, role = ?, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
+-- name: UpdateUserDisplayName :one
+-- The self-service rename (PATCH /api/auth/me). SEPARATE FROM UpdateUser ON
+-- PURPOSE: that statement's SET list carries `role`, so reusing it on a path
+-- with no business setting a role means a role value has to be computed and
+-- carried anyway, and one wrong merge there is a silent privilege change. This
+-- statement CANNOT touch role, username or password_hash — the narrow field set
+-- is a property of the SQL, not of the caller's care.
+--
+-- :one with RETURNING rather than :exec, for two reasons. A bare UPDATE reports
+-- success against zero rows, so a caller whose account was deleted between
+-- authenticating and this write would be told the rename landed; here the
+-- missing row surfaces as sql.ErrNoRows and the handler answers 404. And the
+-- returned row is the canonical post-write state, so the response body needs no
+-- second read that could observe a different one.
+UPDATE users
+SET display_name = ?, updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+RETURNING *;
+
 -- name: UpdateUserPassword :exec
 UPDATE users
 SET password_hash = ?, updated_at = CURRENT_TIMESTAMP
