@@ -193,6 +193,40 @@ semantics — "the hold is filed against the DEPARTED id, if at all." A queue-se
 question, distinct from the auth race that exposed it.
 **Effort:** small.
 
+### B24 — /quick overflows the page horizontally on a 360px phone
+**Verified: reproduced** (found 2026-08-09 during B9 slice 3, on the rebuilt container at a
+360px viewport). `document.scrollWidth` is **506px against a clientWidth of 345** — the page
+itself pans sideways. The cause is a single `CategoryChips` button rendering a long category
+name at **489.5px**, unbounded. Same class as the D4 table cells: user-supplied text whose only
+ceiling is a server constant (`MaxCategoryNameLength = 100`, `internal/api/limits.go:401`).
+
+**This is the owner's daily capture surface** and the most-used screen on the primary platform,
+which is why it outranks its size. Pre-existing — not introduced by slice 3 — and left unfixed
+only because `CategoryChips.tsx` was outside the branch's scope.
+**Effort:** small — the same bounding idiom the three tables now use.
+
+### B25 — the Reports page has one heading, and its Card labels are no-ops
+**Verified: read** (B9 slice-3 accessibility recon, 2026-08-09; PRE-EXISTING and page-wide).
+Three separate defects in one surface, none of them mobile-specific:
+1. **`CardTitle` renders a `<div>`**, so the entire Reports page has exactly one heading
+   (`<h1>Reports</h1>`). "Spending Heatmap", "Recurring Expenses" and "Tag Analysis" cannot be
+   reached by heading navigation.
+2. **`<Card aria-labelledby="…">` is silently discarded.** `Card` renders a bare `<div>`, whose
+   implicit `generic` role is on WAI-ARIA's name-prohibited list — so the association does
+   nothing while reading as done. Three call sites in `PatternsTab.tsx` alone.
+3. **Loading and refetch states are silent to a screen reader.** `Skeleton` is a plain `<div>`
+   with no `role`, no `aria-busy` and no live region; the refetch cue is `opacity-60`, purely
+   visual. (The error path is fine — `alert.tsx` has `role="alert"`.)
+Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
+**Effort:** medium for (1); small for (2) and (3).
+
+### B26 — Recurring Expenses still pans 113px on a phone
+**Verified: reproduced** (2026-08-09, after the D4/D12 fixes). 375.9px of table in a 263px box at
+360. The remainder is five columns of header words plus cell padding, **not** the description —
+that is now bounded. Reaching zero needs the slice-2 card-list treatment rather than more padding
+tuning, which is why it was stopped here.
+**Effort:** medium — it is a presentation change, not a spacing tweak.
+
 ---
 
 ## Queued stages
@@ -246,15 +280,29 @@ Slice 1's shell fix and its `min-w-0` grid fix had already removed the page-leve
   mobile sizing bug with an a11y side-effect; it is a component that is mouse-only-fine on
   desktop and inoperable everywhere else. Enlarging the cell without giving it an interaction
   model would ship a target you can hit and still learn nothing from.
-- **D2 — Budget vs Actual labels 7 of 12 months, unevenly.** *Reproduced.* Its `XAxis` carries no
-  `interval`, unlike its two siblings which pass `axisTickInterval(...)`. A **wiring-seam**
-  defect: the helper and its unit test were already correct — it was never connected. The repo
-  already knows this trap; a comment two charts over records `preserveStartEnd` dropping June.
-- **D3 — Income vs Expenses clips its first X tick.** *Reproduced.* The −30° label overflows the
-  SVG's left edge: the DOM reads `Sep'25`, the render shows `p'25`.
-- **D4 — the Top Merchants description cell is unbounded.** *Reproduced.* One unbroken token
-  drove the table to **3,464px inside a 308px** container. Data-dependent and **not
-  mobile-specific** — desktop is identically exposed.
+- **D2 — Budget vs Actual thins its month labels non-uniformly, and how badly depends on the
+  width.** *Reproduced.* **Corrected 2026-08-09** — this entry first said "7 of 12, unevenly",
+  then a single measurement at 390px suggested "6 of 12, evenly". A width sweep showed both
+  readings are real and neither describes the defect: **12 of 12 at 1440, NINE at 420
+  (`Jan Feb Mar Apr Jun Jul Sep Oct Dec` — May, Aug and Nov gone), six at 390.** recharts'
+  `preserveEnd` walks the axis dropping individual labels, so the stride changes mid-axis and
+  counting bars off a label lands on the wrong month. **The uneven stride is the damage; the
+  count is not.** Root cause: the `XAxis` carried no `interval` while its two siblings did — a
+  **wiring-seam** defect, since the helper and its unit test were already correct and simply
+  never connected.
+- **D3 — four charts paint a tick label outside the SVG.** *Reproduced.* Not a mobile defect and
+  not one chart: `Sep'25` sat at **−18.3px at 390 and −6.1px at 1440** on Income vs Expenses,
+  Category Trends clipped at −9.8px **despite already carrying the `padding` treatment its
+  siblings use**, the Dashboard's Cash Flow chart had the same shape, and Net Cash Flow overhung
+  the RIGHT edge. A −30° end-anchored label hangs off its tick leftward by ~35px; only a chart
+  rendering a wide `YAxis` had a gutter to absorb it.
+- **D4 — three tables render unbounded user text.** *Reproduced.* One 500-char description drove
+  Top Merchants to **3,464px inside a 293px** container. Data-dependent and **not
+  mobile-specific** — desktop is identically exposed. Same exposure in Recurring Expenses and in
+  the Dashboard's surviving desktop table (the phone card path got the fix in slice 2; the table
+  did not). A later measurement found the description was not even the binding column — the
+  **category name** on the same cell's second line is also user-supplied, also capped at 100
+  chars server-side, and was completely unbounded.
 - **D5 — the hardcoded `repeat(53, 1fr)` template can receive 54 columns.** *Reproduced by
   mirroring the function over 1900–2100:* leap years starting on a Sunday (1928, 1956, 1984,
   2012, 2040, 2068, 2096) emit 378 cells. Reachable today only by importing rows dated in one of
@@ -270,6 +318,36 @@ Slice 1's shell fix and its `min-w-0` grid fix had already removed the page-leve
   both versions.
 - **D8 — `ChartLegendContent` keys legend items by `item.value`.** *Read.* Two entries sharing a
   value would collide on the React key. Latent; current configs have distinct labels.
+- **D9 — the legend overflows the card on both sides once there are ~10 series.** *Reproduced —
+  reported by the owner from his live app, and structurally invisible in dev (2 categories
+  against his 9).* recharts fixes the legend wrapper's width; `ChartLegendContent` rendered
+  `flex … justify-center` with `flex-wrap: nowrap`, so the excess was pushed out of **both**
+  edges symmetrically and the first and last chips were cut in half.
+- **D11 — Category Breakdown's labels overlap at a realistic category count.** *Reproduced.*
+  Fixed height against a data-driven row count. The repo already had the idiom — Tag Analysis
+  derives its height from its row count — and this chart never got it. Height alone was not
+  enough: **recharts wraps an over-wide `YAxis type="category"` label and the extra lines grow
+  into the next row**, so a 100-char name rendered five lines tall.
+- **D12 — the Reports tables waste horizontal space on cell padding.** *Owner-reported.* The
+  shared `TableCell p-4` is the residual pan on a phone once the description is bounded.
+- **D13 — Savings Goal Progress is squeezed at phone width.** *Owner-reported.* The percentage
+  ring and the Goal/Saved/Remaining figures sat side by side, leaving the figures ~90px.
+
+**D2, D3, D4, D6, D7, D8, D9, D11, D12, D13 SHIPPED** on this branch in `2d220fc` and `2950a55`
+— along with a defect none of them named: **every tab strip in the app rendered 32px triggers,
+not the 44px this project adopted for touch** (`h-10` minus `p-1`), including QuickAdd's two
+strips on the daily capture surface. Slice 1's "44px floor" never covered tab strips. D1 and D5
+(the heatmap itself) are in progress.
+
+**The generalisable finding**, worth more than any individual fix: for ROTATED tick labels,
+collision is governed by the line's **height**, not its width — adjacent labels clear only when
+`spacing × sin(angle) ≥ ink height` — so shortening a label does nothing, and the tick font is
+the strongest lever because it appears in both that term and the rotational overhang. Fixing the
+clipping with padding *narrows the plot*, which *worsens* collision, so the two invariants must
+be asserted together or the second regression ships looking like a fix. Also: **a viewport-keyed
+tick cap cannot work here** — this grid is `md:grid-cols-2`, so every chart halves at 768px and
+measures worse clearance there than on a phone. Chart width is not monotonic in viewport width.
+The measurements are in the header of `web/src/components/reports/chartAxis.seam.test.ts`.
 
 Reassess the native-Android question now that the phone experience is no longer evidence of a
 web-app limit.
