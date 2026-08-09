@@ -100,7 +100,15 @@ const SelectContent = React.forwardRef<
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
-        "relative z-50 max-h-[--radix-select-content-available-height] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 origin-[--radix-select-content-transform-origin]",
+        // `max-w-[--radix-select-content-available-width]` pairs with the
+        // max-height that was already here. Without it the popover took its
+        // width from the longest option: a category name at the server's
+        // 100-character ceiling produced a 784px menu at a 360px viewport,
+        // 434px of it off-screen and unreachable by touch. Radix's own var,
+        // not `100vw` — it is measured from the trigger's position and the
+        // collision padding, so it stays correct for a menu opened near an
+        // edge or inside a Sheet.
+        "relative z-50 max-h-[--radix-select-content-available-height] max-w-[--radix-select-content-available-width] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 origin-[--radix-select-content-transform-origin]",
         position === "popper" &&
           "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
         className
@@ -155,7 +163,23 @@ const SelectItem = React.forwardRef<
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex min-h-11 w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      // `[overflow-wrap:anywhere]` is the other half of the content's
+      // max-width: once the popover stops growing to fit the longest option,
+      // `overflow-x-hidden` would CLIP a long name instead of showing it.
+      // `anywhere` (not `break-words`) because it also shrinks the intrinsic
+      // min-content size, which is what the flex automatic minimum floors the
+      // text at — the same reason the category chips use it. `min-h-11` is a
+      // floor, so a wrapped option grows instead of clipping.
+      //
+      // NO `line-clamp-*` here, and that is a deliberate deviation from the
+      // table-cell recipe (which pairs the wrap with a clamp, enforced by the
+      // seam test). A table cell is a fixed-height row where unbounded vertical
+      // growth is the defect; an option is a control you must read in full to
+      // pick correctly, and two categories sharing a long prefix become
+      // indistinguishable the moment the tail is clamped away. The vertical
+      // growth is contained anyway — the viewport scrolls and the content has a
+      // max-height — so the trade the clamp exists to make does not apply.
+      "relative flex min-h-11 w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none [overflow-wrap:anywhere] focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}
