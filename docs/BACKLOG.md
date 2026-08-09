@@ -265,10 +265,17 @@ phone picker). `SelectItem`'s stock `py-1.5` around `text-sm` gives a **32px** o
 TRIGGER meets the 44px floor everywhere; the option that is actually tapped to choose does not —
 the wrong half to get right.
 
-Fixed at the Settings call site only. It is app-wide: **QuickAdd's category picker is the one to
-check first**, since it is on the daily capture surface and its options are the primary
-interaction. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
+Fixed at the Settings call site only. It is app-wide: **13 non-test consumers** import
+`SelectItem`. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
 not folded into a branch that had already been reviewed.
+
+**Correction (2026-08-09).** This entry originally said "QuickAdd's category picker is the one to
+check first, since it is on the daily capture surface". **That is false** — `QuickAdd.tsx` imports
+`CategoryChips`, not `Select`, and is not among the 13 consumers. B29 does **not** touch the daily
+capture surface; **B24 alone does**. The claim was written from memory rather than from a grep and
+was caught only when it was about to be handed to an agent as a premise. The consumers that do sit
+on a frequently-used path are `TransactionRow`, `TransactionEditSheet`, `Dashboard` and
+`PaginationBar`.
 
 Related and worth doing in the same pass: **Radix Select drops focus to `<body>` on selection** —
 verified three ways (user-event, a 2s `waitFor` to rule out late arrival, and real Chrome key
