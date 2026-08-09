@@ -143,13 +143,19 @@ describe('the month-axis tick rule', () => {
     // stay small AND still clear the overhang, which is why both bounds are here.
     expect(ROTATED_MONTH_TICK_PADDING.left).toBeGreaterThanOrEqual(18);
     expect(ROTATED_MONTH_TICK_PADDING.left).toBeLessThanOrEqual(24);
-    expect(ROTATED_MONTH_TICK_PADDING.right).toBeGreaterThanOrEqual(8);
-    expect(ROTATED_MONTH_TICK_PADDING.right).toBeLessThanOrEqual(16);
+    // The right gutter is sized by the END-anchored strategy, not by the ink:
+    // recharts checks the LAST tick against the plot's right bound with its own
+    // footprint model, and on a point scale that tick sits ON the bound — so the
+    // check passes only if the padding covers half the modelled footprint,
+    // `(29.9·cos45 + 12·sin45) / 2` ~ 14.8px. At 10 it failed and the whole
+    // strategy collapsed to ONE label.
+    expect(ROTATED_MONTH_TICK_PADDING.right).toBeGreaterThanOrEqual(15);
+    expect(ROTATED_MONTH_TICK_PADDING.right).toBeLessThanOrEqual(20);
 
     // And the whole point of the second constant: its left gutter is the YAxis,
     // so this must stay 0. Setting it to 12 is otherwise invisible.
     expect(ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS.left).toBe(0);
-    expect(ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS.right).toBeGreaterThanOrEqual(8);
+    expect(ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS.right).toBeGreaterThanOrEqual(15);
   });
 
   test('twelve buckets are rendered whole; only a longer window is thinned', () => {
@@ -161,11 +167,18 @@ describe('the month-axis tick rule', () => {
     expect(monthAxisInterval(12)).toBe(0);
     expect(monthAxisInterval(MAX_UNTHINNED_MONTH_TICKS)).toBe(0);
     expect(monthAxisInterval(MAX_UNTHINNED_MONTH_TICKS + 1)).toBe(
-      'equidistantPreserveStart',
+      'equidistantPreserveEnd',
     );
-    expect(monthAxisInterval(516)).toBe('equidistantPreserveStart');
-    // Never the End-anchored variant: it collapses to one label on a point scale.
-    expect(monthAxisInterval(516)).not.toBe('equidistantPreserveEnd');
+    expect(monthAxisInterval(516)).toBe('equidistantPreserveEnd');
+
+    // END-anchored, not Start, and this is the assertion that pins WHY. On a
+    // window that trails the present, the Start variant anchors the OLDEST
+    // bucket and leaves the CURRENT month unlabelled — measured, an All-time
+    // Net Cash Flow at 360px labelled up to `Sep'21` while the chart ran to
+    // `Aug'26`, and a 24-month window stopped at `May'26`. On a budgeting chart
+    // the most recent month is the one being looked for. After: every window at
+    // both widths ends on `Aug'26`.
+    expect(monthAxisInterval(516)).not.toBe('equidistantPreserveStart');
   });
 });
 
@@ -198,7 +211,6 @@ describe('every month axis goes through the shared rule', () => {
     for (const [, source] of AXIS_OWNERS) {
       for (const axis of monthAxes(source)) {
         expect(axis).not.toContain('interval={0}');
-        expect(axis).not.toContain('interval="equidistant');
         expect(axis).not.toContain('interval="preserve');
         expect(axis).not.toContain('axisTickInterval');
       }

@@ -421,10 +421,14 @@ describe('OverviewTab chart axes', () => {
     };
     const buckets = ticks.map(bucketOf);
 
-    // Anchored at the oldest bucket. `equidistantPreserveStart` pins index 0;
-    // the End-anchored variant would not, which is one of the two mutants this
-    // distinguishes.
-    expect(buckets[0]).toBe(0);
+    // Anchored at the NEWEST bucket. `equidistantPreserveEnd` pins the last
+    // index; the Start-anchored variant pins index 0 instead and leaves the
+    // current month unlabelled, which is the mutant this distinguishes — and it
+    // is not cosmetic. Measured in Chrome before the switch: an All-time Net
+    // Cash Flow at 360px labelled up to `Sep'21` while the chart itself ran to
+    // `Aug'26`. On a budgeting chart the most recent month is the first one a
+    // user looks for.
+    expect(buckets.at(-1)).toBe(515);
 
     // And every gap identical — the assertion `preserveEnd` and
     // `preserveStartEnd` both fail, because they drop individuals rather than
@@ -433,10 +437,11 @@ describe('OverviewTab chart axes', () => {
     expect(new Set(strides).size).toBe(1);
     expect(strides[0]).toBeGreaterThan(0);
 
-    // The formatter is still pinned at the oldest end — a `formatMonthTick` that
-    // stopped applying renders a raw ISO key here — and every label is distinct,
-    // so a stride that doubled back or repeated a bucket shows up.
-    expect(ticks[0]).toBe("Jan'84");
+    // The formatter is still pinned — a `formatMonthTick` that stopped applying
+    // renders a raw ISO key here — and every label is distinct, so a stride that
+    // doubled back or repeated a bucket shows up. Pinned at the NEWEST end now,
+    // which is the end the strategy guarantees.
+    expect(ticks.at(-1)).toBe("Dec'26");
     expect(new Set(ticks).size).toBe(ticks.length);
   });
 });

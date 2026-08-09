@@ -98,7 +98,7 @@ export function monthsToCoverYear(year: number, currentYear: number): number {
  * a smaller one shrinks the spacing the labels NEED and the gutter they
  * overhang into, at the same time.
  *
- * WHY 10px AND -45°, and what it replaced. At -30°/12px the labels needed 22px
+ * WHY 9px AND -45°, and what it replaced. At -30°/12px the labels needed 22px
  * of spacing and overhung 36.3px to the left, so the axes carried
  * `{left: 40, right: 26}` — 66px of a 263px chart at a 360px viewport, a
  * quarter of the plot, squeezing the bars into the middle while Budget vs
@@ -112,11 +112,18 @@ export function monthsToCoverYear(year: number, currentYear: number): number {
  *   -45°,  9px   needs 11.7px   overhangs L 22.4  R  8.5   clears every chart
  *   flat,  9px   needs 17.8px   overhangs +/-8.9           fits the wide plots
  *
+ * READ THE `R` COLUMN WITH ITS CAVEAT: it is the label's real INK overhang, and
+ * it is NOT what sizes the right gutter. That is set by recharts' own footprint
+ * check on the last tick — ~14.8px, roughly twice the ink — and the number in
+ * this table is why an earlier revision used `right: 10` and collapsed the
+ * whole end-anchored strategy to a single label. See `monthAxisInterval`.
+ *
  * 10px was built and measured first and is NOT enough: Year-over-Year's twelve
- * bands sit 13.6px apart and ten-point labels need 13.0px, which is inside the
- * noise. 9px leaves 1.9px there, 3.1px on Net Cash Flow and 7.6px on the charts
- * with no YAxis. The gutter drops from 66px to 30px — the plot goes from 187px
- * to 223px of the same 253px, which is the point.
+ * bands sat 13.6px apart and ten-point labels need 13.0px, which is inside the
+ * noise. The margins 9px actually ships with are measured and listed on
+ * `monthAxisInterval` — do not restate them here, or the two drift. The gutter
+ * drops from 66px to 36px, so the plot goes from 187px to 217px of the same
+ * 253px, which is the point.
  * Steepening rather than shallowing: `sin` is in the denominator, so a steeper
  * angle needs LESS spacing, and it also lays more of the label's width down the
  * vertical rather than the horizontal, which shrinks the left overhang.
@@ -141,31 +148,59 @@ export const MONTH_TICK = { fontSize: 9 } as const;
  * one point-scale chart with no YAxis — still clipped `Mar'26` at -7.6px while
  * its band-scale siblings were clean.
  */
-export const ROTATED_MONTH_TICK_PADDING = { left: 20, right: 10 };
+export const ROTATED_MONTH_TICK_PADDING = { left: 20, right: 16 };
 
 /**
  * The same rule for a chart that already renders a `<YAxis>`. Its width (80px on
  * every such chart here) IS the left gutter, so the left half must stay 0 —
- * adding it back would narrow the plot for nothing. The right overhang is
- * covered by nothing and still has to be reserved.
+ * adding it back would narrow the plot for nothing.
+ *
+ * The right half is NOT the mirror of that and must match the sibling constant:
+ * a YAxis lends nothing to the right edge, and the number there is set by
+ * recharts' footprint check on the last tick rather than by the ink overhang.
+ * Shrinking it to the ~8.5px the label actually overhangs is what collapsed the
+ * end-anchored strategy to one label. See `monthAxisInterval`.
  */
-export const ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS = { left: 0, right: 10 };
+export const ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS = { left: 0, right: 16 };
 
 /**
  * `interval` for a month axis of `bucketCount` buckets.
  *
  * `0` — render EVERY bucket — up to the count the geometry above is sized for,
  * because the owner's complaint was that thinning to 3–6 labels lost him the
- * months, not that they collided. At 360px the tightest chart has 15.7px of
- * spacing against the 13.0px twelve rotated labels need, so twelve fit by
- * construction and no collision check is wanted.
+ * months, not that they collided. Measured on the built container at 360px,
+ * with every gutter above applied — twelve rotated 9px labels need 11.3px of
+ * spacing and a flat one 17.4px:
+ *
+ *   Year-over-Year    13.1px   +1.8   <- the tightest on the page
+ *   Net Cash Flow     14.3px   +3.0
+ *   Budget vs Actual  21.1px   +3.7   (flat, so it is measured against 17.4)
+ *   Income vs Expenses 18.1px  +6.8
+ *
+ * So twelve fit by construction and no collision check is wanted. Year-over-Year
+ * is the chart to re-measure first if any of the geometry above changes.
  *
  * Beyond that the count is unbounded — the Time Period control reaches 24 and
  * All time, which is ~516 buckets for a 1984 ledger — and no fixed geometry
- * survives it, so recharts measures the real plot and picks a stride.
- * `equidistantPreserveStart` is the only strategy that picks a stride rather
- * than dropping individuals; `equidistantPreserveEnd` was built and measured
- * and DEGENERATES on a point scale, rendering exactly one label.
+ * survives it, so recharts measures the real plot and picks a stride. Both
+ * `equidistant*` strategies pick a STRIDE rather than dropping individuals,
+ * which is what the `preserve*` family gets wrong.
+ *
+ * END-anchored, and getting there took two attempts. `equidistantPreserveStart`
+ * anchors the OLDEST bucket, and on a window that trails the present that
+ * leaves the CURRENT month unlabelled — measured, an All-time Net Cash Flow at
+ * 360px labelled up to `Sep'21` while the chart ran to `Aug'26`, and a 24-month
+ * window stopped at `May'26`. On a budgeting chart the most recent month is the
+ * one being looked for.
+ *
+ * `equidistantPreserveEnd` was tried FIRST and degenerated to exactly one label
+ * on a point scale, which is why the Start variant was used at all. The cause
+ * was the right gutter, not the strategy: recharts checks the last tick against
+ * the plot's right bound using its own footprint model, and on a point scale the
+ * last tick sits ON that bound — so the check can only pass if `padding.right`
+ * is at least half the modelled footprint. At 9px and -45° that is
+ * `(29.9·cos45 + 12·sin45) / 2` ≈ 14.8px, which is why the right gutter is 16
+ * and not 10.
  *
  * The threshold is the bucket count, not a width, and that is deliberate: a
  * width-keyed switch is what was tried and disproved (the measurements are in
@@ -175,8 +210,8 @@ export const MAX_UNTHINNED_MONTH_TICKS = 12;
 
 export function monthAxisInterval(
   bucketCount: number,
-): 0 | 'equidistantPreserveStart' {
-  return bucketCount <= MAX_UNTHINNED_MONTH_TICKS ? 0 : 'equidistantPreserveStart';
+): 0 | 'equidistantPreserveEnd' {
+  return bucketCount <= MAX_UNTHINNED_MONTH_TICKS ? 0 : 'equidistantPreserveEnd';
 }
 
 /**
