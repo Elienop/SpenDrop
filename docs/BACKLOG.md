@@ -227,11 +227,43 @@ that is now bounded. Reaching zero needs the slice-2 card-list treatment rather 
 tuning, which is why it was stopped here.
 **Effort:** medium — it is a presentation change, not a spacing tweak.
 
+### B27 — the intensity scale returns the DARKEST stop for a zero total
+**Verified: reproduced** (executed the function during B9 slice 3, 2026-08-09).
+`buildIntensityScale`'s out-of-population fallback is `rank.get(total) ?? n`, and a zero-total day
+is genuinely out of population — the heatmap endpoint emits no row for a day with no expenses, so
+`lookup.get(date) ?? 0` hands the scale a value it was never built from. Measured: `scale(0)` → 1
+(the darkest stop), `scale(10)` → 0.3.
+
+**It is invisible only because both consumers gate on the total before reading it** — the chip
+paints under `total > 0`, and `chipTextClass` returns on `total === 0` before the opacity is
+consulted. So this is a **live coupling, not dead code**: dropping either gate paints every empty
+day black. Documented at the site and pinned by `buildIntensityScale.outOfPopulation`, which
+pins the CURRENT behaviour — so the test would not catch a gate being removed.
+
+**Fix:** return the palest stop (or a sentinel) for a value outside the population, so the guard
+does not depend on callers remembering to check first.
+**Effort:** small — production logic, deliberately not stacked onto the slice-3 branch.
+
+### B28 — four sheets scroll their own header away
+**Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
+ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
+long body loses its title and any summary figure on scroll. Measured on the heatmap's day sheet
+before the fix: the day's total left the visible box after **60px** of scroll with 8 of 20 rows
+still on screen.
+
+Slice 3 added an optional `header` slot rendered OUTSIDE the scroller and used it for the day
+sheet. Four consumers still pass `SheetHeader` as a child: `MobileNav` (a `border-b p-4` header,
+where the border makes the scroll-away most visible), `TransactionEditSheet`, `Categories`, and
+the Transactions `Filters` sheet. `TransactionEditSheet` was MEASURED and its form never
+overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is latent; the other
+two were not measured.
+**Effort:** small per consumer — the opt-in is one prop.
+
 ---
 
 ## Queued stages
 
-### B9 — Mobile shell (in progress: slices 1 and 2 shipped, slice 3 in flight)
+### B9 — Mobile shell (all three slices built; slice 3 awaiting merge)
 
 **Slice 1 SHIPPED 2026-08-08** — `feat/b9-mobile-shell-slice1`, PR #126, squash `661ad46`,
 **v0.40.0**. Carried the B13 / B18-ask-1 / B19 riders (owner: *"fit issues together"*).
@@ -241,11 +273,29 @@ Browser-verified at 390×844 on the rebuilt container.
 tables became card lists, including the dashboard. **There are no panning tables left on the
 phone.** The slice-2 re-measure had said it "may prove unnecessary"; measuring said otherwise.
 
-**Slice 3 IN FLIGHT** — `feat/reports-mobile-heatmap`. Scope and defects below. Note that the
-recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129, squash `222caba`,
-**v0.41.1**), deliberately unbundled from slice 3: the bump's only real evidence is a
+**Slice 3 BUILT 2026-08-09** on `feat/reports-mobile-heatmap`, six commits, awaiting the owner's
+push/PR go. All thirteen defects below shipped, plus the heatmap rebuild. Moves to Closed with
+the squash hash at merge. The recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129,
+squash `222caba`, **v0.41.1**), deliberately unbundled: the bump's only real evidence is a
 before/after browser comparison of eleven charts, and that baseline is unreadable if the same
 branch is simultaneously redesigning those charts.
+
+**What slice 3 actually became, stated plainly**, because it is far more than the entry above
+described: the heatmap rebuild (D1/D5) plus twelve other display defects, a **44px touch floor on
+every tab strip in the app** — they were all 32px, `h-10` minus `p-1`, including both of
+QuickAdd's on the daily capture surface — and a **six-site timezone defect** in unrelated files,
+where every transaction date rendered a day early west of GMT behind six tests that recomputed
+their expectation with the same wrong expression. Three reviews ran (design, UX, and an isolated
+adversarial pass that mutation-tested ~65 mutants and returned NOT MERGEABLE on documentation
+grounds while confirming every functional claim). Verification targets moved from 390px to
+**360px** once the owner supplied the household's real devices — see B24's note; a Galaxy S24 is
+the narrowest and a Tab S10 FE at ~720px portrait takes the PHONE layout.
+
+**The finding worth carrying out of this stage:** three separate defects were protected by
+comments explaining why they were fine — a dark-mode contrast claim ("both directions hold
+because the tokens swap together"), six comment blocks describing a design the same branch had
+deleted, and date tests whose comment called the self-referential oracle deliberate. Each read as
+considered design and each stopped someone looking.
 
 **Verified: reproduced** in a browser at 390×844 against the running container.
 The shell has zero responsive breakpoints: a permanent sidebar plus page padding leaves ~262px of
