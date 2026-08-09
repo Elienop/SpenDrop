@@ -314,6 +314,40 @@ and needs its own verification pass — the same reasoning that kept the option 
 branch. **Effort:** medium. Do not fix by adding `min-h-11` blindly; several of these sit in tight
 toolbars where a taller control reflows the row.
 
+### B33 — Enter cannot pick a category in the phone edit sheet
+**Verified: reproduced by me** (Chrome, 360px, real key events, 2026-08-09). In
+`TransactionEditSheet` the category Select opens on Enter and moves on ArrowDown, but Enter to
+choose does **nothing**: 21 options stay mounted, the trigger's value stays `FoodS`, focus stays on
+an option, and the sheet stays open. Mouse and Space both work. The same Select inside
+`BulkEditDialog` handles Enter correctly, so it is the call site, not the primitive.
+
+Cause (reported by the build agent, code site confirmed): the `onKeyDownCapture` guard at
+`TransactionEditSheet.tsx:244`. React synthetic events propagate along the REACT tree, so a
+portalled `SelectContent` is still a React descendant of that div, and `stopPropagation()` in the
+CAPTURE phase kills Radix's own key handler before it runs. An identical guard sits at
+`TransactionRow.tsx:184`.
+
+Proposed one-word fix — `onKeyDownCapture` → `onKeyDown` — is the agent's, **not verified by me**;
+the guard exists to keep Enter from submitting the form, so the bubble-phase version needs its own
+test proving both halves (Select commits, form does not submit). **NOT FIXED:** a distinct defect
+with a subtle fix, on a branch that had already grown twice. **Effort:** small, plus a real test.
+
+### B34 — Dashboard's Month/Year still drop focus to `<body>`
+**Verified: reported by the build agent, NOT independently reproduced by me.** Both widths,
+keyboard and mouse, and unaffected by the B29 central fix because the trigger's DOM node is
+*replaced* during the value change — `useDashboard` keys on `['dashboard', year, month]`, so a
+period change flips `isLoading` and `Dashboard.tsx:282` returns the whole-page skeleton, leaving
+Radix to focus a detached element. Agent's proposed `placeholderData: keepPreviousData` would also
+activate the already-written `refetching && 'opacity-60'` at `Dashboard.tsx:328`, currently dead
+for period changes. **NOT FIXED** — it changes data-fetching semantics, and this repo has a
+recorded incident where `keepPreviousData` staled a count. Treat the diagnosis as unverified until
+someone reproduces it.
+
+### B35 — Settings → Import / Export overflows 36px at 360
+**Verified: reported by the build agent, NOT independently reproduced by me.** A
+`whitespace-nowrap` Button with its right edge at 396 against a 360 viewport. Pre-existing and
+unrelated to the Select work. **Effort:** small.
+
 ### B32 — an unknown route renders a blank shell, not a 404
 **Verified: reproduced** (2026-08-09). The dashboard lives at `/`; navigating to `/dashboard` — a
 plausible URL a user would type or bookmark — renders the full app chrome with an **empty** main
