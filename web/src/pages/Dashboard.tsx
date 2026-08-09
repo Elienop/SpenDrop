@@ -542,9 +542,28 @@ export function Dashboard() {
                     : 0;
                   return (
                     <div key={slice.id} className="flex flex-col gap-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="font-medium">{slice.name}</span>
-                        <span className="font-mono tabular-nums text-muted-foreground">
+                      {/* `min-w-0` + `[overflow-wrap:anywhere]` on the name and
+                          `shrink-0` on the amount. A category name is
+                          user-supplied and bounded only by the server's
+                          `MaxCategoryNameLength` = 100; unbounded here it
+                          rendered a 456px span at a 360px viewport and panned
+                          the HOME screen 195px sideways, dragging the amount
+                          off with it. `min-w-0` is the load-bearing half — a
+                          flex item's automatic minimum is `min-content`, so
+                          without it the span refuses to shrink no matter what
+                          wrapping it is allowed. `line-clamp-2` travels
+                          with the wrap on purpose: this is a fixed-height gauge
+                          row, and wrap alone converts a horizontal overflow
+                          into an unbounded vertical one — the exact half-fix
+                          the seam test in `chartAxis.seam.test.ts` guards, and
+                          it caught this line when it first shipped without the
+                          clamp. Matches the recipe already used by the Recent
+                          Transactions cells below. */}
+                      <div className="flex items-center justify-between gap-2 text-sm">
+                        <span className="line-clamp-2 min-w-0 font-medium [overflow-wrap:anywhere]">
+                          {slice.name}
+                        </span>
+                        <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
                           {formatFull(slice.value)}
                         </span>
                       </div>
