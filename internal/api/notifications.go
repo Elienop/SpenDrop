@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"github.com/elienop/spendrop/internal/database"
 )
@@ -36,11 +37,60 @@ func (h *Handler) categoryLabel(ctx context.Context, categoryID int64) string {
 // failures are logged and swallowed (best-effort). excludeUserID is the acting
 // user's id so the action's author is not notified of their own activity (0 =
 // exclude nobody); it is threaded straight through to fanOutPush.
+// neutralizeForPushBody replaces every character that can fabricate structure
+// in a rendered notification with a single space.
+//
+// THIS IS THE SINK-SIDE HALF OF THE SAME INVARIANT validateDisplayName GUARDS
+// AT THE SOURCE, and it exists because the source side cannot cover the whole
+// sink. The body is assembled as
+// fmt.Sprintf("%s added $%.2f in %s — %s", actor, dollars, category, description)
+// and the service worker rolls several activities into one notification with
+// lines.join('\n'), so a newline anywhere in that string forges a line that
+// reads as a genuine, separately-attributed activity.
+//
+// Three of those four fields are NOT covered by a source-side gate, and two of
+// them cannot be:
+//
+//   - DESCRIPTION is the strongest vector of the three. Any authenticated
+//     member can write it, and it is the LAST field, so a forged line has no
+//     trailing residue to give it away — a newline in the actor's name leaves
+//     " added $12.34 in Groceries — Milk" dangling after the forgery, while a
+//     newline in the description does not. It CANNOT be fixed by refusing the
+//     input: descriptions also arrive from xlsx import, an Excel cell may
+//     legitimately contain a newline (Alt+Enter), and rejecting those would
+//     drop rows the household can import today.
+//   - CATEGORY LABEL is admin-written and length-bounded only.
+//   - DISPLAY NAME is now gated at every write path, but rows stored BEFORE
+//     that gate keep whatever they have; there is no backfill migration. This
+//     is what closes that residual.
+//
+// So the gate at the source stops a name being stored in a forging shape, and
+// this stops anything at all reaching the renderer in one — belt and braces on
+// purpose, because they fail differently: the source gate cannot reach legacy
+// rows or imported text, and this cannot stop a bad name being stored.
+//
+// A SPACE rather than deletion: deleting joins the words on either side, which
+// is its own small forgery ("Rent Milk" from two separate lines). The predicate
+// is shared with validateDisplayName so there is exactly one definition of
+// "forges structure" — two would drift, and the drift would be invisible until
+// something rendered wrong on somebody's phone.
+func neutralizeForPushBody(s string) string {
+	return strings.Map(func(r rune) rune {
+		if forgesStructure(r) {
+			return ' '
+		}
+		return r
+	}, s)
+}
+
 func (h *Handler) emit(ctx context.Context, notifType, title, body, url string, excludeUserID int64) {
 	tag, topic, urgency := pushOptionsFor(notifType)
 	payload := pushAlertPayload{
-		Title: title,
-		Body:  body,
+		// Neutralised HERE, at the one chokepoint every push body passes
+		// through, rather than at the five call sites that build one. A sixth
+		// call site is the way a per-site fix would be missed.
+		Title: neutralizeForPushBody(title),
+		Body:  neutralizeForPushBody(body),
 		URL:   url,
 		Type:  notifType,
 		Tag:   tag,
