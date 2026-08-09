@@ -51,17 +51,6 @@ a count endpoint) applied to all bulk surfaces at once, not bolted onto one.
 direction is fail-safe (the write is always a subset of what was displayed, never a superset).
 Still polish, still below B6.
 
-### B13 — Trash list shows no creator attribution
-**Verified: read** (found 2026-08-07 while building B6j). The main transactions list now carries
-`created_by` (the creator's display name, via LEFT JOIN users); the Trash list does not —
-`deletedTransactionResponse` (internal/api/trash_handlers.go) carries `user_id` only. Same
-one-field change plus the same LEFT JOIN shape on the ListDeleted* queries. The frontend type
-`DeletedTransaction` is deliberately `Omit<Transaction, 'created_by'>` (web/src/api/types.ts) so
-Trash code cannot silently read an undefined field — remove the Omit when the field ships.
-**Effort:** small.
-**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (both halves; the Omit is gone, the
-orphaned-creator LEFT-join is mutation-pinned on both queries) — moves to Closed at merge.
-
 ### B14 — Budget mutations write no audit trail
 **Verified: read** (B6 security audit M2, 2026-08-07). `handleSetBudget`, `handleDeleteBudget`,
 and the category-budget set/delete all mutate budget state with no audit row; `transaction_audit`
@@ -113,9 +102,10 @@ user-event (form-submit paths); each needs the delete-the-handler check before b
 trusted. Any that assert a NEGATIVE ("Enter does nothing") are the prime suspects.
 **Effort:** small-medium — nine audits, each a delete-run-restore cycle.
 
-### B18 — User account details can't be edited (owner request)
+### B18 — Account editing: password flow and the two-surfaces question (owner request)
 **Verified: read** (owner request 2026-08-08, from the live v0.39.0 Settings → Users tab;
-endpoint and UI gap confirmed in code the same day). No UI edits a user's details anywhere.
+endpoint and UI gap confirmed in code the same day). *State AS FOUND, kept for the reasoning —
+ask (1) has since shipped, see below.* No UI edited a user's details anywhere.
 The motivating case: B6's attribution now shows the creator's display name on every
 transaction row, and the owner wants a shorter one ("maybe I want to use something shorter
 so it looks short in the transaction"). The asks, in the owner's framing: (1) edit display
@@ -129,30 +119,21 @@ display_name survives), so a display-name editor can send its field alone with n
 concern. One consequence of the merge semantics: the endpoint cannot CLEAR a display name
 (empty string means keep) — fine for this feature, worth knowing. Password paths today:
 self-service `POST /api/auth/password` (Account tab) and admin
-`POST /api/users/{id}/reset-password` (member rows only in the UI). Open product decision
-for the build: whether a MEMBER may edit their own display name — it changes how their name
-renders on rows other people see. Ask (3) is a real design decision (admin-vs-member
-capability split on one surface) — brainstorm before building, rank with the owner.
+`POST /api/users/{id}/reset-password` (member rows only in the UI).
 **Effort:** small for (1) as admin-only UI; the merged accounts page is its own design stage.
-**Ask (1) built 2026-08-08 on `feat/b9-mobile-shell-slice1`** — admin display-name editor
-(exact single-field PUT), a confirmation dialog on member Delete (whose copy is test-pinned to
-NOT claim a ledger cascade — the 409 guard makes that impossible), and a self-rename refresh
-path (`useAuth.refreshUser`, epoch-guarded). Asks (2)/(3) remain a separate design stage.
-Moves to Closed at merge.
 
-### B19 — Quick page shows no creator attribution (owner request)
-**Verified: read** (owner request 2026-08-08; confirmed in code the same day, v0.39.1 tree).
-The /quick Recently-added panel renders no creator while the Transactions page does
-(`web/src/components/TransactionRow.tsx:375`, the B6 attribution). Display-only gap:
-`Transaction.created_by` is already on the wire (`web/src/api/types.ts:31`) and
-`useRecentTransactions` fetches the household-wide list (`sort_by=created_at`, no user
-filter), so the panel already shows the other member's rows — attribution there is
-informative, not redundant. `RecentlyAdded.test.tsx` fixtures even set `created_by`; the
-component ignores the field. Scope: the rendered list rows only — the entry form has nothing
-to attribute.
-**Effort:** small — same metadata idiom as TransactionRow.
-**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (saved rows only; pending offline rows
-deliberately unattributed) — moves to Closed at merge.
+**Ask (1) SHIPPED 2026-08-08** — built on `feat/b9-mobile-shell-slice1`, merged via PR #126,
+squash `661ad46`, released as **v0.40.0**. What landed: an admin display-name editor (exact
+single-field PUT), a confirmation dialog on member Delete whose copy is test-pinned to NOT
+claim a ledger cascade (the 409 pre-count guard makes that outcome impossible — a schema
+`ON DELETE CASCADE` is not by itself evidence of the behaviour a handler produces), and a
+self-rename refresh path (`useAuth.refreshUser`, epoch-guarded on every arm including the
+failure arms, which were the reachable hole).
+
+**Still open: asks (2) and (3)** — password change belonging in the same edit flow, and the
+one-common-accounts-page question. Ask (3) is a real design decision (the admin-vs-member
+capability split on a single surface) and needs a brainstorm with the owner before any build.
+Also still open from the original framing: whether a MEMBER may edit their own display name.
 
 ### B20 — users.role integrity rests on one handler
 **Verified: read** (found 2026-08-08 during B18 merge-semantics mutation testing; second half
@@ -176,11 +157,33 @@ notification lines. Fix in ONE pass: sanitize at both write sites; consider the 
 builder too.
 **Effort:** small.
 
-### B22 — web tsconfig lacks `strict`
-**Verified: read** (B9 deep review 2026-08-08). `strict` is absent from `web/tsconfig.json`
-and `web/tsconfig.app.json`, while the project rule mandates strict type safety / no `any`.
-Enabling it is its own pass with an unknown error count — do not fold into another branch.
-**Effort:** unknown until tried; likely medium.
+### B22 — web tsconfig lacks an explicit `strict`
+**Verified: reproduced** (B9 deep review 2026-08-08; **materially corrected 2026-08-08** during
+the recharts bump). `strict` is absent from `web/tsconfig.json` and `web/tsconfig.app.json`.
+
+**The correction, because the original entry would have caused someone to budget a pass that
+does not exist.** It read *"Enabling it is its own pass with an unknown error count — do not
+fold into another branch. Effort: unknown until tried; likely medium."* That was written from
+the absence of the flag, without checking what the flag defaults to. **TypeScript 6.0 defaults
+`strict` to true, and `web/package.json` pins `typescript 6.0.2`** — so the project has been
+compiling under strict all along. Verified with a standalone probe using the repo's own
+compiler:
+
+```
+$ tsc --version                          → Version 6.0.2
+$ tsc --noEmit probe.ts                  → TS18047 'x' is possibly 'null'
+                                           TS7006 Parameter 'y' implicitly has an 'any' type   (exit 2)
+$ tsc --noEmit --strict false probe.ts                                                          (exit 0)
+```
+
+Corroborated independently by the recharts 2→3 migration: four of its fourteen type errors were
+`TS7006` implicit-any, a strict-family diagnostic that cannot fire under a non-strict compiler.
+
+**Revised scope: add `"strict": true` to the two tsconfigs for documentation value, with zero
+expected errors.** The instruction not to fold it into another branch no longer applies — it was
+a consequence of the unknown error count, and the count is known to be zero.
+**Effort:** trivial. Worth doing because the guarantee currently rests on a compiler default
+that a future TypeScript downgrade or a `--strict false` in CI would silently remove.
 
 ### B23 — offline-capture hold filing on identity change is untested
 **Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
@@ -194,14 +197,21 @@ question, distinct from the auth race that exposed it.
 
 ## Queued stages
 
-### B9 — Mobile shell (next stage, owner-decided)
-**Slice 1 BUILT 2026-08-08 on `feat/b9-mobile-shell-slice1`** (with the B13 / B18-ask-1 / B19
-riders — owner: "fit issues together"), browser-verified at 390×844 on the rebuilt container,
-PR pending; this entry moves to Closed with the squash hash at merge. Slice-2 re-measure
-notes collected during the build: the heatmap's 1fr cells shrink to ~2px untappable at 390
-(an explicit cell width would instead widen the page ~795px — needs its own scroll container);
-Users-row actions should collapse into a DropdownMenu; Reports/Settings tables pan with no
-scroll affordance hint.
+### B9 — Mobile shell (in progress: slices 1 and 2 shipped, slice 3 in flight)
+
+**Slice 1 SHIPPED 2026-08-08** — `feat/b9-mobile-shell-slice1`, PR #126, squash `661ad46`,
+**v0.40.0**. Carried the B13 / B18-ask-1 / B19 riders (owner: *"fit issues together"*).
+Browser-verified at 390×844 on the rebuilt container.
+
+**Slice 2 SHIPPED 2026-08-08** — PR #128, squash `f308c8f`, **v0.41.0**. The phone's panning
+tables became card lists, including the dashboard. **There are no panning tables left on the
+phone.** The slice-2 re-measure had said it "may prove unnecessary"; measuring said otherwise.
+
+**Slice 3 IN FLIGHT** — `feat/reports-mobile-heatmap`. Scope and defects below. Note that the
+recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129, squash `222caba`,
+**v0.41.1**), deliberately unbundled from slice 3: the bump's only real evidence is a
+before/after browser comparison of eleven charts, and that baseline is unreadable if the same
+branch is simultaneously redesigning those charts.
 
 **Verified: reproduced** in a browser at 390×844 against the running container.
 The shell has zero responsive breakpoints: a permanent sidebar plus page padding leaves ~262px of
@@ -214,17 +224,55 @@ landscape or with the keyboard up, not in portrait today).
 recently-added list only offers delete, capped at six rows. Correcting yesterday's wrong amount
 requires a laptop.
 
-**Do it in slices, and re-measure after the first:**
-- *Slice 1 (1–2 days):* the shell and four shared components — sidebar to a slide-out below
-  tablet width with visible labels, reduced mobile padding, dialog height limit, scrollable tab
-  strips. This alone fixes the Reports/Settings overflow and the 70px state.
-- *Slice 2 (multi-week):* the table pages. Seven columns cannot fit 262px; these need stacked
-  cards, not narrower tables.
-- *Slice 3:* Reports charts.
+**Done in slices, re-measured after each:**
+- *Slice 1:* the shell and four shared components — sidebar to a slide-out below tablet width
+  with visible labels, reduced mobile padding, dialog height limit, scrollable tab strips.
+  Fixed the Reports/Settings overflow and the 70px state. **Shipped.**
+- *Slice 2:* the table pages. Seven columns cannot fit 262px; these needed stacked cards, not
+  narrower tables. **Shipped.** (The original entry guessed this slice "may prove unnecessary";
+  the measurement contradicted the guess. Recorded because the guess was the confident one.)
+- *Slice 3:* Reports charts. **In flight.**
 
-Several pages land within ~26px of correct once the shell stops taking a third of the screen, so
-**slice 2 may prove unnecessary — measure before committing to it.** Reassess the native-Android
-question after slice 1; the current phone experience is not evidence about what the web app can be.
+**Slice 3 was re-measured before being built, and the original framing was partly stale.**
+Slice 1's shell fix and its `min-w-0` grid fix had already removed the page-level overflow: at
+390px all four Reports tabs measure `scrollWidth == clientWidth == 390`, chart surfaces are
+308px and contained, and Net Cash Flow renders correctly. What actually remains:
+
+- **D1 — the spending heatmap has never been operable by anything but a mouse.** *Reproduced.*
+  53 columns × 371 cells at **3×3 CSS px** on a phone. The cell is a bare `<div>` inside a Radix
+  `TooltipTrigger asChild`: `tabIndex: -1`, no `role`, no `aria-label`, and a synthesized touch
+  tap produces no tooltip. There are no month or weekday labels **at any width** — at 1440px the
+  card's entire text content is `"Spending Heatmap 2026 No spend Less More"`. So this is not a
+  mobile sizing bug with an a11y side-effect; it is a component that is mouse-only-fine on
+  desktop and inoperable everywhere else. Enlarging the cell without giving it an interaction
+  model would ship a target you can hit and still learn nothing from.
+- **D2 — Budget vs Actual labels 7 of 12 months, unevenly.** *Reproduced.* Its `XAxis` carries no
+  `interval`, unlike its two siblings which pass `axisTickInterval(...)`. A **wiring-seam**
+  defect: the helper and its unit test were already correct — it was never connected. The repo
+  already knows this trap; a comment two charts over records `preserveStartEnd` dropping June.
+- **D3 — Income vs Expenses clips its first X tick.** *Reproduced.* The −30° label overflows the
+  SVG's left edge: the DOM reads `Sep'25`, the render shows `p'25`.
+- **D4 — the Top Merchants description cell is unbounded.** *Reproduced.* One unbroken token
+  drove the table to **3,464px inside a 308px** container. Data-dependent and **not
+  mobile-specific** — desktop is identically exposed.
+- **D5 — the hardcoded `repeat(53, 1fr)` template can receive 54 columns.** *Reproduced by
+  mirroring the function over 1900–2100:* leap years starting on a Sunday (1928, 1956, 1984,
+  2012, 2040, 2068, 2096) emit 378 cells. Reachable today only by importing rows dated in one of
+  those years — and `web/src/lib/dates.ts:161-169` documents a non-contiguous ledger with 1984
+  rows as a supported case — otherwise it goes live in 2040. Latent, not burning; fixed because
+  the file is open.
+- **D6 — the Savings year-over-year chart has D2's defect too.** *Reproduced.* Labels 6 of 12,
+  evenly, so it reads as less broken than Budget vs Actual's uneven 7. Same root cause.
+- **D7 — gradient-filled series render a colourless legend swatch.** *Read.* A `url(#…)` fill
+  carries no solid colour in the legend payload, `ChartLegendContent` sets
+  `backgroundColor: item.color`, React omits an undefined style, and the swatch renders
+  transparent. Tracks FILL TYPE, not recharts version — solid-stroked series render correctly in
+  both versions.
+- **D8 — `ChartLegendContent` keys legend items by `item.value`.** *Read.* Two entries sharing a
+  value would collide on the React key. Latent; current configs have distinct labels.
+
+Reassess the native-Android question now that the phone experience is no longer evidence of a
+web-app limit.
 
 ### B10 — Refunds cannot offset a category
 **Verified: reproduced** (schema dumped from all 17 migrations applied to a scratch database).
@@ -304,6 +352,27 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B13 — Trash list shows no creator attribution** (built on `feat/b9-mobile-shell-slice1`;
+  MERGED via PR #126, squash `661ad46`, released as **v0.40.0**, branch deleted). The finding:
+  the main transactions list carried `created_by` after B6, but `deletedTransactionResponse`
+  carried `user_id` only, so Trash showed a number where every other surface showed a name.
+  - **What shipped:** both halves — the LEFT JOIN on the `ListDeleted*` queries and the wire
+    field, plus removal of the frontend's deliberate `Omit<Transaction, 'created_by'>` guard
+    (its whole purpose was to make the gap a compile error until it closed).
+  - **Not obvious, kept:** the orphaned-creator arm — a row whose creator no longer exists —
+    is **mutation-pinned on both queries**. A LEFT JOIN's null branch is exactly the arm that
+    an INNER JOIN silently deletes rows through, and no fixture exercises it by accident.
+
+- **B19 — Quick page shows no creator attribution** (owner request; built on
+  `feat/b9-mobile-shell-slice1`; MERGED via PR #126, squash `661ad46`, released as **v0.40.0**).
+  Display-only gap: `created_by` was already on the wire and `useRecentTransactions` already
+  fetched the household-wide list, so the panel was already showing the other member's rows —
+  unattributed. `RecentlyAdded.test.tsx` fixtures even set the field; the component ignored it.
+  - **What shipped:** the same metadata-with-icon idiom as `TransactionRow`, on saved rows only.
+  - **Deliberately excluded:** pending offline rows stay unattributed. They have no server
+    identity yet, and inventing one client-side would render an attribution that a failed sync
+    could contradict.
 
 - **B8 — Backups carry a "verified" marker that two paths never earn** (`68e3ea6` + docs
   rider `bd510d0` + `62d52b5` + `54348c2` + ordering pin `16df627`, 2026-08-08, on
