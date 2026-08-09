@@ -350,7 +350,22 @@ export function TransactionRow({
               <span className="sr-only">Open menu</span>
             </Button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
+          {/* This menu OPTS OUT of the restore, and it is one of the few that
+              should. Both of its items unmount the trigger they were opened
+              from: Delete removes the row, Edit replaces it with the edit form.
+              Radix restores focus to `triggerRef` AFTER the menu closes, so it
+              lands on a disappearing element and, worse, overrides the
+              deliberate move the page has already made — `onDelete` sends focus
+              to the page heading precisely because the row is gone.
+
+              The primitive no longer defaults to this, because defaulting it
+              dropped focus to `<body>` at the other eleven trigger sites, whose
+              triggers survive their own action. So the exception now lives
+              where the exception is: here. */}
+          <DropdownMenuContent
+            align="end"
+            onCloseAutoFocus={(e) => e.preventDefault()}
+          >
             <DropdownMenuItem onSelect={startEditing}>
               Edit
             </DropdownMenuItem>
