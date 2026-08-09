@@ -198,11 +198,22 @@ describe('PaginationBar compact mode', () => {
  * The wiring is worth pinning anyway, because the bar's failure mode is
  * RAGGEDNESS rather than smallness — one control on a different gate from its
  * neighbours. It used to read `size-11 md:size-8`, a WIDTH gate, while the
- * trigger's floor now comes from `SelectTrigger` and is a POINTER gate: on the
+ * trigger's floor comes from `SelectTrigger` and is a POINTER gate: on the
  * household's ~1130px tablet in landscape that mix would put one 44px Select
  * beside six 32px buttons in a single flex row. So each assertion below
  * carries the negative half too — the retired width tokens must be gone, not
  * merely joined by the new ones.
+ *
+ * WHERE THE TOKENS COME FROM, since the answer changed and the file reads
+ * wrongly otherwise: not one of these controls sets a floor of its own any
+ * more. The trigger's is `SelectTrigger`'s, and the six buttons' is `Button`'s
+ * (`size="icon"`, which is what adds the width half) — the local
+ * `TOUCH_TARGET_SQUARE` they used to carry was exactly redundant and is gone.
+ * That weakens "the token is present" here, because it is now present on every
+ * button in the app; it does NOT weaken the two assertions that matter at this
+ * level, which are that the retired width idiom is absent and that the trigger
+ * and its neighbours end up on the SAME gate. The ellipsis is the one control
+ * that still floors itself: a `<span>` no primitive can size.
  */
 describe('PaginationBar touch targets', () => {
   // Every square control in the bar, by accessible name. The ellipsis is not
@@ -220,7 +231,10 @@ describe('PaginationBar touch targets', () => {
     for (const name of SQUARE_CONTROLS) {
       const button = screen.getByRole('button', { name });
       // Both axes: a height-only floor leaves a 32px-wide button that is
-      // merely taller, which is still a miss for a thumb.
+      // merely taller, which is still a miss for a thumb. The width half is
+      // the load-bearing one to assert here — it comes from `size="icon"`, so
+      // this fails if the pager stops declaring these as icon buttons, whereas
+      // the height half arrives from Button's base on any Button at all.
       expect(button).toHaveClass('coarse:min-h-11', 'coarse:min-w-11');
     }
   });
@@ -265,16 +279,23 @@ describe('PaginationBar touch targets', () => {
     }
   });
 
-  it('takes the trigger floor from the primitive and adds only density', () => {
-    // The call site sets no floor of its own — `SelectTrigger` carries
-    // `coarse:min-h-11` and it survives this `h-8` because `min-h` and `h` are
-    // separate tailwind-merge conflict groups. If a future edit re-fixes the
-    // height here the token vanishes and this fails.
+  it('takes both floors from the primitives and adds only density', () => {
+    // Neither call site sets a floor of its own — `SelectTrigger` and `Button`
+    // carry `coarse:min-h-11`, and it survives the `h-8`/`size-8` here because
+    // `min-h`/`min-w` and `h`/`w` are separate tailwind-merge conflict groups.
+    // If a future edit re-fixes the height with a gated `coarse:h-*` the token
+    // vanishes and this fails.
     renderBar();
     const trigger = screen.getByRole('combobox', { name: 'Rows per page' });
     expect(trigger).toHaveClass('h-8', 'coarse:min-h-11');
     expect(trigger).not.toHaveClass('h-11');
     expect(trigger).not.toHaveClass('md:h-8');
+
+    const button = screen.getByRole('button', { name: 'Go to next page' });
+    expect(button).toHaveClass('size-8', 'coarse:min-h-11');
+    // The density class really did replace the icon variant's 40px box, so the
+    // line above is not passing on a button that simply kept both.
+    expect(button).not.toHaveClass('h-10', 'w-10');
   });
 
   it('puts the trigger and its neighbours on the same gate', () => {

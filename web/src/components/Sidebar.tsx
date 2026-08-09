@@ -17,6 +17,7 @@ import { ModeToggle } from '@/components/ModeToggle';
 import { ColorThemePicker } from '@/components/ColorThemePicker';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
+import { TOUCH_TARGET_SQUARE } from '@/lib/touch-target';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import {
   type MenuItem,
@@ -195,7 +196,15 @@ export function Sidebar() {
                     // read heavier than the links above it. Matches the
                     // mobile drawer's copy of this same control.
                     'flex items-center overflow-hidden font-normal text-muted-foreground [&>svg]:size-4 [&>svg]:shrink-0',
-                    expanded ? 'w-full justify-start gap-2 px-3 py-2' : 'size-8 p-2',
+                    // Collapsed, this is a square icon button that never says
+                    // `size="icon"`, so Button's floor gives it height only —
+                    // 44x32 on the tablet, taller but still a miss. The width
+                    // half has to come from the call site; see
+                    // `@/lib/touch-target`. Expanded it is a full-width row and
+                    // the min-width is inert.
+                    expanded
+                      ? 'w-full justify-start gap-2 px-3 py-2'
+                      : cn('size-8 p-2', TOUCH_TARGET_SQUARE),
                   )}
                 >
                   <LogOut aria-hidden="true" />

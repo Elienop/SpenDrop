@@ -903,7 +903,7 @@ export function Transactions() {
                 type="button"
                 variant="link"
                 size="sm"
-                className="h-auto min-h-11 p-0 text-xs md:min-h-0"
+                className="h-auto p-0 text-xs max-md:min-h-11"
                 onClick={handleSelectAllMatching}
               >
                 Select all {total} matching
@@ -1012,7 +1012,15 @@ export function Transactions() {
                   if (e.key === 'Enter') handleReplaceAll();
                 }}
                 placeholder="New description..."
-                className="h-11 max-w-xs text-xs md:h-8"
+                // `coarse:min-h-11` on this INSTANCE, not on the Input
+                // primitive. It is the only field in the app sitting inline
+                // between two Buttons, and Button's floor is pointer-gated: on
+                // a coarse tablet above `md` the two buttons reach 44px while
+                // `md:h-8` would leave this field at 32, a 12px step in one
+                // `items-center` row. Flooring every Input in the app to fix
+                // one row would inflate every form on the tablet, which is a
+                // separate decision and not this one.
+                className="h-11 max-w-xs text-xs coarse:min-h-11 md:h-8"
                 disabled={replacing}
               />
               <Button

@@ -223,7 +223,19 @@ export function TransactionRow({
               under the row's [&>td]:align-top, items-center vertically
               centers the h-9 Save/Cancel buttons inside a 40px box —
               their centers line up with the first-line center of the
-              Date / Description / Category / Tags / Amount inputs. */}
+              Date / Description / Category / Tags / Amount inputs.
+
+              Stays `h-10` on a coarse pointer, where Button's 44px touch floor
+              makes those two 4px TALLER than this box. `items-center` keeps
+              them centred on it, so the contract this comment is about — the
+              centres agreeing with the inputs' first line — still holds, and
+              the cost is 2px of symmetric overhang into TableCell's padding.
+              Growing the box to 44px on a coarse pointer instead would move its
+              centre to 22px while the peer Inputs stay at 20px, i.e. it would
+              break the alignment in order to tidy the overhang. (Written out
+              rather than as the class token it would be: Tailwind scans
+              comments too, and naming a utility nothing uses emits a real,
+              dead rule into the stylesheet.) */}
           <form
             onSubmit={(e) => {
               e.preventDefault();

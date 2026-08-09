@@ -87,12 +87,18 @@ function getPageNumbers(page: number, totalPages: number): number[] {
  *
  * The gate is the POINTER, not the viewport width, and this bar is the reason
  * why. It used to read `size-11 md:size-8`, which hands a ~1130px touch tablet
- * in landscape the 32px desktop sizes. Worse, the trigger's floor now comes
- * from `SelectTrigger` itself and is pointer-gated: leaving the buttons on a
- * width gate would put a 44px Select beside six 32px buttons in one flex row
- * on exactly that tablet — a 12px step, which is uglier than the coherent-if-
- * small 32px it replaced. The trigger and its neighbours have to share one
- * gate; see `@/lib/touch-target` for the two levers.
+ * in landscape the 32px desktop sizes. Worse, the trigger's floor comes from
+ * `SelectTrigger` itself and is pointer-gated: leaving the buttons on a width
+ * gate would put a 44px Select beside six 32px buttons in one flex row on
+ * exactly that tablet — a 12px step, which is uglier than the coherent-if-small
+ * 32px it replaced. The trigger and its neighbours have to share one gate.
+ *
+ * Not one class here says so any more. Both floors now come from the primitives
+ * — `SelectTrigger` for the trigger, `Button` (`size="icon"`, so both axes) for
+ * the six buttons — and the `size-8`/`h-8` left behind is density only. The
+ * ellipsis is the exception and keeps `TOUCH_TARGET_SQUARE`: it is a `<span>`
+ * holding a slot in the same flex row, so no primitive can size it, and sized
+ * differently it staggers the numbers on one side of the gap.
  */
 export function PaginationBar({
   page,
@@ -145,7 +151,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className={cn('hidden size-8 lg:flex', TOUCH_TARGET_SQUARE)}
+          className="hidden size-8 lg:flex"
           onClick={() => onPageChange(1)}
           disabled={page <= 1}
           aria-label="Go to first page"
@@ -155,7 +161,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className={cn('size-8', TOUCH_TARGET_SQUARE)}
+          className="size-8"
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
           aria-label="Go to previous page"
@@ -187,7 +193,7 @@ export function PaginationBar({
                 key={p}
                 variant={p === page ? 'outline' : 'ghost'}
                 size="icon"
-                className={cn('size-8 text-xs', TOUCH_TARGET_SQUARE)}
+                className="size-8 text-xs"
                 onClick={() => onPageChange(p)}
                 aria-current={p === page ? 'page' : undefined}
               >
@@ -200,7 +206,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className={cn('size-8', TOUCH_TARGET_SQUARE)}
+          className="size-8"
           onClick={() => onPageChange(page + 1)}
           disabled={page >= totalPages}
           aria-label="Go to next page"
@@ -210,7 +216,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className={cn('hidden size-8 lg:flex', TOUCH_TARGET_SQUARE)}
+          className="hidden size-8 lg:flex"
           onClick={() => onPageChange(totalPages)}
           disabled={page >= totalPages}
           aria-label="Go to last page"

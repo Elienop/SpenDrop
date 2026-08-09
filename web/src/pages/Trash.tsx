@@ -302,6 +302,16 @@ function TrashCard({
         the amount: `min-h-11` is the 44px touch floor, and two of these
         plus a 16px gutter do not fit next to a right-aligned amount at
         390px.
+
+        Kept even though `Button` now floors these on a coarse pointer, because
+        the two answer different questions and only overlap: this card renders
+        only below `md`, and at those widths it is 44px for a MOUSE too — which
+        is the density the owner asked to leave exactly as it was. Safe to have
+        both, unlike the `md:min-h-0` half these controls used to carry: same
+        property, same specificity, and `md:` is emitted AFTER `coarse:` in the
+        built stylesheet (measured: offsets 52141 vs 49393), so that pair did
+        not merely look ambiguous — it DEFEATED the primitive's floor on the
+        tablet. Two rules agreeing on 44px cannot.
       */}
       <div className="flex items-center gap-2">
         <Button
@@ -381,7 +391,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="outline"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onCancel}
             disabled={busy}
           >
@@ -390,7 +400,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="destructive"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -451,7 +461,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="outline"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onCancel}
             disabled={busy}
           >
@@ -460,7 +470,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="destructive"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -799,7 +809,7 @@ export function Trash() {
           type="button"
           variant="outline"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => void handleRestoreAll()}
           disabled={bulkBusy}
         >
@@ -810,7 +820,7 @@ export function Trash() {
           type="button"
           variant="destructive"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => setPendingPurgeAll(true)}
           disabled={bulkBusy}
         >
@@ -831,7 +841,7 @@ export function Trash() {
         <Button
           type="button"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => void handleBatchRestore()}
           disabled={batchRestoring}
         >
@@ -842,7 +852,7 @@ export function Trash() {
           type="button"
           variant="ghost"
           size="sm"
-          className="h-8 min-h-11 text-xs md:min-h-0"
+          className="h-8 text-xs max-md:min-h-11"
           onClick={() => setSelectedIds(new Set())}
           disabled={batchRestoring}
         >

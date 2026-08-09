@@ -234,6 +234,15 @@ function spacingPx(steps: number): number {
  * keeps its fixed height. That is the point of the gate rather than a gap in
  * the helper: the controls carrying it are meant to stay dense for a mouse at
  * every width. Callers asserting a floor are asking the touch question.
+ *
+ * WHAT IT CANNOT DISCRIMINATE, since the floor moved into `Button` itself:
+ * every shadcn `<Button>` in the app now carries `coarse:min-h-11`, so this
+ * returns >= 44 for ALL of them and `touchFloorPx(someButton) >= 44` no longer
+ * has a failing case. It still discriminates for anything the primitive does
+ * not size — a `<label>`, a raw `<button>`, a `<span>` spacer — which is what
+ * the remaining callers below use it for. Consumer-level Button assertions
+ * moved to the pair "the primitive's token is present AND the retired width
+ * gate is absent"; the second half is the one that can fail.
  */
 function touchFloorPx(el: Element): number {
   const minH = tokenSteps(el, /^(?:coarse:)?min-h-([\d.]+)$/);
@@ -1049,33 +1058,49 @@ describe('Trash', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Phone touch floor on the controls BOTH presentations share
+  // Touch floor on the controls BOTH presentations share
   // -------------------------------------------------------------------------
   //
-  // These render at every width, so the fix has to raise the phone target
-  // without touching the desktop toolbar. The class tokens are static, so
-  // this runs at the default width — what is being asserted is the pair,
-  // not the rendering.
-  describe('44px touch floor on shared controls', () => {
+  // These render at every width. They used to carry a local `min-h-11
+  // md:min-h-0` pair — a WIDTH gate, which left the household's ~1130px touch
+  // tablet on the 32px desktop side — and the floor now comes from `Button`
+  // itself on a POINTER gate. `web/src/components/ui/button.test.tsx` owns the
+  // primitive; what is left to check here is that this page did not keep a
+  // second, contradicting rule for the same property.
+  //
+  // BE HONEST ABOUT THE HALVES. `coarse:min-h-11` being present is nearly
+  // vacuous now — every `<Button>` in the app has it — and would only fail if
+  // one of these became a raw `<button>`. The two halves with a live failing
+  // case are the other two:
+  //
+  //   - `md:min-h-0` must be ABSENT. It is not merely redundant: it sets the
+  //     same property at the same specificity and Tailwind emits it AFTER the
+  //     plugin's `coarse:` rule, so above 768px it wins and switches the
+  //     primitive's floor back OFF — on precisely the coarse tablet the floor
+  //     exists for. Measured in the built bundle, not inferred.
+  //   - `max-md:min-h-11` must be PRESENT. These controls were 44px for a mouse
+  //     below `md` before any of this, and desktop density is meant to be
+  //     preserved exactly; dropping it shrank them to 32px there, which a
+  //     browser pass caught and no class assertion would have.
+  describe('touch floor on shared controls', () => {
     beforeEach(asAdmin);
 
-    /**
-     * Both halves of the swap, and neither works alone: without `min-h-11`
-     * the phone target is the base `h-8` (32px, well under the floor);
-     * without `md:min-h-0` the 44px floor leaks up into the desktop
-     * toolbar these controls have always been 32px in.
-     */
-    function expectPhoneOnlyTouchFloor(el: Element): void {
-      expect(touchFloorPx(el)).toBeGreaterThanOrEqual(44);
-      expect(classes(el)).toContain('md:min-h-0');
+    function expectPointerGatedFloor(el: Element): void {
+      expect(classes(el)).toContain('coarse:min-h-11');
+      expect(classes(el)).toContain('max-md:min-h-11');
+      expect(classes(el)).not.toContain('md:min-h-0');
+      // The unprefixed form would floor a mouse desktop at 44px at EVERY width,
+      // which the owner ruled out; it is also how a well-meaning "just make it
+      // always 44" edit would look.
+      expect(classes(el)).not.toContain('min-h-11');
     }
 
     test('the whole-trash bulk actions clear it', async () => {
       renderTrash();
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         await screen.findByRole('button', { name: /restore all 2/i }),
       );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         screen.getByRole('button', { name: /purge all 2/i }),
       );
     });
@@ -1088,10 +1113,8 @@ describe('Trash', () => {
         screen.getByRole('checkbox', { name: /select all on this page/i }),
       );
 
-      expectPhoneOnlyTouchFloor(
-        screen.getByRole('button', { name: 'Restore 2' }),
-      );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(screen.getByRole('button', { name: 'Restore 2' }));
+      expectPointerGatedFloor(
         screen.getByRole('button', { name: /clear selection/i }),
       );
     });
@@ -1107,10 +1130,10 @@ describe('Trash', () => {
       const dialog = screen.getByRole('dialog');
       // The destructive confirm especially: it is the last control before
       // an irreversible action, and a 40px mis-tap lands on Cancel.
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /purge permanently/i }),
       );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /^cancel$/i }),
       );
     });
@@ -1122,7 +1145,7 @@ describe('Trash', () => {
       await user.click(screen.getByRole('button', { name: /purge all 2/i }));
 
       const dialog = screen.getByRole('dialog');
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /purge all permanently/i }),
       );
     });
@@ -1214,7 +1237,11 @@ describe('Trash', () => {
       const next = screen.getAllByRole('button', {
         name: /go to next page/i,
       })[0];
-      expect(touchFloorPx(next)).toBeGreaterThanOrEqual(44);
+      expect(classes(next)).toContain('coarse:min-h-11');
+      // The WIDTH half, which is the one still worth asserting at this level:
+      // it rides `size="icon"` rather than Button's base, so it disappears if
+      // the pager ever drops that prop — and a square control floored in height
+      // alone is a 44x32 rectangle that still misses a thumb.
       expect(classes(next)).toContain('coarse:min-w-11');
       // The retired width gate: it left a ~1130px touch tablet at 32px.
       expect(classes(next)).not.toContain('md:size-8');
@@ -1634,7 +1661,14 @@ describe('Trash', () => {
         // Restore cannot retreat into a menu — it is the reason the page
         // exists.
         expect(restore).toBeVisible();
-        expect(touchFloorPx(restore)).toBeGreaterThanOrEqual(44);
+        // Not `touchFloorPx` any more: the floor comes from `Button` too now,
+        // so that helper returns 44 for every button on the page and would pass
+        // with the card's own `min-h-11` deleted. The card keeps its own
+        // because this surface is 44px for a MOUSE as well — it only renders
+        // below `md` — and that half is what has a failing case.
+        expect(classes(restore)).toContain('min-h-11');
+        expect(classes(restore)).toContain('coarse:min-h-11');
+        expect(classes(restore)).not.toContain('md:min-h-0');
       });
 
       test('tapping Restore on a card POSTs to the restore endpoint', async () => {

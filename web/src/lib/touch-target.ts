@@ -24,6 +24,26 @@
  *     Select call site had to change. A floor also lets content grow past it,
  *     which a fixed height does not.
  *
+ *     WHERE THE FLOOR ALREADY IS, so nothing below reaches for it twice:
+ *     `Button` (base = height, `size="icon"` = width too), `SelectTrigger`,
+ *     and `SelectItem` (ungated there — an option list is a menu you tap).
+ *     A shadcn `Button` therefore needs NO touch class at any call site.
+ *
+ *     `min-h-11 md:min-h-0` ON A BUTTON IS NOW A BUG, not just clutter. Both
+ *     halves set `min-height` at the same specificity — a media query adds none
+ *     — so the winner is whichever Tailwind emits last, and it emits screen
+ *     variants AFTER plugin variants: measured in the built bundle at offsets
+ *     52141 (`md:min-h-0`) against 49393 (`coarse:min-h-11`). The `md:` half
+ *     therefore WINS above 768px and switches the primitive's floor back off on
+ *     exactly the coarse tablet it exists for. Delete the pair.
+ *
+ *     If the site really did want 44px for a MOUSE at narrow widths — Trash's
+ *     phone cards and bulk bar did, and the owner asked for desktop density to
+ *     be preserved exactly — express that half as `max-md:min-h-11`. It agrees
+ *     with the primitive on the value wherever the two overlap, so emission
+ *     order stops mattering; `md:min-h-0` disagrees, which is the whole
+ *     difference.
+ *
  *   - GROW ONLY THE HIT AREA (`TOUCH_TARGET_CHECKBOX` below). Correct where
  *     the VISIBLE size is load-bearing — a checkbox that must stay optically
  *     aligned with the text beside it, or an icon pinned to a corner. Growing
@@ -40,10 +60,15 @@
  */
 
 /**
- * The 44px floor on BOTH axes, for a control whose target is square — an icon
- * button, or a spacer that has to keep its place in a row of them. A square
+ * The 44px floor on BOTH axes, for a control whose target is square. A square
  * target needs width as well as height; a height-only floor leaves a 32px-wide
  * button that is merely taller.
+ *
+ * `<Button size="icon">` carries this itself now, so what is left for this
+ * constant is the squares that are NOT one: a spacer holding its place in a row
+ * of icon buttons (PaginationBar's ellipsis), a raw `<button>`, and a Button
+ * that is square by className rather than by `size` — the primitive cannot see
+ * that shape, so those add the width half here.
  *
  * Additive, not a size: the caller keeps its own base `size-*` for fine
  * pointers, and this only clamps upward when the pointer is coarse. So the
