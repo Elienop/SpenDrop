@@ -51,17 +51,6 @@ a count endpoint) applied to all bulk surfaces at once, not bolted onto one.
 direction is fail-safe (the write is always a subset of what was displayed, never a superset).
 Still polish, still below B6.
 
-### B13 — Trash list shows no creator attribution
-**Verified: read** (found 2026-08-07 while building B6j). The main transactions list now carries
-`created_by` (the creator's display name, via LEFT JOIN users); the Trash list does not —
-`deletedTransactionResponse` (internal/api/trash_handlers.go) carries `user_id` only. Same
-one-field change plus the same LEFT JOIN shape on the ListDeleted* queries. The frontend type
-`DeletedTransaction` is deliberately `Omit<Transaction, 'created_by'>` (web/src/api/types.ts) so
-Trash code cannot silently read an undefined field — remove the Omit when the field ships.
-**Effort:** small.
-**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (both halves; the Omit is gone, the
-orphaned-creator LEFT-join is mutation-pinned on both queries) — moves to Closed at merge.
-
 ### B14 — Budget mutations write no audit trail
 **Verified: read** (B6 security audit M2, 2026-08-07). `handleSetBudget`, `handleDeleteBudget`,
 and the category-budget set/delete all mutate budget state with no audit row; `transaction_audit`
@@ -113,9 +102,10 @@ user-event (form-submit paths); each needs the delete-the-handler check before b
 trusted. Any that assert a NEGATIVE ("Enter does nothing") are the prime suspects.
 **Effort:** small-medium — nine audits, each a delete-run-restore cycle.
 
-### B18 — User account details can't be edited (owner request)
+### B18 — Account editing: password flow and the two-surfaces question (owner request)
 **Verified: read** (owner request 2026-08-08, from the live v0.39.0 Settings → Users tab;
-endpoint and UI gap confirmed in code the same day). No UI edits a user's details anywhere.
+endpoint and UI gap confirmed in code the same day). *State AS FOUND, kept for the reasoning —
+ask (1) has since shipped, see below.* No UI edited a user's details anywhere.
 The motivating case: B6's attribution now shows the creator's display name on every
 transaction row, and the owner wants a shorter one ("maybe I want to use something shorter
 so it looks short in the transaction"). The asks, in the owner's framing: (1) edit display
@@ -129,30 +119,21 @@ display_name survives), so a display-name editor can send its field alone with n
 concern. One consequence of the merge semantics: the endpoint cannot CLEAR a display name
 (empty string means keep) — fine for this feature, worth knowing. Password paths today:
 self-service `POST /api/auth/password` (Account tab) and admin
-`POST /api/users/{id}/reset-password` (member rows only in the UI). Open product decision
-for the build: whether a MEMBER may edit their own display name — it changes how their name
-renders on rows other people see. Ask (3) is a real design decision (admin-vs-member
-capability split on one surface) — brainstorm before building, rank with the owner.
+`POST /api/users/{id}/reset-password` (member rows only in the UI).
 **Effort:** small for (1) as admin-only UI; the merged accounts page is its own design stage.
-**Ask (1) built 2026-08-08 on `feat/b9-mobile-shell-slice1`** — admin display-name editor
-(exact single-field PUT), a confirmation dialog on member Delete (whose copy is test-pinned to
-NOT claim a ledger cascade — the 409 guard makes that impossible), and a self-rename refresh
-path (`useAuth.refreshUser`, epoch-guarded). Asks (2)/(3) remain a separate design stage.
-Moves to Closed at merge.
 
-### B19 — Quick page shows no creator attribution (owner request)
-**Verified: read** (owner request 2026-08-08; confirmed in code the same day, v0.39.1 tree).
-The /quick Recently-added panel renders no creator while the Transactions page does
-(`web/src/components/TransactionRow.tsx:375`, the B6 attribution). Display-only gap:
-`Transaction.created_by` is already on the wire (`web/src/api/types.ts:31`) and
-`useRecentTransactions` fetches the household-wide list (`sort_by=created_at`, no user
-filter), so the panel already shows the other member's rows — attribution there is
-informative, not redundant. `RecentlyAdded.test.tsx` fixtures even set `created_by`; the
-component ignores the field. Scope: the rendered list rows only — the entry form has nothing
-to attribute.
-**Effort:** small — same metadata idiom as TransactionRow.
-**Built 2026-08-08 on `feat/b9-mobile-shell-slice1`** (saved rows only; pending offline rows
-deliberately unattributed) — moves to Closed at merge.
+**Ask (1) SHIPPED 2026-08-08** — built on `feat/b9-mobile-shell-slice1`, merged via PR #126,
+squash `661ad46`, released as **v0.40.0**. What landed: an admin display-name editor (exact
+single-field PUT), a confirmation dialog on member Delete whose copy is test-pinned to NOT
+claim a ledger cascade (the 409 pre-count guard makes that outcome impossible — a schema
+`ON DELETE CASCADE` is not by itself evidence of the behaviour a handler produces), and a
+self-rename refresh path (`useAuth.refreshUser`, epoch-guarded on every arm including the
+failure arms, which were the reachable hole).
+
+**Still open: asks (2) and (3)** — password change belonging in the same edit flow, and the
+one-common-accounts-page question. Ask (3) is a real design decision (the admin-vs-member
+capability split on a single surface) and needs a brainstorm with the owner before any build.
+Also still open from the original framing: whether a MEMBER may edit their own display name.
 
 ### B20 — users.role integrity rests on one handler
 **Verified: read** (found 2026-08-08 during B18 merge-semantics mutation testing; second half
@@ -176,11 +157,33 @@ notification lines. Fix in ONE pass: sanitize at both write sites; consider the 
 builder too.
 **Effort:** small.
 
-### B22 — web tsconfig lacks `strict`
-**Verified: read** (B9 deep review 2026-08-08). `strict` is absent from `web/tsconfig.json`
-and `web/tsconfig.app.json`, while the project rule mandates strict type safety / no `any`.
-Enabling it is its own pass with an unknown error count — do not fold into another branch.
-**Effort:** unknown until tried; likely medium.
+### B22 — web tsconfig lacks an explicit `strict`
+**Verified: reproduced** (B9 deep review 2026-08-08; **materially corrected 2026-08-08** during
+the recharts bump). `strict` is absent from `web/tsconfig.json` and `web/tsconfig.app.json`.
+
+**The correction, because the original entry would have caused someone to budget a pass that
+does not exist.** It read *"Enabling it is its own pass with an unknown error count — do not
+fold into another branch. Effort: unknown until tried; likely medium."* That was written from
+the absence of the flag, without checking what the flag defaults to. **TypeScript 6.0 defaults
+`strict` to true, and `web/package.json` pins `typescript 6.0.2`** — so the project has been
+compiling under strict all along. Verified with a standalone probe using the repo's own
+compiler:
+
+```
+$ tsc --version                          → Version 6.0.2
+$ tsc --noEmit probe.ts                  → TS18047 'x' is possibly 'null'
+                                           TS7006 Parameter 'y' implicitly has an 'any' type   (exit 2)
+$ tsc --noEmit --strict false probe.ts                                                          (exit 0)
+```
+
+Corroborated independently by the recharts 2→3 migration: four of its fourteen type errors were
+`TS7006` implicit-any, a strict-family diagnostic that cannot fire under a non-strict compiler.
+
+**Revised scope: add `"strict": true` to the two tsconfigs for documentation value, with zero
+expected errors.** The instruction not to fold it into another branch no longer applies — it was
+a consequence of the unknown error count, and the count is known to be zero.
+**Effort:** trivial. Worth doing because the guarantee currently rests on a compiler default
+that a future TypeScript downgrade or a `--strict false` in CI would silently remove.
 
 ### B23 — offline-capture hold filing on identity change is untested
 **Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
@@ -190,18 +193,134 @@ semantics — "the hold is filed against the DEPARTED id, if at all." A queue-se
 question, distinct from the auth race that exposed it.
 **Effort:** small.
 
+### B24 — /quick overflows the page horizontally on a 360px phone
+**Verified: reproduced** (found 2026-08-09 during B9 slice 3, on the rebuilt container at a
+360px viewport). `document.scrollWidth` is **506px against a clientWidth of 345** — the page
+itself pans sideways. The cause is a single `CategoryChips` button rendering a long category
+name at **489.5px**, unbounded. Same class as the D4 table cells: user-supplied text whose only
+ceiling is a server constant (`MaxCategoryNameLength = 100`, `internal/api/limits.go:401`).
+
+**This is the owner's daily capture surface** and the most-used screen on the primary platform,
+which is why it outranks its size. Pre-existing — not introduced by slice 3 — and left unfixed
+only because `CategoryChips.tsx` was outside the branch's scope.
+**Effort:** small — the same bounding idiom the three tables now use.
+
+### B25 — the Reports page has one heading, and its Card labels are no-ops
+**Verified: read** (B9 slice-3 accessibility recon, 2026-08-09; PRE-EXISTING and page-wide).
+Three separate defects in one surface, none of them mobile-specific:
+1. **`CardTitle` renders a `<div>`**, so the entire Reports page has exactly one heading
+   (`<h1>Reports</h1>`). "Spending Heatmap", "Recurring Expenses" and "Tag Analysis" cannot be
+   reached by heading navigation.
+2. **`<Card aria-labelledby="…">` is silently discarded.** `Card` renders a bare `<div>`, whose
+   implicit `generic` role is on WAI-ARIA's name-prohibited list — so the association does
+   nothing while reading as done. Three call sites in `PatternsTab.tsx` alone.
+3. **Loading and refetch states are silent to a screen reader.** `Skeleton` is a plain `<div>`
+   with no `role`, no `aria-busy` and no live region; the refetch cue is `opacity-60`, purely
+   visual. (The error path is fine — `alert.tsx` has `role="alert"`.)
+Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
+**Effort:** medium for (1); small for (2) and (3).
+
+### B26 — Recurring Expenses still pans 113px on a phone
+**Verified: reproduced** (2026-08-09, after the D4/D12 fixes). 375.9px of table in a 263px box at
+360. The remainder is five columns of header words plus cell padding, **not** the description —
+that is now bounded. Reaching zero needs the slice-2 card-list treatment rather than more padding
+tuning, which is why it was stopped here.
+**Effort:** medium — it is a presentation change, not a spacing tweak.
+
+### B27 — the intensity scale returns the DARKEST stop for a zero total
+**Verified: reproduced** (executed the function during B9 slice 3, 2026-08-09).
+`buildIntensityScale`'s out-of-population fallback is `rank.get(total) ?? n`, and a zero-total day
+is genuinely out of population — the heatmap endpoint emits no row for a day with no expenses, so
+`lookup.get(date) ?? 0` hands the scale a value it was never built from. Measured: `scale(0)` → 1
+(the darkest stop), `scale(10)` → 0.3.
+
+**It is invisible only because both consumers gate on the total before reading it** — the chip
+paints under `total > 0`, and `chipTextClass` returns on `total === 0` before the opacity is
+consulted. So this is a **live coupling, not dead code**: dropping either gate paints every empty
+day black. Documented at the site and pinned by `buildIntensityScale.outOfPopulation`, which
+pins the CURRENT behaviour — so the test would not catch a gate being removed.
+
+**Fix:** return the palest stop (or a sentinel) for a value outside the population, so the guard
+does not depend on callers remembering to check first.
+**Effort:** small — production logic, deliberately not stacked onto the slice-3 branch.
+
+### B28 — four sheets scroll their own header away
+**Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
+ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
+long body loses its title and any summary figure on scroll. Measured on the heatmap's day sheet
+before the fix: the day's total left the visible box after **60px** of scroll with 8 of 20 rows
+still on screen.
+
+Slice 3 added an optional `header` slot rendered OUTSIDE the scroller and used it for the day
+sheet. Four consumers still pass `SheetHeader` as a child: `MobileNav` (a `border-b p-4` header,
+where the border makes the scroll-away most visible), `TransactionEditSheet`, `Categories`, and
+the Transactions `Filters` sheet. `TransactionEditSheet` was MEASURED and its form never
+overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is latent; the other
+two were not measured.
+**Effort:** small per consumer — the opt-in is one prop.
+
+### B29 — every Select in the app has 32px options
+**Verified: reproduced** (measured at a 360px viewport, 2026-08-09, while building the Settings
+phone picker). `SelectItem`'s stock `py-1.5` around `text-sm` gives a **32px** option row. The
+TRIGGER meets the 44px floor everywhere; the option that is actually tapped to choose does not —
+the wrong half to get right.
+
+Fixed at the Settings call site only. It is app-wide: **QuickAdd's category picker is the one to
+check first**, since it is on the daily capture surface and its options are the primary
+interaction. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
+not folded into a branch that had already been reviewed.
+
+Related and worth doing in the same pass: **Radix Select drops focus to `<body>` on selection** —
+verified three ways (user-event, a 2s `waitFor` to rule out late arrival, and real Chrome key
+events), and reproduced on a bare Select with nothing to swap, so it is the primitive rather than
+any consumer. Settings' picker now restores focus explicitly via `onCloseAutoFocus`; **every other
+Select in the app still drops it.** Same shape as the recorded Sheet-without-a-Trigger finding.
+**Effort:** small — one component, but verify every consumer at 360 and 1440.
+
+### B30 — the Settings section is not reflected in the URL
+**Verified: read** (2026-08-09). `location.search` stays empty when a section is chosen, on both
+the desktop tab strip and the new phone picker. A `?tab=` value is honoured *into* the page but
+never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
+not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
+**Effort:** small.
+
 ---
 
 ## Queued stages
 
-### B9 — Mobile shell (next stage, owner-decided)
-**Slice 1 BUILT 2026-08-08 on `feat/b9-mobile-shell-slice1`** (with the B13 / B18-ask-1 / B19
-riders — owner: "fit issues together"), browser-verified at 390×844 on the rebuilt container,
-PR pending; this entry moves to Closed with the squash hash at merge. Slice-2 re-measure
-notes collected during the build: the heatmap's 1fr cells shrink to ~2px untappable at 390
-(an explicit cell width would instead widen the page ~795px — needs its own scroll container);
-Users-row actions should collapse into a DropdownMenu; Reports/Settings tables pan with no
-scroll affordance hint.
+### B9 — Mobile shell (all three slices built; slice 3 awaiting merge)
+
+**Slice 1 SHIPPED 2026-08-08** — `feat/b9-mobile-shell-slice1`, PR #126, squash `661ad46`,
+**v0.40.0**. Carried the B13 / B18-ask-1 / B19 riders (owner: *"fit issues together"*).
+Browser-verified at 390×844 on the rebuilt container.
+
+**Slice 2 SHIPPED 2026-08-08** — PR #128, squash `f308c8f`, **v0.41.0**. The phone's panning
+tables became card lists, including the dashboard. **There are no panning tables left on the
+phone.** The slice-2 re-measure had said it "may prove unnecessary"; measuring said otherwise.
+
+**Slice 3 BUILT 2026-08-09** on `feat/reports-mobile-heatmap`, eight commits, awaiting the owner's
+push/PR go. All thirteen defects below shipped, plus the heatmap rebuild. Moves to Closed with
+the squash hash at merge. The recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129,
+squash `222caba`, **v0.41.1**), deliberately unbundled: the bump's only real evidence is a
+before/after browser comparison of eleven charts, and that baseline is unreadable if the same
+branch is simultaneously redesigning those charts.
+
+**What slice 3 actually became, stated plainly**, because it is far more than the entry above
+described: the heatmap rebuild (D1/D5) plus twelve other display defects, a **44px touch floor on
+every tab strip in the app** — they were all 32px, `h-10` minus `p-1`, including both of
+QuickAdd's on the daily capture surface — and a **six-site timezone defect** in unrelated files,
+where every transaction date rendered a day early west of GMT behind six tests that recomputed
+their expectation with the same wrong expression. Three reviews ran (design, UX, and an isolated
+adversarial pass that mutation-tested ~65 mutants and returned NOT MERGEABLE on documentation
+grounds while confirming every functional claim). Verification targets moved from 390px to
+**360px** once the owner supplied the household's real devices — see B24's note; a Galaxy S24 is
+the narrowest and a Tab S10 FE at ~720px portrait takes the PHONE layout.
+
+**The finding worth carrying out of this stage:** three separate defects were protected by
+comments explaining why they were fine — a dark-mode contrast claim ("both directions hold
+because the tokens swap together"), six comment blocks describing a design the same branch had
+deleted, and date tests whose comment called the self-referential oracle deliberate. Each read as
+considered design and each stopped someone looking.
 
 **Verified: reproduced** in a browser at 390×844 against the running container.
 The shell has zero responsive breakpoints: a permanent sidebar plus page padding leaves ~262px of
@@ -214,17 +333,99 @@ landscape or with the keyboard up, not in portrait today).
 recently-added list only offers delete, capped at six rows. Correcting yesterday's wrong amount
 requires a laptop.
 
-**Do it in slices, and re-measure after the first:**
-- *Slice 1 (1–2 days):* the shell and four shared components — sidebar to a slide-out below
-  tablet width with visible labels, reduced mobile padding, dialog height limit, scrollable tab
-  strips. This alone fixes the Reports/Settings overflow and the 70px state.
-- *Slice 2 (multi-week):* the table pages. Seven columns cannot fit 262px; these need stacked
-  cards, not narrower tables.
-- *Slice 3:* Reports charts.
+**Done in slices, re-measured after each:**
+- *Slice 1:* the shell and four shared components — sidebar to a slide-out below tablet width
+  with visible labels, reduced mobile padding, dialog height limit, scrollable tab strips.
+  Fixed the Reports/Settings overflow and the 70px state. **Shipped.**
+- *Slice 2:* the table pages. Seven columns cannot fit 262px; these needed stacked cards, not
+  narrower tables. **Shipped.** (The original entry guessed this slice "may prove unnecessary";
+  the measurement contradicted the guess. Recorded because the guess was the confident one.)
+- *Slice 3:* Reports charts. **In flight.**
 
-Several pages land within ~26px of correct once the shell stops taking a third of the screen, so
-**slice 2 may prove unnecessary — measure before committing to it.** Reassess the native-Android
-question after slice 1; the current phone experience is not evidence about what the web app can be.
+**Slice 3 was re-measured before being built, and the original framing was partly stale.**
+Slice 1's shell fix and its `min-w-0` grid fix had already removed the page-level overflow: at
+390px all four Reports tabs measure `scrollWidth == clientWidth == 390`, chart surfaces are
+308px and contained, and Net Cash Flow renders correctly. What actually remains:
+
+- **D1 — the spending heatmap has never been operable by anything but a mouse.** *Reproduced.*
+  53 columns × 371 cells at **3×3 CSS px** on a phone. The cell is a bare `<div>` inside a Radix
+  `TooltipTrigger asChild`: `tabIndex: -1`, no `role`, no `aria-label`, and a synthesized touch
+  tap produces no tooltip. There are no month or weekday labels **at any width** — at 1440px the
+  card's entire text content is `"Spending Heatmap 2026 No spend Less More"`. So this is not a
+  mobile sizing bug with an a11y side-effect; it is a component that is mouse-only-fine on
+  desktop and inoperable everywhere else. Enlarging the cell without giving it an interaction
+  model would ship a target you can hit and still learn nothing from.
+- **D2 — Budget vs Actual thins its month labels non-uniformly, and how badly depends on the
+  width.** *Reproduced.* **Corrected 2026-08-09** — this entry first said "7 of 12, unevenly",
+  then a single measurement at 390px suggested "6 of 12, evenly". A width sweep showed both
+  readings are real and neither describes the defect: **12 of 12 at 1440, NINE at 420
+  (`Jan Feb Mar Apr Jun Jul Sep Oct Dec` — May, Aug and Nov gone), six at 390.** recharts'
+  `preserveEnd` walks the axis dropping individual labels, so the stride changes mid-axis and
+  counting bars off a label lands on the wrong month. **The uneven stride is the damage; the
+  count is not.** Root cause: the `XAxis` carried no `interval` while its two siblings did — a
+  **wiring-seam** defect, since the helper and its unit test were already correct and simply
+  never connected.
+- **D3 — four charts paint a tick label outside the SVG.** *Reproduced.* Not a mobile defect and
+  not one chart: `Sep'25` sat at **−18.3px at 390 and −6.1px at 1440** on Income vs Expenses,
+  Category Trends clipped at −9.8px **despite already carrying the `padding` treatment its
+  siblings use**, the Dashboard's Cash Flow chart had the same shape, and Net Cash Flow overhung
+  the RIGHT edge. A −30° end-anchored label hangs off its tick leftward by ~35px; only a chart
+  rendering a wide `YAxis` had a gutter to absorb it.
+- **D4 — three tables render unbounded user text.** *Reproduced.* One 500-char description drove
+  Top Merchants to **3,464px inside a 293px** container. Data-dependent and **not
+  mobile-specific** — desktop is identically exposed. Same exposure in Recurring Expenses and in
+  the Dashboard's surviving desktop table (the phone card path got the fix in slice 2; the table
+  did not). A later measurement found the description was not even the binding column — the
+  **category name** on the same cell's second line is also user-supplied, also capped at 100
+  chars server-side, and was completely unbounded.
+- **D5 — the hardcoded `repeat(53, 1fr)` template can receive 54 columns.** *Reproduced by
+  mirroring the function over 1900–2100:* leap years starting on a Sunday (1928, 1956, 1984,
+  2012, 2040, 2068, 2096) emit 378 cells. Reachable today only by importing rows dated in one of
+  those years — and `web/src/lib/dates.ts:161-169` documents a non-contiguous ledger with 1984
+  rows as a supported case — otherwise it goes live in 2040. Latent, not burning; fixed because
+  the file is open.
+- **D6 — the Savings year-over-year chart has D2's defect too.** *Reproduced.* Labels 6 of 12,
+  evenly, so it reads as less broken than Budget vs Actual's uneven 7. Same root cause.
+- **D7 — gradient-filled series render a colourless legend swatch.** *Read.* A `url(#…)` fill
+  carries no solid colour in the legend payload, `ChartLegendContent` sets
+  `backgroundColor: item.color`, React omits an undefined style, and the swatch renders
+  transparent. Tracks FILL TYPE, not recharts version — solid-stroked series render correctly in
+  both versions.
+- **D8 — `ChartLegendContent` keys legend items by `item.value`.** *Read.* Two entries sharing a
+  value would collide on the React key. Latent; current configs have distinct labels.
+- **D9 — the legend overflows the card on both sides once there are ~10 series.** *Reproduced —
+  reported by the owner from his live app, and structurally invisible in dev (2 categories
+  against his 9).* recharts fixes the legend wrapper's width; `ChartLegendContent` rendered
+  `flex … justify-center` with `flex-wrap: nowrap`, so the excess was pushed out of **both**
+  edges symmetrically and the first and last chips were cut in half.
+- **D11 — Category Breakdown's labels overlap at a realistic category count.** *Reproduced.*
+  Fixed height against a data-driven row count. The repo already had the idiom — Tag Analysis
+  derives its height from its row count — and this chart never got it. Height alone was not
+  enough: **recharts wraps an over-wide `YAxis type="category"` label and the extra lines grow
+  into the next row**, so a 100-char name rendered five lines tall.
+- **D12 — the Reports tables waste horizontal space on cell padding.** *Owner-reported.* The
+  shared `TableCell p-4` is the residual pan on a phone once the description is bounded.
+- **D13 — Savings Goal Progress is squeezed at phone width.** *Owner-reported.* The percentage
+  ring and the Goal/Saved/Remaining figures sat side by side, leaving the figures ~90px.
+
+**D2, D3, D4, D6, D7, D8, D9, D11, D12, D13 SHIPPED** on this branch in `2d220fc` and `2950a55`
+— along with a defect none of them named: **every tab strip in the app rendered 32px triggers,
+not the 44px this project adopted for touch** (`h-10` minus `p-1`), including QuickAdd's two
+strips on the daily capture surface. Slice 1's "44px floor" never covered tab strips. D1 and D5
+(the heatmap itself) are in progress.
+
+**The generalisable finding**, worth more than any individual fix: for ROTATED tick labels,
+collision is governed by the line's **height**, not its width — adjacent labels clear only when
+`spacing × sin(angle) ≥ ink height` — so shortening a label does nothing, and the tick font is
+the strongest lever because it appears in both that term and the rotational overhang. Fixing the
+clipping with padding *narrows the plot*, which *worsens* collision, so the two invariants must
+be asserted together or the second regression ships looking like a fix. Also: **a viewport-keyed
+tick cap cannot work here** — this grid is `md:grid-cols-2`, so every chart halves at 768px and
+measures worse clearance there than on a phone. Chart width is not monotonic in viewport width.
+The measurements are in the header of `web/src/components/reports/chartAxis.seam.test.ts`.
+
+Reassess the native-Android question now that the phone experience is no longer evidence of a
+web-app limit.
 
 ### B10 — Refunds cannot offset a category
 **Verified: reproduced** (schema dumped from all 17 migrations applied to a scratch database).
@@ -304,6 +505,27 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B13 — Trash list shows no creator attribution** (built on `feat/b9-mobile-shell-slice1`;
+  MERGED via PR #126, squash `661ad46`, released as **v0.40.0**, branch deleted). The finding:
+  the main transactions list carried `created_by` after B6, but `deletedTransactionResponse`
+  carried `user_id` only, so Trash showed a number where every other surface showed a name.
+  - **What shipped:** both halves — the LEFT JOIN on the `ListDeleted*` queries and the wire
+    field, plus removal of the frontend's deliberate `Omit<Transaction, 'created_by'>` guard
+    (its whole purpose was to make the gap a compile error until it closed).
+  - **Not obvious, kept:** the orphaned-creator arm — a row whose creator no longer exists —
+    is **mutation-pinned on both queries**. A LEFT JOIN's null branch is exactly the arm that
+    an INNER JOIN silently deletes rows through, and no fixture exercises it by accident.
+
+- **B19 — Quick page shows no creator attribution** (owner request; built on
+  `feat/b9-mobile-shell-slice1`; MERGED via PR #126, squash `661ad46`, released as **v0.40.0**).
+  Display-only gap: `created_by` was already on the wire and `useRecentTransactions` already
+  fetched the household-wide list, so the panel was already showing the other member's rows —
+  unattributed. `RecentlyAdded.test.tsx` fixtures even set the field; the component ignored it.
+  - **What shipped:** the same metadata-with-icon idiom as `TransactionRow`, on saved rows only.
+  - **Deliberately excluded:** pending offline rows stay unattributed. They have no server
+    identity yet, and inventing one client-side would render an attribution that a failed sync
+    could contradict.
 
 - **B8 — Backups carry a "verified" marker that two paths never earn** (`68e3ea6` + docs
   rider `bd510d0` + `62d52b5` + `54348c2` + ordering pin `16df627`, 2026-08-08, on

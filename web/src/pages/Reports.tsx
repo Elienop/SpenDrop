@@ -14,6 +14,63 @@ import { SavingsTab } from '@/components/reports/SavingsTab';
 import { PatternsTab } from '@/components/reports/PatternsTab';
 import { useReportYears } from '@/hooks/useReportYears';
 
+/**
+ * Trigger sizing for THIS strip's four tabs, applied at the call site rather
+ * than to the shared `TabsTrigger` — Settings' six triggers cannot fit on a
+ * phone at any padding, so they must keep scrolling, and FilterPanel and
+ * QuickAdd lay their own tabs out on a grid.
+ *
+ * WIDTH — phone-only. Measured on the built container at a 360px viewport, the
+ * width of the owner's main phone: the four triggers came to 326.2px of
+ * content (Overview 85.3, Spending 86.1, Savings 76.1, Patterns 78.7) plus the
+ * list's 8px of padding, against 298px of usable width. The strip overflowed
+ * by 36px, so Patterns was cut off and reachable only by dragging the strip
+ * sideways — the owner's report was "the scroll is not good for the nav bar
+ * top". `px-2 text-xs` brings the four to 261.4px, which fits with room to
+ * spare; `px-2 text-sm` alone came to 302.2px and would still have overflowed
+ * by 4px, so both halves are load-bearing. Restored to the shared values at
+ * `sm`, where the strip has always fitted and nothing needed changing.
+ *
+ * HEIGHT is NOT here. It moved to the shared `TabsTrigger` as `min-h-11` once
+ * the owner approved the other four tablists getting it too, and this constant
+ * deliberately does not repeat it: a duplicate would have masked the shared one
+ * from the test below — verified by mutation, deleting the shared class left
+ * the whole suite green while this string still carried its own copy.
+ *
+ * The reasoning, kept because it is what decided the shared version: `TabsList`'s `h-10` left the triggers
+ * 32px tall, under the 44px touch floor the rest of the phone shell keeps
+ * (`MobileNav`, `CategoryChips`, `TransactionEditSheet`). It is NOT gated on a
+ * breakpoint, and both ends of the range are the reason: the household's tablet
+ * is ~720px in portrait, below `md`, so a `sm:`-gated floor would drop it back
+ * to 32px on a device taking the phone layout — and the same tablet in
+ * LANDSCAPE is ~1152px, so an `md:`-gated one would drop it on a device that is
+ * still touched. There is no breakpoint that separates "touch" from "pointer".
+ * The floor itself now lives on the shared `TabsTrigger` (every tablist in
+ * the app wanted it), so this constant only carries the WIDTH squeeze plus a
+ * restatement of why the height is ungated.
+ *
+ * THE FIT IS NOT UNCONDITIONAL, and the failure mode is deliberate. These
+ * classes are rem-based and the container is not, so a larger system font eats
+ * the 43.6px of headroom this leaves at 360px (269.4px of strip in 313px) —
+ * roughly 16%. Past that the strip goes back to scrolling, which is why
+ * `scrollableTabsList` stays on the list rather than being replaced by a
+ * `grid grid-cols-4`. Degrading to the old behaviour is the point; widening the
+ * page is what must not happen. Not tested at any accessibility text size.
+ *
+ * IF YOU RE-MEASURE THIS, READ THIS FIRST. Every width in this comment came
+ * from headless Chrome at an emulated viewport, and those numbers are ~15px
+ * PESSIMISTIC against a real phone. `overflow-x: auto` on the list forces
+ * `overflow-y` to compute to `auto` as well, and desktop Chrome then reserves a
+ * classic-scrollbar gutter: the same element measures 313px by
+ * `getBoundingClientRect()` and 298px by `clientWidth`. A phone has overlay
+ * scrollbars and no gutter, so the real deficit on the owner's S24 was nearer
+ * 21px than the 36px recorded above. Sizing against the pessimistic number is
+ * deliberate; reading it as the on-device figure is not. The same correction
+ * applies to every width this project has recorded from a resized desktop
+ * browser.
+ */
+const REPORTS_TAB_TRIGGER = 'px-2 text-xs sm:px-3 sm:text-sm';
+
 export function Reports() {
   const [activeTab, setActiveTab] = useState('overview');
   const { outOfRangeYears, futureYears, currentYear } = useReportYears();
@@ -115,11 +172,25 @@ export function Reports() {
       )}
 
       <Tabs value={activeTab} onValueChange={setActiveTab}>
+        {/* `scrollableTabsList` STAYS. It is not the defect — it is the
+            fallback, and the sizing above is what stops the fallback from
+            being the everyday experience at 360px. A strip that is made to fit
+            today can stop fitting tomorrow (a fifth tab, a longer label, a
+            larger system font), and without these three classes the overflow
+            goes back to widening the page instead of scrolling. */}
         <TabsList className={scrollableTabsList}>
-          <TabsTrigger value="overview">Overview</TabsTrigger>
-          <TabsTrigger value="spending">Spending</TabsTrigger>
-          <TabsTrigger value="savings">Savings</TabsTrigger>
-          <TabsTrigger value="patterns">Patterns</TabsTrigger>
+          <TabsTrigger value="overview" className={REPORTS_TAB_TRIGGER}>
+            Overview
+          </TabsTrigger>
+          <TabsTrigger value="spending" className={REPORTS_TAB_TRIGGER}>
+            Spending
+          </TabsTrigger>
+          <TabsTrigger value="savings" className={REPORTS_TAB_TRIGGER}>
+            Savings
+          </TabsTrigger>
+          <TabsTrigger value="patterns" className={REPORTS_TAB_TRIGGER}>
+            Patterns
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="overview" className="mt-6">

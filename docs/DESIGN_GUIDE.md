@@ -40,6 +40,35 @@ All colors use HSL space-separated format: `H S% L%`. Consumed via `hsl(var(--to
 | `--destructive` | `0 72% 51%` | Error, delete actions |
 | `--radius` | `0.625rem` | Base border radius |
 
+### Partial Transparency — put the alpha in the COLOR, never on the element
+
+A tint of a token is `hsl(var(--token) / N)` in a **class or a stylesheet**, and
+`color-mix(in oklab, hsl(var(--token)) N%, transparent)` in an **inline `style`**. Both
+composite to the same pixel (verified in Chrome). What is never right is
+`style={{ backgroundColor: 'hsl(var(--token))', opacity: N }}`.
+
+Why the split matters more than it looks:
+
+- **CSS `opacity` fades the whole subtree and the element's own ring.** Reaching for it forces
+  workarounds that then read as considered design — a second span so the label does not fade
+  with its chip, a marker ring relocated off the faded element. The spending heatmap carried
+  both. Alpha in the color touches only the background.
+- **happy-dom 20.11.1 drops the slash-alpha `hsl()` from an inline style declaration
+  entirely** — measured, and not because of the `var()`: literal `hsl(240 5.9% 10% / 0.5)` goes
+  too, while `rgb(0 0 0 / 0.5)` survives. The property reads back as `''`, so a painted element
+  is indistinguishable from an unpainted one and any test asserting "this paints nothing" passes
+  for a fully painted element. Tailwind's own `bg-primary/35` is unaffected: it compiles into a
+  stylesheet, which happy-dom never parses. **The rule is inline-style-specific.**
+
+`color-mix` is already the repo's inline idiom (`CategoryBadge.tsx`, `CategoryChips.tsx`), and
+mixing with `transparent` scales only the alpha whatever the interpolation space, because the
+other endpoint contributes no color.
+
+Related: `--primary` and `--ring` are the same value, so a ring drawn on a full-intensity
+`--primary` surface vanishes — `ring-offset-2 ring-offset-card` is the fix. `--foreground` and
+`--primary` are near-identical at both ends of both themes, so a marker ring on a `--primary`
+chip measures ~1.1–3.2:1 against it and needs to sit in a card-colored gutter instead.
+
 ### Color Philosophy: Neutral-First
 
 **Non-category charts use neutral colors only.** The `--primary` and `--muted-foreground` tokens differentiate series — never `chart-N` variables. This keeps the interface clean and reserves color for meaning.
@@ -116,6 +145,17 @@ fontFamily: {
 - All currency/numeric columns: `font-mono tabular-nums`
 - No `text-transform: uppercase` in main content
 - Minimum text size: `text-xs` (12px)
+- **Carve-out: chart tick labels may go below 12px.** The month axes render at
+  **9px** (`MONTH_TICK` in `components/reports/utils.ts`). This is not a
+  loosening of the rule for convenience — the tick font appears in BOTH terms
+  of the collision condition for rotated labels, `spacing x sin(angle) >= ink
+  height`, and in the gutter the label overhangs, so shrinking it is the only
+  lever that buys fit and plot width at the same time. Measured at 360px: at
+  12px/-30 the axes needed 66px of a 263px chart as gutter and still collided;
+  at 9px/-45 they need 36px and clear every chart on the page. The alternative
+  was thinning to 3-6 labels, which the owner rejected — losing the months was
+  the complaint. Applies to SVG tick text only; it is not licence for 9px in
+  ordinary UI copy.
 
 ---
 
@@ -350,11 +390,54 @@ shadcn's `ChartContainer` generates `--color-<key>` CSS variables from the confi
 
 ### Axis Styling
 
+A plain axis — no month labels, so no rotation and no gutter to reserve:
+
 ```tsx
 <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
 <XAxis tickLine={false} axisLine={false} stroke="hsl(var(--muted-foreground))" />
 <YAxis tickLine={false} axisLine={false} stroke="hsl(var(--muted-foreground))" />
 ```
+
+### Month Axes — use the shared constants, do not hand-roll
+
+**A month axis needs four props that the snippet above does not have.** Copying
+the plain recipe for a month axis reproduces the exact collision this app spent
+a batch of commits removing: labels overlapping at 360px, and `Mar'26` clipped
+off the left edge because a rotated end-anchored label hangs past its tick.
+
+```tsx
+import {
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING,            // no <YAxis> on this chart
+  ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS, // chart already has a <YAxis>
+} from '@/components/reports/utils';
+
+<XAxis
+  dataKey="month"
+  tickFormatter={formatMonthTick}
+  tickLine={false}
+  axisLine={false}
+  stroke="hsl(var(--muted-foreground))"
+  angle={MONTH_TICK_ANGLE}
+  tick={MONTH_TICK}
+  textAnchor="end"
+  padding={ROTATED_MONTH_TICK_PADDING}
+  interval={monthAxisInterval(data.length)}
+/>
+```
+
+Pick the padding constant by whether the chart renders a `<YAxis>`: its 80px
+width IS the left gutter, so a chart that has one must use the `_INSIDE_YAXIS`
+variant or it pays for the gutter twice. The right half is the same in both and
+is set by recharts' footprint check on the last tick, not by the ink overhang —
+shrinking it collapses `equidistantPreserveEnd` to a single label.
+
+The measurements behind every number are in the docblocks in
+`components/reports/utils.ts`, and the wiring is pinned by
+`components/reports/chartAxis.seam.test.ts` — add a new month axis and that test
+requires it to carry these props.
 
 ### Category Charts
 
@@ -529,6 +612,8 @@ The confirm AlertDialog (all-matching scope only) uses the **default primary** p
 
 - Use Tailwind utility classes for all styling
 - Use `hsl(var(--token))` for colors in inline styles (charts)
+- Use `color-mix(in oklab, hsl(var(--token)) N%, transparent)` for a runtime tint in an
+  inline style — see Partial Transparency; never an element `opacity`
 - Use `font-mono tabular-nums` on all numeric columns
 - Use `gap-3` between cards, `gap-6` between sections
 - Use neutral colors (`--primary`, `--muted-foreground`) for non-category charts
@@ -538,6 +623,7 @@ The confirm AlertDialog (all-matching scope only) uses the **default primary** p
 ### Don't
 
 - Use CSS Modules or standalone CSS files
+- Put an alpha on the ELEMENT (`opacity`) when you mean a translucent color
 - Use `chart-N` variables for non-category charts
 - Use colored fills (green/red) for income/expense bars
 - Add `shadow-sm` or other shadows to cards

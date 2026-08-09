@@ -1,5 +1,5 @@
 import { useCallback, useState, type KeyboardEvent } from 'react';
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { MoreHorizontal, User } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
@@ -269,7 +269,7 @@ export function TransactionRow({
         />
       </TableCell>
       <TableCell className="whitespace-nowrap">
-        {format(new Date(transaction.date), 'MMM d, yyyy')}
+        {format(parseISO(transaction.date), 'MMM d, yyyy')}
       </TableCell>
       {/* Width-bounded on purpose. Import does not enforce the 500-character
           description limit the rest of the app does — validateImportField runs

@@ -36,7 +36,13 @@ import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useReportYears } from '@/hooks/useReportYears';
 import { cn } from '@/lib/utils';
-import { monthsToCoverYear } from './utils';
+import {
+  monthsToCoverYear,
+  monthAxisInterval,
+  MONTH_TICK,
+  MONTH_TICK_ANGLE,
+  ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS,
+} from './utils';
 import type { SavingsGoal, YoYResponse } from '@/api/types';
 import { api } from '@/api/client';
 
@@ -207,7 +213,16 @@ export function SavingsTab() {
               )}
             >
               {goal ? (
-                <div className="flex items-center gap-6">
+                /* STACKED below `sm`, side by side above it. At 360px the ring
+                   is a fixed 200px square, so the figures beside it were left
+                   with ~90px and "Remaining: $17,151.23" wrapped onto three
+                   cramped lines. The owner asked for the percentage on one line
+                   and the goal/saved figures on another; a column does that and
+                   gives the figures the full card width. `items-center` only
+                   applies once they are side by side — a centred column would
+                   leave the three figures floating away from the card's left
+                   edge, out of line with every other block on the tab. */
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-6">
                   <ChartContainer
                     config={SAVINGS_CONFIG}
                     className="h-[200px] w-[200px]"
@@ -299,13 +314,29 @@ export function SavingsTab() {
                     </linearGradient>
                   </defs>
                   <CartesianGrid vertical={false} />
+                  {/* The tightest of the three twelve-month axes in Reports:
+                      an 80px YAxis leaves the narrowest plot on the page. It
+                      still renders EVERY month, because rotating to -45° and
+                      dropping the tick font to 9px cut what twelve labels need
+                      from 23.7px of horizontal width to 11.7px of perpendicular
+                      spacing — the geometry and the measurements are on
+                      `MONTH_TICK_ANGLE` and `monthAxisInterval` in
+                      `reports/utils.ts`, and are deliberately not restated here.
+
+                      A partial year renders fewer than twelve — eight months in
+                      August, twelve every December — so December is the case to
+                      re-measure, not today's. */}
                   <XAxis
                     dataKey="name"
                     tickLine={false}
                     axisLine={false}
                     tickMargin={10}
-                    interval={0}
-                    padding={{ left: 20, right: 20 }}
+                    tick={MONTH_TICK}
+                    angle={MONTH_TICK_ANGLE}
+                    textAnchor="end"
+                    height={48}
+                    interval={monthAxisInterval(savingsData.length)}
+                    padding={ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS}
                   />
                   <YAxis
                     tickLine={false}
@@ -411,11 +442,36 @@ export function SavingsTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
+                {/* Recharts' default `preserveEnd` walk drops whichever labels
+                    its collision pass reaches, so the stride is not uniform and
+                    changes with the container width. `monthAxisInterval` is
+                    what replaces it; its docblock holds the numbers.
+
+                    THIS is the chart to re-measure first if any of the shared
+                    geometry moves. At 360px it has the least tick spacing on
+                    the page — 13.1px against the 11.7px twelve rotated 9px
+                    labels need, so +1.8px, where its siblings have +3.0 and
+                    +3.7. An earlier revision THINNED this axis instead, on the
+                    strength of the same twelve labels needing 23.7px of
+                    horizontal width at the old flat 12px; steepening and
+                    shrinking the font is what made forcing all twelve fit, and
+                    keeping the months was the owner's actual complaint.
+
+                    The three twelve-month axes agreeing is a COINCIDENCE OF THE
+                    DEVICE FLEET, not one rule: each was decided against its own
+                    plot width. A future reader unifying them has to re-derive
+                    all three, not copy one. */}
                 <XAxis
                   dataKey="name"
                   tickLine={false}
                   axisLine={false}
                   tickMargin={10}
+                  tick={MONTH_TICK}
+                  angle={MONTH_TICK_ANGLE}
+                  textAnchor="end"
+                  height={48}
+                  interval={monthAxisInterval(yoyData.length)}
+                  padding={ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS}
                 />
                 <YAxis
                   tickLine={false}

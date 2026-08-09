@@ -106,6 +106,10 @@ vi.mock('../hooks/useDashboard', () => ({
 let reportYears: number[] = [2026];
 /** When set, `reports/years` rejects — the offline / 401 / 500 degradation. */
 let reportYearsFails = false;
+// Mutable holder in the same style as `reportYears` above, because `vi.mock`'s
+// factory is hoisted and cannot close over a per-test value. Only the
+// empty-description test moves it.
+let recentDescription = 'Groceries';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -147,7 +151,7 @@ vi.mock('../api/client', () => ({
             amount: 42.50,
             original_amount: null,
             original_currency: null,
-            description: 'Groceries',
+            description: recentDescription,
             category_id: 1,
             category_name: 'Food',
             category_type: 'expense',
@@ -197,6 +201,7 @@ describe('Dashboard', () => {
     mockUseDashboard.mockReturnValue(defaultDashboardData);
     reportYears = [new Date().getFullYear()];
     reportYearsFails = false;
+    recentDescription = 'Groceries';
   });
 
   test('renders welcome heading with user name', () => {
@@ -373,6 +378,74 @@ describe('Dashboard', () => {
       // Category initial should appear in the icon cell
       expect(screen.getByText('F')).toBeInTheDocument();
     });
+  });
+
+  test('the desktop description cell is bounded in both directions', async () => {
+    // The phone branch renders `TransactionDescription`, which is bound, titled
+    // and fallback-applied. This desktop branch rendered a bare `<span>`, so one
+    // imported row with an unbroken token stretched the table — measured, the
+    // same shape that took the Reports tables to 3464px inside a 293px card.
+    //
+    // NOT the `min-w-0` + `truncate` idiom the ledger uses, and this is the part
+    // a future edit is most likely to "correct" back. That mechanism works on a
+    // FLEX child and does nothing in a table: a `white-space: nowrap` cell
+    // contributes its full text width as the column's min-content, so a
+    // `max-w-*` above it becomes the column's FLOOR. Measured in Chrome with
+    // that idiom: `max-w-md` held the description column at 448px inside a card
+    // 384.5px wide at a 1024px viewport — 302px of overflow, worse than the bug.
+    //
+    // `overflow-wrap:anywhere` removes the floor for MIN-content, and the
+    // tempting conclusion — that a cap is therefore harmless above it — is
+    // false. Re-measured, twice, because a review asked for exactly that change:
+    // Chrome's auto table layout sizes this column from its max-content capped
+    // by `max-width`, so a long token makes the cap the width. Adding
+    // `max-w-md` back pinned the column at 448px and the table overflowed its
+    // card by 302px at 1024, 174px at 1280 and 87px at 1440. Without it: 0px at
+    // 768, 900, 1024, 1150, 1280, 1440 and 1920, column adapting 145px -> 465px.
+    //
+    // The two Reports cells DO carry caps, and that is not an inconsistency:
+    // theirs never bind (12rem against a 107px column at phone width, 28rem
+    // against 383px at desktop), while this card is only 384.5px wide at 1024.
+    //
+    // happy-dom lays nothing out, so none of that is observable here; what is
+    // asserted is that the classes reach the rendered cell.
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const description = await screen.findByText('Groceries');
+
+    expect(description.className).toContain('[overflow-wrap:anywhere]');
+    expect(description.className).toContain('line-clamp-2');
+    expect(description).toHaveAttribute('title', 'Groceries');
+
+    const cell = description.closest('td');
+    // Asserted to EXIST first: `closest('td')?.className ?? ''` passes happily
+    // against '' if the markup ever stops being a table, which is the one shape
+    // that would make every assertion above meaningless.
+    expect(cell).not.toBeNull();
+    expect(cell!.className).not.toMatch(/max-w-/);
+
+    // BOTH lines in this cell, not just the description. Bounding only the
+    // first left the column pinned at 473.7px and the table overflowing its
+    // card by 119px at 1440 — the category name below is user-supplied too and
+    // the server caps it at 100 characters, so it sets the column's min-content
+    // on its own. Found by measuring after the description was already bounded.
+    const category = within(cell!).getByText('Food');
+    expect(category.className).toContain('[overflow-wrap:anywhere]');
+    expect(category.className).toContain('line-clamp-1');
+  });
+
+  test('an empty description falls back instead of rendering nothing', async () => {
+    // Pins the `transactionLabel` half of the same change. The default fixture
+    // is 'Groceries', so `transactionLabel(tx)` and `tx.description` agree and
+    // reverting to the raw field stays green — this is the row that separates
+    // them. Import bypasses the presence check the per-row edit route applies,
+    // so a blank description is reachable from a spreadsheet, and without the
+    // fallback the cell renders an empty clipped box with an empty `title`.
+    recentDescription = '';
+
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+    const fallback = await screen.findByText('(no description)');
+    expect(fallback).toHaveAttribute('title', '(no description)');
+    expect(fallback.className).toContain('line-clamp-2');
   });
 
   test('does not render Savings Progress section', () => {

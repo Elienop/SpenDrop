@@ -33,9 +33,15 @@ import "unicode/utf8"
 // NEVER lower MinDataYear below 1000. Two verified hazards live under four
 // digits:
 //
-//   - web/src/components/reports/SpendingHeatmap.tsx (lines 24 and 31)
-//     builds `new Date(Date.UTC(year, 0, 1))`, and JS maps years 0-99 onto
-//     1900-1999 — a year-84 row would silently render as 1984.
+//   - generateYearDates and generateMonthDates in
+//     web/src/components/reports/heatmapGrid.ts build
+//     `new Date(Date.UTC(year, 0, 1))` and `new Date(Date.UTC(year, month, 1))`
+//     respectively, and JS maps years 0-99 onto 1900-1999 — a year-84 row
+//     would silently render as 1984. The YEAR argument is the hazard in both;
+//     they differ only in the month.
+//     (Named by FUNCTION, not by line: this used to cite two line numbers in
+//     SpendingHeatmap.tsx, which the heatmap rebuild moved into a new file
+//     with nothing in either toolchain to notice.)
 //   - The report handlers build ranges with fmt.Sprintf("%d-01-01", year),
 //     which emits "5-01-01" for year 5 and breaks the lexical string
 //     comparison SumByMonthRange does against the stored dates.

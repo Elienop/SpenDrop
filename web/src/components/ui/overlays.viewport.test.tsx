@@ -189,6 +189,46 @@ describe('overlay viewport bounds', () => {
       expect(content).toHaveClass('w-full', 'sm:max-w-md');
       expect(content).toHaveClass('max-h-[100dvh]');
     });
+
+    // A sheet whose title names WHICH thing you are looking at loses that
+    // title the moment the body is long enough to scroll, because the scroller
+    // wraps every child. Measured on the heatmap's day sheet at 360px with 20
+    // rows: the summary total left the box after 60px of scroll while 8 rows
+    // were still visible. `header` is the opt-in that puts it above the
+    // scroller instead.
+    it('renders `header` outside the body scroller, children inside', () => {
+      render(
+        <Sheet defaultOpen>
+          <SheetContent
+            side="bottom"
+            header={
+              <div>
+                <SheetTitle>Tuesday</SheetTitle>
+                <SheetDescription>$42.50 spent</SheetDescription>
+              </div>
+            }
+          >
+            <p>Body row</p>
+          </SheetContent>
+        </Sheet>,
+      );
+      // Both halves in one test: an "is outside the scroller" assertion passes
+      // just as well when there is no scroller at all, or when nothing
+      // rendered.
+      expect(scrollerAround(screen.getByText('Tuesday'))).toBeNull();
+      expect(scrollerAround(screen.getByText('$42.50 spent'))).toBeNull();
+      expect(scrollerAround(screen.getByText('Body row'))).not.toBeNull();
+    });
+
+    it('adds no node at all when `header` is omitted', () => {
+      // The opt-in has to be free for the four sheets that do not use it:
+      // `{undefined}` must render nothing, or every one of them silently gains
+      // a flex child and a `gap-4`.
+      const content = renderSheet('bottom');
+      expect(content.firstElementChild).toBe(
+        scrollerAround(screen.getByText('Filters')),
+      );
+    });
   });
 
   /**

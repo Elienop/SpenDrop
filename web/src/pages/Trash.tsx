@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useState } from 'react';
-import { differenceInCalendarDays, format } from 'date-fns';
+import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { toast } from 'sonner';
 import { AlertCircle, RotateCcw, Trash2, User } from 'lucide-react';
@@ -293,7 +293,7 @@ function TrashCard({
             className="text-xs text-muted-foreground"
             title={absolute}
           >
-            {format(new Date(row.date), 'MMM d, yyyy')} · Deleted {phrase}
+            {format(parseISO(row.date), 'MMM d, yyyy')} · Deleted {phrase}
           </p>
         </div>
       </div>
@@ -1022,7 +1022,7 @@ export function Trash() {
                       {relative}
                     </TableCell>
                     <TableCell className="whitespace-nowrap">
-                      {format(new Date(row.date), 'MMM d, yyyy')}
+                      {format(parseISO(row.date), 'MMM d, yyyy')}
                     </TableCell>
                     {/* Width-bounded on purpose, exactly as in
                         TransactionRow's description cell: import does not

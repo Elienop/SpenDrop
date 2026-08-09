@@ -1,5 +1,5 @@
 import { useId } from 'react';
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import type { Transaction } from '../api/types';
 import { TransactionCard } from './TransactionCard';
 import { groupIntoDayRuns } from '@/lib/transaction-day-groups';
@@ -130,7 +130,7 @@ export function TransactionCardList({
               id={headingId}
               className="sticky top-14 z-10 border-y border-border bg-muted px-3 py-1.5 text-xs font-medium text-muted-foreground"
             >
-              {format(new Date(group.date), 'MMM d, yyyy')}
+              {format(parseISO(group.date), 'MMM d, yyyy')}
             </h2>
             {/* Same `role="list"` reasoning as the flat branch. Labelled by the
                 day heading, so each run announces which day it belongs to

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, type PointerEvent } from 'react';
-import { format } from 'date-fns';
+import { format, parseISO } from 'date-fns';
 import { User } from 'lucide-react';
 import type { Transaction } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
@@ -212,7 +212,7 @@ export function TransactionCard({
               // rather than a terse one. Same format as the day header and the
               // desktop date column.
               <span className="shrink-0 text-xs text-muted-foreground">
-                {format(new Date(transaction.date), 'MMM d, yyyy')}
+                {format(parseISO(transaction.date), 'MMM d, yyyy')}
               </span>
             )}
             <CategoryBadge

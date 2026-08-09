@@ -35,9 +35,15 @@ import {
 } from '@/hooks/useReports';
 import { SpendingHeatmap } from './SpendingHeatmap';
 import { tagChartHeightPx } from './tagChart';
+import {
+  CLAMPED_TABLE_TEXT,
+  PHONE_TABLE_DENSITY,
+  TABLE_TEXT_CELL_WIDTH,
+} from './utils';
 import { MONTH_NAMES_FULL, yearOptionsFrom } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useFinePointerDesktop } from '@/hooks/useFinePointerDesktop';
 import { useReportYears } from '@/hooks/useReportYears';
 import { cn } from '@/lib/utils';
 
@@ -50,6 +56,10 @@ export function PatternsTab() {
   const [year, setYear] = useState(now.getFullYear());
   const [tagYear, setTagYear] = useState(now.getFullYear());
   const [tagMonth, setTagMonth] = useState(0);
+  // Mirrors the heatmap's own gate exactly — the placeholder has to reserve
+  // room for the branch that is about to render, and that branch is now chosen
+  // on pointer capability, not width.
+  const isMobile = !useFinePointerDesktop();
   const heatmap = useSpendingHeatmap(year);
   const recurring = useRecurring(year);
   const tags = useTagBreakdown(tagYear, tagMonth);
@@ -69,7 +79,11 @@ export function PatternsTab() {
   return (
     <div className="flex flex-col gap-6">
       {/* Spending Heatmap */}
-      <Card aria-labelledby="spending-heatmap-heading">
+      {/* `role="region"` is what makes the `aria-labelledby` beneath it do
+          anything. `Card` renders a bare <div>, whose implicit `generic` role
+          is on ARIA's name-prohibited list — so the association was silently
+          discarded and the card read as unnamed. */}
+      <Card role="region" aria-labelledby="spending-heatmap-heading">
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <CardTitle
             id="spending-heatmap-heading"
@@ -94,7 +108,17 @@ export function PatternsTab() {
           </Select>
         </CardHeader>
         <CardContent>
-          {heatmap.loading && <Skeleton className="h-[120px] w-full" />}
+          {/* Sized per BRANCH, because the two presentations are nowhere near
+              the same height and one number cannot be right for both. The old
+              flat 120px under-reserved even the desktop grid (7 rows of
+              ~21px cells plus the legend is closer to 200px), so the card
+              grew when data landed; a phone month grid plus the month picker
+              is roughly twice that again. */}
+          {heatmap.loading && (
+            <Skeleton
+              className={cn('w-full', isMobile ? 'h-[420px]' : 'h-[200px]')}
+            />
+          )}
           {heatmap.error && (
             <Alert variant="destructive">
               <AlertCircle className="h-4 w-4" />
@@ -119,7 +143,12 @@ export function PatternsTab() {
       </Card>
 
       {/* Recurring Expenses */}
-      <Card aria-labelledby="recurring-heading">
+      {/* Named for the same reason as the heatmap card above: `Card` is a
+          bare <div>, whose implicit `generic` role is name-prohibited, so the
+          `aria-labelledby` was discarded. All THREE carry it — one landmark
+          among three identical cards would put a single arbitrary card in a
+          landmark list and hide its siblings. */}
+      <Card role="region" aria-labelledby="recurring-heading">
         <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-4">
           <CardTitle id="recurring-heading" className="text-base font-semibold">
             Recurring Expenses
@@ -149,7 +178,10 @@ export function PatternsTab() {
                   recurring.fetching && !recurring.loading && 'opacity-60',
                 )}
               >
-                <Table>
+                {/* Same phone-width density as Top Merchants in SpendingTab —
+                    see the note there. Five columns here, so 160px of padding
+                    before any content. */}
+                <Table className={PHONE_TABLE_DENSITY}>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Description</TableHead>
@@ -164,7 +196,21 @@ export function PatternsTab() {
                   <TableBody>
                     {recurring.data.map((entry) => (
                       <TableRow key={entry.description}>
-                        <TableCell>{entry.description}</TableCell>
+                        {/* Same exposure and same treatment as Top Merchants
+                            in SpendingTab — see the note there for why
+                            `overflow-wrap:anywhere` (not `break-words`) is the
+                            class that bounds a table cell's WIDTH, why
+                            `line-clamp-3` is needed to bound its HEIGHT, and
+                            why three clamped lines beat one truncated one on a
+                            surface with no row expansion. */}
+                        <TableCell className={TABLE_TEXT_CELL_WIDTH}>
+                          <div
+                            className={CLAMPED_TABLE_TEXT}
+                            title={entry.description}
+                          >
+                            {entry.description}
+                          </div>
+                        </TableCell>
                         <TableCell className="text-right font-mono tabular-nums">
                           {fmt(entry.monthly_avg)}
                         </TableCell>
@@ -204,7 +250,7 @@ export function PatternsTab() {
       </Card>
 
       {/* Tag Analysis */}
-      <Card aria-labelledby="tag-analysis-heading">
+      <Card role="region" aria-labelledby="tag-analysis-heading">
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 pb-4">
           <CardTitle
             id="tag-analysis-heading"

@@ -111,6 +111,241 @@ describe('ChartLegendContent ordering', () => {
   });
 });
 
+describe('ChartLegendContent swatch colour', () => {
+  // A gradient-filled series reports `color: "url(#…)"` in the legend payload,
+  // because recharts reports a Bar's `fill` verbatim. That is not a CSS colour,
+  // so React drops the declaration and the swatch renders fully transparent —
+  // browser-verified on Savings' Year-over-Year, where both swatches computed
+  // to `rgba(0, 0, 0, 0)` beside three gradient shapes.
+  //
+  // Literal colours, not `hsl(var(--primary))`. Checked directly rather than
+  // assumed: happy-dom keeps `var(--color-x)` VERBATIM in `style.backgroundColor`
+  // and drops `url(#foo)` to `''`. So a var-based fixture would read back the
+  // same `var(...)` string whether the swatch came from the config or from the
+  // payload — the config path and the mutant would be indistinguishable. A
+  // literal is what makes the two differ.
+  const CONFIG = {
+    gradientSeries: { label: 'Gradient Series', color: 'rgb(1, 2, 3)' },
+    plainSeries: { label: 'Plain Series' },
+    emptyColourSeries: { label: 'Empty Colour Series', color: '' },
+  } satisfies ChartConfig
+
+  const DATA = [
+    { name: 'Jan', gradientSeries: 3, plainSeries: 2, emptyColourSeries: 1 },
+    { name: 'Feb', gradientSeries: 4, plainSeries: 3, emptyColourSeries: 2 },
+  ]
+
+  /** Each legend chip's label and the inline colour of its swatch. */
+  function swatches(container: HTMLElement): Record<string, string> {
+    const wrapper = container.querySelector('.recharts-legend-wrapper')
+    if (!wrapper) throw new Error('no .recharts-legend-wrapper rendered')
+    const out: Record<string, string> = {}
+    for (const chip of wrapper.querySelectorAll<HTMLElement>(
+      ':scope > div > div'
+    )) {
+      const swatch = chip.querySelector<HTMLElement>('div')
+      out[chip.textContent?.trim() ?? ''] = swatch?.style.backgroundColor ?? ''
+    }
+    return out
+  }
+
+  function renderLegend() {
+    return render(
+      <ChartContainer config={CONFIG}>
+        <BarChart data={DATA}>
+          <defs>
+            <linearGradient id="swatch-test-gradient" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="5%" stopColor="rgb(1, 2, 3)" stopOpacity={0.8} />
+              <stop offset="95%" stopColor="rgb(1, 2, 3)" stopOpacity={0.1} />
+            </linearGradient>
+          </defs>
+          <XAxis dataKey="name" />
+          <ChartLegend content={<ChartLegendContent />} itemSorter={null} />
+          <Bar dataKey="gradientSeries" fill="url(#swatch-test-gradient)" />
+          <Bar dataKey="plainSeries" fill="rgb(9, 8, 7)" />
+          <Bar dataKey="emptyColourSeries" fill="rgb(4, 5, 6)" />
+        </BarChart>
+      </ChartContainer>
+    )
+  }
+
+  test('a gradient-filled series takes its swatch from the config', () => {
+    const { container } = renderLegend()
+    // Asserted POSITIVELY and exactly. `not.toBe('url(#…)')` would pass on the
+    // mutant too: happy-dom rejects the invalid value and the style reads back
+    // as the empty string either way.
+    expect(swatches(container)['Gradient Series']).toBe('rgb(1, 2, 3)')
+  })
+
+  test('positive control: a series with no config colour still uses its own', () => {
+    // Guards the other direction. Resolving from the config must not become
+    // "only ever the config" — a series that declares no colour has to keep
+    // falling through to the payload exactly as it did before.
+    const { container } = renderLegend()
+    expect(swatches(container)['Plain Series']).toBe('rgb(9, 8, 7)')
+  })
+
+  test('an empty-string config colour counts as absent, not as a colour', () => {
+    // This is what makes `||` load-bearing rather than a style choice: under
+    // `??` the empty string wins and the swatch goes transparent again. It
+    // matches how ChartStyle filters (`config.theme || config.color`), so the
+    // two cannot disagree about whether a series has a colour.
+    const { container } = renderLegend()
+    expect(swatches(container)['Empty Colour Series']).toBe('rgb(4, 5, 6)')
+  })
+})
+
+describe('ChartLegendContent React keys', () => {
+  // `key={item.value}` keyed each chip by the series NAME, which two series may
+  // legitimately share. The obvious test is vacuous — React renders both chips
+  // regardless — so the only assertion that distinguishes the two is React's
+  // duplicate-key warning, and a spy that never fires proves nothing without a
+  // control that makes it fire.
+  const DUPLICATE_KEY_WARNING = /Encountered two children with the same key/
+
+  // `item.value` is recharts' `name ?? dataKey`, NOT the config label — the
+  // first version of this fixture gave the two series the same config LABEL and
+  // survived the mutant, because their dataKeys still differed. An explicit
+  // shared `name` is what makes `key={item.value}` actually collide, and it is
+  // a legitimate thing for a chart to do: two series can share a display name
+  // and be distinguished by the axis they sit on.
+  const CONFIG = {
+    first: { label: 'Same Name', color: 'rgb(1, 1, 1)' },
+    second: { label: 'Same Name', color: 'rgb(2, 2, 2)' },
+  } satisfies ChartConfig
+
+  const SHARED_NAME = 'Shared Series Name'
+  const DATA = [{ name: 'Jan', first: 1, second: 2 }]
+
+  test('positive control: the spy DOES catch a duplicate key', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(
+        <div>
+          {['dup', 'dup'].map((k) => (
+            <span key={k}>{k}</span>
+          ))}
+        </div>
+      )
+      expect(
+        spy.mock.calls.some((args) =>
+          args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
+        )
+      ).toBe(true)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('two series sharing a name do not collide on a React key', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(
+        <ChartContainer config={CONFIG}>
+          <BarChart data={DATA}>
+            <XAxis dataKey="name" />
+            <ChartLegend content={<ChartLegendContent />} itemSorter={null} />
+            <Bar dataKey="first" name={SHARED_NAME} fill="var(--color-first)" />
+            <Bar dataKey="second" name={SHARED_NAME} fill="var(--color-second)" />
+          </BarChart>
+        </ChartContainer>
+      )
+      // Both chips render either way — that is why this is asserted on the
+      // warning and not on the DOM.
+      expect(screen.getAllByText('Same Name')).toHaveLength(2)
+      expect(
+        spy.mock.calls.filter((args) =>
+          args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
+        )
+      ).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
+describe('ChartLegendContent overflow', () => {
+  // WIRING SEAM, and it says so. happy-dom performs no layout, so the defect
+  // this pins — recharts gives the legend wrapper a FIXED pixel width, and a
+  // `nowrap` row with `justify-center` pushed the excess out of BOTH edges, so
+  // the first and last chips were clipped in half with ~10 series — is not
+  // observable here at all. What IS observable is that the classes which fix it
+  // are on the elements that need them.
+  //
+  // Browser-measured on Category Trends with 6 series at a 390px viewport: the
+  // row wraps to 3 lines inside the 283px wrapper, no chip lands outside the
+  // SVG, and recharts re-measures so the plot ends above the legend rather than
+  // under it.
+  const CONFIG = {
+    alpha: { label: 'Alpha', color: 'rgb(1, 1, 1)' },
+  } satisfies ChartConfig
+
+  test('the legend row wraps and its chips do not break mid-label', () => {
+    const { container } = render(
+      <ChartContainer config={CONFIG}>
+        <BarChart data={[{ name: 'Jan', alpha: 1 }]}>
+          <XAxis dataKey="name" />
+          <ChartLegend content={<ChartLegendContent />} itemSorter={null} />
+          <Bar dataKey="alpha" fill="var(--color-alpha)" />
+        </BarChart>
+      </ChartContainer>
+    )
+    const row = container.querySelector('.recharts-legend-wrapper > div')
+    if (!row) throw new Error('no legend row rendered')
+    expect(row).toHaveClass('flex-wrap')
+
+    const chips = row.querySelectorAll(':scope > div')
+    expect(chips.length).toBeGreaterThan(0)
+    for (const chip of chips) {
+      // Without this a long label wraps INSIDE its own chip while the row
+      // refuses to wrap — the shape the owner's screenshot showed.
+      expect(chip).toHaveClass('whitespace-nowrap')
+    }
+  })
+
+  test('a chip is shrinkable and bounded, so nowrap cannot re-create the overflow', () => {
+    // `whitespace-nowrap` alone reintroduces the exact defect it was added to
+    // help fix. A flex item's automatic minimum size is its min-content, and
+    // nowrap raises that to the WHOLE string — so the chip becomes
+    // unshrinkable, and recharts sizes the legend wrapper in fixed pixels.
+    // Category names are user-supplied and the server caps them at 100
+    // characters (`internal/api/limits.go`), so one long one is enough.
+    //
+    // The three classes are one mechanism and each is load-bearing: `min-w-0`
+    // lifts the automatic minimum, `max-w-full` stops the chip exceeding the
+    // wrapper, `overflow-hidden` contains what is left, and the inner
+    // `truncate` makes the remainder an ellipsis rather than a cut glyph.
+    // happy-dom lays nothing out, so this asserts the wiring; the geometry was
+    // measured in Chrome with a 100-character category on Category Trends.
+    const LONG = 'Household Groceries Pharmacy And Sundries '.padEnd(100, 'Z')
+    expect(LONG).toHaveLength(100)
+
+    const { container } = render(
+      <ChartContainer config={{ alpha: { label: LONG, color: 'rgb(1, 1, 1)' } }}>
+        <BarChart data={[{ name: 'Jan', alpha: 1 }]}>
+          <XAxis dataKey="name" />
+          <ChartLegend content={<ChartLegendContent />} itemSorter={null} />
+          <Bar dataKey="alpha" fill="var(--color-alpha)" />
+        </BarChart>
+      </ChartContainer>
+    )
+
+    const chip = container.querySelector('.recharts-legend-wrapper > div > div')
+    if (!chip) throw new Error('no legend chip rendered')
+    expect(chip).toHaveClass('min-w-0', 'max-w-full', 'overflow-hidden')
+
+    // The label sits in its own truncating span rather than as a bare text
+    // node — `truncate` on the flex CONTAINER would fight `flex`, and a text
+    // node cannot be ellipsised at all.
+    const label = chip.querySelector('span')
+    expect(label).not.toBeNull()
+    expect(label).toHaveClass('truncate')
+    // Positive control: the full name still reaches the DOM. Bounding it must
+    // not shorten the string, only how much of it is painted.
+    expect(label).toHaveTextContent(LONG)
+  })
+})
+
 describe('ChartTooltipContent money rendering', () => {
   // Our chart.tsx is a FORK of shadcn's, differing from upstream in two ways
   // that matter for a currency app. Neither is covered anywhere else, and a
