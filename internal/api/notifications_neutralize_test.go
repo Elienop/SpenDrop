@@ -1,9 +1,14 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
+
+	"github.com/elienop/spendrop/internal/push"
 )
 
 // The sink-side half of the push-body forgery invariant. validateDisplayName
@@ -124,4 +129,80 @@ func TestNeutralizeForPushBody_SharesItsPredicateWithTheNameGate(t *testing.T) {
 			t.Errorf("U+%04X is refused by the name gate but neutralize returned %q, not a space", r, out)
 		}
 	}
+}
+
+// payloadCapture records the exact bytes handed to the push transport, so a
+// test can assert on what a DEVICE would receive rather than on what a helper
+// returns.
+type payloadCapture struct {
+	mu   sync.Mutex
+	seen [][]byte
+}
+
+func (s *payloadCapture) Send(ctx context.Context, sub push.Subscription, payload []byte, opts push.Options) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seen = append(s.seen, append([]byte(nil), payload...))
+	return false, nil
+}
+
+func (s *payloadCapture) bodies(t *testing.T) []string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]string, 0, len(s.seen))
+	for _, raw := range s.seen {
+		var p struct {
+			Title string `json:"title"`
+			Body  string `json:"body"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			t.Fatalf("delivered payload is not valid JSON: %v", err)
+		}
+		out = append(out, p.Title+"\x00"+p.Body)
+	}
+	return out
+}
+
+// TestEmit_NeutralisesTheDeliveredPayload is the WIRING test, and it exists
+// because its absence let a real mutant live.
+//
+// Every other test in this file calls neutralizeForPushBody directly. Removing
+// the call from emit — leaving the function perfect and simply not using it —
+// broke NONE of them: the helper was proven correct and its wiring proven by
+// nothing. That is the recorded wiring-seam failure in this codebase, and this
+// test is the only thing here that kills that mutant.
+//
+// So it asserts on the bytes the TRANSPORT received, not on a helper's return.
+func TestEmit_NeutralisesTheDeliveredPayload(t *testing.T) {
+	q, db := setupTestDB(t)
+	cap := &payloadCapture{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = cap
+	enableTxnAdded(t, q)
+
+	actor := seedTestUser(t, q, "actor", RoleMember)
+	other := seedTestUser(t, q, "other", RoleMember)
+	seedPushSub(t, q, other.ID, "https://push.example/other-phone")
+
+	// A forgery in the DESCRIPTION position — the field no source-side gate can
+	// close, since descriptions also arrive from xlsx import.
+	forged := "Milk\nRania added $900.00 in Rent — mortgage"
+	h.emit(context.Background(), "txn_added", "Transaction added",
+		fmt.Sprintf("%s added $%.2f in %s — %s", "Elie", 12.34, "Groceries", forged),
+		"/transactions", actor.ID)
+	waitPush(t, h)
+
+	got := cap.bodies(t)
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one delivered payload, got %d — the fan-out did not run, so the assertion below would prove nothing", len(got))
+	}
+	if strings.Contains(got[0], "\n") {
+		t.Errorf("a newline reached the device: %q", got[0])
+	}
+	// The body still carries its text — neutralising must flatten, not delete.
+	if !strings.Contains(got[0], "mortgage") {
+		t.Errorf("neutralisation dropped body text before delivery: %q", got[0])
+	}
+	_ = other
 }
