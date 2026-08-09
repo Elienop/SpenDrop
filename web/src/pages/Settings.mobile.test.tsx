@@ -250,11 +250,17 @@ describe('choosing a section', () => {
   });
 
   test('focus comes back to the trigger, not to <body>', async () => {
-    // A CDP-synthesized click on the option reported `document.activeElement`
-    // as BODY, which would mean a keyboard user is dropped to the top of the
-    // document on every section change. `user-event` drives the full pointer
-    // sequence Radix listens for, so it is the oracle that decides — this
-    // repo has a recorded finding that synthesized clicks lie on Radix.
+    // CORRECTION (this pass): an earlier note here blamed the browser oracle,
+    // reading "CDP-synthesized clicks lie on Radix" into a disagreement that
+    // was really a disagreement about CODE — the CDP run measured the surface
+    // BEFORE a local `onCloseAutoFocus` was added and this test measured it
+    // after. Both oracles agree once they measure the same build: with the
+    // shared wrapper's old blanket `preventDefault()` restored, `user-event`
+    // also reports `<body>` here.
+    //
+    // Nothing local fixes it now. `ui/select.tsx` passes `onCloseAutoFocus`
+    // straight through, so Radix's own restore runs, and this test covers the
+    // phone's only Settings navigation control end to end.
     const user = setup();
     const trigger = renderPhone('admin');
     await user.click(trigger);
@@ -331,6 +337,10 @@ describe('the control is thumb-sized', () => {
     // every option in the open list was 32px — `SelectItem`'s stock `py-1.5`
     // around 20px of `text-sm`. The tap that actually chooses a section was
     // the one under the floor, which is the wrong half to get right.
+    //
+    // The floor now comes from `ui/select.tsx` rather than a `className` here,
+    // so this asserts the phone still GETS it — the per-call-site version was
+    // removed once the primitive covered all thirteen consumers.
     const user = setup();
     await user.click(renderPhone('admin'));
     const options = screen.getAllByRole('option');

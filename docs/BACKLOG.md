@@ -265,10 +265,17 @@ phone picker). `SelectItem`'s stock `py-1.5` around `text-sm` gives a **32px** o
 TRIGGER meets the 44px floor everywhere; the option that is actually tapped to choose does not —
 the wrong half to get right.
 
-Fixed at the Settings call site only. It is app-wide: **QuickAdd's category picker is the one to
-check first**, since it is on the daily capture surface and its options are the primary
-interaction. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
+Fixed at the Settings call site only. It is app-wide: **13 non-test consumers** import
+`SelectItem`. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
 not folded into a branch that had already been reviewed.
+
+**Correction (2026-08-09).** This entry originally said "QuickAdd's category picker is the one to
+check first, since it is on the daily capture surface". **That is false** — `QuickAdd.tsx` imports
+`CategoryChips`, not `Select`, and is not among the 13 consumers. B29 does **not** touch the daily
+capture surface; **B24 alone does**. The claim was written from memory rather than from a grep and
+was caught only when it was about to be handed to an agent as a premise. The consumers that do sit
+on a frequently-used path are `TransactionRow`, `TransactionEditSheet`, `Dashboard` and
+`PaginationBar`.
 
 Related and worth doing in the same pass: **Radix Select drops focus to `<body>` on selection** —
 verified three ways (user-event, a 2s `waitFor` to rule out late arrival, and real Chrome key
@@ -283,6 +290,71 @@ the desktop tab strip and the new phone picker. A `?tab=` value is honoured *int
 never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
 not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
 **Effort:** small.
+
+### B31 — Select TRIGGERS are 32–40px, app-wide
+**Verified: measured** (Chrome, 2026-08-09, true device metrics at 360px and 1440px, after B29's
+option fix landed). B29's own filing claimed "the TRIGGER meets the 44px floor everywhere" and used
+that to argue only the option was wrong. **That claim was false.** `SelectTrigger`'s stock class is
+`h-10` = 40px, and several call sites shrink it further:
+
+| Trigger | Height | Where |
+|---|---|---|
+| ColorThemePicker | **32px** | app header, every page |
+| PaginationBar "Rows per page" | **32px** at 1440, 44px at 360 | Transactions |
+| Reports "Time Period" / "Budget Year" | **36px** | all four Reports tabs |
+| Dashboard "Month" / "Year" | **36px** | `/` |
+| Budgets year/month | **40px** | Budgets |
+| Categories type, BulkEdit category, TransactionRow inline, TransactionEditSheet | **40px** | various |
+| Settings section picker | 44px | the only one that meets the floor (`h-11`, set in B9 slice 3) |
+
+So the touch-floor gap was *both* halves, not just the option. Deliberately NOT folded into the
+B29 branch: `SelectTrigger` carries `h-10` as a fixed height that call sites override with their
+own `h-9`/`h-11`, so moving it to a floor changes chrome density on nine surfaces at two widths
+and needs its own verification pass — the same reasoning that kept the option fix off the slice-3
+branch. **Effort:** medium. Do not fix by adding `min-h-11` blindly; several of these sit in tight
+toolbars where a taller control reflows the row.
+
+### B33 — Enter cannot pick a category in the phone edit sheet
+**Verified: reproduced by me** (Chrome, 360px, real key events, 2026-08-09). In
+`TransactionEditSheet` the category Select opens on Enter and moves on ArrowDown, but Enter to
+choose does **nothing**: 21 options stay mounted, the trigger's value stays `FoodS`, focus stays on
+an option, and the sheet stays open. Mouse and Space both work. The same Select inside
+`BulkEditDialog` handles Enter correctly, so it is the call site, not the primitive.
+
+Cause (reported by the build agent, code site confirmed): the `onKeyDownCapture` guard at
+`TransactionEditSheet.tsx:244`. React synthetic events propagate along the REACT tree, so a
+portalled `SelectContent` is still a React descendant of that div, and `stopPropagation()` in the
+CAPTURE phase kills Radix's own key handler before it runs. An identical guard sits at
+`TransactionRow.tsx:184`.
+
+Proposed one-word fix — `onKeyDownCapture` → `onKeyDown` — is the agent's, **not verified by me**;
+the guard exists to keep Enter from submitting the form, so the bubble-phase version needs its own
+test proving both halves (Select commits, form does not submit). **NOT FIXED:** a distinct defect
+with a subtle fix, on a branch that had already grown twice. **Effort:** small, plus a real test.
+
+### B34 — Dashboard's Month/Year still drop focus to `<body>`
+**Verified: reported by the build agent, NOT independently reproduced by me.** Both widths,
+keyboard and mouse, and unaffected by the B29 central fix because the trigger's DOM node is
+*replaced* during the value change — `useDashboard` keys on `['dashboard', year, month]`, so a
+period change flips `isLoading` and `Dashboard.tsx:282` returns the whole-page skeleton, leaving
+Radix to focus a detached element. Agent's proposed `placeholderData: keepPreviousData` would also
+activate the already-written `refetching && 'opacity-60'` at `Dashboard.tsx:328`, currently dead
+for period changes. **NOT FIXED** — it changes data-fetching semantics, and this repo has a
+recorded incident where `keepPreviousData` staled a count. Treat the diagnosis as unverified until
+someone reproduces it.
+
+### B35 — Settings → Import / Export overflows 36px at 360
+**Verified: reported by the build agent, NOT independently reproduced by me.** A
+`whitespace-nowrap` Button with its right edge at 396 against a 360 viewport. Pre-existing and
+unrelated to the Select work. **Effort:** small.
+
+### B32 — an unknown route renders a blank shell, not a 404
+**Verified: reproduced** (2026-08-09). The dashboard lives at `/`; navigating to `/dashboard` — a
+plausible URL a user would type or bookmark — renders the full app chrome with an **empty** main
+container: no content, no 404, no redirect, and no console error. Found by walking into it while
+verifying B29 and briefly mistaking it for a rendering defect in the branch.
+**Effort:** small — a catch-all route. **Note:** worth checking whether the SW precache serves the
+shell for arbitrary paths, since that is what makes the blank state look like a successful load.
 
 ---
 
