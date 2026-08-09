@@ -217,10 +217,18 @@ func (h *Handler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Default display name to username if not provided
+	// Default display name to username if not provided.
+	//
+	// validateDisplayName bounds LENGTH AND CONTENT, and it is the same call on
+	// all four paths that write this column — the name is interpolated into the
+	// activity push body, so a newline in it forges a line in another member's
+	// notification. See display_name.go for the per-codepoint-class reasoning.
+	//
+	// The fallback needs no check of its own: req.Username is already past
+	// isValidUsername, which admits only [a-zA-Z0-9_-].
 	displayName := req.DisplayName
-	if charLen(displayName) > MaxDisplayNameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
+	if err := validateDisplayName(displayName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if displayName == "" {

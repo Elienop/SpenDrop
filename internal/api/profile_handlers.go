@@ -3,7 +3,6 @@ package api
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
 
@@ -70,13 +69,21 @@ func (h *Handler) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "display_name is required")
 		return
 	}
-	// CHARACTERS via charLen, and the same wording as the three paths above.
-	// len() would refuse an Arabic name at about half the cap it advertises,
-	// and this household writes Arabic alongside English — see charLen's
-	// comment in limits.go. Pinned at the boundary by
+	// LENGTH AND CONTENT, through the one validator the other three write paths
+	// also call — see display_name.go for the per-codepoint-class reasoning.
+	//
+	// The length half is CHARACTERS via charLen, with the same wording as the
+	// three paths above. len() would refuse an Arabic name at about half the cap
+	// it advertises, and this household writes Arabic alongside English — see
+	// charLen's comment in limits.go. Pinned at the boundary by
 	// TestHandleUpdateMe_DisplayNameLimitIsCharacters.
-	if charLen(req.DisplayName) > MaxDisplayNameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
+	//
+	// The content half matters most HERE of the four. This is the only path a
+	// member can reach unaided, and it is the path a name arrives on by paste —
+	// so it is where a crafted name would be introduced, and also where a
+	// pre-existing one gets replaced, since the whole request is the new name.
+	if err := validateDisplayName(req.DisplayName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
