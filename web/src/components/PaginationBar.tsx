@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { TRANSACTION_PAGE_SIZES } from '@/lib/constants';
+import { TOUCH_TARGET_SQUARE } from '@/lib/touch-target';
 
 export interface PaginationBarProps {
   page: number;
@@ -32,10 +33,12 @@ export interface PaginationBarProps {
    */
   leadingActions?: ReactNode;
   /**
-   * Phone layout: the numbered page buttons collapse to a "Page N of M"
+   * Narrow layout: the numbered page buttons collapse to a "Page N of M"
    * readout. Nine 32px buttons plus the rows-per-page control need ~440px and
    * a 390px viewport has 358px — unwrapped they overflow the card, and wrapped
-   * they cost two extra rows both above AND below the list.
+   * they cost two extra rows both above AND below the list. (Unlike the touch
+   * floor below, this one really is about available room, so the caller
+   * decides it from the viewport width.)
    */
   compact?: boolean;
   /** Overridable so a page with a different page-size menu can reuse this. */
@@ -76,10 +79,20 @@ function getPageNumbers(page: number, totalPages: number): number[] {
  * same 44px controls, which is exactly the point at which a duplicated
  * component stops being cheap.
  *
- * Every control is `size-11` on a phone and `md:size-8` above it — a pager is
- * mostly small icon buttons sitting next to each other, which is the worst
- * shape for a thumb, and unlike a checkbox there is nothing here whose visible
- * size has to stay put.
+ * Every control is 32px by default and floored at 44px when the pointer is
+ * coarse. A pager is mostly small icon buttons sitting next to each other,
+ * which is the worst shape for a thumb, and unlike a checkbox there is nothing
+ * here whose visible size has to stay put — so the box grows, not just the hit
+ * area.
+ *
+ * The gate is the POINTER, not the viewport width, and this bar is the reason
+ * why. It used to read `size-11 md:size-8`, which hands a ~1130px touch tablet
+ * in landscape the 32px desktop sizes. Worse, the trigger's floor now comes
+ * from `SelectTrigger` itself and is pointer-gated: leaving the buttons on a
+ * width gate would put a 44px Select beside six 32px buttons in one flex row
+ * on exactly that tablet — a 12px step, which is uglier than the coherent-if-
+ * small 32px it replaced. The trigger and its neighbours have to share one
+ * gate; see `@/lib/touch-target` for the two levers.
  */
 export function PaginationBar({
   page,
@@ -106,11 +119,13 @@ export function PaginationBar({
         >
           {/* The visible "Rows per page" text is a <p>, not a <label>, so it
               names nothing programmatically — the trigger needs its own name
-              or it announces only its value. */}
-          <SelectTrigger
-            className="h-11 w-[70px] md:h-8"
-            aria-label="Rows per page"
-          >
+              or it announces only its value.
+
+              `h-8` is the density only; the 44px touch floor arrives from
+              `SelectTrigger`'s own `coarse:min-h-11`, which outranks this
+              because `min-h` and `h` are separate tailwind-merge groups and
+              CSS clamps the used height up. Nothing to add here. */}
+          <SelectTrigger className="h-8 w-[70px]" aria-label="Rows per page">
             <SelectValue />
           </SelectTrigger>
           <SelectContent side="top">
@@ -130,7 +145,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className="hidden size-11 md:size-8 lg:flex"
+          className={cn('hidden size-8 lg:flex', TOUCH_TARGET_SQUARE)}
           onClick={() => onPageChange(1)}
           disabled={page <= 1}
           aria-label="Go to first page"
@@ -140,7 +155,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className="size-11 md:size-8"
+          className={cn('size-8', TOUCH_TARGET_SQUARE)}
           onClick={() => onPageChange(page - 1)}
           disabled={page <= 1}
           aria-label="Go to previous page"
@@ -160,7 +175,8 @@ export function PaginationBar({
               <span
                 key={`ellipsis-${i}`}
                 className={cn(
-                  'flex size-11 items-center justify-center text-sm text-muted-foreground md:size-8',
+                  'flex size-8 items-center justify-center text-sm text-muted-foreground',
+                  TOUCH_TARGET_SQUARE,
                 )}
                 aria-hidden
               >
@@ -171,7 +187,7 @@ export function PaginationBar({
                 key={p}
                 variant={p === page ? 'outline' : 'ghost'}
                 size="icon"
-                className="size-11 text-xs md:size-8"
+                className={cn('size-8 text-xs', TOUCH_TARGET_SQUARE)}
                 onClick={() => onPageChange(p)}
                 aria-current={p === page ? 'page' : undefined}
               >
@@ -184,7 +200,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className="size-11 md:size-8"
+          className={cn('size-8', TOUCH_TARGET_SQUARE)}
           onClick={() => onPageChange(page + 1)}
           disabled={page >= totalPages}
           aria-label="Go to next page"
@@ -194,7 +210,7 @@ export function PaginationBar({
         <Button
           variant="outline"
           size="icon"
-          className="hidden size-11 md:size-8 lg:flex"
+          className={cn('hidden size-8 lg:flex', TOUCH_TARGET_SQUARE)}
           onClick={() => onPageChange(totalPages)}
           disabled={page >= totalPages}
           aria-label="Go to last page"

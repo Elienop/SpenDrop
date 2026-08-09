@@ -1,22 +1,57 @@
 /**
- * Recipes for reaching the 44px touch floor on phone-width surfaces.
+ * Recipes for reaching the 44px touch floor.
  *
- * Two levers, and which one to reach for is a design question, not a taste
- * one:
+ * The first question is WHAT TO GATE ON, and the answer is the pointer, not
+ * the viewport width. `md:` reads as "phone versus desktop" but it measures
+ * neither: the household's Galaxy Tab S10 FE is ~1130px in landscape, so it
+ * takes the desktop side of every breakpoint while still being a touch
+ * screen — a control sized `h-11 md:h-8` gives that tablet a 32px target,
+ * which is the exact hole this file exists to close. `coarse:` (registered in
+ * `tailwind.config.ts` as `@media (pointer: coarse)`) asks the question the
+ * floor is actually about. Reach for `md:` only when the thing being decided
+ * really is about available room — a table collapsing to cards, a sidebar
+ * folding away — and never for a tap target.
  *
- *   - GROW THE BOX (`h-11 md:h-8`, `size-11 md:size-8`). Correct for buttons.
- *     A control that is tapped ought to look tappable, and on a phone there is
- *     room for it. Desktop keeps its denser sizing through the `md:` half.
+ * The second question is WHICH LEVER, and it is a design question rather than
+ * a taste one:
  *
- *   - GROW ONLY THE HIT AREA (the constants below). Correct where the visible
- *     size is load-bearing — a checkbox that must stay optically aligned with
- *     the text beside it, or an icon pinned to a corner. Padding would move
- *     the thing it is trying to keep still.
+ *   - RAISE THE FLOOR (`coarse:min-h-11`, or `TOUCH_TARGET_SQUARE` for
+ *     something square). Correct for most controls, and it composes: because
+ *     `min-h`/`min-w` and `h`/`w` are separate tailwind-merge conflict groups,
+ *     a floor set on a shared primitive SURVIVES every call site's own
+ *     `h-8`/`h-9`, and CSS clamps the used size up. That is why `SelectTrigger`
+ *     carries `coarse:min-h-11` in `components/ui/select.tsx` and not one
+ *     Select call site had to change. A floor also lets content grow past it,
+ *     which a fixed height does not.
+ *
+ *   - GROW ONLY THE HIT AREA (`TOUCH_TARGET_CHECKBOX` below). Correct where
+ *     the VISIBLE size is load-bearing — a checkbox that must stay optically
+ *     aligned with the text beside it, or an icon pinned to a corner. Growing
+ *     the box would move the thing it is trying to keep still.
+ *
+ * What NOT to do: an ungated floor. `twMerge('h-10 w-full min-h-11', 'h-9')`
+ * keeps both classes, so an ungated `min-h-11` on a primitive silently
+ * inflates every dense trigger on a mouse desktop too. Desktop density is a
+ * deliberate constraint here, so the floor is always behind `coarse:`.
  *
  * Shared rather than per-page: Transactions and Trash both grew phone card
- * lists in the same slice, and a second copy of the recipe is a second place
- * for the inset to drift away from the 44px it is meant to produce.
+ * lists in the same slice, and a second copy of a recipe is a second place for
+ * it to drift away from the 44px it is meant to produce.
  */
+
+/**
+ * The 44px floor on BOTH axes, for a control whose target is square — an icon
+ * button, or a spacer that has to keep its place in a row of them. A square
+ * target needs width as well as height; a height-only floor leaves a 32px-wide
+ * button that is merely taller.
+ *
+ * Additive, not a size: the caller keeps its own base `size-*` for fine
+ * pointers, and this only clamps upward when the pointer is coarse. So the
+ * desktop appearance of anything it is added to is unchanged at every width.
+ *
+ * Two tokens rather than one because Tailwind 3 has no `min-size-*`.
+ */
+export const TOUCH_TARGET_SQUARE = "coarse:min-h-11 coarse:min-w-11";
 
 /**
  * Grows a 16px Checkbox to a 44px tap target without moving it: the

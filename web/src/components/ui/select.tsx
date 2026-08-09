@@ -16,10 +16,32 @@ const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
 >(({ className, children, ...props }, ref) => (
+  // `coarse:min-h-11` is the 44px touch floor for the trigger, and every part
+  // of that token is load-bearing:
+  //
+  //   - `coarse:`, not `md:`. The gate is the POINTER, not the width. The
+  //     household's tablet is ~1130px in landscape — above `md`, so a width
+  //     gate hands a touch screen the 32–40px desktop sizes. Measured, not
+  //     hypothetical. See the variant's own note in `tailwind.config.ts`.
+  //   - gated, not unconditional. `twMerge('h-10 w-full min-h-11', 'h-9')`
+  //     keeps BOTH (`min-h` and `h` are separate conflict groups), so an
+  //     ungated floor would silently inflate every `h-8`/`h-9` trigger on a
+  //     mouse desktop. Desktop density is a stated constraint.
+  //   - `min-h`, not `h`. Because the two do not conflict in tailwind-merge,
+  //     the floor SURVIVES every call site's `h-8`/`h-9`/`h-10` and CSS then
+  //     clamps the used height up to 44px. A gated fixed height instead
+  //     (a `coarse:h-*` token) would leave both classes standing with equal
+  //     specificity — a media query adds no specificity — and let stylesheet
+  //     order decide the winner.
+  //
+  // So call sites need no edit and must not re-fix a height below the floor:
+  // there is nothing to opt out of, because on a fine pointer the rule never
+  // matches. `SelectItem` carries the matching floor — a big trigger opening
+  // onto 32px rows is no floor at all.
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background data-[placeholder]:text-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background coarse:min-h-11 data-[placeholder]:text-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
       className
     )}
     {...props}
@@ -156,10 +178,15 @@ const SelectItem = React.forwardRef<
   // call sites: the option is the element the user actually taps to CHOOSE,
   // and stock `py-1.5` around `text-sm` measured 32px in Chrome at 360px. A
   // floor on the trigger you open and not on the row you then hit is no floor
-  // at all. Deliberately NOT gated behind `md:` (the idiom `PaginationBar`
-  // uses on its trigger): a touch tablet held in landscape is above `md` and
-  // would keep the 32px rows. A floor, not a height — a two-line option still
-  // grows past 44px.
+  // at all. Deliberately NOT gated behind `md:`: a touch tablet held in
+  // landscape is above `md` and would keep the 32px rows. A floor, not a
+  // height — a two-line option still grows past 44px.
+  //
+  // Ungated rather than `coarse:`-gated, unlike the trigger above. An option
+  // row has no desktop density worth defending — nothing sits beside it to
+  // stay aligned with, and 44px rows in a dropdown read as comfortable rather
+  // than oversized. The trigger needs the gate because it shares a toolbar row
+  // with buttons and inputs that the owner asked to leave alone.
   <SelectPrimitive.Item
     ref={ref}
     className={cn(

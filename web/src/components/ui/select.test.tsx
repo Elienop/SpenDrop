@@ -9,6 +9,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from './select';
+import tailwindConfigSource from '../../../tailwind.config.ts?raw';
 
 /**
  * These pin two properties of the SHARED primitive, because both defects they
@@ -88,6 +89,87 @@ describe('SelectItem touch floor', () => {
     const option = screen.getByRole('option', { name: 'Apple' });
     expect(option.classList.contains('min-h-14')).toBe(true);
     expect(option.classList.contains('min-h-11')).toBe(false);
+  });
+});
+
+/**
+ * WHAT THESE CAN AND CANNOT PROVE. Nothing here measures a pixel, and no
+ * assertion below should be read as if it did: happy-dom runs no layout, and
+ * the Tailwind stylesheet is never loaded in tests (`globals.css` is imported
+ * only by `main.tsx`, which no test renders). A class token is in the DOM at
+ * every pointer state, so a `classList.contains('coarse:min-h-11')` check is
+ * true on a mouse and on a finger alike — testing "does the gate flip" here
+ * would be testing a string.
+ *
+ * What they DO prove is the wiring, which is where this mechanism can silently
+ * fail: that the floor lives on the shared primitive rather than at a call
+ * site, that it is the pointer-gated token and not one of the two variants
+ * that were rejected, that tailwind-merge lets it coexist with a caller's own
+ * height, and that the variant it depends on is still registered — delete the
+ * plugin and `coarse:min-h-11` compiles to no CSS at all while every render
+ * test stays green.
+ *
+ * The pixels are the browser check's job.
+ */
+describe('SelectTrigger touch floor', () => {
+  it('carries the pointer-gated 44px floor, not either rejected variant', () => {
+    render(<Basic />);
+    const tokens = Array.from(
+      screen.getByRole('combobox', { name: 'Fruit' }).classList,
+    );
+
+    expect(tokens).toContain('coarse:min-h-11');
+    // Ungated would inflate every dense trigger on a mouse desktop — `min-h`
+    // and `h` do not conflict in tailwind-merge, so an ungated floor survives
+    // a call site's `h-8` there too. Desktop density is a stated constraint.
+    expect(tokens).not.toContain('min-h-11');
+    // Width-gated is the bug being fixed: a ~1130px touch tablet in landscape
+    // is above `md` and would keep the 40px trigger.
+    expect(tokens).not.toContain('md:min-h-11');
+    // A floor, not a cap: `h-10` may be overridden, but nothing here may
+    // clamp the trigger below the floor once the pointer is coarse.
+    expect(tokens.some((t) => /^(coarse:)?max-h-/.test(t))).toBe(false);
+  });
+
+  it('keeps the floor when a call site sets its own height', () => {
+    // The whole reason the token is `min-h` rather than a gated `h`: the two
+    // are separate tailwind-merge conflict groups, so the primitive's floor
+    // survives the caller's density class instead of being merged away, and
+    // CSS clamps the used height up. This is what lets ~19 Select call sites
+    // stay untouched. `h-8` is the densest one in the app (PaginationBar).
+    render(
+      <Select>
+        <SelectTrigger aria-label="Fruit" className="h-8 w-[70px]">
+          <SelectValue placeholder="Pick one" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="apple">Apple</SelectItem>
+        </SelectContent>
+      </Select>,
+    );
+
+    const tokens = Array.from(
+      screen.getByRole('combobox', { name: 'Fruit' }).classList,
+    );
+    expect(tokens).toContain('h-8');
+    expect(tokens).toContain('coarse:min-h-11');
+    // ...and the caller's height really did replace the primitive's, so the
+    // assertion above is not passing on a trigger that simply kept both.
+    expect(tokens).not.toContain('h-10');
+  });
+
+  it('still registers the coarse variant the floor depends on', () => {
+    // The wiring seam, and the one mutant no render test can see: with the
+    // plugin removed from `tailwind.config.ts` the token above still appears
+    // in the DOM, still passes every assertion here, and generates no CSS
+    // whatsoever — the floor would simply not exist in the built app.
+    //
+    // Pinned as source text rather than by importing the config: the config
+    // is outside `tsconfig.app.json`'s program and uses `require()`, so
+    // importing it for its value would drag it into the type-check.
+    expect(tailwindConfigSource).toContain(
+      "addVariant('coarse', '@media (pointer: coarse)')",
+    );
   });
 });
 

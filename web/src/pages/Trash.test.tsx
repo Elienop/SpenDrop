@@ -228,9 +228,15 @@ function spacingPx(steps: number): number {
  * `min-h-*` is authoritative when present: CSS clamps a fixed `height` up
  * to `min-height`, which is why shadcn Button's own `h-9` can sit
  * alongside `min-h-11` and the control still renders 44px.
+ *
+ * `coarse:min-h-*` counts the same way, and the number it yields is the floor
+ * A TOUCH POINTER GETS — on a mouse the rule never matches and the control
+ * keeps its fixed height. That is the point of the gate rather than a gap in
+ * the helper: the controls carrying it are meant to stay dense for a mouse at
+ * every width. Callers asserting a floor are asking the touch question.
  */
 function touchFloorPx(el: Element): number {
-  const minH = tokenSteps(el, /^min-h-([\d.]+)$/);
+  const minH = tokenSteps(el, /^(?:coarse:)?min-h-([\d.]+)$/);
   if (minH !== null) return spacingPx(minH);
   const fixed = tokenSteps(el, /^(?:size|h)-([\d.]+)$/);
   if (fixed === null) {
@@ -1192,10 +1198,15 @@ describe('Trash', () => {
       expect(screen.queryByText(/^Page 1 of 1$/)).not.toBeInTheDocument();
     });
 
-    test('the phone pager controls clear the 44px floor', async () => {
-      // A consumer-level pin, deliberately: <PaginationBar> ships with no test
-      // file of its own, so without this the 44px half of UX-D5 is asserted
-      // nowhere on this page.
+    test('the pager controls clear the 44px floor for a touch pointer', async () => {
+      // A consumer-level pin: PaginationBar has its own tests, but this is the
+      // one place that proves TRASH still gets the floored pager rather than a
+      // local copy that drifted.
+      //
+      // The pager's floor is gated on the POINTER, not the width, so unlike
+      // the controls above it carries no `md:` half — and this test renders at
+      // phone width only because the rest of the block does. The tokens are
+      // static; the width is not what is being asserted.
       setViewportWidth(PHONE_WIDTH);
       renderTrash();
       await screen.findByRole('list', { name: /deleted transactions/i });
@@ -1204,7 +1215,9 @@ describe('Trash', () => {
         name: /go to next page/i,
       })[0];
       expect(touchFloorPx(next)).toBeGreaterThanOrEqual(44);
-      expect(classes(next)).toContain('md:size-8');
+      expect(classes(next)).toContain('coarse:min-w-11');
+      // The retired width gate: it left a ~1130px touch tablet at 32px.
+      expect(classes(next)).not.toContain('md:size-8');
     });
 
     test('the selection bar is sticky and sits above the pager on a phone', async () => {
