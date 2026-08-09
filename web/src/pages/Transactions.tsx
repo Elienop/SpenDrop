@@ -1069,7 +1069,21 @@ export function Transactions() {
                   // sit 6px apart, so a 44px invisible ring around each X would
                   // overlap its neighbour and let one chip eat a tap meant for
                   // the next. A taller chip row on a phone is the honest cost.
-                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
+                  // `max-md:` rather than the retired md-gated zero half. Those
+                  // set the same property at the same specificity — a media
+                  // query adds none — and Tailwind emits screen variants AFTER
+                  // plugin-registered ones, so the md rule simply WON above
+                  // 768px and switched the floor off, on precisely the touch
+                  // tablet in landscape the floor exists for. Measured by byte
+                  // offset in the built stylesheet: the md zero rule at 52213,
+                  // the coarse floor at 49393. `max-md:` never overlaps the
+                  // coarse rule, so emission order stops mattering.
+                  //
+                  // The class names above are written in prose deliberately —
+                  // Tailwind SCANS COMMENTS, so spelling the retired token here
+                  // would emit a live CSS rule for the very thing this warns
+                  // against.
+                  'flex items-center justify-center max-md:min-h-11 max-md:min-w-11 coarse:min-h-11 coarse:min-w-11',
                 )}
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
@@ -1158,7 +1172,21 @@ export function Transactions() {
                   'shrink-0 rounded-sm opacity-70 ring-offset-background',
                   'transition-opacity hover:opacity-100',
                   'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
-                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
+                  // `max-md:` rather than the retired md-gated zero half. Those
+                  // set the same property at the same specificity — a media
+                  // query adds none — and Tailwind emits screen variants AFTER
+                  // plugin-registered ones, so the md rule simply WON above
+                  // 768px and switched the floor off, on precisely the touch
+                  // tablet in landscape the floor exists for. Measured by byte
+                  // offset in the built stylesheet: the md zero rule at 52213,
+                  // the coarse floor at 49393. `max-md:` never overlaps the
+                  // coarse rule, so emission order stops mattering.
+                  //
+                  // The class names above are written in prose deliberately —
+                  // Tailwind SCANS COMMENTS, so spelling the retired token here
+                  // would emit a live CSS rule for the very thing this warns
+                  // against.
+                  'flex items-center justify-center max-md:min-h-11 max-md:min-w-11 coarse:min-h-11 coarse:min-w-11',
                 )}
               >
                 <X className="size-4" />
