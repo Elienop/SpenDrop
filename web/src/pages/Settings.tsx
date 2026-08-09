@@ -67,7 +67,7 @@ import {
 } from '@/components/ui/tabs';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import {
-  isValidTab,
+  resolveSettingsTab,
   settingsSectionLabel,
   visibleSettingsSections,
   type SettingsTab,
@@ -2964,7 +2964,10 @@ export function Settings() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
-  const initialTab = isValidTab(tabParam) ? tabParam : 'account';
+  // Role-clamped, not merely validated — see `resolveSettingsTab`. A member
+  // arriving on `?tab=users` lands on `account`, because the phone surface
+  // renders whatever value it is handed.
+  const initialTab = resolveSettingsTab(tabParam, admin);
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   // One-shot forwarding toast for `?tab=savings|budgets|general`
@@ -2985,8 +2988,12 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
-    if (isValidTab(tabParam) && tabParam !== activeTab) {
-      setActiveTab(tabParam);
+    // Clamped here too, not just on the initial value: this is the second way
+    // a `?tab=` reaches state, so validating without the role check would let
+    // a later in-app navigation reopen the hole the initial clamp closes.
+    const resolved = resolveSettingsTab(tabParam, admin);
+    if (tabParam !== null && resolved !== activeTab) {
+      setActiveTab(resolved);
     }
     // activeTab is intentionally excluded from deps: this effect is a
     // one-way URL → state sync. Including activeTab would re-run the

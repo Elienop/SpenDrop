@@ -67,6 +67,36 @@ export function visibleSettingsSections(admin: boolean): SettingsSection[] {
   return SETTINGS_SECTIONS.filter((s) => admin || !s.adminOnly);
 }
 
+/**
+ * The tab a given role may actually land on, given a raw `?tab=` value.
+ *
+ * THIS IS THE ROLE GATE FOR THE PHONE SURFACE, not a convenience. `isValidTab`
+ * answers "is this one of the six values" and is deliberately role-blind, so it
+ * cannot carry the gate: the desktop strip renders its panels by mapping over
+ * `visibleSettingsSections(admin)`, which filters, but the phone renders ONE
+ * section resolved from the raw value. Passing an unfiltered value there
+ * mounted an `adminOnly` section's panel for a member — a member opening
+ * `?tab=users` on a phone got the whole household-administration UI, every
+ * control of which then failed against `RequireAdmin`. Backend refused the
+ * data, so it was a control leak rather than a data leak, but the fix belongs
+ * here at the value rather than at either render site: clamp once, where the
+ * value enters state, and neither surface can drift from the other again.
+ *
+ * Falls back to `account` — the one section with no `adminOnly`, so it is
+ * reachable by every role, and already the hard-coded default for an absent or
+ * unrecognised `?tab=`.
+ */
+export function resolveSettingsTab(
+  value: string | null,
+  admin: boolean,
+): SettingsTab {
+  if (!isValidTab(value)) return 'account';
+  const reachable = visibleSettingsSections(admin).some(
+    (s) => s.value === value,
+  );
+  return reachable ? value : 'account';
+}
+
 /** The label for one tab value, or `undefined` if the role cannot see it. */
 export function settingsSectionLabel(
   value: SettingsTab,
