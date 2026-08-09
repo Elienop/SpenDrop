@@ -2909,57 +2909,23 @@ function SettingsSectionPicker({
 }) {
   const sections = visibleSettingsSections(admin);
   const label = settingsSectionLabel(value, admin);
-  const triggerRef = useRef<HTMLButtonElement>(null);
   return (
     <div className="flex flex-col gap-6">
       <Select value={value} onValueChange={onChange}>
         {/* `h-11`, not the stock `h-10`: this is the only way to reach five of
             the six sections on a phone, so it carries the 44px touch floor the
             rest of the phone shell keeps. */}
-        <SelectTrigger
-          ref={triggerRef}
-          aria-label="Settings section"
-          className="h-11 w-full"
-        >
+        <SelectTrigger aria-label="Settings section" className="h-11 w-full">
           <SelectValue />
         </SelectTrigger>
-        <SelectContent
-          // MEASURED, not defensive. Driven by real keys in Chrome at 360px —
-          // Enter opens and focus moves into the option list, ArrowDown moves,
-          // and Enter to choose leaves `document.activeElement` on <body>. The
-          // section swaps correctly and the trigger's label updates, so it
-          // looks right; a keyboard or switch user is simply dropped to the top
-          // of the document and has to Tab all the way back, on the one control
-          // that is the ONLY way to navigate Settings on a phone.
-          //
-          // Not caused by swapping the section beneath it: a bare Select with
-          // no sibling to swap loses focus the same way, so this is Radix's
-          // restore not landing rather than anything this surface does. Taking
-          // the restore over explicitly is the fix.
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            triggerRef.current?.focus();
-          }}
-        >
+        {/* No local `onCloseAutoFocus` and no per-option `min-h-11`: both were
+            workarounds for defects that now live fixed in `ui/select.tsx` —
+            the wrapper's blanket `preventDefault()` that cancelled Radix's
+            focus restore, and the 32px stock option row. Restoring either here
+            would only re-do what the primitive already does. */}
+        <SelectContent>
           {sections.map((section) => (
-            // `min-h-11` on the OPTIONS too, not just the trigger. Measured at
-            // 360px before this: the trigger was already 44px but every option
-            // in the open list was 32px (`SelectItem`'s stock `py-1.5` around
-            // 20px of `text-sm`), so the tap that actually chooses a section
-            // was the one under the floor. A floor on the control you open and
-            // not on the thing you then hit is no floor at all.
-            //
-            // At the call site rather than in `ui/select.tsx`: every Select in
-            // the app has 32px options, including QuickAdd's category picker
-            // on the daily capture surface. That is a real and wider gap, and
-            // it is reported rather than fixed here — changing the shared
-            // primitive moves every menu in the app and is not what this
-            // change was asked to do.
-            <SelectItem
-              key={section.value}
-              value={section.value}
-              className="min-h-11"
-            >
+            <SelectItem key={section.value} value={section.value}>
               {section.label(admin)}
             </SelectItem>
           ))}

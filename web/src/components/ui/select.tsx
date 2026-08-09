@@ -70,8 +70,21 @@ SelectScrollDownButton.displayName =
 const SelectContent = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Content>
->(({ className, children, position = "popper", onCloseAutoFocus, ...props }, ref) => (
+>(({ className, children, position = "popper", ...props }, ref) => (
   <SelectPrimitive.Portal>
+    {/* `onCloseAutoFocus` is passed straight through (via `props`) and is NOT
+        defaulted to `e.preventDefault()`. It used to be, to suppress a focus
+        ring after a mouse pick — but Radix composes the consumer handler with
+        its own restore using `composeEventHandlers`, which SKIPS the rest on
+        `defaultPrevented`. Preventing here therefore cancelled the one call
+        that puts focus back on the trigger (`context.trigger?.focus()`), and
+        `document.activeElement` landed on `<body>`: measured in Chrome with
+        real key events on a stock Select, still `<body>` two seconds later.
+        A keyboard or switch user choosing an option was dropped to the top of
+        the document. The ring the old default was avoiding is already handled
+        the right way — the trigger styles `focus-visible:ring-2`, not
+        `focus:`, so a programmatic restore after a POINTER pick draws nothing
+        while a restore after a KEY pick correctly shows the ring. */}
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
@@ -81,15 +94,6 @@ const SelectContent = React.forwardRef<
         className
       )}
       position={position}
-      onCloseAutoFocus={(e) => {
-        if (onCloseAutoFocus) {
-          onCloseAutoFocus(e);
-        } else {
-          // Prevent Radix from programmatically refocusing the trigger,
-          // which causes a visible focus ring on mouse interactions.
-          e.preventDefault();
-        }
-      }}
       {...props}
     >
       <SelectScrollUpButton />
@@ -112,6 +116,10 @@ const SelectLabel = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Label>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Label>
 >(({ className, ...props }, ref) => (
+  // Left at `py-1.5` while `SelectItem` takes a 44px floor. A label is not a
+  // tap target, and staying shorter than the options is what makes it read as
+  // a group heading rather than a row you could have picked. (No call site in
+  // this app renders one today; every `SelectGroup` here is unlabelled.)
   <SelectPrimitive.Label
     ref={ref}
     className={cn("py-1.5 pl-8 pr-2 text-sm font-semibold", className)}
@@ -124,10 +132,18 @@ const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
 >(({ className, children, ...props }, ref) => (
+  // `min-h-11` (44px) is the touch floor, and it lives here rather than at the
+  // call sites: the option is the element the user actually taps to CHOOSE,
+  // and stock `py-1.5` around `text-sm` measured 32px in Chrome at 360px. A
+  // floor on the trigger you open and not on the row you then hit is no floor
+  // at all. Deliberately NOT gated behind `md:` (the idiom `PaginationBar`
+  // uses on its trigger): a touch tablet held in landscape is above `md` and
+  // would keep the 32px rows. A floor, not a height — a two-line option still
+  // grows past 44px.
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex min-h-11 w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}
