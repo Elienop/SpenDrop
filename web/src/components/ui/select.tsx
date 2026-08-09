@@ -81,10 +81,22 @@ const SelectContent = React.forwardRef<
         `document.activeElement` landed on `<body>`: measured in Chrome with
         real key events on a stock Select, still `<body>` two seconds later.
         A keyboard or switch user choosing an option was dropped to the top of
-        the document. The ring the old default was avoiding is already handled
-        the right way — the trigger styles `focus-visible:ring-2`, not
-        `focus:`, so a programmatic restore after a POINTER pick draws nothing
-        while a restore after a KEY pick correctly shows the ring. */}
+        the document.
+
+        The ring that default was avoiding DOES come back, and that is an
+        accepted trade rather than a solved problem. Measured in Chrome on a
+        fresh page with mouse-only input: after the restore the trigger matches
+        `:focus-visible` and paints its 2px ring. `focus-visible:ring-2` does
+        not filter it out — Chrome's heuristic treats a PROGRAMMATIC `.focus()`
+        as focus-visible regardless of the modality that triggered it, so the
+        `focus:` vs `focus-visible:` distinction buys nothing here.
+
+        Kept anyway, for three reasons: a ring after a mouse pick is cosmetic
+        while dropping a keyboard user to `<body>` is a barrier; this is what
+        stock shadcn/Radix does, so the old default was the local deviation;
+        and suppressing a focus indicator the user can genuinely act on runs
+        against WCAG 2.4.7. Do not "fix" the ring by restoring the blanket
+        preventDefault — that is the focus drop, not a styling choice. */}
     <SelectPrimitive.Content
       ref={ref}
       className={cn(
