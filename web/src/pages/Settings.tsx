@@ -65,6 +65,13 @@ import {
   TabsTrigger,
   scrollableTabsList,
 } from '@/components/ui/tabs';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
+import {
+  isValidTab,
+  settingsSectionLabel,
+  visibleSettingsSections,
+  type SettingsTab,
+} from './settings-sections';
 import { ButtonGroup } from '@/components/ui/button-group';
 import {
   Select,
@@ -118,16 +125,6 @@ import { destructiveActionClass } from '@/lib/styles';
 
 /* ---------- Module-scope constants ---------- */
 
-const VALID_TABS = [
-  'account',
-  'currencies',
-  'users',
-  'api-tokens',
-  'notifications',
-  'data',
-] as const;
-type SettingsTab = (typeof VALID_TABS)[number];
-
 const EXPIRY_OPTIONS = {
   never: null,
   '7d': 7,
@@ -167,9 +164,6 @@ type CreateTokenValues = z.infer<typeof createTokenSchema>;
 
 /* ---------- Pure helpers ---------- */
 
-function isValidTab(value: string | null): value is SettingsTab {
-  return value !== null && (VALID_TABS as readonly string[]).includes(value);
-}
 
 // Match preview category names (case-insensitive) to existing category ids.
 // Pure — captures no closure, hoisted for test-ability and perf.
@@ -2860,9 +2854,134 @@ const MOVED_TABS: Record<string, { route: string; label: string }> = {
   general: { route: '/budgets', label: 'Budgets' },
 };
 
+/**
+ * One Settings section's body. The single place that maps a tab value to its
+ * component, so the two surfaces cannot render different things for the same
+ * value.
+ */
+function renderSettingsSection(value: SettingsTab, admin: boolean) {
+  switch (value) {
+    case 'account':
+      return <AccountSection />;
+    case 'currencies':
+      return <CurrenciesSection />;
+    case 'users':
+      return <UsersSection />;
+    case 'api-tokens':
+      return <ApiTokensSection />;
+    case 'notifications':
+      return <NotificationsSection />;
+    case 'data':
+      return <DataSection admin={admin} />;
+  }
+}
+
+/**
+ * The phone-width replacement for the tab strip: a Select that chooses which
+ * section is shown, and the section itself as a labelled region.
+ *
+ * NOT A HIDDEN TAB STRIP, and that is the whole design decision. The obvious
+ * cheap move — keep `TabsList` with `sr-only` and let a Select drive the same
+ * value — leaves TWO controls for one choice in the accessibility tree, since
+ * `sr-only` hides from sight and not from a screen reader. A phone user would
+ * meet a six-item tablist AND a combobox that do the same thing.
+ *
+ * The other obvious move is worse, and it is measured rather than assumed:
+ * dropping `TabsList` while keeping `Tabs`/`TabsContent` leaves every panel
+ * with `aria-labelledby` pointing at a trigger id that no longer exists —
+ * probed on this Radix version, the panels still mount and switch correctly,
+ * `role="tabpanel"` is still emitted, and the IDREF resolves to NOTHING. So
+ * every section silently loses its accessible name, and `role="tabpanel"`
+ * survives with no `tablist` anywhere in the document, which is not a valid
+ * ARIA structure. It looks perfect on screen.
+ *
+ * So the phone does not use the tab pattern at all. A combobox that swaps a
+ * region is what this actually is, and it is named as such.
+ */
+function SettingsSectionPicker({
+  admin,
+  value,
+  onChange,
+}: {
+  admin: boolean;
+  value: SettingsTab;
+  onChange: (next: string) => void;
+}) {
+  const sections = visibleSettingsSections(admin);
+  const label = settingsSectionLabel(value, admin);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  return (
+    <div className="flex flex-col gap-6">
+      <Select value={value} onValueChange={onChange}>
+        {/* `h-11`, not the stock `h-10`: this is the only way to reach five of
+            the six sections on a phone, so it carries the 44px touch floor the
+            rest of the phone shell keeps. */}
+        <SelectTrigger
+          ref={triggerRef}
+          aria-label="Settings section"
+          className="h-11 w-full"
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent
+          // MEASURED, not defensive. Driven by real keys in Chrome at 360px —
+          // Enter opens and focus moves into the option list, ArrowDown moves,
+          // and Enter to choose leaves `document.activeElement` on <body>. The
+          // section swaps correctly and the trigger's label updates, so it
+          // looks right; a keyboard or switch user is simply dropped to the top
+          // of the document and has to Tab all the way back, on the one control
+          // that is the ONLY way to navigate Settings on a phone.
+          //
+          // Not caused by swapping the section beneath it: a bare Select with
+          // no sibling to swap loses focus the same way, so this is Radix's
+          // restore not landing rather than anything this surface does. Taking
+          // the restore over explicitly is the fix.
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            triggerRef.current?.focus();
+          }}
+        >
+          {sections.map((section) => (
+            // `min-h-11` on the OPTIONS too, not just the trigger. Measured at
+            // 360px before this: the trigger was already 44px but every option
+            // in the open list was 32px (`SelectItem`'s stock `py-1.5` around
+            // 20px of `text-sm`), so the tap that actually chooses a section
+            // was the one under the floor. A floor on the control you open and
+            // not on the thing you then hit is no floor at all.
+            //
+            // At the call site rather than in `ui/select.tsx`: every Select in
+            // the app has 32px options, including QuickAdd's category picker
+            // on the daily capture surface. That is a real and wider gap, and
+            // it is reported rather than fixed here — changing the shared
+            // primitive moves every menu in the app and is not what this
+            // change was asked to do.
+            <SelectItem
+              key={section.value}
+              value={section.value}
+              className="min-h-11"
+            >
+              {section.label(admin)}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {/* A named region, so the section is a landmark a screen-reader user can
+          jump to — the job the tabpanel did on the other surface. The name is
+          the section's own label, which is also what the closed Select reads,
+          so the control and the content agree. */}
+      <section aria-label={label}>{renderSettingsSection(value, admin)}</section>
+    </div>
+  );
+}
+
 export function Settings() {
   const { user } = useAuth();
   const admin = isAdmin(user);
+  // WIDTH, not pointer capability — unlike the heatmap's year grid, which
+  // needs a pointer that can hit a sub-24px target. Nothing here depends on
+  // hover or precision; six long labels simply do not fit a narrow page. A
+  // touch tablet at ~720px portrait getting the Select is correct.
+  const isMobile = useIsMobileViewport();
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
@@ -2908,53 +3027,44 @@ export function Settings() {
   return (
     <div className="flex flex-col gap-6">
       <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-      <Tabs
-        value={activeTab}
-        onValueChange={handleTabChange}
-        activationMode="manual"
-        className="w-full"
-      >
-        {/* Six triggers for an admin come to roughly 550px of
-            whitespace-nowrap content, against ~358px of content width on a
-            390px phone. The strip scrolls sideways rather than widening the
-            page — see the note on `scrollableTabsList`, which explains why
-            `justify-start` is the half that must not be lost. */}
-        <TabsList className={scrollableTabsList}>
-          <TabsTrigger value="account">Account</TabsTrigger>
-          <TabsTrigger value="currencies">Currencies</TabsTrigger>
-          {admin && <TabsTrigger value="users">Users</TabsTrigger>}
-          <TabsTrigger value="api-tokens">API tokens</TabsTrigger>
-          <TabsTrigger value="notifications">Notifications</TabsTrigger>
-          {/* The tab value stays "data" for both roles so existing
-              ?tab=data bookmarks keep resolving; only the visible label
-              narrows. Import is admin-only (see <ImportCard>), and a
-              member whose panel holds nothing but the Export card should
-              not be told the tab offers import. */}
-          <TabsTrigger value="data">
-            {admin ? 'Import / Export' : 'Export'}
-          </TabsTrigger>
-        </TabsList>
-        <TabsContent value="account" className="mt-6">
-          <AccountSection />
-        </TabsContent>
-        <TabsContent value="currencies" className="mt-6">
-          <CurrenciesSection />
-        </TabsContent>
-        {admin && (
-          <TabsContent value="users" className="mt-6">
-            <UsersSection />
-          </TabsContent>
-        )}
-        <TabsContent value="api-tokens" className="mt-6">
-          <ApiTokensSection />
-        </TabsContent>
-        <TabsContent value="notifications" className="mt-6">
-          <NotificationsSection />
-        </TabsContent>
-        <TabsContent value="data" className="mt-6">
-          <DataSection admin={admin} />
-        </TabsContent>
-      </Tabs>
+      {isMobile ? (
+        <SettingsSectionPicker
+          admin={admin}
+          value={activeTab}
+          onChange={handleTabChange}
+        />
+      ) : (
+        <Tabs
+          value={activeTab}
+          onValueChange={handleTabChange}
+          activationMode="manual"
+          className="w-full"
+        >
+          {/* The strip scrolls sideways rather than widening the page — see
+              the note on `scrollableTabsList`, which explains why
+              `justify-start` is the half that must not be lost. Below `md`
+              this is not rendered at all: six labels measured 568px of
+              scrollWidth against 313 of client, and the Reports treatment
+              (9px tick font, px-2) still came to 461px. Four short words fit
+              that way; six long ones do not at any size worth reading. */}
+          <TabsList className={scrollableTabsList}>
+            {visibleSettingsSections(admin).map((section) => (
+              <TabsTrigger key={section.value} value={section.value}>
+                {section.label(admin)}
+              </TabsTrigger>
+            ))}
+          </TabsList>
+          {visibleSettingsSections(admin).map((section) => (
+            <TabsContent
+              key={section.value}
+              value={section.value}
+              className="mt-6"
+            >
+              {renderSettingsSection(section.value, admin)}
+            </TabsContent>
+          ))}
+        </Tabs>
+      )}
       {/* Outside the Tabs on purpose: "which build am I on" is a property of
           the app, not of a tab, so it stays put wherever the user has
           navigated rather than hiding on five of the six panels. */}
