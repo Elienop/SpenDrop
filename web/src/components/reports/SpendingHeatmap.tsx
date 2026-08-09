@@ -19,6 +19,7 @@ import { HeatmapDaySheet, type HeatmapDay } from './HeatmapDaySheet';
 import {
   OPACITY_STOPS,
   buildIntensityScale,
+  chipFill,
   generateMonthDates,
   generateYearDates,
   heatmapCellLabel,
@@ -56,8 +57,28 @@ const WEEKDAYS = [
 ] as const;
 
 /** Shared by both grids' cells and the phone's month buttons. */
+/**
+ * `outline`, not `ring`, and that is forced rather than chosen: an element gets
+ * ONE ring, and this component has already spent it twice — on the today marker
+ * and on the selected month. An outline is a second, independent indicator.
+ *
+ * `outline-offset-2` matches every other focusable surface in the app. It was
+ * `offset-0` while the cells were the only place using an outline, which made
+ * this the one screen where the focus indicator sat ON the element edge instead
+ * of 2px outside it — so tabbing from the tab strip into the grid changed the
+ * affordance mid-page.
+ *
+ * `[outline-style:solid]` RATHER THAN THE BARE `outline` UTILITY, and this is
+ * not stylistic. `tailwind-merge` puts bare `outline` and `outline-2` in the
+ * same conflict group, so `cn()` DROPS the style and keeps only the width —
+ * verified against the rendered DOM, where the class list came back as
+ * `outline-2 outline-offset-2 outline-ring` with no style at all. The element
+ * still showed a ring, which is why this survived several browser passes: with
+ * no author style, Chrome's UA `:focus-visible { outline: auto }` painted its
+ * own. The arbitrary property is in a group of its own and survives the merge.
+ */
 const FOCUS_RING =
-  'focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-ring';
+  'focus-visible:[outline-style:solid] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring';
 
 /**
  * The day number's colour, per intensity stop.
@@ -75,11 +96,15 @@ const FOCUS_RING =
  * light mode (`#fafafa` on `#8c8c8d` ≈ 3.2:1). Hence the `dark:` variant on
  * that one stop.
  *
- * Measured in Chrome at 360px after the fix, number vs its own composited
- * chip (the /60 alpha composited too) — light / dark:
- *   0.30  10.23 / 5.85     0.50   5.89 / 5.00
- *   0.75   7.50 / 9.85     1.00  16.97 / 16.97
- *   no spend  5.14 / 5.78
+ * Measured in Chrome at 360px, number vs its own composited chip — light /
+ * dark. Re-measured after D1 by PAINTING both colours onto a canvas and
+ * reading the bytes back, rather than compositing them in JS, because the fill
+ * is now a `color-mix` that Chrome resolves in oklab; the figures moved by at
+ * most 0.10, all of it rounding, which is the evidence that moving the alpha
+ * from the element into the colour changes no pixel:
+ *   0.30  10.15 / 5.89     0.50   5.85 / 5.00
+ *   0.75   7.47 / 9.75     1.00  16.97 / 16.97
+ *   no spend  5.13 / 5.72
  *
  * `text-foreground/60` rather than `text-muted-foreground` for the zero cell:
  * `text-muted-foreground` on `bg-muted` is shadcn's own default pair and
@@ -99,7 +124,9 @@ function chipTextClass(
   upcoming = false,
 ): string {
   // An upcoming cell paints no chip, so its number sits on the CARD, not on a
-  // stop: measured 4.83 light / 5.49 dark.
+  // stop: measured 4.83 light / 5.49 dark. (The test table said 5.29 for the
+  // dark figure — a transcription slip; 5.49 is what both measurement passes
+  // produced, and the table now agrees.)
   if (upcoming) return 'text-muted-foreground';
   if (total === 0) return 'text-foreground/60';
   if (opacity >= OPACITY_STOPS[2]) return 'text-primary-foreground';
@@ -450,7 +477,7 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
                           none. */}
                       <div className="relative h-4">
                         {label !== null && (
-                          <span className="absolute left-0 top-0 whitespace-nowrap text-[10px] leading-4 text-muted-foreground">
+                          <span className="absolute left-0 top-0 whitespace-nowrap text-xs leading-4 text-muted-foreground">
                             {label}
                           </span>
                         )}
@@ -544,20 +571,33 @@ function YearCell({
           className={cn(
             'relative block aspect-square w-full rounded-sm',
             FOCUS_RING,
-            // ON THE BUTTON, not on the chip. The chip carries the inline
-            // `opacity`, and CSS opacity fades an element's OWN ring with it —
-            // so a ring here was invisible on every day that had spending and
-            // visible only on days that had none, marking today exactly when
-            // there was nothing to mark. Measured ring-vs-chip while it sat on
-            // the span: 1.02-1.08:1. On the button it lands in the 1.5px
-            // card-coloured gutter instead, outside the faded subtree: 3.74
-            // light / 4.68 dark against the card, measured on a today that has
-            // spending — which is the only case where the defect showed.
-            // MonthCell was already doing this; this was the one place the
-            // two-layer rule below was not applied.
+            // ON THE BUTTON, NOT ON THE CHIP — and D1 did not make this
+            // redundant, which is the trap. It was MOVED here for a reason
+            // that has now gone: the chip carried a CSS `opacity`, which fades
+            // an element's own ring, so the ring was invisible on every day
+            // that had spending and visible only on days that had none —
+            // marking today exactly when there was nothing to mark. `chipFill`
+            // ends that. It is KEPT here for a SECOND reason that was never
+            // written down and does not go away: `--foreground` and
+            // `--primary` are near-identical at both ends of both themes, so a
+            // ring drawn on the chip has almost nothing to contrast against.
+            //
+            // Measured in Chrome, ring composited over what it would sit on,
+            // against a 3:1 non-text bar (light / dark):
+            //   on the CHIP   0.30  3.15 / 2.77    0.50  2.60 / 1.85
+            //                 0.75  1.74 / 1.26    1.00  1.06 / 1.05
+            //   on the BUTTON  every stop  3.74 / 4.71
+            // Seven of those eight chip figures fail, and the two that pass
+            // are the pale end — the same inversion as the original defect,
+            // arrived at by a different route. On the button the ring lands in
+            // the 1.5px card-coloured gutter, where the ratio is a constant
+            // that does not depend on the day's total at all.
             isToday && 'ring-1 ring-inset ring-foreground/50',
           )}
         >
+          {/* Still two elements here, and for a reason that has nothing to do
+              with alpha: the button is the whole column pitch so the click
+              target is not the 20px square, and the chip is inset inside it. */}
           <span
             aria-hidden="true"
             className={cn(
@@ -565,9 +605,7 @@ function YearCell({
               total === 0 && !isUpcoming && 'bg-muted',
             )}
             style={
-              total > 0
-                ? { backgroundColor: 'hsl(var(--primary))', opacity }
-                : undefined
+              total > 0 ? { backgroundColor: chipFill(opacity) } : undefined
             }
           />
         </button>
@@ -623,30 +661,27 @@ function MonthCell({
         isToday && 'ring-1 ring-inset ring-foreground/50',
       )}
     >
-      {/* Two layers, not one: `opacity` on a single element would fade the day
-          number along with the chip and make the darkest days the hardest to
-          read. It is also why the today ring is on the BUTTON above and not
-          here — see YearCell, where it was not, and was invisible. */}
+      {/* ONE layer. This was a painted chip with a separate number span sitting
+          over it, and the only thing separating them was that CSS `opacity`
+          would have faded the number along with its own background — making the
+          darkest days the hardest to read. `chipFill` puts the alpha in the
+          colour, which does not touch text, so the chip can hold its own
+          number.
+
+          Still inset from the button rather than being it: the button is the
+          44px touch target and the 2px it gives up is the gutter between
+          adjacent days. The today ring stays on the BUTTON — see YearCell for
+          the reason that outlived this one. */}
       <span
-        aria-hidden="true"
         className={cn(
-          'absolute inset-[2px] rounded-md',
+          'absolute inset-[2px] flex items-center justify-center rounded-md text-xs font-medium',
           // An upcoming day paints NOTHING — no fill at all, so it cannot be
           // read as the `bg-muted` of a day that really did cost nothing. The
           // month opens on today, so this is most of the default view.
           total === 0 && !isUpcoming && 'bg-muted',
-        )}
-        style={
-          total > 0
-            ? { backgroundColor: 'hsl(var(--primary))', opacity }
-            : undefined
-        }
-      />
-      <span
-        className={cn(
-          'absolute inset-0 flex items-center justify-center text-xs font-medium',
           chipTextClass(total, opacity, isUpcoming),
         )}
+        style={total > 0 ? { backgroundColor: chipFill(opacity) } : undefined}
       >
         {day}
       </span>
@@ -700,37 +735,31 @@ function MonthPicker({
             }`}
             onClick={() => onSelect(m)}
             className={cn(
-              // Same 44px floor as the day cells, and the same two-layer
-              // structure — `opacity` on one element would fade the month name
-              // along with its chip.
+              // Same 44px floor as the day cells, and the same single painted
+              // chip: the month name rides on its own background now that the
+              // alpha is in the colour rather than on the element.
               'relative block min-h-11 w-full rounded-md',
               FOCUS_RING,
               // OFFSET, not inset. `--ring` is near-white in dark mode and
               // near-black in light, and so is a full-opacity chip — an inset
               // ring on the busiest month of the year is the same colour as
-              // the chip it is drawn on and vanishes. The 2px of card colour
-              // between chip and ring is what makes it visible against every
-              // stop, which is the same reason shadcn's own focus ring has it.
+              // the chip it is drawn on and vanishes. Measured on the selected
+              // month at the 1.00 stop, ring against the chip: 1.00:1 in both
+              // themes. Against the 2px card-coloured offset band it is drawn
+              // on: 17.72 light / 17.31 dark. That band is the whole fix, and
+              // it is the same reason shadcn's own focus ring has one.
               m === month && 'ring-2 ring-ring ring-offset-2 ring-offset-card',
             )}
           >
             <span
-              aria-hidden="true"
               className={cn(
-                'absolute inset-0 rounded-md',
+                'absolute inset-0 flex items-center justify-center rounded-md text-xs font-medium',
                 total === 0 && 'bg-muted',
-              )}
-              style={
-                total > 0
-                  ? { backgroundColor: 'hsl(var(--primary))', opacity }
-                  : undefined
-              }
-            />
-            <span
-              className={cn(
-                'absolute inset-0 flex items-center justify-center text-xs font-medium',
                 chipTextClass(total, opacity),
               )}
+              style={
+                total > 0 ? { backgroundColor: chipFill(opacity) } : undefined
+              }
             >
               {name}
             </span>
@@ -777,29 +806,48 @@ function HeatmapFooter({
   );
 }
 
+/**
+ * LABELLED "Daily", and that word is the whole point of it.
+ *
+ * The month picker's twelve chips and the grid's day cells paint from the SAME
+ * four stops of the SAME token through `chipTextClass` — but they are ranked
+ * over different populations: `dayScale` over the year's DAY totals,
+ * `monthScale` over the twelve MONTH totals. An identically dark chip therefore
+ * means different things in the two blocks. One unqualified legend sitting
+ * below both read as governing both, and it is paired in that row with
+ * "Heaviest day:", which is also day-scoped and reinforced the wrong reading.
+ *
+ * Naming the scale is the cheap fix and the right scope for this branch.
+ * Redesigning the picker to share the day scale, or giving it its own legend,
+ * is a larger change than a labelling defect warrants.
+ */
 function HeatmapLegend() {
   return (
     <div
       role="group"
-      aria-label="Spending intensity legend"
+      aria-label="Daily spending intensity legend"
       className="ml-auto flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs text-muted-foreground"
     >
+      {/* LEADS the legend rather than sitting between its two groups, so it
+          qualifies the whole scale — "No spend" is day-scoped too. Mid-string
+          it read as labelling only the gradient. */}
+      <span className="font-medium text-foreground">Daily spending</span>
       <div className="flex items-center gap-1.5">
-        <div className="h-3 w-3 rounded-sm bg-muted" aria-hidden />
+        <div className="h-3 w-3 rounded-sm bg-muted" aria-hidden="true" />
         <span>No spend</span>
       </div>
       <div className="flex items-center gap-1.5">
         <span>Less</span>
-        <div className="flex items-center gap-[3px]">
+        <div className="flex items-center gap-1">
           {OPACITY_STOPS.map((opacity, i) => (
             <div
               key={i}
               className="h-3 w-3 rounded-sm"
-              style={{
-                backgroundColor: 'hsl(var(--primary))',
-                opacity,
-              }}
-              aria-hidden
+              // Through `chipFill`, not a second copy of the expression: a
+              // legend that paints its swatches by its own rule is a legend
+              // that can drift off the cells it claims to explain.
+              style={{ backgroundColor: chipFill(opacity) }}
+              aria-hidden="true"
             />
           ))}
         </div>

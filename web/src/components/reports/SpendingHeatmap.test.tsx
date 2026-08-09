@@ -62,7 +62,7 @@ const CURRENCIES = [
 ];
 
 import { SpendingHeatmap } from './SpendingHeatmap';
-import { OPACITY_STOPS } from './heatmapGrid';
+import { OPACITY_STOPS, chipFill } from './heatmapGrid';
 
 // ---------------------------------------------------------------------------
 // Viewport control
@@ -245,6 +245,43 @@ function cell(grid: HTMLElement, date: string): HTMLElement {
 }
 
 /**
+ * The painted chip inside a cell or a month button.
+ *
+ * `button > span` rather than `span[aria-hidden="true"]`, which is what this
+ * was: since D1 the phone's chip HOLDS the day number, so it is no longer
+ * hidden from the a11y tree. The year grid's chip has no text and still is.
+ * Both grids have exactly one span per cell, so the first one is the chip in
+ * either tree — asserted here so a future second span cannot make every
+ * caller silently read the wrong element.
+ */
+function chipOf(el: HTMLElement): HTMLElement {
+  const spans = el.querySelectorAll<HTMLElement>('span');
+  if (spans.length !== 1) {
+    throw new Error(`expected exactly one chip span, found ${spans.length}`);
+  }
+  return spans[0];
+}
+
+/**
+ * The alpha a chip is painted at, read back out of its fill, or null when it
+ * paints no fill at all.
+ *
+ * The alpha lives in the COLOUR now, not in a CSS `opacity` — so this parses
+ * the percentage rather than reading a property. That is not a cosmetic
+ * difference: happy-dom drops `hsl(… / N)` from a style declaration entirely
+ * (measured on 20.11.1, and not because of the `var()` — literal
+ * `hsl(240 5.9% 10% / 0.5)` goes too), so had D1 shipped that form, every
+ * assertion below would read `''` and the "upcoming paints nothing" test would
+ * have passed for a fully painted cell. `color-mix` round-trips verbatim.
+ */
+function chipAlpha(el: HTMLElement): number | null {
+  const match = /hsl\(var\(--primary\)\)\s*([\d.]+)%/.exec(
+    el.style.backgroundColor,
+  );
+  return match === null ? null : Number(match[1]) / 100;
+}
+
+/**
  * `.focus()` fires the cell's `onFocus`, which moves the roving index — a
  * state update, so it has to be wrapped or React logs an act() warning that
  * the default reporter then buries.
@@ -288,12 +325,12 @@ describe('which presentation mounts', () => {
   test('the legend renders on both viewports', () => {
     renderMonthGrid();
     expect(
-      screen.getByRole('group', { name: 'Spending intensity legend' }),
+      screen.getByRole('group', { name: 'Daily spending intensity legend' }),
     ).toBeInTheDocument();
     cleanup();
     renderYearGrid();
     expect(
-      screen.getByRole('group', { name: 'Spending intensity legend' }),
+      screen.getByRole('group', { name: 'Daily spending intensity legend' }),
     ).toBeInTheDocument();
   });
 });
@@ -377,17 +414,28 @@ describe('every cell says what it is', () => {
 describe('intensity', () => {
   test('the year’s largest spend paints the darkest stop, the smallest the palest', () => {
     const grid = renderYearGrid();
-    const chip = (date: string) =>
-      cell(grid, date).querySelector<HTMLElement>('span[aria-hidden="true"]')!;
-    expect(chip('2026-07-18').style.opacity).toBe(String(OPACITY_STOPS[3]));
-    expect(chip('2026-03-02').style.opacity).toBe(String(OPACITY_STOPS[0]));
+    const alpha = (date: string) => chipAlpha(chipOf(cell(grid, date)));
+    expect(alpha('2026-07-18')).toBe(OPACITY_STOPS[3]);
+    expect(alpha('2026-03-02')).toBe(OPACITY_STOPS[0]);
+  });
+
+  test('the rendered fill is the shared expression, character for character', () => {
+    // Pins the FORM, not just the number: it is what proves the chip is
+    // painted through `chipFill` and not by a second copy of the expression
+    // that happens to agree today. `heatmapGrid.test.ts` holds the function's
+    // own contract, including the rounding this cannot see.
+    const grid = renderYearGrid();
+    expect(chipOf(cell(grid, '2026-03-02')).style.backgroundColor).toBe(
+      chipFill(OPACITY_STOPS[0]),
+    );
+    expect(chipFill(OPACITY_STOPS[0])).toBe(
+      'color-mix(in oklab, hsl(var(--primary)) 30%, transparent)',
+    );
   });
 
   test('a day with no rows carries no inline background at all', () => {
     const grid = renderYearGrid();
-    const chip = cell(grid, '2026-03-03').querySelector<HTMLElement>(
-      'span[aria-hidden="true"]',
-    )!;
+    const chip = chipOf(cell(grid, '2026-03-03'));
     expect(chip.style.backgroundColor).toBe('');
     expect(chip.style.opacity).toBe('');
     expect(chip.className.split(/\s+/)).toContain('bg-muted');
@@ -400,10 +448,9 @@ describe('intensity', () => {
     // darkest and the second-palest. Both assertions therefore fail the moment
     // the scale is scoped to the displayed month.
     const grid = renderMonthGrid();
-    const chip = (date: string) =>
-      cell(grid, date).querySelector<HTMLElement>('span[aria-hidden="true"]')!;
-    expect(chip('2026-03-20').style.opacity).toBe(String(OPACITY_STOPS[1]));
-    expect(chip('2026-03-04').style.opacity).toBe(String(OPACITY_STOPS[0]));
+    const alpha = (date: string) => chipAlpha(chipOf(cell(grid, date)));
+    expect(alpha('2026-03-20')).toBe(OPACITY_STOPS[1]);
+    expect(alpha('2026-03-04')).toBe(OPACITY_STOPS[0]);
   });
 });
 
@@ -425,12 +472,15 @@ function themeTokens(el: Element): { light: string; dark: string } {
   return { light: base ?? 'NONE', dark: override ?? base ?? 'NONE' };
 }
 
-function numberSpan(el: HTMLElement): Element {
-  const span = [...el.querySelectorAll('span')].find(
-    (x) => !x.hasAttribute('aria-hidden'),
-  );
-  if (span === undefined) throw new Error('no number span');
-  return span;
+/**
+ * The element the day number (or month name) is written on.
+ *
+ * Since D1 that is the CHIP ITSELF — one element carrying both the fill and the
+ * text — so this delegates rather than selecting separately. Two selectors for
+ * one element could drift apart and quietly start measuring different things.
+ */
+function numberSpan(el: HTMLElement): HTMLElement {
+  return chipOf(el);
 }
 
 describe('the day number stays readable on its own chip', () => {
@@ -446,12 +496,12 @@ describe('the day number stays readable on its own chip', () => {
     dark: string;
     ratios: string;
   }[] = [
-    { stop: '0.30', date: '2026-03-02', month: 'March', light: 'text-foreground', dark: 'text-foreground', ratios: '10.23 / 5.85' },
-    { stop: '0.50', date: '2026-03-10', month: 'March', light: 'text-foreground', dark: 'text-primary-foreground', ratios: '5.89 / 5.00' },
-    { stop: '0.75', date: '2026-07-15', month: 'July', light: 'text-primary-foreground', dark: 'text-primary-foreground', ratios: '7.50 / 9.85' },
+    { stop: '0.30', date: '2026-03-02', month: 'March', light: 'text-foreground', dark: 'text-foreground', ratios: '10.15 / 5.89' },
+    { stop: '0.50', date: '2026-03-10', month: 'March', light: 'text-foreground', dark: 'text-primary-foreground', ratios: '5.85 / 5.00' },
+    { stop: '0.75', date: '2026-07-15', month: 'July', light: 'text-primary-foreground', dark: 'text-primary-foreground', ratios: '7.47 / 9.75' },
     { stop: '1.00', date: '2026-07-18', month: 'July', light: 'text-primary-foreground', dark: 'text-primary-foreground', ratios: '16.97 / 16.97' },
-    { stop: 'no-spend', date: '2026-03-03', month: 'March', light: 'text-foreground/60', dark: 'text-foreground/60', ratios: '5.14 / 5.78' },
-    { stop: 'upcoming', date: '2026-03-05', month: 'March', light: 'text-muted-foreground', dark: 'text-muted-foreground', ratios: '4.83 / 5.29' },
+    { stop: 'no-spend', date: '2026-03-03', month: 'March', light: 'text-foreground/60', dark: 'text-foreground/60', ratios: '5.13 / 5.72' },
+    { stop: 'upcoming', date: '2026-03-05', month: 'March', light: 'text-muted-foreground', dark: 'text-muted-foreground', ratios: '4.83 / 5.49' },
   ];
 
   test.each(DAY_STOPS)(
@@ -474,12 +524,11 @@ describe('the day number stays readable on its own chip', () => {
       // Guards the table itself: if the fixture drifts and `date` stops
       // landing on `stop`, the row above would still pass while describing
       // the wrong cell.
-      const chip = cell(grid, date).querySelector<HTMLElement>(
-        'span[aria-hidden="true"]',
-      )!;
+      const chip = chipOf(cell(grid, date));
+      const alpha = chipAlpha(chip);
       const actual =
-        chip.style.opacity !== ''
-          ? Number(chip.style.opacity).toFixed(2)
+        alpha !== null
+          ? alpha.toFixed(2)
           : chip.className.includes('bg-muted')
             ? 'no-spend'
             : 'upcoming';
@@ -506,25 +555,71 @@ describe('the day number stays readable on its own chip', () => {
   );
 });
 
+/**
+ * The guarantee the two-layer span used to provide, now that it is gone.
+ *
+ * D1 collapsed the painted chip and the number span into one element, and the
+ * ONLY thing that makes that safe is where the alpha lives: in the fill colour,
+ * which does not touch text, rather than on the element, which fades everything
+ * inside it. Nothing about the collapsed markup announces that — it is one span
+ * with a background and some text, and it looks correct either way. So the
+ * invariant needs its own assertion or the structure is one edit from putting
+ * the day numbers back behind their own chips at 30% alpha.
+ */
+describe('the day number does not inherit its chip’s alpha', () => {
+  test.each([
+    ['the month grid day cell', () => chipOf(cell(renderMonthGrid(), '2026-03-20'))],
+    [
+      'the month picker chip',
+      () => {
+        renderMonthGrid();
+        return numberSpan(screen.getByRole('button', { name: /^March 2026:/ }));
+      },
+    ],
+  ])('%s carries the alpha in its FILL, never as an opacity', (_n, get) => {
+    const el = get();
+    // The text and the fill are on one element…
+    expect(el.textContent).not.toBe('');
+    expect(el.style.backgroundColor).not.toBe('');
+    // …which is only safe because this is empty. `opacity` here would fade the
+    // text with the background — the exact defect the second span existed to
+    // avoid.
+    expect(el.style.opacity).toBe('');
+    // And the alpha really is a partial one: at 1.00 the two forms are
+    // indistinguishable, so a fully opaque chip would prove nothing.
+    const alpha = chipAlpha(el);
+    expect(alpha).not.toBeNull();
+    expect(alpha!).toBeLessThan(1);
+  });
+});
+
 describe('today is marked where the marking can be seen', () => {
-  // D1: the ring used to sit on the chip span, which carries the inline
-  // `opacity` — and CSS opacity fades an element's own ring with it. Measured
-  // ring-vs-chip there: 1.02-1.08:1, i.e. invisible on every day that HAD
-  // spending, and visible only on days that had none. A perfect inversion of
-  // the intent.
+  // The ring used to sit on the chip span, which carried a CSS `opacity` —
+  // and opacity fades an element's own ring with it. Measured ring-vs-chip
+  // there: 1.02-1.08:1, i.e. invisible on every day that HAD spending and
+  // visible only on days that had none. A perfect inversion of the intent.
+  //
+  // D1 removed that cause and NOT this placement. Re-measured with the alpha
+  // in the colour, a ring drawn on the chip would score 3.15 / 2.60 / 1.74 /
+  // 1.06 light and 2.77 / 1.85 / 1.26 / 1.05 dark across the four stops
+  // against a 3:1 bar — because `--foreground` and `--primary` are nearly the
+  // same colour at both ends of both themes, which never had anything to do
+  // with opacity. On the button it is a flat 3.74 / 4.71 against the card.
+  // The structural assertion below is what stops the next reader undoing the
+  // placement on the strength of the cause that DID go away.
   test.each([
     ['the year grid', renderYearGrid],
     ['the month grid', renderMonthGrid],
-  ])('%s rings the BUTTON, never the opacity-carrying chip', (_n, renderGrid) => {
+  ])('%s rings the BUTTON, in the card-coloured gutter', (_n, renderGrid) => {
     const grid = renderGrid();
     const today = cell(grid, '2026-03-04');
-    const chip = today.querySelector<HTMLElement>('span[aria-hidden="true"]')!;
+    const chip = chipOf(today);
 
     expect(today.className.split(/\s+/)).toContain('ring-1');
     expect(chip.className.split(/\s+/)).not.toContain('ring-1');
     // Positive control: today really does have spending here, so a ring on the
-    // chip would be the faded, invisible case rather than a coincidence.
-    expect(chip.style.opacity).not.toBe('');
+    // chip would be the failing-contrast case rather than a coincidence.
+    expect(chipAlpha(chip)).not.toBeNull();
 
     // And no other cell claims to be today.
     expect(
@@ -542,13 +637,18 @@ describe('a day that has not happened yet', () => {
     ['the year grid', renderYearGrid],
   ])('%s paints no chip at all, so it cannot read as a real zero', (_n, renderGrid) => {
     const grid = renderGrid();
-    const chip = (date: string) =>
-      cell(grid, date).querySelector<HTMLElement>('span[aria-hidden="true"]')!;
+    const chip = (date: string) => chipOf(cell(grid, date));
     // 03-05 and 03-03 are adjacent days with identical data (none). Only the
     // paint tells them apart, so both halves are asserted together.
     expect(chip('2026-03-05').className.split(/\s+/)).not.toContain('bg-muted');
     expect(chip('2026-03-05').style.backgroundColor).toBe('');
     expect(chip('2026-03-03').className.split(/\s+/)).toContain('bg-muted');
+    // Positive control for the empty-string assertion above, and it is not
+    // decoration: happy-dom DROPS a background it cannot parse, so a fill
+    // written in a form it rejects reads as `''` on every cell and that
+    // assertion passes for a fully painted day. 03-04 has spending, so this
+    // fails the moment the fill stops being observable.
+    expect(chip('2026-03-04').style.backgroundColor).not.toBe('');
   });
 
   test('announces "upcoming" rather than asserting a fact about the future', () => {
@@ -573,6 +673,88 @@ describe('a day that has not happened yet', () => {
       within(dialog).getByText('This day has not happened yet.'),
     ).toBeInTheDocument();
     expect(apiGet).not.toHaveBeenCalled();
+  });
+});
+
+describe('the legend names the scale it describes', () => {
+  test('it says "Daily spending", visibly and in its accessible name', () => {
+    // The month picker's chips and the day cells paint from the same four
+    // stops but are ranked over different populations, so an unqualified
+    // legend below both read as governing both. The visible word is the fix;
+    // the accessible name has to agree with it.
+    renderMonthGrid();
+    const legend = screen.getByRole('group', {
+      name: 'Daily spending intensity legend',
+    });
+    expect(legend).toHaveTextContent('Daily spending');
+    // Leading the legend, not buried between its two groups — mid-string it
+    // read as labelling only the gradient.
+    expect(legend.textContent).toMatch(/^Daily spending/);
+  });
+
+  test('its swatches are painted by the same rule as the cells', () => {
+    // A legend that paints itself by its own copy of the expression is a
+    // legend that can drift off the scale it claims to explain, and nothing
+    // on screen would say so — the swatches would simply describe a gradient
+    // the grid no longer uses. Pinned against the cells' own stops.
+    const grid = renderMonthGrid();
+    const legend = screen.getByRole('group', {
+      name: 'Daily spending intensity legend',
+    });
+    const swatches = [...legend.querySelectorAll<HTMLElement>('div[style]')];
+    expect(swatches.map((s) => chipAlpha(s))).toEqual([...OPACITY_STOPS]);
+    // …and a swatch really is the same string a day at that stop is painted
+    // with, so the two lists cannot agree by both being wrong the same way.
+    // 03-02 sits on the palest stop and 03-20 on the second, ranked over the
+    // whole year (see the scale test above).
+    expect(swatches[0].style.backgroundColor).toBe(
+      chipOf(cell(grid, '2026-03-02')).style.backgroundColor,
+    );
+    expect(swatches[1].style.backgroundColor).toBe(
+      chipOf(cell(grid, '2026-03-20')).style.backgroundColor,
+    );
+  });
+
+  test('the desktop month labels use the guide’s 12px minimum', () => {
+    // Measured at 1440: twelve labels, widest 23.19px, 73.58px of clearance
+    // between neighbours, so the arbitrary `text-[10px]` bought nothing and
+    // existed nowhere else in web/src.
+    const grid = renderYearGrid();
+    const label = grid.querySelector('thead span');
+    expect(label).not.toBeNull();
+    const tokens = label!.className.split(/\s+/);
+    expect(tokens).toContain('text-xs');
+    expect(tokens).not.toContain('text-[10px]');
+  });
+});
+
+describe('the focus indicator survives the class merge', () => {
+  test('the RENDERED class list carries an outline style, width, offset and colour', () => {
+    // Asserted on the rendered element, NOT on the FOCUS_RING constant. The
+    // constant was correct the whole time; `cn()`/tailwind-merge put bare
+    // `outline` in the same conflict group as `outline-2` and silently dropped
+    // the style, so the browser fell back to its own `outline: auto` ring. A
+    // test reading the constant would have passed throughout.
+    const grid = renderYearGrid();
+    const tokens = cell(grid, '2026-03-04').className.split(/\s+/);
+    expect(tokens).toContain('focus-visible:[outline-style:solid]');
+    expect(tokens).toContain('focus-visible:outline-2');
+    expect(tokens).toContain('focus-visible:outline-offset-2');
+    expect(tokens).toContain('focus-visible:outline-ring');
+    // The bare utility must not come back: it is what gets eaten.
+    expect(tokens).not.toContain('focus-visible:outline');
+  });
+
+  test('the month grid and the month picker get the same indicator', () => {
+    const grid = renderMonthGrid();
+    for (const el of [
+      cell(grid, '2026-03-04'),
+      screen.getByRole('button', { name: /^March 2026:/ }),
+    ]) {
+      expect(el.className.split(/\s+/)).toContain(
+        'focus-visible:[outline-style:solid]',
+      );
+    }
   });
 });
 
@@ -1015,8 +1197,8 @@ describe('the phone grid buys back the room a 44px target needs', () => {
   });
 
   test('the grid cancels part of the card padding and caps its width', () => {
-    // At 360px the card's own `p-6` leaves 278px, which is 37px per column —
-    // under the floor above. `-mx-4` is what buys it back. `max-w-[420px]` is
+    // At 360px the card's own `p-6` leaves 278px, which is 39.7px per column
+    // — under the floor above. `-mx-4` is what buys it back. `max-w-[420px]` is
     // the other end: a 720px tablet is BELOW `md`, so it renders this branch
     // and would otherwise get 95px cells.
     const grid = renderMonthGrid();
@@ -1109,7 +1291,7 @@ describe('the heaviest day is named, because the scale cannot show it', () => {
       screen.getByRole('grid', { name: 'Spending heatmap for March 2026' }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole('group', { name: 'Spending intensity legend' }),
+      screen.getByRole('group', { name: 'Daily spending intensity legend' }),
     ).toBeInTheDocument();
   });
 });
@@ -1150,12 +1332,19 @@ describe('a touch device never gets the year grid, however wide', () => {
   });
 
   test('width still gates: a fine pointer on a phone gets the calendar', () => {
+    // Both halves, like its two siblings above. The presence assertion alone
+    // says nothing about the gate: the month grid is what renders whenever the
+    // year grid does NOT, so only the absence half distinguishes "width still
+    // gates" from "the year grid stopped rendering at every width".
     setViewportWidth(PHONE_WIDTH);
     setPointer('fine');
     renderHeatmap();
     expect(
       screen.getByRole('grid', { name: 'Spending heatmap for March 2026' }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('grid', { name: 'Spending heatmap for 2026' }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -1217,10 +1406,7 @@ describe('a day that arrives as several groups', () => {
     const grid = screen.getByRole('grid', {
       name: 'Spending heatmap for March 2026',
     });
-    const chip = cell(grid, '2026-03-04').querySelector<HTMLElement>(
-      'span[aria-hidden="true"]',
-    )!;
-    expect(chip.style.opacity).toBe(String(OPACITY_STOPS[0]));
+    expect(chipAlpha(chipOf(cell(grid, '2026-03-04')))).toBe(OPACITY_STOPS[0]);
   });
 
   test('the sheet header reports the whole day too', async () => {
@@ -1269,156 +1455,6 @@ describe('changing the year', () => {
       </QueryClientProvider>,
     );
     // January, not the July left over from 2026.
-    expect(
-      screen.getByRole('grid', { name: 'Spending heatmap for January 2024' }),
-    ).toBeInTheDocument();
-  });
-});
-
-describe('a touch device never gets the year grid, however wide', () => {
-  /** Galaxy Tab S10 FE in landscape: wide, and entirely touch-driven. */
-  const TABLET_LANDSCAPE = 1152;
-
-  test('a coarse pointer at 1152px gets the calendar', () => {
-    // Rotating the household's tablet used to turn a 60px calendar into 18.4px
-    // squares with no day numbers, whose only value affordance is a tooltip
-    // that cannot open on touch at all.
-    setViewportWidth(TABLET_LANDSCAPE);
-    setPointer('coarse');
-    renderHeatmap();
-    expect(
-      screen.getByRole('grid', { name: 'Spending heatmap for March 2026' }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole('grid', { name: 'Spending heatmap for 2026' }),
-    ).not.toBeInTheDocument();
-  });
-
-  test('a fine pointer at the SAME width keeps the year grid', () => {
-    // The other half, and the one that makes the pair meaningful: without it a
-    // component that had simply stopped rendering the year grid at any width
-    // would pass the case above.
-    setViewportWidth(TABLET_LANDSCAPE);
-    setPointer('fine');
-    renderHeatmap();
-    const grid = screen.getByRole('grid', {
-      name: 'Spending heatmap for 2026',
-    });
-    expect(within(grid).getAllByRole('button').length).toBeGreaterThan(360);
-    expect(
-      screen.queryByRole('group', { name: 'Heatmap month' }),
-    ).not.toBeInTheDocument();
-  });
-
-  test('width still gates: a fine pointer on a phone gets the calendar', () => {
-    setViewportWidth(PHONE_WIDTH);
-    setPointer('fine');
-    renderHeatmap();
-    expect(
-      screen.getByRole('grid', { name: 'Spending heatmap for March 2026' }),
-    ).toBeInTheDocument();
-  });
-});
-
-describe('a day that arrives as several groups', () => {
-  // `SumExpensesByDay` groups by the raw timestamp column, so one calendar day
-  // holding rows at different times of day comes back as several entries that
-  // the handler formats to the SAME "YYYY-MM-DD". Building the lookup with
-  // `new Map(...)` was last-write-wins, and the three surfaces then disagreed
-  // with each other.
-  const SPLIT: HeatmapEntry[] = [
-    { date: '2026-03-04', total: 30 },
-    { date: '2026-03-04', total: 12.5 },
-    { date: '2026-03-20', total: 1 },
-  ];
-
-  test('the cell announces the whole day, not the last group', () => {
-    setViewportWidth(PHONE_WIDTH);
-    renderHeatmap(YEAR, SPLIT);
-    const grid = screen.getByRole('grid', {
-      name: 'Spending heatmap for March 2026',
-    });
-    expect(cell(grid, '2026-03-04')).toHaveAttribute(
-      'aria-label',
-      'Today, Wednesday, March 4th, 2026: $42.50 spent',
-    );
-  });
-
-  test('the month chip and the day cells cannot disagree', () => {
-    // `monthTotals` already accumulated, so before the fix the chip said
-    // $42.50 while its own day cells summed to $12.50. Both are asserted here
-    // because the defect was the DISAGREEMENT, not either number alone.
-    setViewportWidth(PHONE_WIDTH);
-    renderHeatmap(YEAR, SPLIT);
-    expect(
-      screen.getByRole('button', { name: 'March 2026: $43.50 spent' }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Heaviest day:/)).toHaveTextContent(
-      'Heaviest day: Mar 4 — $42.50',
-    );
-  });
-
-  test('the intensity scale ranks DAYS, not per-timestamp groups', () => {
-    // 03-04 arrives as two groups of 5. Ranked over accumulated DAYS
-    // ([10,20,30,40], n=4) it is the smallest of four and takes the palest
-    // stop. Ranked over the raw entries ([5,5,20,30,40], n=5) its accumulated
-    // 10 is absent from the rank map, falls back to n, and paints DARKEST —
-    // the quietest day of the month rendered as its heaviest. The earlier
-    // fixture in this block cannot see that: it yields the same two opacities
-    // either way, which is why this case exists separately.
-    const groups: HeatmapEntry[] = [
-      { date: '2026-03-04', total: 5 },
-      { date: '2026-03-04', total: 5 },
-      { date: '2026-03-10', total: 20 },
-      { date: '2026-03-20', total: 30 },
-      { date: '2026-03-25', total: 40 },
-    ];
-    setViewportWidth(PHONE_WIDTH);
-    renderHeatmap(YEAR, groups);
-    const grid = screen.getByRole('grid', {
-      name: 'Spending heatmap for March 2026',
-    });
-    const chip = cell(grid, '2026-03-04').querySelector<HTMLElement>(
-      'span[aria-hidden="true"]',
-    )!;
-    expect(chip.style.opacity).toBe(String(OPACITY_STOPS[0]));
-  });
-
-  test('the sheet header reports the whole day too', async () => {
-    apiGet.mockResolvedValue(
-      page([transaction({ id: 7, description: 'Butcher', amount: 30 })]),
-    );
-    const user = setup();
-    setViewportWidth(PHONE_WIDTH);
-    renderHeatmap(YEAR, SPLIT);
-    const grid = screen.getByRole('grid', {
-      name: 'Spending heatmap for March 2026',
-    });
-    await user.click(cell(grid, '2026-03-04'));
-    const dialog = await screen.findByRole('dialog');
-    expect(
-      within(dialog).getByText('$42.50 spent \u00b7 Expenses only'),
-    ).toBeInTheDocument();
-  });
-});
-
-describe('changing the year', () => {
-  test('resets the month instead of stranding the old one', async () => {
-    // M7: deleting the reset left the whole suite green. Landing on December
-    // 2019 because that is where you happened to be in 2026 is not a sensible
-    // default, and the reset is a render-time state adjustment that nothing
-    // else exercises.
-    const user = setup();
-    renderMonthGrid();
-    await user.click(screen.getByRole('button', { name: /^July 2026:/ }));
-    expect(
-      screen.getByRole('grid', { name: 'Spending heatmap for July 2026' }),
-    ).toBeInTheDocument();
-
-    cleanup();
-    setViewportWidth(PHONE_WIDTH);
-    renderHeatmap(2024, []);
-    // A past year opens on January, not on the month left over from 2026.
     expect(
       screen.getByRole('grid', { name: 'Spending heatmap for January 2024' }),
     ).toBeInTheDocument();

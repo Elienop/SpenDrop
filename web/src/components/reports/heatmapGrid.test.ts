@@ -3,6 +3,7 @@ import {
   OPACITY_STOPS,
   WEEKDAY_COUNT,
   buildIntensityScale,
+  chipFill,
   generateMonthDates,
   generateYearDates,
   heatmapCellLabel,
@@ -132,7 +133,61 @@ describe('month labels', () => {
   });
 });
 
+describe('chipFill', () => {
+  test('renders a stop as a token wash, not an element opacity', () => {
+    expect(chipFill(0.5)).toBe(
+      'color-mix(in oklab, hsl(var(--primary)) 50%, transparent)',
+    );
+  });
+
+  test('every shipped stop comes out as a whole percentage', () => {
+    expect(OPACITY_STOPS.map(chipFill)).toEqual([
+      'color-mix(in oklab, hsl(var(--primary)) 30%, transparent)',
+      'color-mix(in oklab, hsl(var(--primary)) 50%, transparent)',
+      'color-mix(in oklab, hsl(var(--primary)) 75%, transparent)',
+      'color-mix(in oklab, hsl(var(--primary)) 100%, transparent)',
+    ]);
+  });
+
+  test('roundsTheStop: a stop that IS a float artefact still comes out clean', () => {
+    // The four stops above happen not to need this — `0.3 * 100` is exactly
+    // 30 — so the rounding inside `chipFill` is invisible through the rendered
+    // component and a mutant that removes it survives every test that goes via
+    // the DOM. These two values are the ones that would ship
+    // `28.999999999999996%` and `7.000000000000001%` into a style attribute,
+    // and they are the whole reason the guard is there. Changing OPACITY_STOPS
+    // to such a value must not be the moment anyone finds out.
+    expect(chipFill(0.29)).toBe(
+      'color-mix(in oklab, hsl(var(--primary)) 29%, transparent)',
+    );
+    expect(chipFill(0.07)).toBe(
+      'color-mix(in oklab, hsl(var(--primary)) 7%, transparent)',
+    );
+    // The naive form really does produce those, so the case is not imaginary.
+    expect(0.29 * 100).not.toBe(29);
+    expect(0.07 * 100).not.toBe(7);
+  });
+});
+
 describe('the intensity scale', () => {
+  test('outOfPopulation: a total the scale never saw comes back DARKEST', () => {
+    // Not a curiosity — this is what a no-spend day gets. `cellProps` calls the
+    // day scale with `lookup.get(date) ?? 0`, and a day with no rows is absent
+    // from the totals the scale was built from, so it lands on the `?? n`
+    // fallback and ranks top. It is invisible today only because both consumers
+    // branch on the total rather than on the value returned here.
+    //
+    // Pinned so that the coupling is written down somewhere a reader will meet
+    // it: if this ever needs to change, it is the paint gate in `MonthCell` and
+    // the `total === 0` arm of `chipTextClass` that are holding it up.
+    const scale = buildIntensityScale([10, 20, 30, 40]);
+    expect(scale(0)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
+    expect(scale(999)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
+    // Control: an in-population value still ranks normally, so the assertion
+    // above is about the fallback and not about the scale being broken.
+    expect(scale(10)).toBe(OPACITY_STOPS[0]);
+  });
+
   // The defect the old percentile arithmetic had: `pct(0.75)` indexed the LAST
   // element for n <= 4, and the top stop was only returned for `total > p75`
   // strictly — so the biggest spend in a sparse set painted at the PALEST

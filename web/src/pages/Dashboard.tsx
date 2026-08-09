@@ -465,11 +465,17 @@ export function Dashboard() {
               tickLine={false}
               axisLine={false}
               tickMargin={8}
-              // Was a hardcoded `0`. 6M is the default and six rotated labels
-              // clear each other at any width, but the 12M toggle puts twelve
-              // into a 208px plot at phone width. Same rotated-axis rule as the
-              // Reports charts — see the long note on Income vs Expenses in
-              // OverviewTab.
+              // Was a hardcoded `0`, and this call RETURNS 0 for every input
+              // this chart can produce — the trend request is hardcoded
+              // `months=12` and the toggle only narrows it to 6, both at or
+              // under `MAX_UNTHINNED_MONTH_TICKS`. So it changes nothing today
+              // and is not what made twelve labels fit a 208px plot at phone
+              // width; the rotation and the 9px tick did that.
+              //
+              // Kept deliberately: it is the seam that stops a hardcoded `0`
+              // being wrong the day the window grows past twelve, and it makes
+              // this axis answerable by the same rule as the six in Reports
+              // rather than by a local constant nobody re-derives.
               interval={monthAxisInterval(chartData.length)}
               angle={MONTH_TICK_ANGLE}
               textAnchor="end"

@@ -19,6 +19,38 @@ export const WEEKDAY_COUNT = 7;
 export const OPACITY_STOPS = [0.3, 0.5, 0.75, 1] as const;
 
 /**
+ * One stop rendered as a fill, with the alpha IN THE COLOUR.
+ *
+ * Lives beside the stops rather than in the component because every surface
+ * that paints one — day cells, month picker, legend swatches — must produce
+ * byte-identical strings, and a second copy of this expression is how a legend
+ * quietly stops describing the grid it sits under.
+ *
+ * `color-mix(…, transparent)` and not `hsl(var(--primary) / N)`, which is the
+ * form used for a STATIC wash elsewhere in the repo. Those are all chart-config
+ * strings and SVG attributes; this one goes into an inline `style`, and
+ * **happy-dom 20.11.1 drops the slash-alpha `hsl()` from a style declaration
+ * altogether** — measured, and not because of the `var()`: literal
+ * `hsl(240 5.9% 10% / 0.5)` is dropped too while `rgb(0 0 0 / 0.5)` survives.
+ * The declaration simply vanishes, a painted chip becomes indistinguishable
+ * from an unpainted one, and the assertion that an upcoming day paints NOTHING
+ * passes for a fully painted cell. `color-mix` round-trips, and it is already
+ * the repo's inline-style idiom for a wash (`CategoryBadge.tsx`). Chrome
+ * composites the two forms to the same pixel — verified, not assumed.
+ *
+ * The rounding is DEFENSIVE and is not currently observable: none of the four
+ * stops above produces a float artefact (`0.3 * 100` is exactly 30), so a
+ * mutant that drops it survives the suite through the rendered component. It
+ * earns its place one stop value later — `0.29 * 100` is 28.999999999999996
+ * and `0.07 * 100` is 7.000000000000001, either of which would ship into the
+ * DOM. `chipFill.roundsTheStop` in the unit tests is what actually holds it.
+ */
+export function chipFill(opacity: number): string {
+  const percent = Math.round(opacity * 10000) / 100;
+  return `color-mix(in oklab, hsl(var(--primary)) ${percent}%, transparent)`;
+}
+
+/**
  * Chronological cells for a whole year, Monday-first, padded at both ends so
  * the array length is always a multiple of 7.
  *
@@ -178,6 +210,18 @@ export function buildIntensityScale(
   const top = OPACITY_STOPS[OPACITY_STOPS.length - 1];
   return (total: number): number => {
     if (n === 0) return top;
+    // `?? n` IS REACHED, and by the commonest input there is. `cellProps`
+    // calls this with `lookup.get(date) ?? 0` for EVERY day, and a day with no
+    // rows is absent from the map the scale was built from — so a zero total
+    // falls through here and comes back as the DARKEST stop. Nothing shows,
+    // only because both consumers gate on the total rather than on this value:
+    // the chip paints under `total > 0` and `chipTextClass` returns on
+    // `total === 0` before it looks at the opacity. That coupling is invisible
+    // from either end, so dropping one of those gates would paint empty days
+    // black. `buildIntensityScale.outOfPopulation` pins it.
+    //
+    // (`monthScale` genuinely cannot reach it — it is built from
+    // `filter(t => t > 0)` and called under the same predicate.)
     const q = (rank.get(total) ?? n) / n;
     const bucket = Math.ceil(q * OPACITY_STOPS.length) - 1;
     return OPACITY_STOPS[Math.min(OPACITY_STOPS.length - 1, Math.max(0, bucket))];

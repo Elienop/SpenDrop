@@ -59,9 +59,12 @@ import {
   categoryChartHeightPx,
   shortenCategoryLabel,
   monthAxisInterval,
+  CLAMPED_TABLE_TEXT,
   MONTH_TICK,
   MONTH_TICK_ANGLE,
+  PHONE_TABLE_DENSITY,
   ROTATED_MONTH_TICK_PADDING,
+  TABLE_TEXT_CELL_WIDTH,
 } from './utils';
 import type { ExpenseVelocityData } from '@/api/types';
 
@@ -210,7 +213,6 @@ export function SpendingTab() {
   // Expense velocity - cumulative lines
   const velocityData = useMemo(() => buildVelocityData(velocity.data), [velocity.data]);
 
-
   return (
     // Every card in this grid carries `min-w-0` — without it this tab measured
     // 3530px wide at a 390px viewport. A grid item defaults to min-width:auto,
@@ -283,7 +285,14 @@ export function SpendingTab() {
               <ChartContainer
                 config={breakdownConfig}
                 className={cn(
-                  'w-full transition-opacity duration-200',
+                  // `aspect-auto` neutralizes ChartContainer's base
+                  // `aspect-video` so the explicit height below is the sole
+                  // sizing input — the same pairing every other data-driven
+                  // chart here uses. It renders correctly without it only
+                  // because CSS ignores `aspect-ratio` when both axes are
+                  // already definite; the class is what keeps that true if the
+                  // width ever stops being.
+                  'aspect-auto w-full transition-opacity duration-200',
                   catBreakdown.fetching &&
                     !catBreakdown.loading &&
                     'opacity-60',
@@ -493,7 +502,7 @@ export function SpendingTab() {
                     // preview and Settings, and none of those asked for it. A
                     // descendant selector rather than a class on every cell so a
                     // new column cannot be added without it.
-                    className="[&_td]:px-2 [&_th]:px-2 sm:[&_td]:px-4 sm:[&_th]:px-4"
+                    className={PHONE_TABLE_DENSITY}
                 >
                   <TableHeader>
                     <TableRow>
@@ -542,9 +551,9 @@ export function SpendingTab() {
                             phone width and ~150 at desktop, against ~14 for a
                             single truncated line. `title` is still set, for
                             the pointer case where it does work. */}
-                        <TableCell className="max-w-[12rem] font-medium md:max-w-md">
+                        <TableCell className={cn(TABLE_TEXT_CELL_WIDTH, 'font-medium')}>
                           <div
-                            className="line-clamp-3 [overflow-wrap:anywhere]"
+                            className={CLAMPED_TABLE_TEXT}
                             title={m.description}
                           >
                             {m.description}

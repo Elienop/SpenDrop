@@ -370,31 +370,27 @@ describe('OverviewTab chart axes', () => {
     // 24-label cap produced exactly 24 labels on a stride of 22 — a number this
     // harness could check, and it did, against 24 hand-derived month strings.
     //
-    // The axis now passes `interval="equidistantPreserveStart"`, which asks
+    // The axis now passes `interval="equidistantPreserveEnd"`, which asks
     // recharts to measure the plot and pick the largest stride that fits. That
     // is the fix for a defect this harness could never have seen: a fixed cap
     // is blind to the container, and `md:grid-cols-2` halves every chart on
     // this tab at 768px, so twelve labels measured 6.8px of clearance there
-    // against the 11px their ink needs — worse than the phone. Measurements are
-    // in the header of `chartAxis.seam.test.ts`.
-    //
-    // happy-dom performs no layout, so recharts measures every tick as 0x0, no
-    // collision ever fires, and ALL 516 render here. That is an artefact of the
-    // environment, not the behaviour: the same build renders 6 of 516 at 360px
-    // and 12 at 700px in Chrome. So the count is asserted as the artefact it is
-    // — proof the data still reaches the axis — and the thinning itself is
-    // pinned as source text in `chartAxis.seam.test.ts` and measured in a
-    // browser. Do NOT restore an assertion on the rendered count: under this
-    // strategy it can only ever repeat what happy-dom failed to lay out.
+    // against the ink they need — worse than the phone. Measurements are in the
+    // header of `chartAxis.seam.test.ts`.
     const ticks = netCashFlowTicks();
 
     // happy-dom performs no layout, so recharts measures every tick as 0x0 and
-    // its collision arithmetic degenerates to `minTickGap` alone — it renders 52
-    // of the 516 here, where the same build renders 6 at 360px and 12 at 700px
-    // in Chrome. So the COUNT is an artefact of the environment and is not
-    // asserted; what is asserted is the property that made this strategy the
-    // right one, and it survives the degeneracy: the rendered set is a UNIFORM
-    // stride anchored at the oldest bucket.
+    // its collision arithmetic degenerates to `minTickGap` alone — it renders
+    // 58 of the 516 here, where the same build renders 6 at 360px and 12 at
+    // 700px in Chrome. So the COUNT is an artefact of the environment and is
+    // NOT asserted; what is asserted is the property that made this strategy
+    // the right one, and it survives the degeneracy: the rendered set is a
+    // UNIFORM stride anchored at the NEWEST bucket.
+    //
+    // Do not restore an assertion on the rendered count — under this strategy
+    // it can only ever repeat what happy-dom failed to lay out. And do not add
+    // a second paragraph restating this one: the two that used to stand here
+    // said 516 and 52, neither of which was ever the number.
     //
     // That is the whole defect. `preserveEnd` — recharts' default, and what this
     // axis falls back to with the interval deleted — walks the ticks and drops

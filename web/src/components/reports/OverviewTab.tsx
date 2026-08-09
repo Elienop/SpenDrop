@@ -235,49 +235,23 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
-                {/* THE ROTATED-AXIS RULE, written here once and referenced from
-                    the other three (Net Cash Flow below, Category Trends in
-                    SpendingTab, Cash Flow on the Dashboard).
+                {/* One of four month axes that share a rule. The rule, the
+                    geometry and every measured number behind them live on
+                    `MONTH_TICK_ANGLE`, `MONTH_TICK`, the two padding constants
+                    and `monthAxisInterval` in `reports/utils.ts` — read them
+                    there, and do not restate them here. That is not tidiness:
+                    this comment used to carry its own copy, the design went
+                    through a second attempt, and the copy kept asserting the
+                    REJECTED mechanism (`equidistantPreserveStart`, -30°, 12px)
+                    long after the code shipped the accepted one. Four labels
+                    quoting one rule is four chances to describe a design that
+                    no longer exists.
 
-                    Rotated labels are parallel strips: they clear each other
-                    only when `spacing × sin(30°)` — half the spacing — exceeds
-                    their INK height, measured at 11px for `Sep'25` in the tick
-                    font. So they need 22px of spacing, and label width has
-                    nothing to do with it: shortening `Sep'25` to `Sep` would
-                    not move the number at all. Fewer labels is the only lever.
-
-                    That number depends on the CHART's width, which is not a
-                    function of the viewport's — this grid is `md:grid-cols-2`,
-                    so every chart on it halves at 768px. Measured here with a
-                    derived interval forcing twelve: 8.5px of gap at 360px, then
-                    22.8px at 700px, then 6.8px at 768px where the second column
-                    appears. A viewport-keyed cap was built for this and thrown
-                    away for exactly that reading; the full clearance table is
-                    in the header of `chartAxis.seam.test.ts`.
-
-                    `equidistantPreserveStart` is the only kind of strategy that
-                    reads the real plot: it takes the smallest stride for which
-                    every Nth tick clears its neighbour, so the set is uniform
-                    at every width by construction and never collides.
-
-                    START, not End, and this is measured rather than preferred.
-                    `equidistantPreserveEnd` would anchor the most recent month,
-                    which is the better one to anchor on a trailing window — but
-                    it was built and it DEGENERATES on a point scale: every
-                    stepsize failed its visibility walk and it fell through to
-                    the terminal one, rendering exactly ONE label on Net Cash
-                    Flow at every width from 640 to 1280. Start has no such
-                    edge, because it never has to prove the last tick visible.
-
-                    KNOWN COST, stated so nobody reads it as an accident:
-                    recharts models a rotated label's footprint as its
-                    axis-aligned projection — `39.9·cos30 + 16·sin30 + 5` ≈
-                    47.6px — where two of them actually clear at 22px. It is
-                    about twice as conservative as the geometry, so at 1280px
-                    this axis shows six evenly-spaced months where twelve would
-                    have been legible. Six correct labels beat twelve overlapping
-                    ones, and the alternative was a viewport cap that measurement
-                    disproved, but it IS a density loss on desktop. */}
+                    What is local to THIS chart: it is a band scale (Bar) with
+                    no `<YAxis>`, so it takes the standalone padding constant,
+                    and it is the loosest of the four — 18.1px of tick spacing
+                    at 360px against the 11.7px twelve rotated 9px labels need.
+                    Net Cash Flow below is the tight one. */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
@@ -363,18 +337,24 @@ export function OverviewTab() {
                   </linearGradient>
                 </defs>
                 <CartesianGrid vertical={false} />
-                {/* Same rotated-axis rule as Income vs Expenses above. This is
-                    the TIGHTEST of the four, because 80px of currency YAxis
-                    comes off the plot: it was the chart measuring 6.8px of gap
-                    at 768px and 8.5px at 360px.
+                {/* Same rotated-axis rule as Income vs Expenses above; the
+                    numbers live on the constants in `reports/utils.ts`.
 
-                    Being a point scale is also why the End-anchored variant is
-                    not used: this is the chart it collapsed to a single label
-                    on. `preserveStartEnd` remains wrong here for the reason it
-                    always was — it pins both ends and thins between them, and
-                    on a point scale the last tick sits hard against the right
-                    edge, so its neighbour loses the minTickGap contest and
-                    vanishes (measured: 11 of 12, jumping May'26 -> Jul'26). */}
+                    Local to THIS chart: a POINT scale (Area) that also renders
+                    an 80px currency `<YAxis>`, so it takes the inside-YAxis
+                    padding constant — left 0, because the YAxis already IS the
+                    left gutter. It is the chart the end-anchored strategy
+                    collapsed to a single label on, and `monthAxisInterval`
+                    documents why: a point scale's last tick sits ON the plot's
+                    right bound, so the strategy only survives if the RIGHT
+                    padding covers half recharts' modelled footprint. That is
+                    the 16 in both padding constants — shrinking it is what
+                    breaks this axis, not the strategy.
+
+                    `preserveStartEnd` remains wrong here for the reason it
+                    always was: it pins both ends and thins between them, so on
+                    a point scale the last tick's neighbour loses the minTickGap
+                    contest and vanishes (measured: 11 of 12, May'26 -> Jul'26). */}
                 <XAxis
                   dataKey="date"
                   tickLine={false}
@@ -507,24 +487,21 @@ export function OverviewTab() {
                     changes mid-axis, so counting bars off a label lands on the
                     wrong month with nothing on screen saying so.
 
-                    `equidistantPreserveStart` is recharts' only strategy that
-                    picks a STRIDE rather than dropping individuals, so the
-                    label set is uniform at every width by construction, and it
-                    pins January.
+                    `monthAxisInterval` answers it. At twelve buckets it returns
+                    `0` — render EVERY month — and beyond that a stride-picking
+                    strategy rather than one that drops individuals. Its
+                    docblock carries the measurements; this one deliberately
+                    does not repeat them.
 
-                    DERIVED HERE, not copied from the rotated charts above. This
-                    axis is flat, so it needs 23.7px of spacing where a rotated
-                    one needs 22px of PERPENDICULAR clearance; and its plot is
-                    283px at the narrowest layout where Year-over-Year's is
-                    203px and cumulative savings' is 133px. Three twelve-month
-                    axes on this page, three different plots, and they arrive at
-                    the same strategy for three separate reasons — a future
-                    reader who wants to unify them has to re-derive all three.
-
-                    An earlier revision forced all twelve here — measured, they
-                    fit at 390 with 1px to spare — but 23.6px per band against a
-                    23.7px widest label is not a margin, and the household's
-                    main phone is 360px, where the same twelve overlap. */}
+                    DERIVED HERE, not copied from the rotated charts above, and
+                    that is the part worth keeping: this axis is FLAT, so its
+                    labels clear on horizontal width rather than perpendicular
+                    spacing, and it needs 17.4px where a rotated 9px label needs
+                    11.7px. It measures 21.1px at 360px, so twelve fit with
+                    +3.7px in hand. Three twelve-month axes on this page, three
+                    different plots, three separate derivations that happen to
+                    land on the same answer — anyone unifying them has to
+                    re-derive all three. */}
                 <XAxis
                   dataKey="name"
                   tickLine={false}

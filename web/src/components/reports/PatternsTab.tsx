@@ -35,6 +35,11 @@ import {
 } from '@/hooks/useReports';
 import { SpendingHeatmap } from './SpendingHeatmap';
 import { tagChartHeightPx } from './tagChart';
+import {
+  CLAMPED_TABLE_TEXT,
+  PHONE_TABLE_DENSITY,
+  TABLE_TEXT_CELL_WIDTH,
+} from './utils';
 import { MONTH_NAMES_FULL, yearOptionsFrom } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
@@ -176,7 +181,7 @@ export function PatternsTab() {
                 {/* Same phone-width density as Top Merchants in SpendingTab —
                     see the note there. Five columns here, so 160px of padding
                     before any content. */}
-                <Table className="[&_td]:px-2 [&_th]:px-2 sm:[&_td]:px-4 sm:[&_th]:px-4">
+                <Table className={PHONE_TABLE_DENSITY}>
                   <TableHeader>
                     <TableRow>
                       <TableHead>Description</TableHead>
@@ -198,9 +203,9 @@ export function PatternsTab() {
                             `line-clamp-3` is needed to bound its HEIGHT, and
                             why three clamped lines beat one truncated one on a
                             surface with no row expansion. */}
-                        <TableCell className="max-w-[12rem] md:max-w-md">
+                        <TableCell className={TABLE_TEXT_CELL_WIDTH}>
                           <div
-                            className="line-clamp-3 [overflow-wrap:anywhere]"
+                            className={CLAMPED_TABLE_TEXT}
                             title={entry.description}
                           >
                             {entry.description}

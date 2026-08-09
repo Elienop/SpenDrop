@@ -62,6 +62,19 @@ interface SheetContentProps
    * "$290.30 spent" total left the box after 60px of scroll, with 8 of the 20
    * rows still on screen — so from row 9 on, the sheet explaining one day
    * showed neither the day nor its total.
+   *
+   * FOUR CONSUMERS STILL PASS `SheetHeader` AS A CHILD, and that was assessed,
+   * not overlooked: `TransactionEditSheet`, `MobileNav`, `Categories` and the
+   * Transactions filter panel. Measured at 360/390/720, TransactionEditSheet's
+   * form does not overflow (`scrollHeight === clientHeight === 603`,
+   * `maxScroll: 0`), so its header never scrolls away — the mechanism is
+   * shared but the defect is latent there, and migrating it would have been an
+   * unverifiable change with no before/after to show. `MobileNav` sets
+   * `p-0 gap-0` and owns its own layout. The other two were not measured.
+   *
+   * So the repo holds a better idiom used once and an older one used four
+   * times. This note is which is which, so the next reader does not have to
+   * guess whether the single user is the exception or the direction.
    */
   header?: React.ReactNode
 }

@@ -270,3 +270,53 @@ export function shortenCategoryLabel(name: string): string {
     ? `${name.slice(0, MAX_CATEGORY_LABEL_CHARS - 1).trimEnd()}\u2026`
     : name;
 }
+
+/**
+ * Phone-width table density for the Reports tables.
+ *
+ * shadcn's `TableCell` ships `p-4`, which is 32px of horizontal padding per
+ * column before any content. On a five-column table at a 360px viewport that
+ * is 160px of the ~278px available, and the table pans. Halving it below `sm`
+ * and restoring it above buys the columns back on the phone without changing
+ * anything on a desktop.
+ *
+ * SHARED because it was copy-pasted between SpendingTab and PatternsTab, and
+ * the second copy carried a comment reading "see the note there" — a pointer
+ * to prose that a later edit to either table could silently invalidate. One
+ * constant means the two densities cannot drift apart, which is the whole
+ * reason they matched.
+ *
+ * NOT used by `Dashboard.tsx`, deliberately. Its recent-transactions table
+ * keeps its own local copy with a comment re-measuring why `max-w-*` binds
+ * there and not here; that reasoning belongs at its call site and would be
+ * lost behind an import.
+ */
+export const PHONE_TABLE_DENSITY =
+  '[&_td]:px-2 [&_th]:px-2 sm:[&_td]:px-4 sm:[&_th]:px-4';
+
+/**
+ * A free-text table cell bounded in BOTH axes.
+ *
+ * Two classes doing two different jobs, which is why they travel together:
+ * `overflow-wrap:anywhere` (not `break-words`) is what bounds the WIDTH of a
+ * string with no spaces in it — import bypasses the 500-character description
+ * limit the per-row edit route enforces, so a spreadsheet cell can put an
+ * arbitrarily long unbroken run into the ledger. `line-clamp-3` then bounds the
+ * HEIGHT, because a wrapped cell grows downward without limit.
+ *
+ * THREE lines rather than one truncated line: neither surface has row
+ * expansion, and `title` is dead on touch, so the clamped text is the only way
+ * back to the content on the primary platform. Three lines is ~27 characters at
+ * phone width and ~150 at desktop, against ~14 for a single truncated line.
+ * Pair it with `TABLE_TEXT_CELL_WIDTH` on the cell and a `title` for pointers.
+ */
+export const CLAMPED_TABLE_TEXT = 'line-clamp-3 [overflow-wrap:anywhere]';
+
+/**
+ * The width bound that makes `CLAMPED_TABLE_TEXT` do anything.
+ *
+ * A table cell sizes to its content by default, so the clamp above has nothing
+ * to clamp against until the cell itself is bounded. Narrow on a phone, roomy
+ * from `md` up where there is width to spend.
+ */
+export const TABLE_TEXT_CELL_WIDTH = 'max-w-[12rem] md:max-w-md';

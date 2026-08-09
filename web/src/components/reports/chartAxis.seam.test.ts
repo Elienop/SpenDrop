@@ -17,6 +17,9 @@ import {
   MONTH_TICK_ANGLE,
   ROTATED_MONTH_TICK_PADDING,
   ROTATED_MONTH_TICK_PADDING_INSIDE_YAXIS,
+  CLAMPED_TABLE_TEXT,
+  PHONE_TABLE_DENSITY,
+  TABLE_TEXT_CELL_WIDTH,
 } from './utils';
 
 /**
@@ -57,6 +60,19 @@ const SOURCES: ReadonlyArray<readonly [string, string]> = [
  */
 const axes = (source: string): string[] =>
   source.match(/<XAxis[\s\S]*?\/>/g) ?? [];
+
+/**
+ * Source text with comments removed.
+ *
+ * REQUIRED before asserting that a class is PRESENT, because the call sites in
+ * this codebase explain themselves: the Category Breakdown container carries a
+ * six-line comment about why `aspect-auto` is there, and a bare
+ * `toContain('aspect-auto')` matched that comment while the class itself was
+ * deleted. Verified — the mutation survived 26 green tests. Asserting ABSENCE
+ * has the mirror problem and the same fix.
+ */
+const stripComments = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
 
 describe('the month-axis tick rule', () => {
   // THE MEASUREMENTS, kept here because they outlived the code that carried
@@ -106,6 +122,17 @@ describe('the month-axis tick rule', () => {
       );
       expect(plain || insideYAxis).toBe(true);
       expect(axis).toContain('tick={MONTH_TICK}');
+      // ENUMERATED FROM THE JSX, not from the rule's prose, and that is the
+      // whole reason these two are here. A rotated axis is four props, not
+      // two: the angle tilts the label, `textAnchor="end"` is what pivots it
+      // about its trailing edge so it hangs UNDER its own tick instead of
+      // beside it, and `height` is the band reserved for the tilted strip.
+      // Both were absent from this seam because the prose above talks about
+      // angle, font and gutters — so deleting either from a real axis left the
+      // whole suite green while the labels drifted off their ticks or were
+      // clipped by a 30px default band.
+      expect(axis).toContain('textAnchor="end"');
+      expect(axis).toContain('height={48}');
     }
   });
 
@@ -134,8 +161,20 @@ describe('the month-axis tick rule', () => {
     // that shallows the angle or grows the font fails here rather than in the
     // browser. 10px was built and measured and left Year-over-Year 0.6px of
     // margin, which is why the font bound is an upper one.
-    expect(Math.abs(MONTH_TICK_ANGLE)).toBeGreaterThanOrEqual(45);
+    // BOUNDED ON BOTH SIDES, and the angle is not wrapped in `Math.abs`. It
+    // was, and that accepted a SIGN FLIP: `+45` has the same magnitude and
+    // rotates every label up into the plot instead of down into the gutter,
+    // which no measurement here would have caught. The lower bound stops the
+    // opposite tidy-up — at -90 the labels are vertical and the 48px band
+    // clips them.
+    expect(MONTH_TICK_ANGLE).toBeLessThanOrEqual(-45);
+    expect(MONTH_TICK_ANGLE).toBeGreaterThanOrEqual(-60);
+    // The upper bound is the measured one (10px left Year-over-Year 0.6px of
+    // margin). The lower bound is a legibility floor rather than a measured
+    // optimum — without it the constant survives being set to 4, which fits
+    // everything and reads as nothing.
     expect(MONTH_TICK.fontSize).toBeLessThanOrEqual(9);
+    expect(MONTH_TICK.fontSize).toBeGreaterThanOrEqual(8);
 
     // The gutters are what the owner objected to: `{left: 40, right: 26}` was
     // 66px of a 263px chart, a quarter of the plot, and it squeezed the bars
@@ -164,11 +203,17 @@ describe('the month-axis tick rule', () => {
     // bucket is labelled. Beyond it the window is unbounded (24 months, and
     // ~516 for an All-time view over a 1984 ledger) and recharts measures the
     // real plot instead.
+    // LITERALS ON BOTH SIDES OF THE THRESHOLD, not `MAX_UNTHINNED ± 1`. Three
+    // of the four assertions here used to be written in terms of the constant,
+    // which made them true for ANY value of it: raising 12 to 24 kept the whole
+    // suite green while reintroducing a measured overlap — at 24 rotated labels
+    // the seam header above records a 10.4–11.2px gap against the 11px they
+    // need. A self-referential oracle cannot fail; it can only restate its
+    // input.
+    expect(MAX_UNTHINNED_MONTH_TICKS).toBe(12);
     expect(monthAxisInterval(12)).toBe(0);
-    expect(monthAxisInterval(MAX_UNTHINNED_MONTH_TICKS)).toBe(0);
-    expect(monthAxisInterval(MAX_UNTHINNED_MONTH_TICKS + 1)).toBe(
-      'equidistantPreserveEnd',
-    );
+    expect(monthAxisInterval(13)).toBe('equidistantPreserveEnd');
+    expect(monthAxisInterval(24)).toBe('equidistantPreserveEnd');
     expect(monthAxisInterval(516)).toBe('equidistantPreserveEnd');
 
     // END-anchored, not Start, and this is the assertion that pins WHY. On a
@@ -244,18 +289,42 @@ describe('free-text table cells are bounded in both directions', () => {
   // which wrapping alone trades the width problem for — measured, a 500-char
   // token wrapped into a 932px-tall row at 390px, and import does not enforce
   // the 500-char per-row ceiling.
-  const CELLS: ReadonlyArray<readonly [string, string]> = [
+  // The two Reports cells now take the recipe from ONE constant, so "the two
+  // classes travel together" is guaranteed by construction there rather than by
+  // two files happening to agree. That moves what this file has to pin: the
+  // CONSTANT must still carry both halves, and each tab must still reach for
+  // it. Dashboard keeps its literal copy on purpose (its comment re-measures
+  // why `max-w-*` binds there and not here), so it is still checked as text.
+  test('the shared recipe carries both halves', () => {
+    expect(CLAMPED_TABLE_TEXT).toMatch(/line-clamp-\d/);
+    expect(CLAMPED_TABLE_TEXT).toContain('[overflow-wrap:anywhere]');
+    // The width bound is what gives the clamp something to clamp against — a
+    // table cell sizes to its content until it is capped.
+    expect(TABLE_TEXT_CELL_WIDTH).toMatch(/^max-w-/);
+    expect(TABLE_TEXT_CELL_WIDTH).toContain('md:max-w-');
+  });
+
+  test.each([
     ['SpendingTab.tsx (Top Merchants)', spendingSource],
     ['PatternsTab.tsx (Recurring Expenses)', patternsSource],
-    ['Dashboard.tsx (desktop Recent Transactions)', dashboardSource],
-  ];
+  ])('%s takes the recipe from the shared constant', (_name, source) => {
+    expect(source).toContain('CLAMPED_TABLE_TEXT');
+    expect(source).toContain('TABLE_TEXT_CELL_WIDTH');
+    // And has not kept a private copy that could drift from it.
+    expect(source).not.toContain('[overflow-wrap:anywhere]"');
+  });
 
-  test.each(CELLS)('%s bounds width and height together', (_name, source) => {
-    const bounded = source.match(/className="line-clamp-\d[^"]*\[overflow-wrap:anywhere\][^"]*"/g) ?? [];
+  test('Dashboard.tsx bounds width and height together in its own copy', () => {
+    const bounded =
+      dashboardSource.match(
+        /className="line-clamp-\d[^"]*\[overflow-wrap:anywhere\][^"]*"/g,
+      ) ?? [];
     expect(bounded.length).toBeGreaterThan(0);
   });
 
-  test.each(CELLS)('%s: no half-fix — the two classes always travel together', (_name, source) => {
+  test.each([['Dashboard.tsx (desktop Recent Transactions)', dashboardSource]])(
+    '%s: no half-fix — the two classes always travel together',
+    (_name, source) => {
     // The failure mode this catches is a half-fix: `overflow-wrap:anywhere`
     // without a clamp turns a horizontal overflow into an unbounded vertical
     // one, and a clamp without it leaves the column sized to the longest token.
@@ -282,10 +351,11 @@ describe('free-text table cells are bounded in both directions', () => {
     // category name under it), because bounding only the first left the column
     // pinned at 473.7px by the second.
     expect(boundedCells.length).toBeGreaterThan(0);
-    for (const cell of boundedCells) {
-      expect(cell).toMatch(/line-clamp-\d/);
-    }
-  });
+      for (const cell of boundedCells) {
+        expect(cell).toMatch(/line-clamp-\d/);
+      }
+    },
+  );
 });
 
 describe('Category Breakdown is sized to its data, not to a constant', () => {
@@ -351,6 +421,25 @@ describe('Category Breakdown is sized to its data, not to a constant', () => {
     );
     expect(container).toContain('style={{ height:');
     expect(container).not.toMatch(/h-\[\d+px\]/);
+    // And `aspect-auto`, which every other explicit-height chart carries.
+    // It renders correctly without it only because CSS ignores aspect-ratio
+    // when both axes are already definite — so its absence is latent
+    // fragility, and the omission also contradicted the comment three lines
+    // above PatternsTab's copy, which cites this chart as the precedent.
+    expect(stripComments(container)).toContain('aspect-auto');
+  });
+
+  test('every explicit-height chart pairs its height with aspect-auto', () => {
+    // The positive control for the assertion above: it is scoped to ONE
+    // container, so it cannot notice a fifth chart added without the pairing.
+    for (const [, source] of SOURCES) {
+      const containers =
+        stripComments(source).match(/<ChartContainer[\s\S]*?>/g) ?? [];
+      for (const c of containers) {
+        if (!c.includes('style={{ height:')) continue;
+        expect(c).toContain('aspect-auto');
+      }
+    }
   });
 });
 
@@ -362,16 +451,22 @@ describe('the two Reports tables are dense at phone width', () => {
   // 263px, zero overflow.
   const DENSE = ['[&_td]:px-2', '[&_th]:px-2', 'sm:[&_td]:px-4', 'sm:[&_th]:px-4'];
 
+  test('the shared constant carries both halves of the responsive density', () => {
+    // BOTH halves: the phone-only half alone would shrink every viewport, and
+    // the `sm:` half alone would shrink none. Now asserted on the constant,
+    // since that is where the two can be separated.
+    for (const cls of DENSE) {
+      expect(PHONE_TABLE_DENSITY).toContain(cls);
+    }
+  });
+
   test.each([
     ['SpendingTab.tsx (Top Merchants)', spendingSource],
     ['PatternsTab.tsx (Recurring Expenses)', patternsSource],
-  ])('%s carries both halves of the responsive density', (_name, source) => {
-    for (const cls of DENSE) {
-      expect(source).toContain(cls);
-    }
-    // BOTH halves: the phone-only half alone would shrink every viewport, and
-    // the `sm:` half alone would shrink none.
-    expect(source).toContain('sm:[&_td]:px-4');
+  ])('%s takes the density from the shared constant', (_name, source) => {
+    expect(source).toContain('PHONE_TABLE_DENSITY');
+    // No private copy left to drift from it.
+    expect(source).not.toContain('[&_td]:px-2');
     // And it is scoped to a table, not applied to the shared component — the
     // ledger, Trash, the import preview and Settings did not ask for it.
     expect(source).not.toContain('TableCell className="px-2"');

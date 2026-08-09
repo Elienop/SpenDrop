@@ -14,7 +14,8 @@ const TabsList = React.forwardRef<
   <TabsPrimitive.List
     ref={ref}
     className={cn(
-      // `h-auto`, not the stock `h-10`. 40px of list minus 8px of padding left
+      // `min-h-10`, a FLOOR, replacing the stock fixed `h-10`. 40px of list
+      // minus 8px of padding left
       // every trigger 32px tall — under the 44px touch floor the rest of the
       // phone shell keeps (`MobileNav`, `CategoryChips`, `TransactionEditSheet`)
       // — and a fixed height CLIPS the taller trigger rather than growing with
