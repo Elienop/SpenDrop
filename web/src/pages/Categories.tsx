@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AlertCircle, MoreHorizontal, Plus } from 'lucide-react';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import type { Category } from '../api/types';
 import { Button } from '@/components/ui/button';
 import {
@@ -47,6 +48,7 @@ import {
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
 import { isAdmin } from '@/lib/roles';
+import { cn } from '@/lib/utils';
 import {
   TYPE_EXPENSE,
   TYPE_INCOME,
@@ -64,9 +66,212 @@ interface CategoryEditorState {
   category?: Category;
 }
 
+interface CategoryActions {
+  onEdit: (cat: Category) => void;
+  onToggleActive: (cat: Category) => void;
+  onDelete: (cat: Category) => void;
+}
+
+/**
+ * The width bound for a category name, in both directions.
+ *
+ * A name is user-supplied and capped only by the server's
+ * `MaxCategoryNameLength` = 100 (`internal/api/limits.go`). The two classes do
+ * two different jobs and must travel together:
+ *
+ *   - `overflow-wrap:anywhere` bounds the WIDTH. Tailwind's `break-words`
+ *     (`overflow-wrap: break-word`) breaks a run for painting but leaves the
+ *     element's min-content contribution at the full token width, so the box
+ *     keeps sizing itself to it — which is how an unbounded name pans a phone
+ *     surface sideways. Measured on the Dashboard's gauge rows, same field: a
+ *     456px span at a 360px viewport, dragging the amount off with it.
+ *   - `line-clamp-2` bounds the HEIGHT, which wrapping alone trades the width
+ *     problem for. Two lines rather than the three a description gets: a name
+ *     is an identifier, ~60 characters of one is already unambiguous, and a
+ *     browse list of twenty-odd rows is scanned rather than read.
+ *
+ * Neither does anything without a `min-w-0` ancestor — a flex item's automatic
+ * minimum is `min-content`, so the block refuses to shrink however it is
+ * allowed to wrap. The card below puts that on the identity column.
+ */
+const CLAMPED_CATEGORY_NAME = 'line-clamp-2 [overflow-wrap:anywhere]';
+
+/**
+ * The type badge, shared by both presentations so the label and the variant
+ * cannot drift apart between the table and the phone card.
+ */
+function CategoryTypeBadge({ type }: { type: TransactionType }) {
+  return (
+    <Badge variant={type === TYPE_EXPENSE ? 'outline' : 'secondary'}>
+      {type === TYPE_EXPENSE ? 'Expense' : 'Income'}
+    </Badge>
+  );
+}
+
+/**
+ * The per-row actions menu, rendered by the desktop table AND the phone card.
+ *
+ * Shared rather than copied because the two presentations must offer the same
+ * three actions: a card that quietly dropped Delete would leave the phone with
+ * no way to do something the desktop can, and nothing would fail.
+ *
+ * `coarse:min-h-11` on each item is the 44px floor, and the items are where it
+ * matters most — measured on the built container at 360px with a confirmed
+ * coarse pointer, the trigger was already 44px while all three menu items were
+ * 32px. The thing that actually performs the action was the one under the
+ * floor. Gated on the pointer, per `lib/touch-target.ts`: an unconditional
+ * floor would inflate the desktop menu too. Written here rather than in
+ * `ui/dropdown-menu.tsx` because that primitive has thirty-odd consumers this
+ * task did not measure; if it later grows the floor itself, this agrees with it
+ * on both the value and the gate, so the pair is inert rather than conflicting.
+ */
+function CategoryActionsMenu({
+  category,
+  triggerClassName,
+  onEdit,
+  onToggleActive,
+  onDelete,
+}: CategoryActions & { category: Category; triggerClassName?: string }) {
+  return (
+    /*
+      `modal={false}`: this row-actions menu opens the Edit Sheet (a modal Radix
+      Dialog). A *modal* dropdown sets `body { pointer-events: none }`; opening
+      the Sheet from it can leave a stuck pointer-events lock / lingering
+      dismissable layer so the first *mouse* click on Save is swallowed while
+      keyboard Enter still submits (keyboard skips hit-testing). Making the
+      small actions menu non-modal removes its body lock entirely — the Sheet's
+      own modal lifecycle is then the only one in play. This is the
+      Radix-recommended pattern for a menu that opens a dialog.
+      See https://github.com/radix-ui/primitives/issues/1241
+    */
+    <DropdownMenu modal={false}>
+      <DropdownMenuTrigger asChild>
+        <Button
+          variant="ghost"
+          size="icon"
+          className={cn('data-[state=open]:bg-accent', triggerClassName)}
+          aria-label={`Actions for ${category.name}`}
+        >
+          <MoreHorizontal />
+          <span className="sr-only">Open menu</span>
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuItem
+          className="coarse:min-h-11"
+          onClick={() => onEdit(category)}
+        >
+          Edit
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          className="coarse:min-h-11"
+          onClick={() => onToggleActive(category)}
+        >
+          {category.is_active ? 'Deactivate' : 'Activate'}
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem
+          className="coarse:min-h-11"
+          variant="destructive"
+          onClick={() => onDelete(category)}
+        >
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/**
+ * One category as a stacked card — the below-`md` presentation of the row the
+ * table renders.
+ *
+ * Three columns do not survive a 360px viewport. Measured on the built
+ * container with a coarse pointer: the table wanted 672px inside a 263px
+ * content box, so 409px of it sat behind a horizontal scroll — and what was out
+ * there was the Actions column, every row's only control, at x=653 in a 345px
+ * window. The page itself did not pan, which is what made this easy to miss:
+ * the overflow is inside the table's own `overflow-auto` wrapper, so nothing
+ * looks wrong until you go looking for the actions.
+ *
+ * ANATOMY: an identity column (name, then type and state) and the actions menu
+ * beside it, rather than <TrashCard>'s full-width action row. Three reasons,
+ * and the first is a measurement:
+ *
+ *   - Three nowrap buttons do not fit. `Edit` / `Deactivate` / `Delete` at
+ *     `size="sm"` need ~300px against the 279px this card has inside its
+ *     gutters, and `Button` is `whitespace-nowrap` — so they would not wrap,
+ *     they would overflow, trading a table pan for a card pan.
+ *   - Delete has no confirm dialog on this page (it fires straight at the API;
+ *     the backend refuses a category that still has transactions, which is the
+ *     only guard). Promoting it to a one-tap full-width button would make it
+ *     easier to hit by accident here than on the desktop it mirrors. Trash's
+ *     card can afford visible actions because its destructive one walks through
+ *     a dialog and its primary one is the page's whole purpose; here the page's
+ *     purpose is reading the list, and a member sees no actions at all.
+ *   - Density. Twenty-odd rows are browsed on this surface; an action row per
+ *     card doubles the scroll for a control used a few times a month.
+ */
+function CategoryCard({
+  category,
+  admin,
+  onEdit,
+  onToggleActive,
+  onDelete,
+}: CategoryActions & { category: Category; admin: boolean }) {
+  return (
+    <li className="flex items-start justify-between gap-3 p-4">
+      {/*
+        `opacity-60` marks a deactivated category, exactly as the table row
+        does — but scoped to the identity block rather than the whole card, so
+        the actions trigger beside it keeps full contrast. The desktop row can
+        fade its own control because a mouse target does not have to be seen to
+        be hit precisely; a 44px thumb target at 60% opacity on a phone is the
+        one control on the card and should not be the hardest thing to read.
+        `min-w-0` is what lets the name clamp — see CLAMPED_CATEGORY_NAME.
+      */}
+      <div
+        className={cn(
+          'flex min-w-0 flex-col gap-1.5',
+          !category.is_active && 'opacity-60',
+        )}
+      >
+        <span className={cn('font-medium', CLAMPED_CATEGORY_NAME)}>
+          {category.name}
+        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <CategoryTypeBadge type={category.type} />
+          {!category.is_active && (
+            <span className="text-xs text-muted-foreground">(inactive)</span>
+          )}
+        </div>
+      </div>
+      {admin && (
+        <CategoryActionsMenu
+          category={category}
+          /*
+            44px for a MOUSE too, not only for a coarse pointer, because this
+            subtree only exists below `md` — the same call the phone cards in
+            Trash make. `min-*` rather than `size-*`: it is a different
+            tailwind-merge group from the icon variant's `h-10 w-10`, so it
+            composes with the primitive instead of racing it, and it agrees with
+            the primitive's own coarse floor on the value, which is what makes
+            stylesheet emission order irrelevant here.
+          */
+          triggerClassName="min-h-11 min-w-11 shrink-0"
+          onEdit={onEdit}
+          onToggleActive={onToggleActive}
+          onDelete={onDelete}
+        />
+      )}
+    </li>
+  );
+}
+
 export function Categories() {
   const { user } = useAuth();
   const admin = isAdmin(user);
+  const isMobile = useIsMobileViewport();
 
   const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
@@ -185,25 +390,74 @@ export function Categories() {
         </Alert>
       )}
 
-      <Card>
+      {/*
+        `overflow-hidden` only on the phone: the card list below runs edge to
+        edge, so without it the first and last rows paint over the card's
+        rounded corners. Withheld from the desktop branch because the table
+        there has its own `overflow-auto` wrapper and a clipping ancestor is a
+        change to a surface this task did not measure.
+      */}
+      <Card className={cn(isMobile && 'overflow-hidden')}>
         <CardHeader>
           <CardDescription>
             Manage expense and income categories. Deactivated categories stay
             attached to past transactions but no longer appear in the entry row.
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          {loading ? (
+        {loading ? (
+          <CardContent>
             <div className="flex flex-col gap-2">
               {Array.from({ length: 4 }).map((_, i) => (
                 <Skeleton key={i} className="h-12 w-full" />
               ))}
             </div>
-          ) : sortedCategories.length === 0 ? (
+          </CardContent>
+        ) : sortedCategories.length === 0 ? (
+          <CardContent>
             <p className="text-sm text-muted-foreground">
               No categories yet.
             </p>
-          ) : (
+          </CardContent>
+        ) : isMobile ? (
+          /*
+            --- The presentation fork ------------------------------------
+            Below `md` the table is replaced wholesale by stacked cards, not
+            hidden with `md:hidden` — see `useIsMobileViewport` for why only one
+            tree may be mounted. Everything above the fork (the header, the
+            error banner, the loading and empty states) is shared and already
+            width-agnostic, and the editor Sheet is reached identically from
+            either side.
+
+            Outside `CardContent` on purpose: its `p-6` would spend 48px of a
+            360px viewport on gutters the rows do not need, and the row dividers
+            are meant to run edge to edge. Each card restores a 16px gutter of
+            its own.
+
+            `role="list"` is not redundant: Tailwind's preflight sets
+            `list-style: none` and Safari/VoiceOver drop the list role with the
+            marker, so without it the rows stop being announced as a list.
+          */
+          <ul
+            role="list"
+            aria-label="Categories"
+            className={cn(
+              'flex flex-col divide-y divide-border border-t transition-opacity',
+              fetching && 'opacity-60',
+            )}
+          >
+            {sortedCategories.map((cat) => (
+              <CategoryCard
+                key={cat.id}
+                category={cat}
+                admin={admin}
+                onEdit={(c) => setEditor({ mode: 'edit', category: c })}
+                onToggleActive={(c) => void handleToggleActive(c)}
+                onDelete={(c) => void handleDelete(c)}
+              />
+            ))}
+          </ul>
+        ) : (
+          <CardContent>
             <Table className={fetching ? 'opacity-60 transition-opacity' : 'transition-opacity'}>
               <TableHeader>
                 <TableRow>
@@ -227,69 +481,25 @@ export function Categories() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <Badge
-                        variant={cat.type === TYPE_EXPENSE ? 'outline' : 'secondary'}
-                      >
-                        {cat.type === TYPE_EXPENSE ? 'Expense' : 'Income'}
-                      </Badge>
+                      <CategoryTypeBadge type={cat.type} />
                     </TableCell>
                     <TableCell className="text-right">
-                      {/*
-                        `modal={false}`: this row-actions menu opens the Edit
-                        Sheet (a modal Radix Dialog). A *modal* dropdown sets
-                        `body { pointer-events: none }`; opening the Sheet from it
-                        can leave a stuck pointer-events lock / lingering
-                        dismissable layer so the first *mouse* click on Save is
-                        swallowed while keyboard Enter still submits (keyboard
-                        skips hit-testing). Making the small actions menu non-modal
-                        removes its body lock entirely — the Sheet's own modal
-                        lifecycle is then the only one in play. This is the
-                        Radix-recommended pattern for a menu that opens a dialog.
-                        See https://github.com/radix-ui/primitives/issues/1241
-                      */}
                       {admin && (
-                        <DropdownMenu modal={false}>
-                          <DropdownMenuTrigger asChild>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="size-8 data-[state=open]:bg-accent"
-                              aria-label={`Actions for ${cat.name}`}
-                            >
-                              <MoreHorizontal />
-                              <span className="sr-only">Open menu</span>
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            <DropdownMenuItem
-                              onClick={() =>
-                                setEditor({ mode: 'edit', category: cat })
-                              }
-                            >
-                              Edit
-                            </DropdownMenuItem>
-                            <DropdownMenuItem
-                              onClick={() => void handleToggleActive(cat)}
-                            >
-                              {cat.is_active ? 'Deactivate' : 'Activate'}
-                            </DropdownMenuItem>
-                            <DropdownMenuSeparator />
-                            <DropdownMenuItem
-                              variant="destructive"
-                              onClick={() => void handleDelete(cat)}
-                            >
-                              Delete
-                            </DropdownMenuItem>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                        <CategoryActionsMenu
+                          category={cat}
+                          triggerClassName="size-8"
+                          onEdit={(c) => setEditor({ mode: 'edit', category: c })}
+                          onToggleActive={(c) => void handleToggleActive(c)}
+                          onDelete={(c) => void handleDelete(c)}
+                        />
                       )}
                     </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
             </Table>
-          )}
-        </CardContent>
+          </CardContent>
+        )}
       </Card>
 
       <CategoryEditorSheet
