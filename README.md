@@ -122,7 +122,7 @@ Tabbed settings page covering account and system configuration. Monthly Budgets,
 
 ### Authentication
 
-Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles. Users can change their own password from **Settings → Account** (which logs them out everywhere and revokes their API tokens); admins can reset any member's password from **Settings → Users**.
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles. Users can change their own display name and password from **Settings → Account** (the password change logs them out everywhere and revokes their API tokens); admins get the household user list on that same panel, labelled **Settings → Account & users**, and can reset any member's password from there. Legacy `?tab=users` bookmarks resolve to it.
 
 ![Login](docs/screenshots/09-login.png)
 ![Register](docs/screenshots/10-register.png)
@@ -171,7 +171,7 @@ SpenDrop is now running at **http://localhost:3535**. Data is persisted in a Doc
 1. Open http://localhost:3535
 2. Click **Register** to create your account
 3. The first user automatically becomes **admin** with full access
-4. Additional users can be created from Settings > Users as members
+4. Additional users can be created from Settings > Account & users as members
 
 ## Development Setup
 

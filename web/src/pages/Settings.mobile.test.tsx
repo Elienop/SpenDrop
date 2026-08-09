@@ -191,10 +191,21 @@ describe('the phone surface does not orphan its panels', () => {
   });
 
   test('the section is a named region, so it is still a landmark', () => {
+    // `renderPhone()` signs in as an admin, so the region takes the merged
+    // label. Exact string: `/account/i` would match either label and stop
+    // discriminating the two roles.
     renderPhone();
     expect(
-      screen.getByRole('region', { name: 'Account' }),
+      screen.getByRole('region', { name: 'Account & users' }),
     ).toBeInTheDocument();
+  });
+
+  test('a member gets the same region under the narrowed name', () => {
+    renderPhone('member');
+    expect(screen.getByRole('region', { name: 'Account' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('region', { name: 'Account & users' }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -205,27 +216,32 @@ describe('the option list matches what the role may open', () => {
     await user.click(trigger);
     const options = screen.getAllByRole('option');
     expect(options.map((o) => o.textContent)).toEqual([
-      'Account',
+      'Account & users',
       'Currencies',
-      'Users',
       'API tokens',
       'Notifications',
       'Import / Export',
     ]);
   });
 
-  test('a member is not offered Users, and Export narrows', async () => {
-    // An option list that offers a section the user cannot open is a dead end
-    // with no feedback — the value would be set and nothing would render. The
-    // tab strip could get away with dropping a trigger inline; this cannot.
+  test('a member gets the same five sections under two narrower names', async () => {
+    // Both roles now open every section — `users` was merged into `account`
+    // and the admin half is gated inside that panel, so nothing is hidden from
+    // the option list at all. What still narrows is the LABEL, on the two
+    // sections whose panel holds less for a member.
     const user = setup();
     const trigger = renderPhone('member');
     await user.click(trigger);
     const labels = screen.getAllByRole('option').map((o) => o.textContent);
-    expect(labels).not.toContain('Users');
-    expect(labels).toContain('Export');
+    expect(labels).toEqual([
+      'Account',
+      'Currencies',
+      'API tokens',
+      'Notifications',
+      'Export',
+    ]);
+    expect(labels).not.toContain('Account & users');
     expect(labels).not.toContain('Import / Export');
-    expect(labels).toHaveLength(5);
   });
 });
 
@@ -233,7 +249,9 @@ describe('choosing a section', () => {
   test('swaps the panel and renames the region', async () => {
     const user = setup();
     const trigger = renderPhone('admin');
-    expect(screen.getByRole('region', { name: 'Account' })).toBeInTheDocument();
+    expect(
+      screen.getByRole('region', { name: 'Account & users' }),
+    ).toBeInTheDocument();
 
     await user.click(trigger);
     await user.click(screen.getByRole('option', { name: 'Notifications' }));
@@ -242,7 +260,7 @@ describe('choosing a section', () => {
       screen.getByRole('region', { name: 'Notifications' }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole('region', { name: 'Account' }),
+      screen.queryByRole('region', { name: 'Account & users' }),
     ).not.toBeInTheDocument();
     // The closed control reads the new section too, so the control and the
     // content cannot disagree about where the user is.
@@ -344,7 +362,7 @@ describe('the control is thumb-sized', () => {
     const user = setup();
     await user.click(renderPhone('admin'));
     const options = screen.getAllByRole('option');
-    expect(options).toHaveLength(6);
+    expect(options).toHaveLength(5);
     for (const option of options) {
       expect(option.className.split(/\s+/)).toContain('min-h-11');
     }
@@ -354,14 +372,14 @@ describe('the control is thumb-sized', () => {
 describe('the desktop surface is untouched', () => {
   test('its triggers and panels are still wired to each other', () => {
     renderDesktop('admin');
-    const tab = screen.getByRole('tab', { name: 'Account' });
+    const tab = screen.getByRole('tab', { name: 'Account & users' });
     const panel = screen.getByRole('tabpanel');
     // The wiring the phone branch deliberately does not fake: the panel is
     // named by its trigger, and the trigger owns the panel.
     expect(panel.getAttribute('aria-labelledby')).toBe(tab.getAttribute('id'));
     expect(tab.getAttribute('aria-controls')).toBe(panel.getAttribute('id'));
     expect(
-      within(document.body).getByRole('tabpanel', { name: 'Account' }),
+      within(document.body).getByRole('tabpanel', { name: 'Account & users' }),
     ).toBeInTheDocument();
   });
 });

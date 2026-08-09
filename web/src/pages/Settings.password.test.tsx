@@ -106,15 +106,21 @@ describe('Account tab — change password', () => {
     mockAuth(memberUser);
   });
 
-  test('Account tab is visible to a non-admin member', () => {
+  // Exact strings, per role. `/account/i` matches BOTH labels — it would have
+  // gone on passing if the member's tab had silently become "Account & users",
+  // which is the label that promises the household controls a member cannot
+  // have.
+  test('the Account tab is visible to a non-admin member, under that exact name', () => {
     renderSettings();
-    expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Account' })).toBeInTheDocument();
   });
 
-  test('Account tab is also visible to an admin', () => {
+  test('an admin gets the merged label on the same tab', () => {
     mockAuth(adminUser);
     renderSettings();
-    expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole('tab', { name: 'Account & users' }),
+    ).toBeInTheDocument();
   });
 
   test('each password field has its own independently-scoped reveal toggle', async () => {
@@ -303,7 +309,7 @@ describe('Account tab — change password', () => {
   });
 });
 
-describe('Users tab — admin reset password', () => {
+describe('Household users card — admin reset password', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
@@ -312,7 +318,7 @@ describe('Users tab — admin reset password', () => {
   });
 
   test('renders a Reset password action for other users', async () => {
-    renderSettings('users');
+    renderSettings('account');
     await waitFor(() => {
       expect(screen.getByText('bob')).toBeInTheDocument();
     });
@@ -322,10 +328,11 @@ describe('Users tab — admin reset password', () => {
   });
 
   test("does NOT render a Reset password action for the admin's own row", async () => {
-    renderSettings('users');
-    await waitFor(() => {
-      expect(screen.getByText('alice')).toBeInTheDocument();
-    });
+    renderSettings('account');
+    // The account card above the table renders the signed-in admin's own
+    // username, so `getByText('alice')` now matches twice. Sync on the row's
+    // own control instead.
+    await screen.findByRole('button', { name: 'Edit display name for alice' });
     expect(
       screen.queryByRole('button', { name: /reset password for alice/i }),
     ).not.toBeInTheDocument();
@@ -333,7 +340,7 @@ describe('Users tab — admin reset password', () => {
 
   test('reset dialog validates confirm match before posting', async () => {
     const user = userEvent.setup();
-    renderSettings('users');
+    renderSettings('account');
     await waitFor(() => {
       expect(screen.getByText('bob')).toBeInTheDocument();
     });
@@ -366,7 +373,7 @@ describe('Users tab — admin reset password', () => {
       status: 'password_reset',
       tokens_revoked: 1,
     });
-    renderSettings('users');
+    renderSettings('account');
     await waitFor(() => {
       expect(screen.getByText('bob')).toBeInTheDocument();
     });

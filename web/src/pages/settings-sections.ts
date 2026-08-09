@@ -15,7 +15,6 @@
 export const VALID_TABS = [
   'account',
   'currencies',
-  'users',
   'api-tokens',
   'notifications',
   'data',
@@ -34,14 +33,47 @@ export interface SettingsSection {
    * VALUE never does — see `data` below.
    */
   label: (admin: boolean) => string;
-  /** Hidden entirely from a member, control and panel alike. */
+  /**
+   * Hidden entirely from a member, control and panel alike.
+   *
+   * NO SECTION USES THIS TODAY, and that is a decision rather than an
+   * oversight. `adminOnly` is all-or-nothing by construction, so it cannot
+   * express "this section minus one card" — which is what both remaining
+   * admin-gated surfaces need: `data` shows a member the Export card without
+   * the Import one, and `account` shows a member their own card without the
+   * household table. Every such gate therefore sits inside the panel.
+   *
+   * The mechanism is kept because the NEXT admin-only section (a whole panel a
+   * member has no card in) is one line away, and the phone surface needs the
+   * clamp in `resolveSettingsTab` the moment that line is written — it renders
+   * ONE section resolved from a raw `?tab=` value rather than mapping over the
+   * filtered list. Deleting the field would take the clamp with it and leave
+   * that leak to be re-derived. Both are pinned against an injected fixture in
+   * `settings-sections.test.ts` rather than against a live section, so neither
+   * goes vacuous while no section is marked.
+   */
   adminOnly?: boolean;
 }
 
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
-  { value: 'account', label: () => 'Account' },
+  {
+    // `users` is retired INTO this value. `account` is the one a member can
+    // reach, so it is the value in a member's bookmark and the hard-coded
+    // fallback below; keeping it means `?tab=users` degrades to a section that
+    // still holds the household table for an admin.
+    //
+    // The word "Account" is load-bearing beyond taste. `password_change_handlers.go`
+    // ships the string "use the Account page to change your own password", and
+    // README documents legacy bookmarks landing here — renaming the visible
+    // half to anything without "Account" in it is a cross-stack edit.
+    //
+    // Same `data` precedent as below: the VALUE never narrows, only the label.
+    // A member's panel is their own account card and nothing else, so offering
+    // them the word "users" would name a capability the panel cannot deliver.
+    value: 'account',
+    label: (admin) => (admin ? 'Account & users' : 'Account'),
+  },
   { value: 'currencies', label: () => 'Currencies' },
-  { value: 'users', label: () => 'Users', adminOnly: true },
   { value: 'api-tokens', label: () => 'API tokens' },
   { value: 'notifications', label: () => 'Notifications' },
   {
@@ -63,8 +95,11 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
  * mounts, but an option list that offers a section the user cannot open is a
  * dead end with no feedback — the value would be set and nothing would render.
  */
-export function visibleSettingsSections(admin: boolean): SettingsSection[] {
-  return SETTINGS_SECTIONS.filter((s) => admin || !s.adminOnly);
+export function visibleSettingsSections(
+  admin: boolean,
+  sections: readonly SettingsSection[] = SETTINGS_SECTIONS,
+): SettingsSection[] {
+  return sections.filter((s) => admin || !s.adminOnly);
 }
 
 /**
@@ -82,16 +117,24 @@ export function visibleSettingsSections(admin: boolean): SettingsSection[] {
  * here at the value rather than at either render site: clamp once, where the
  * value enters state, and neither surface can drift from the other again.
  *
- * Falls back to `account` — the one section with no `adminOnly`, so it is
- * reachable by every role, and already the hard-coded default for an absent or
- * unrecognised `?tab=`.
+ * Falls back to `account` — the section that carries a member's own account
+ * card, so it is reachable by every role, and already the hard-coded default
+ * for an absent or unrecognised `?tab=`. It is also where a retired `?tab=users`
+ * bookmark lands, which is the whole reason `users` was merged INTO this value
+ * rather than renamed.
+ *
+ * `sections` is injectable for one reason: no section is `adminOnly` today, so
+ * the clamp below cannot be exercised against the production list, and a
+ * fallback branch that no test can reach is a mutant waiting to survive. The
+ * fixture in the test file supplies one. No production caller passes it.
  */
 export function resolveSettingsTab(
   value: string | null,
   admin: boolean,
+  sections: readonly SettingsSection[] = SETTINGS_SECTIONS,
 ): SettingsTab {
   if (!isValidTab(value)) return 'account';
-  const reachable = visibleSettingsSections(admin).some(
+  const reachable = visibleSettingsSections(admin, sections).some(
     (s) => s.value === value,
   );
   return reachable ? value : 'account';
@@ -101,8 +144,9 @@ export function resolveSettingsTab(
 export function settingsSectionLabel(
   value: SettingsTab,
   admin: boolean,
+  sections: readonly SettingsSection[] = SETTINGS_SECTIONS,
 ): string | undefined {
-  return visibleSettingsSections(admin)
+  return visibleSettingsSections(admin, sections)
     .find((s) => s.value === value)
     ?.label(admin);
 }

@@ -168,15 +168,23 @@ describe('Settings', () => {
       expect(stamp.closest('[role="tabpanel"]')).toBeNull();
     });
 
+    // EXACT STRINGS, and a count. `@testing-library/dom` treats a RegExp
+    // matcher as an unanchored substring test, so the `/account/i` and
+    // `/users/i` this used to carry BOTH match the merged "Account & users"
+    // label — the pair would have gone on passing while asserting that one tab
+    // exists twice, and the count is what proves the sixth is really gone.
+    // String matchers compare with `===`.
     test('renders tab navigation', () => {
       renderSettings();
-      expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /currencies/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /users/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /api tokens/i })).toBeInTheDocument();
       expect(
-        screen.getByRole('tab', { name: /import \/ export/i }),
-      ).toBeInTheDocument();
+        screen.getAllByRole('tab').map((t) => t.textContent),
+      ).toEqual([
+        'Account & users',
+        'Currencies',
+        'API tokens',
+        'Notifications',
+        'Import / Export',
+      ]);
     });
 
     // Six triggers for an admin come to roughly 550px of whitespace-nowrap
@@ -217,15 +225,21 @@ describe('Settings', () => {
       });
     });
 
-    test('shows users tab for admin', async () => {
-      const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // The household table now lives INSIDE the Account panel, which is the
+    // default tab — so there is no navigation left to perform and the
+    // assertion has to be about the table being there at all.
+    //
+    // Not `getByText('alice')` any more: the merged panel renders the
+    // signed-in user's own username in the account card above the table, so
+    // that query matches twice and throws. The per-row control is unique.
+    test('shows the household users table to an admin', async () => {
       renderSettings();
 
-      await user.click(screen.getByRole('tab', { name: /users/i }));
-
-      await waitFor(() => {
-        expect(screen.getByText('alice')).toBeInTheDocument();
-      });
+      expect(
+        await screen.findByRole('button', {
+          name: 'Edit display name for alice',
+        }),
+      ).toBeInTheDocument();
     });
 
     test('renders Import / Export tab', () => {
@@ -449,8 +463,7 @@ describe('Settings', () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderSettings();
 
-      await user.click(screen.getByRole('tab', { name: /users/i }));
-
+      // No tab click: the household table is on the default Account panel now.
       await waitFor(() => {
         expect(
           screen.getByRole('combobox', { name: /role for alice/i }),
@@ -495,13 +508,26 @@ describe('Settings', () => {
         );
       }
 
+      // `?tab=account`, not the retired `?tab=users`. The old value still
+      // RESOLVES here (it falls back to account, where the table now lives), so
+      // leaving it would have kept every test below green while naming a tab
+      // that no longer exists.
       function renderUsersTab() {
         return render(
-          <MemoryRouter initialEntries={['/settings?tab=users']}>
+          <MemoryRouter initialEntries={['/settings?tab=account']}>
             <Settings />
           </MemoryRouter>,
           { wrapper: withQueryClient },
         );
+      }
+
+      // Syncs on the row's own control rather than on `getByText(username)`:
+      // the account card above the table renders the signed-in user's username
+      // too, so the bare text matches twice for `alice` and throws.
+      async function findRow(username: string) {
+        return await screen.findByRole('button', {
+          name: `Edit display name for ${username}`,
+        });
       }
 
       async function openEditor(
@@ -509,14 +535,7 @@ describe('Settings', () => {
         username = 'alice',
       ) {
         renderUsersTab();
-        await waitFor(() => {
-          expect(screen.getByText(username)).toBeInTheDocument();
-        });
-        await user.click(
-          screen.getByRole('button', {
-            name: new RegExp(`edit display name for ${username}`, 'i'),
-          }),
-        );
+        await user.click(await findRow(username));
         return await screen.findByRole('dialog');
       }
 
@@ -524,12 +543,7 @@ describe('Settings', () => {
       // must NOT copy that rule, or the feature misses the case it exists for.
       test("offers the editor on the admin's own row", async () => {
         renderUsersTab();
-        await waitFor(() => {
-          expect(screen.getByText('alice')).toBeInTheDocument();
-        });
-        expect(
-          screen.getByRole('button', { name: /edit display name for alice/i }),
-        ).toBeInTheDocument();
+        expect(await findRow('alice')).toBeInTheDocument();
         expect(
           screen.queryByRole('button', { name: /reset password for alice/i }),
         ).not.toBeInTheDocument();
@@ -685,9 +699,7 @@ describe('Settings', () => {
         mockedApi.del.mockResolvedValue({});
         const user = userEvent.setup({ pointerEventsCheck: 0 });
         renderUsersTab();
-        await waitFor(() => {
-          expect(screen.getByText('alice')).toBeInTheDocument();
-        });
+        await findRow('alice');
 
         await user.click(screen.getByRole('button', { name: /delete alice/i }));
         const confirm = await screen.findByRole('alertdialog');
@@ -707,9 +719,7 @@ describe('Settings', () => {
         mockedApi.del.mockResolvedValue({});
         const user = userEvent.setup({ pointerEventsCheck: 0 });
         renderUsersTab();
-        await waitFor(() => {
-          expect(screen.getByText('alice')).toBeInTheDocument();
-        });
+        await findRow('alice');
 
         await user.click(screen.getByRole('button', { name: /delete alice/i }));
         const confirm = await screen.findByRole('alertdialog');
@@ -729,9 +739,7 @@ describe('Settings', () => {
       test('the confirmation says the ledger is not at stake', async () => {
         const user = userEvent.setup({ pointerEventsCheck: 0 });
         renderUsersTab();
-        await waitFor(() => {
-          expect(screen.getByText('alice')).toBeInTheDocument();
-        });
+        await findRow('alice');
 
         await user.click(screen.getByRole('button', { name: /delete alice/i }));
         const confirm = await screen.findByRole('alertdialog');
@@ -998,19 +1006,60 @@ describe('Settings', () => {
       expect(strip).not.toHaveClass('justify-center');
     });
 
-    test('hides users tab for non-admin', () => {
+    // Was "hides users tab for non-admin", asserting `queryByRole('tab',
+    // {name: /users/i})` is absent. That regex is an unanchored substring
+    // test, so it would ALSO be satisfied by an admin's "Account & users"
+    // going missing, and it says nothing about the member's own label. The
+    // question worth asking now is what the member's tab is CALLED: the panel
+    // behind it holds their account card alone, so a label naming users would
+    // promise a capability the panel cannot deliver.
+    test('labels the merged tab "Account" for a member, never "Account & users"', () => {
       renderSettings();
-      expect(
-        screen.queryByRole('tab', { name: /users/i }),
-      ).not.toBeInTheDocument();
+      const labels = screen.getAllByRole('tab').map((t) => t.textContent);
+      expect(labels).toContain('Account');
+      expect(labels).not.toContain('Account & users');
     });
 
-    test('still shows account, currencies, api-tokens, and export tabs', () => {
+    test('shows the same five tabs an admin gets, with two labels narrowed', () => {
       renderSettings();
-      expect(screen.getByRole('tab', { name: /account/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /currencies/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /api tokens/i })).toBeInTheDocument();
-      expect(screen.getByRole('tab', { name: /^export$/i })).toBeInTheDocument();
+      // Exact strings and a full list. The member and admin strips now have
+      // the SAME length — the sixth tab is gone for both — so an assertion
+      // that only counted would no longer discriminate the two roles.
+      expect(screen.getAllByRole('tab').map((t) => t.textContent)).toEqual([
+        'Account',
+        'Currencies',
+        'API tokens',
+        'Notifications',
+        'Export',
+      ]);
+    });
+
+    // The half a section-level gate used to cover and a card-level gate must
+    // now carry: a member's Account panel holds their own card and nothing
+    // else. Asserted by the ABSENCE OF THE MOUNT-TIME FETCH rather than by
+    // absent DOM — `HouseholdUsersCard` fires `api.get('users')` from a mount
+    // effect and the backend answers 403, so rendering it and hiding its
+    // markup would still make the request. Not mounting is the gate.
+    test('does not mount the household users card for a member', async () => {
+      renderSettings();
+      // Positive control for the wiring: the panel really is on screen, so
+      // this is not passing because nothing rendered at all.
+      expect(
+        await screen.findByRole('button', { name: /change password/i }),
+      ).toBeInTheDocument();
+
+      expect(
+        mockedApi.get.mock.calls.filter((call) => call[0] === 'users'),
+      ).toHaveLength(0);
+      expect(
+        screen.queryByRole('button', { name: /^add user$/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('button', { name: /edit display name for/i }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole('combobox', { name: /^role for/i }),
+      ).not.toBeInTheDocument();
     });
 
     // /api/import/* is behind auth.RequireAdmin, so the tab a member sees
