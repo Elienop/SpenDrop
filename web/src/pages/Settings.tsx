@@ -2384,7 +2384,20 @@ function DataSection({ admin }: DataSectionProps) {
               </Button>
             ))}
           </ButtonGroup>
-          <div className="flex max-w-md items-end gap-3">
+          {/* `flex-wrap`, and `max-w-md` stays. Without the wrap this row's
+              natural width is 355px — Year `w-28` (112) + gap 12 + Month
+              `w-36` (144, mounted by default since exportMode starts
+              'monthly') + gap 12 + the Export button (~75, whitespace-nowrap
+              from buttonVariants) — against 278px of content box at a 360px
+              viewport (360 − 32 AppShell px-4 − 2 card border − 48
+              CardContent p-6). It panned the whole page 36px.
+              Wrapped, line 1 is 268 of 278 and no single child exceeds 144px,
+              so the row cannot overflow above roughly a 226px viewport.
+              Desktop is bit-identical: 355 natural is under `max-w-md`'s 448,
+              so it never wraps once there is room — and REMOVING max-w-md
+              instead would throw the Export button to the far right of a
+              1400px column. Same idiom as `Budgets.tsx`'s filter row. */}
+          <div className="flex max-w-md flex-wrap items-end gap-3">
             <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
               <Input
