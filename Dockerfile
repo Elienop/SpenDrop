@@ -46,7 +46,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     -o spendrop ./cmd/spendrop
 
 # Build React frontend
-FROM node:24-alpine AS web-builder
+FROM node:26-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package*.json ./
 # Same scheme as the Go stage: /root/.npm is npm's content-addressed download
