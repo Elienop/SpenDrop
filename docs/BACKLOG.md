@@ -254,6 +254,21 @@ close on `saving` would trap the user behind a hung request. The clean fix is an
 before the close still toasts.
 **Effort:** small.
 
+### B44 — the Budgets table still pans 211px inside its wrapper at 360
+**Verified: reproduced with real data** (2026-08-14 browser pass, built container at 360). The
+page itself does not pan — the table sits in a bounded scroll wrapper — but the table is 556px
+wide in a 345px box, so the Limit column and everything right of it needs a 211px in-card pan.
+This is the B41 residual re-measured: real data confirms it, so the fixture-inflation caveat is
+retired. Fix is the same card-list treatment every other table got. **Effort:** small-medium.
+
+### B45 — the five stacked notification switches' tap bands overlap by ~4px
+**Verified: measured** (2026-08-14 browser pass at 360). The activity switches (Over budget
+through Large transaction) sit 16px apart; each carries the coarse tap band that reaches 10px
+past its border box, so adjacent bands overlap by ~4px and a tap at the seam lands on the LATER
+switch in paint order. Pre-existing rhythm, untouched by the phone batch; low stakes (the wrong
+toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
+20px+, or shrink the band on stacked placements. **Effort:** small.
+
 ### B43 — Enter on the closed category trigger in the desktop row opens the picker AND saves
 **Verified: read** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
 the fix batch pinned the current behavior with a test rather than changing it). In the desktop
