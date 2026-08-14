@@ -761,6 +761,20 @@ describe('Budgets page', () => {
       });
     });
 
+    // Every currency read-cell in this app is `font-mono tabular-nums` — both
+    // tables on this page, and the phone cards' shared value class. The annual
+    // total was the one figure carrying `tabular-nums` alone, which equalizes
+    // DIGIT widths on a proportional face but leaves the separators and the
+    // symbol shifting — visible here precisely because this figure recomputes
+    // on every keystroke.
+    test('annual total renders in the currency read-cell register', async () => {
+      renderBudgets();
+
+      const total = screen.getByLabelText(/^Annual total$/);
+      expect(total).toHaveClass('font-mono');
+      expect(total).toHaveClass('tabular-nums');
+    });
+
     test('annual total reflects per-row edits', async () => {
       const user = userEvent.setup({ pointerEventsCheck: 0 });
       renderBudgets();
