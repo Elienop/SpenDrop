@@ -418,7 +418,7 @@ condition *and* move the predicate, believing one was safe because the other was
 *(Move items here with their commit hash rather than deleting them.)*
 
 - **B22 — web tsconfig lacks an explicit `strict`** (`a20b7e4`, 2026-08-14, on
-  `chore/backlog-catch-up-and-strict`). Pinned with zero new errors, exactly as the corrected
+  `chore/backlog-catch-up-and-strict`, PR #138). Pinned with zero new errors, exactly as the corrected
   entry predicted — TypeScript 6.0.2 was already compiling the project under strict by default,
   so the pin's value is that a TypeScript downgrade or a CLI `--strict false` can no longer
   remove the guarantee silently. Verified by a clean-slate `tsc -b` (tsbuildinfo removed first;
