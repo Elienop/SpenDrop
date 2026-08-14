@@ -38,11 +38,13 @@ import (
 //     `skipReasonUnparseableDate`, so an Inserted row outside the
 //     window is a direct contract violation.
 //
-//  4. Amount sanity: every Inserted row has `AmountCents > 0`. The
-//     zero-amount skip branch combined with `math.Abs` on parse
-//     guarantees this, but a refactor that moves the zero-check
-//     *after* the insert would regress silently — this property
-//     catches that class of bug immediately.
+//  4. Amount sanity: every Inserted row has non-zero AmountCents whose
+//     sign matches the sampled input. B10 inverted this property: it
+//     used to assert `> 0`, which described the old math.Abs flip at
+//     the insert site rather than any contract worth keeping. Zero
+//     rows are still illegal (a signed ledger permits zero SUMS, never
+//     zero ROWS), so the zero half of the guard survives — a refactor
+//     that moved the zero-check after the insert still fails here.
 //
 // Performance budget: `rapid.Check` runs 100 samples by default. Each
 // sample opens a short-lived SQLite transaction on a file-backed WAL
@@ -179,10 +181,15 @@ func genNonEmptyDescription() *rapid.Generator[string] {
 }
 
 // genNonZeroAmount draws a dollar amount in a realistic household
-// range [$0.01, $1,000,000.00], with a random sign. `math.Abs` inside
-// processImportRows flips negatives to positive at insert time, so
-// properties only need to see "will this amount round to zero cents"
-// — and the integer-cents draw guarantees it will not.
+// range [$0.01, $1,000,000.00], with a random sign. Both signs are
+// drawn because both are legal since B10: a negative is a refund and
+// reaches the ledger negative. (The generator drew signs before B10
+// too, but only as noise — processImportRows flattened them with
+// math.Abs. The sign is now observable, which is what makes
+// TestImportProperty_AmountSanity's sign half real coverage.)
+//
+// The integer-cents draw guarantees the value never rounds to zero
+// cents, so a sampled "valid" row is never rejected as zero-amount.
 func genNonZeroAmount() *rapid.Generator[float64] {
 	return rapid.Custom(func(t *rapid.T) float64 {
 		cents := rapid.IntRange(1, 100_000_000).Draw(t, "abs_cents")
@@ -200,9 +207,10 @@ func genNonZeroAmount() *rapid.Generator[float64] {
 // processImportRows one-to-one — a shape that should get Inserted
 // draws all valid fields, an empty-desc shape pairs a valid date/
 // amount with `Description: ""`, and so on. Valid rows are weighted
-// higher (shapes 0-2 all produce valid rows) so the conservation and
-// sanity properties still see Inserted samples on the vast majority
-// of iterations; rejection shapes exist mainly to exercise the
+// higher (shapes 0-2 draw plain valid rows and shape 9 draws a valid
+// foreign row) so the conservation and sanity properties still see
+// Inserted samples on the vast majority of
+// iterations; rejection shapes exist mainly to exercise the
 // reason-set property and to force a mixed-outcome distribution that
 // tests the Skipped branches.
 //
@@ -226,7 +234,7 @@ func genNonZeroAmount() *rapid.Generator[float64] {
 // where the conservation and sanity invariants matter most.
 func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 	return rapid.Custom(func(t *rapid.T) importRow {
-		shape := rapid.IntRange(0, 7).Draw(t, "shape")
+		shape := rapid.IntRange(0, 9).Draw(t, "shape")
 		switch shape {
 		case 0, 1, 2:
 			// Valid row (weighted higher so most rows hit the
@@ -295,8 +303,46 @@ func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 				Amount:      genNonZeroAmount().Draw(t, "amount"),
 				Category:    "noncat_" + rapid.StringMatching(`[a-z]{4,8}`).Draw(t, "catsuf"),
 			}
+		case 8:
+			// Mixed money pair — hits skipReasonSignMismatch. The base
+			// amount and the foreign original are drawn independently
+			// and then forced to opposite signs, so the row is valid in
+			// every other respect and can only be rejected by the sign
+			// gate.
+			amount := genNonZeroAmount().Draw(t, "amount")
+			original := genNonZeroAmount().Draw(t, "orig")
+			if (amount < 0) == (original < 0) {
+				original = -original
+			}
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Amount:           amount,
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   original,
+				OriginalCurrency: "LBP",
+			}
+		case 9:
+			// Agreeing money pair — a foreign row, which INSERTS. Both
+			// halves share a sign, including the both-negative case (a
+			// foreign refund). Without this shape nothing in the property
+			// suite exercises the original_amount_cents write path, so a
+			// build that rejected every foreign row would look clean.
+			amount := genNonZeroAmount().Draw(t, "amount")
+			original := genNonZeroAmount().Draw(t, "orig")
+			if (amount < 0) != (original < 0) {
+				original = -original
+			}
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Amount:           amount,
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   original,
+				OriginalCurrency: "LBP",
+			}
 		}
-		// Unreachable — IntRange(0, 7) guarantees shape is in [0, 7].
+		// Unreachable — IntRange(0, 9) guarantees shape is in [0, 9].
 		// If a future refactor widens the range without adding a
 		// matching case, the default importRow{} here lands in the
 		// empty-date branch and is counted as skipReasonUnparseableDate,
@@ -362,6 +408,13 @@ func TestImportProperty_NoSilentDrops(t *testing.T) {
 		skipReasonUnparseableDate:  {},
 		skipReasonMissingCategory:  {},
 		skipReasonDuplicate:        {},
+		skipReasonSignMismatch:     {},
+		// field_too_long is reachable from processImportRows (the floor
+		// inside preCategorySkipReason) even though this generator cannot
+		// produce it — descriptions cap at 30 chars. It was missing from
+		// this set, which would have turned a legitimate skip into a
+		// property failure the day a generator grew longer strings.
+		skipReasonFieldTooLong: {},
 	}
 	rapid.Check(t, func(t *rapid.T) {
 		rows := genImportRows(fix.knownCats).Draw(t, "rows")
@@ -406,23 +459,69 @@ func TestImportProperty_DateSanity(t *testing.T) {
 	})
 }
 
-// TestImportProperty_AmountSanity asserts that every Inserted row
-// has `AmountCents > 0`. processImportRows calls `math.Abs` on the
-// parsed amount and skips rows whose absolute value is zero, so the
-// combination should guarantee positive cents on insert. A future
-// refactor that moves the zero-check after the insert — or that
-// replaces math.Abs with something sign-preserving — would regress
-// silently in the absence of this property.
+// TestImportProperty_AmountSanity asserts two things about every
+// Inserted row: its AmountCents is non-zero, and its sign is the sign
+// of the amount that was sampled for that row.
+//
+// The zero half is the surviving guard from the pre-B10 property — the
+// zero-amount skip branch runs before the insert, so a refactor that
+// moved it after would show up here immediately.
+//
+// The sign half is the B10 inversion. The old property asserted
+// `AmountCents > 0`, which was a restatement of the math.Abs call at
+// the insert site rather than a contract: it would have failed on the
+// correct behaviour and passed on the wrong one. Correlating back
+// through RowIndex is what gives the new half teeth — asserting merely
+// that some inserted rows are negative would pass on a build that
+// flipped every sign, since the generator draws both.
 func TestImportProperty_AmountSanity(t *testing.T) {
 	fix := newPropertyFixture(t)
 	rapid.Check(t, func(t *rapid.T) {
 		rows := genImportRows(fix.knownCats).Draw(t, "rows")
 		result := fix.runProcess(t, rows)
 		for _, ins := range result.Inserted {
-			if ins.AmountCents <= 0 {
+			if ins.AmountCents == 0 {
 				t.Fatalf(
-					"row %d inserted with non-positive AmountCents=%d — math.Abs + zero-skip should guarantee >0",
-					ins.RowIndex, ins.AmountCents,
+					"row %d inserted with AmountCents=0 — the zero-amount skip must run before the insert",
+					ins.RowIndex,
+				)
+			}
+			source := rows[ins.RowIndex].Amount
+			if (ins.AmountCents < 0) != (source < 0) {
+				t.Fatalf(
+					"row %d sampled amount %.2f but stored AmountCents=%d — import must preserve the spreadsheet's sign",
+					ins.RowIndex, source, ins.AmountCents,
+				)
+			}
+		}
+	})
+}
+
+// TestImportProperty_MoneyPairSignsAgree asserts the pair invariant over
+// randomized input: no Inserted row carries a base amount and a foreign
+// original that point in opposite directions. Rows that would violate it are
+// rejected upstream as skipReasonSignMismatch, so an Inserted row with a mixed
+// pair means the gate was removed or bypassed — and the stored row would imply
+// a negative exchange rate.
+//
+// Inserted carries no original amount, so the check reads the sampled row back
+// through RowIndex, which is also what makes the property meaningful: shape 8
+// deliberately generates mixed pairs, so a build without the gate fails within
+// a sample or two rather than needing a hand-built fixture.
+func TestImportProperty_MoneyPairSignsAgree(t *testing.T) {
+	fix := newPropertyFixture(t)
+	rapid.Check(t, func(t *rapid.T) {
+		rows := genImportRows(fix.knownCats).Draw(t, "rows")
+		result := fix.runProcess(t, rows)
+		for _, ins := range result.Inserted {
+			src := rows[ins.RowIndex]
+			if src.OriginalAmount == 0 {
+				continue
+			}
+			if (src.Amount < 0) != (src.OriginalAmount < 0) {
+				t.Fatalf(
+					"row %d inserted with amount %.2f against original %.2f — a mixed pair implies a negative booked rate and must be skipped as %q",
+					ins.RowIndex, src.Amount, src.OriginalAmount, skipReasonSignMismatch,
 				)
 			}
 		}
@@ -524,6 +623,44 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 			CatIDToName: fix.catIDToName,
 		})
 		assertSingleSkip(t, result, skipReasonUnparseableDate)
+	})
+
+	t.Run("sign_mismatch", func(t *testing.T) {
+		row := validBase
+		row.OriginalAmount = -150_000 // base is +4.50: the two disagree
+		row.OriginalCurrency = "LBP"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonSignMismatch)
+	})
+
+	t.Run("agreeing_pair_inserts", func(t *testing.T) {
+		// The control for the subtest above: same shape, signs agreed, and
+		// both negative so the case that matters most for B10 (a foreign
+		// refund) is the one exercised. Without this arm, a gate that
+		// rejected every row carrying an original amount would satisfy
+		// sign_mismatch and look correct.
+		row := validBase
+		row.Amount = -4.50
+		row.OriginalAmount = -150_000
+		row.OriginalCurrency = "LBP"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		if len(result.Skipped) != 0 || len(result.Errored) != 0 {
+			t.Fatalf("expected a clean insert, got skipped=%v errored=%v", result.Skipped, result.Errored)
+		}
+		if len(result.Inserted) != 1 {
+			t.Fatalf("expected 1 inserted, got %d", len(result.Inserted))
+		}
+		if result.Inserted[0].AmountCents != -450 {
+			t.Errorf("inserted AmountCents=%d, want -450", result.Inserted[0].AmountCents)
+		}
 	})
 
 	t.Run("missing_category", func(t *testing.T) {

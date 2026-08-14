@@ -122,6 +122,21 @@ var amountSeeds = []string{
 	"Inf",
 	"-Inf",
 	"1e20",
+
+	// The same magnitudes on the NEGATIVE side. These are not redundant:
+	// the parser's bound is `math.Abs(parsed) > MaxTransactionAmount`, and
+	// until B10 every seed above the limit was positive — so relaxing the
+	// bound to a one-sided `parsed > MaxTransactionAmount` passed the whole
+	// suite (measured: that mutant survived). An unbounded negative is the
+	// worse half of the pair, because dollarsToCents overflows int64 into
+	// -9223372036854775808 and, since B10 preserves the sign, that value now
+	// lands in amount_cents instead of being flattened by math.Abs on the
+	// way in. See the measurement in internal/api/cents.go's
+	// safeDollarsToCents comment for the same failure on other paths.
+	"-99999999999",
+	"-1e20",
+	"-1.7976931348623157e308",
+	"(99999999999)", // accounting negative above the limit
 }
 
 // FuzzParseImportDate feeds dateSeeds (plus any random mutations the

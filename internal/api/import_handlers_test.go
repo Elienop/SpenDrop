@@ -767,15 +767,24 @@ func TestHandleImportConfirm_CategoryMatchByName(t *testing.T) {
 	}
 }
 
-func TestHandleImportConfirm_NegativeAmounts_ConvertedToAbsolute(t *testing.T) {
+// TestHandleImportConfirm_NegativeAmounts_SignPreserved is the B10 inversion
+// of TestHandleImportConfirm_NegativeAmounts_ConvertedToAbsolute, which
+// asserted the opposite behaviour: that math.Abs at the insert site flattened
+// every spreadsheet negative into a positive row. Under signed amounts a
+// negative cell is a refund and must reach the ledger negative, so the test
+// that used to pin the flip now pins its absence — deliberately rewritten
+// rather than deleted, because the case it covers (a household sheet with
+// refund lines in it) is exactly as load-bearing as before.
+//
+// Counts alone cannot tell the two designs apart: all three rows imported
+// under the old behaviour too. The stored cents are the only evidence, so the
+// assertions read amount_cents straight out of SQLite.
+func TestHandleImportConfirm_NegativeAmounts_SignPreserved(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
 	user := seedTestUser(t, q, "refundimporter", "admin")
 
-	// Negative amounts in spreadsheets (refunds/credits) should be converted
-	// to absolute values during import, not silently skipped. The system uses
-	// category type to distinguish expense vs income, not amount sign.
 	xlsxData := createTestXLSX(t, "Transactions", []string{
 		"Date", "Description", "Amount", "Category",
 	}, [][]string{
@@ -820,12 +829,435 @@ func TestHandleImportConfirm_NegativeAmounts_ConvertedToAbsolute(t *testing.T) {
 
 	var resp map[string]any
 	decodeResponse(t, confirmRec, &resp)
-	// All 3 rows should be imported — negatives are converted to absolute values
+	// All 3 rows import — a negative amount is data, not a rejection reason.
 	if int(resp["imported"].(float64)) != 3 {
-		t.Errorf("expected 3 imported (negatives converted to abs), got %v; skipped=%v", resp["imported"], resp["skipped"])
+		t.Errorf("expected 3 imported, got %v; skipped=%v", resp["imported"], resp["skipped"])
 	}
 	if int(resp["skipped"].(float64)) != 0 {
 		t.Errorf("expected 0 skipped, got %v", resp["skipped"])
+	}
+
+	for _, want := range []struct {
+		description string
+		cents       int64
+	}{
+		{"Groceries", 4250},
+		{"Refund from store", -1500},
+		{"Credit adjustment", -575},
+	} {
+		var got int64
+		if err := db.QueryRow(
+			`SELECT amount_cents FROM transactions WHERE description = ? AND deleted_at IS NULL`,
+			want.description,
+		).Scan(&got); err != nil {
+			t.Fatalf("read amount_cents for %q: %v", want.description, err)
+		}
+		if got != want.cents {
+			t.Errorf("%q stored amount_cents=%d, want %d — the spreadsheet's sign must survive to the ledger",
+				want.description, got, want.cents)
+		}
+	}
+}
+
+// TestHandleImportConfirm_NegativeForeignRow_BothSignsNegative covers the
+// money PAIR, which no import test touched before B10: a foreign-currency
+// refund is negative on both sides, so the implied rate (base/original) stays
+// positive. A build that signed amount_cents but left math.Abs on the original
+// would pass every other import test in this file and store the contradiction
+// this one rejects.
+//
+// booked_rate is asserted NULL in the same breath because it is the same
+// decision: import applies no conversion, so it has no rate to record, and
+// deriving one from the pair would invent a quote the user never gave.
+func TestHandleImportConfirm_NegativeForeignRow_BothSignsNegative(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "foreignrefunder", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency",
+	}, [][]string{
+		{"2026-02-10", "Bakery run", "10.00", "Food", "890000.00", "LBP"},
+		{"2026-02-11", "Bakery refund", "-10.00", "Food", "-890000.00", "LBP"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, _ := q.ListAllCategories(context.Background())
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	if int(resp["imported"].(float64)) != 2 {
+		t.Fatalf("expected 2 imported, got %v; skipped_reasons=%v", resp["imported"], resp["skipped_reasons"])
+	}
+
+	for _, want := range []struct {
+		description string
+		cents       int64
+		origCents   int64
+	}{
+		{"Bakery run", 1000, 89000000},
+		{"Bakery refund", -1000, -89000000},
+	} {
+		var gotCents, gotOrig int64
+		var bookedRate sql.NullFloat64
+		if err := db.QueryRow(
+			`SELECT amount_cents, original_amount_cents, booked_rate FROM transactions
+			 WHERE description = ? AND deleted_at IS NULL`,
+			want.description,
+		).Scan(&gotCents, &gotOrig, &bookedRate); err != nil {
+			t.Fatalf("read row %q: %v", want.description, err)
+		}
+		if gotCents != want.cents {
+			t.Errorf("%q amount_cents=%d, want %d", want.description, gotCents, want.cents)
+		}
+		if gotOrig != want.origCents {
+			t.Errorf("%q original_amount_cents=%d, want %d — the pair must agree in sign",
+				want.description, gotOrig, want.origCents)
+		}
+		if bookedRate.Valid {
+			t.Errorf("%q stored booked_rate=%v; import performs no conversion, so it must stay NULL",
+				want.description, bookedRate.Float64)
+		}
+	}
+}
+
+// TestHandleImportConfirm_SignMismatch_SkippedWithReason pins the new
+// rejection: a row whose base amount and foreign original point in opposite
+// directions describes a contradiction no exchange rate can express.
+//
+// The assertion is on skipped_reasons, not on the bare skipped count, because
+// the count alone cannot distinguish "rejected for the right reason" from
+// "rejected because the category failed to resolve" — and a row silently
+// landing in the wrong bucket is the failure mode the reason map exists to
+// prevent. The clean row alongside it is the control: it proves the batch
+// itself was importable and only the mismatched row was refused.
+func TestHandleImportConfirm_SignMismatch_SkippedWithReason(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "signmismatcher", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency",
+	}, [][]string{
+		{"2026-03-01", "Clean foreign row", "10.00", "Food", "890000.00", "LBP"},
+		{"2026-03-02", "Contradictory row", "-10.00", "Food", "890000.00", "LBP"},
+		{"2026-03-03", "Contradictory the other way", "10.00", "Food", "-890000.00", "LBP"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, _ := q.ListAllCategories(context.Background())
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+
+	if int(resp["imported"].(float64)) != 1 {
+		t.Errorf("expected 1 imported (the clean row), got %v", resp["imported"])
+	}
+	reasons, ok := resp["skipped_reasons"].(map[string]any)
+	if !ok {
+		t.Fatalf("skipped_reasons missing or not an object: %v", resp["skipped_reasons"])
+	}
+	got, present := reasons[string(skipReasonSignMismatch)]
+	if !present {
+		t.Fatalf("skipped_reasons has no %q key: %v", skipReasonSignMismatch, reasons)
+	}
+	if int(got.(float64)) != 2 {
+		t.Errorf("skipped_reasons[%q] = %v, want 2", skipReasonSignMismatch, got)
+	}
+
+	var stored int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM transactions WHERE description LIKE 'Contradictory%' AND deleted_at IS NULL`,
+	).Scan(&stored); err != nil {
+		t.Fatalf("count contradictory rows: %v", err)
+	}
+	if stored != 0 {
+		t.Errorf("%d contradictory rows reached the ledger, want 0", stored)
+	}
+}
+
+// TestHandleImportConfirm_SignMismatch_DoesNotBlockAsCollision pins the
+// second half of the sign gate: a row that cannot be imported must not be
+// grouped as a collision either.
+//
+// buildCollisionGroups drops every row the confirm path would reject —
+// unparseable date, empty description, zero amount — for one reason: a
+// collision group blocks /confirm with a 409, and blocking an import over two
+// rows that were never going to land leaves the user resolving a duplicate
+// that does not exist. Sign-mismatched rows joined that list when the gate was
+// added, and the two identical mismatched rows below are the shape that would
+// otherwise group: same date, description, category and amount.
+func TestHandleImportConfirm_SignMismatch_DoesNotBlockAsCollision(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "mismatchcollider", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency",
+	}, [][]string{
+		{"2026-06-01", "Twice contradictory", "-10.00", "Food", "890000.00", "LBP"},
+		{"2026-06-01", "Twice contradictory", "-10.00", "Food", "890000.00", "LBP"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	if groups, ok := uploadResp["collision_groups"].([]any); ok && len(groups) != 0 {
+		t.Errorf("upload grouped %d collision(s) among rows that cannot import: %v", len(groups), groups)
+	}
+
+	cats, _ := q.ListAllCategories(context.Background())
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	// The whole point: a 409 here would be the import refusing to proceed over
+	// a collision between two rows it was going to skip anyway.
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	if int(resp["imported"].(float64)) != 0 {
+		t.Errorf("expected 0 imported, got %v", resp["imported"])
+	}
+	reasons, ok := resp["skipped_reasons"].(map[string]any)
+	if !ok {
+		t.Fatalf("skipped_reasons missing or not an object: %v", resp["skipped_reasons"])
+	}
+	if got := reasons[string(skipReasonSignMismatch)]; got == nil || int(got.(float64)) != 2 {
+		t.Errorf("skipped_reasons[%q] = %v, want 2", skipReasonSignMismatch, got)
+	}
+}
+
+// TestHandleImportConfirm_PurchaseAndRefund_DistinctIdentities is the
+// preview/commit agreement test for the pair that used to collapse: same day,
+// same description, same category, opposite signs. Before B10 both hash
+// constructions ran math.Abs, so the two rows shared one identity — the
+// preview flagged them as an intra_file collision and confirm 409'd, and had
+// the user pushed past it the second row would have been skipped as a
+// duplicate.
+//
+// The test asserts the two halves TOGETHER because the failure mode is
+// disagreement between them, not either one alone: a build that signs only the
+// commit-side hash still 409s here, and a build that signs only the preview
+// hash imports one row and drops the other as a duplicate. Both survive if you
+// assert just one side.
+func TestHandleImportConfirm_PurchaseAndRefund_DistinctIdentities(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "refundpair", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-04-04", "Corner shop", "42.50", "Food"},
+		{"2026-04-04", "Corner shop", "-42.50", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	// Preview half: the two rows must not be grouped. An intra_file group here
+	// is the old shared identity showing through the preview hash.
+	if groups, ok := uploadResp["collision_groups"].([]any); ok && len(groups) != 0 {
+		t.Errorf("upload predicted %d collision group(s) for a purchase/refund pair: %v", len(groups), groups)
+	}
+
+	cats, _ := q.ListAllCategories(context.Background())
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	// Commit half: no 409 from the collision gate, and both rows land.
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	if int(resp["imported"].(float64)) != 2 {
+		t.Fatalf("expected 2 imported, got %v; skipped_reasons=%v", resp["imported"], resp["skipped_reasons"])
+	}
+
+	rows, err := db.Query(
+		`SELECT amount_cents FROM transactions WHERE description = 'Corner shop' AND deleted_at IS NULL ORDER BY amount_cents`)
+	if err != nil {
+		t.Fatalf("query stored rows: %v", err)
+	}
+	defer rows.Close()
+	var stored []int64
+	for rows.Next() {
+		var c int64
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		stored = append(stored, c)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate stored rows: %v", err)
+	}
+	if len(stored) != 2 || stored[0] != -4250 || stored[1] != 4250 {
+		t.Errorf("stored amount_cents = %v, want [-4250 4250] — the purchase and its refund are distinct identities", stored)
+	}
+
+	// And the two hashes really are different, which is what makes them
+	// distinct: equal hashes with two rows stored would mean the partial
+	// unique index had been dropped, not that the identities diverged.
+	var distinctHashes int
+	if err := db.QueryRow(
+		`SELECT COUNT(DISTINCT content_hash) FROM transactions WHERE description = 'Corner shop' AND deleted_at IS NULL`,
+	).Scan(&distinctHashes); err != nil {
+		t.Fatalf("count distinct hashes: %v", err)
+	}
+	if distinctHashes != 2 {
+		t.Errorf("got %d distinct content_hash values for the pair, want 2", distinctHashes)
+	}
+}
+
+// TestHandleImportConfirm_AccountingNegative_LandsNegative walks the
+// accounting-format path end to end. stripCurrencyFormat has always turned
+// "(42.50)" into "-42.50" and TestStripCurrencyFormat_AccountingNegatives has
+// always pinned that — but with the sign stripped at insert, the conversion
+// was moot below the parser. This is the test that makes the whole chain
+// load-bearing: a bookkeeper's parenthesised credit reaches the ledger as a
+// refund.
+func TestHandleImportConfirm_AccountingNegative_LandsNegative(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "accountingimporter", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions", []string{
+		"Date", "Description", "Amount", "Category",
+	}, [][]string{
+		{"2026-05-05", "Parenthesised credit", "(42.50)", "Food"},
+		{"2026-05-06", "Symbol credit", "-$15.00", "Food"},
+	})
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", xlsxData)
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+
+	var uploadResp map[string]any
+	decodeResponse(t, uploadRec, &uploadResp)
+	importID := uploadResp["import_id"].(string)
+
+	cats, _ := q.ListAllCategories(context.Background())
+	confirmBody, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": cats[0].ID,
+	})
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(confirmBody))
+	confirmReq = withUser(confirmReq, user)
+	confirmRec := httptest.NewRecorder()
+	h.handleImportConfirm(confirmRec, confirmReq)
+
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var resp map[string]any
+	decodeResponse(t, confirmRec, &resp)
+	if int(resp["imported"].(float64)) != 2 {
+		t.Fatalf("expected 2 imported, got %v; skipped_reasons=%v", resp["imported"], resp["skipped_reasons"])
+	}
+
+	for _, want := range []struct {
+		description string
+		cents       int64
+	}{
+		{"Parenthesised credit", -4250},
+		{"Symbol credit", -1500},
+	} {
+		var got int64
+		if err := db.QueryRow(
+			`SELECT amount_cents FROM transactions WHERE description = ? AND deleted_at IS NULL`,
+			want.description,
+		).Scan(&got); err != nil {
+			t.Fatalf("read amount_cents for %q: %v", want.description, err)
+		}
+		if got != want.cents {
+			t.Errorf("%q stored amount_cents=%d, want %d", want.description, got, want.cents)
+		}
 	}
 }
 
