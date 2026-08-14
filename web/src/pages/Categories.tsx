@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { AlertCircle, MoreHorizontal, Plus } from 'lucide-react';
+import { toast } from 'sonner';
 import { api } from '../api/client';
 import { useAuth } from '../hooks/useAuth';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
@@ -34,6 +35,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -47,6 +57,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Skeleton } from '@/components/ui/skeleton';
+import { destructiveActionClass } from '@/lib/styles';
 import { isAdmin } from '@/lib/roles';
 import { cn } from '@/lib/utils';
 import {
@@ -151,6 +162,13 @@ function CategoryActionsMenu({
           size="icon"
           className={cn('data-[state=open]:bg-accent', triggerClassName)}
           aria-label={`Actions for ${category.name}`}
+          /*
+            The focus anchor the page's trigger-less overlays (editor sheet,
+            delete confirm) come back to on close. Queried by id rather than
+            held as a ref because this menu is rendered once per row on
+            whichever of the two presentations is mounted.
+          */
+          data-category-actions-id={category.id}
         >
           <MoreHorizontal />
           <span className="sr-only">Open menu</span>
@@ -202,13 +220,12 @@ function CategoryActionsMenu({
  *     `size="sm"` need ~300px against the 279px this card has inside its
  *     gutters, and `Button` is `whitespace-nowrap` — so they would not wrap,
  *     they would overflow, trading a table pan for a card pan.
- *   - Delete has no confirm dialog on this page (it fires straight at the API;
- *     the backend refuses a category that still has transactions, which is the
- *     only guard). Promoting it to a one-tap full-width button would make it
- *     easier to hit by accident here than on the desktop it mirrors. Trash's
- *     card can afford visible actions because its destructive one walks through
- *     a dialog and its primary one is the page's whole purpose; here the page's
- *     purpose is reading the list, and a member sees no actions at all.
+ *   - Delete is PERMANENT — categories have no tombstone — so even now that it
+ *     walks through the page-level confirm, it stays behind the menu rather
+ *     than being promoted to a one-tap full-width button. Trash's card can
+ *     afford visible actions because its primary one is the page's whole
+ *     purpose; here the page's purpose is reading the list, and a member sees
+ *     no actions at all.
  *   - Density. Twenty-odd rows are browsed on this surface; an action row per
  *     card doubles the scroll for a control used a few times a month.
  */
@@ -278,7 +295,31 @@ export function Categories() {
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState('');
   const [editor, setEditor] = useState<CategoryEditorState | null>(null);
+  // Lifted out of the sheet because the write lives here: the sheet only knows
+  // the submit happened, not whether the POST is still in flight, so without
+  // this the Save button stays live and a second tap double-POSTs the category.
+  const [saving, setSaving] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<Category | null>(null);
+  // Kept when `deleteTarget` is cleared so the confirm does not blank its
+  // title during the close animation — same two-piece shape as Settings'
+  // delete-user confirm.
+  const [deleteTargetName, setDeleteTargetName] = useState('');
+  const [deleting, setDeleting] = useState(false);
   const fetchSeqRef = useRef(0);
+
+  const pageRef = useRef<HTMLDivElement>(null);
+  // Focus anchor for after a confirmed delete: the row (and its menu trigger)
+  // is gone, so focus would otherwise drop onto <body> with no context.
+  // Mirrors Transactions' pageHeadingRef pattern.
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  // Remembered separately from `deleteTarget` / `editor`, which are already
+  // null by the time the close-focus hooks run.
+  const lastDeleteIdRef = useRef<number | null>(null);
+  const editorAnchorRef = useRef<number | 'add' | null>(null);
+  // Selects between the confirm's two close destinations: a confirmed delete
+  // unmounts the row's trigger, so focus goes to the heading instead.
+  const deletedRef = useRef(false);
 
   const fetchCategories = useCallback(() => {
     const seq = ++fetchSeqRef.current;
@@ -309,6 +350,7 @@ export function Categories() {
   }, [fetchCategories]);
 
   async function handleSave(data: CategoryFormData) {
+    setSaving(true);
     try {
       if (editor?.mode === 'edit' && editor.category) {
         // PUT only sends `name` and `icon` — the backend's
@@ -330,9 +372,15 @@ export function Categories() {
       setEditor(null);
       fetchCategories();
     } catch (err) {
-      setError(
+      // A toast, not `setError`, for the reason the delete confirm gives: the
+      // sheet stays open over the page on failure, so the banner would render
+      // behind its overlay and a duplicate-name 409 would read as "Save does
+      // nothing". handleToggleActive keeps the banner — nothing covers it.
+      toast.error(
         err instanceof Error ? err.message : 'Failed to save category',
       );
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -347,14 +395,67 @@ export function Categories() {
     }
   }
 
-  async function handleDelete(cat: Category) {
+  // Where focus goes when the confirm or the editor closes while the row is
+  // still there: back to the "Actions for <name>" trigger it was opened from,
+  // which is where the user's attention was. The heading is the fallback for
+  // a row that has left the list in the meantime. Queried through `pageRef`
+  // so it finds the trigger on whichever presentation — table or card list —
+  // is mounted.
+  function focusRowTrigger(id: number | null) {
+    const trigger =
+      id === null
+        ? null
+        : pageRef.current?.querySelector<HTMLElement>(
+            `[data-category-actions-id="${id}"]`,
+          );
+    (trigger ?? pageHeadingRef.current)?.focus();
+  }
+
+  function openCreate() {
+    editorAnchorRef.current = 'add';
+    setEditor({ mode: 'create' });
+  }
+
+  function openEdit(cat: Category) {
+    editorAnchorRef.current = cat.id;
+    setEditor({ mode: 'edit', category: cat });
+  }
+
+  function focusAfterEditorClose() {
+    const anchor = editorAnchorRef.current;
+    if (anchor === 'add') {
+      (addButtonRef.current ?? pageHeadingRef.current)?.focus();
+      return;
+    }
+    focusRowTrigger(anchor);
+  }
+
+  function openDelete(cat: Category) {
+    setDeleteTargetName(cat.name);
+    lastDeleteIdRef.current = cat.id;
+    setDeleteTarget(cat);
+  }
+
+  async function onConfirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await api.del(`categories/${cat.id}`);
+      await api.del(`categories/${deleteTarget.id}`);
+      toast.success('Category deleted');
+      deletedRef.current = true;
+      setDeleteTarget(null);
       fetchCategories();
     } catch (err) {
-      setError(
+      // Stays open on failure, and the toast carries the server's own words.
+      // The likeliest failure is the 409 refusing to delete a category that
+      // still has transactions — a sentence the user needs to read, and the
+      // page's error banner sits BEHIND this dialog's overlay where it would
+      // never be seen.
+      toast.error(
         err instanceof Error ? err.message : 'Failed to delete category',
       );
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -369,14 +470,17 @@ export function Categories() {
   );
 
   return (
-    <div className="flex flex-col gap-6">
+    <div ref={pageRef} className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-semibold tracking-tight">Categories</h1>
+        <h1
+          ref={pageHeadingRef}
+          tabIndex={-1}
+          className="text-2xl font-semibold tracking-tight outline-none"
+        >
+          Categories
+        </h1>
         {admin && (
-          <Button
-            onClick={() => setEditor({ mode: 'create' })}
-            aria-label="Add category"
-          >
+          <Button ref={addButtonRef} onClick={openCreate} aria-label="Add category">
             <Plus data-icon="inline-start" />
             Add category
           </Button>
@@ -450,9 +554,9 @@ export function Categories() {
                 key={cat.id}
                 category={cat}
                 admin={admin}
-                onEdit={(c) => setEditor({ mode: 'edit', category: c })}
+                onEdit={openEdit}
                 onToggleActive={(c) => void handleToggleActive(c)}
-                onDelete={(c) => void handleDelete(c)}
+                onDelete={openDelete}
               />
             ))}
           </ul>
@@ -488,9 +592,9 @@ export function Categories() {
                         <CategoryActionsMenu
                           category={cat}
                           triggerClassName="size-8"
-                          onEdit={(c) => setEditor({ mode: 'edit', category: c })}
+                          onEdit={openEdit}
                           onToggleActive={(c) => void handleToggleActive(c)}
-                          onDelete={(c) => void handleDelete(c)}
+                          onDelete={openDelete}
                         />
                       )}
                     </TableCell>
@@ -504,21 +608,119 @@ export function Categories() {
 
       <CategoryEditorSheet
         state={editor}
+        saving={saving}
         onClose={() => setEditor(null)}
         onSave={(data) => void handleSave(data)}
+        onCloseFocus={focusAfterEditorClose}
       />
+
+      {/* AlertDialog, not a plain Dialog: categories have no tombstone, so
+          this delete is permanent — the register role="alertdialog" exists
+          for. Page-level and Trigger-less like every other confirm in this
+          app (no `AlertDialogTrigger` exists anywhere in it), so the table
+          row's menu and the phone card's menu open this one dialog, and
+          `onCloseAutoFocus` below pays for the restore Radix cannot do.
+
+          The copy says what the server ACTUALLY does: handleDeleteCategory
+          answers 409 on the FK constraint when any transaction still
+          references the category — tombstoned rows in the Trash included,
+          since a tombstone keeps its category_id — so a mis-tap here cannot
+          take spending history with it. */}
+      <AlertDialog
+        open={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (deleting) return;
+          if (!open) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            // Radix's own restore composes `preventDefault();
+            // context.triggerRef.current?.focus()`, and `triggerRef` is only
+            // populated by an `AlertDialogTrigger` — this dialog has none, so
+            // without this hook every close would land on `<body>`.
+            e.preventDefault();
+            if (deletedRef.current) {
+              // The row this confirm pointed at is gone and its menu trigger
+              // is unmounting with it. Park focus on the heading, as the
+              // Transactions delete path does.
+              deletedRef.current = false;
+              pageHeadingRef.current?.focus();
+              return;
+            }
+            // Cancel/Escape: the row is still there, and so is the trigger
+            // the user opened it from.
+            focusRowTrigger(lastDeleteIdRef.current);
+          }}
+        >
+          <AlertDialogHeader>
+            {/* The name gets the register Settings' delete-user confirm gives
+                a display name: a `font-mono` span, so a title reads as
+                "this exact row" rather than as prose a name happens to sit
+                in. (The token-revoke confirm adds quotes inside the span
+                because a token name is a sentence-like label; a category name
+                is one word in the common case.) */}
+            <AlertDialogTitle>
+              Delete <span className="font-mono">{deleteTargetName}</span>?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Categories have no Trash: this permanently removes the category
+              and cannot be undone. A category that still has transactions —
+              including rows in the Trash — cannot be deleted at all, so no
+              spending history is at stake here. Deactivate it instead to keep
+              it out of the entry row.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel
+              type="button"
+              className="max-md:min-h-11"
+              disabled={deleting}
+            >
+              Cancel
+            </AlertDialogCancel>
+            {/* Plain Button, not AlertDialogAction, for the reason Settings'
+                delete-user confirm gives: the action component closes the
+                dialog on click, which would hide the pending state and leave
+                a failed delete with nowhere to report back to. */}
+            <Button
+              type="button"
+              disabled={deleting}
+              onClick={() => void onConfirmDelete()}
+              className={cn(destructiveActionClass, 'max-md:min-h-11')}
+            >
+              {deleting ? 'Deleting…' : 'Delete category'}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
 
 function CategoryEditorSheet({
   state,
+  saving,
   onClose,
   onSave,
+  onCloseFocus,
 }: {
   state: CategoryEditorState | null;
+  /** Whether the caller's write is in flight. Owned there, not here. */
+  saving: boolean;
   onClose: () => void;
   onSave: (data: CategoryFormData) => void;
+  /**
+   * Where focus goes when the sheet closes on any path — save, cancel,
+   * Escape, overlay.
+   *
+   * Required, not optional: this sheet has no `SheetTrigger`, so Radix has
+   * nothing to restore focus to and every close would otherwise land on
+   * `<body>`. Making the caller supply a target is what stops that being
+   * silently re-introduced. Same contract as TransactionEditSheet's
+   * `onCloseFocus`, which documents the Radix mechanism in full.
+   */
+  onCloseFocus: () => void;
 }) {
   const [name, setName] = useState('');
   const [type, setType] = useState<TransactionType>(TYPE_EXPENSE);
@@ -558,7 +760,20 @@ function CategoryEditorSheet({
         if (!open) onClose();
       }}
     >
-      <SheetContent side="right" className="sm:max-w-md">
+      <SheetContent
+        side="right"
+        className="sm:max-w-md"
+        onCloseAutoFocus={(e) => {
+          // Radix's own restore is a no-op here: `DialogContentModal`
+          // composes `preventDefault(); context.triggerRef.current?.focus()`
+          // (@radix-ui/react-dialog), and `triggerRef` is only populated by a
+          // `SheetTrigger`. This sheet is opened from a row menu or the Add
+          // button and has neither, so every close landed on `<body>`.
+          // `preventDefault` is belt-and-braces (Radix already calls it).
+          e.preventDefault();
+          onCloseFocus();
+        }}
+      >
         <SheetHeader>
           <SheetTitle>
             {state?.mode === 'edit' ? 'Edit category' : 'Add category'}
@@ -618,7 +833,14 @@ function CategoryEditorSheet({
             <Button type="button" variant="outline" onClick={onClose}>
               Cancel
             </Button>
-            <Button type="submit">Save</Button>
+            {/* Present-participle label, not just dimming: a dimmed button
+                still reading "Save" says "you cannot do this" rather than
+                "this is happening" (TransactionEditSheet spells out the same
+                choice), and aria-busy carries it to a reader who cannot see
+                the dimming. */}
+            <Button type="submit" disabled={saving} aria-busy={saving}>
+              {saving ? 'Saving…' : 'Save'}
+            </Button>
           </SheetFooter>
         </form>
       </SheetContent>

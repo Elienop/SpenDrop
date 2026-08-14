@@ -15,8 +15,17 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Categories } from './Categories';
 
 /**
@@ -61,6 +70,7 @@ function setViewportWidth(width: number): void {
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 
 /**
  * A name at the server's ceiling. `MaxCategoryNameLength` = 100
@@ -342,23 +352,163 @@ describe('the actions work from a card', () => {
     });
   });
 
-  test('Delete DELETEs, and a refusal reaches the banner', async () => {
+  test('Delete confirms first, then DELETEs the row it was opened for', async () => {
+    // The confirm sits above the presentation fork, shared with the desktop
+    // table — this proves the phone branch reaches the SAME dialog rather
+    // than keeping the old two-tap direct delete, which an agent literally
+    // performed by accident while measuring this page.
     const user = setup();
-    mockedApi.del.mockRejectedValueOnce(
-      new Error('cannot delete category that has transactions'),
-    );
+    mockedApi.del.mockResolvedValue(undefined);
     await renderPhone('admin');
     await user.click(screen.getByRole('button', { name: 'Actions for Food' }));
     await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
 
+    const confirm = await screen.findByRole('alertdialog');
+    expect(confirm).toHaveTextContent('Delete Food?');
+    // Opening the confirmation is not the deletion.
+    expect(mockedApi.del).not.toHaveBeenCalled();
+
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Delete category' }),
+    );
     await waitFor(() => {
       expect(mockedApi.del).toHaveBeenCalledWith('categories/1');
     });
-    // The error surface is shared with the desktop and sits above the fork —
-    // this proves the phone branch did not lose it.
-    expect(await screen.findByRole('alert')).toHaveTextContent(
-      /cannot delete category/,
+  });
+
+  test('a refusal reaches a toast, and the confirm stays open to report it', async () => {
+    // A toast rather than the page banner the pre-confirm wiring used: the
+    // banner renders BEHIND the confirm's overlay, where the 409's sentence
+    // would never be seen.
+    const user = setup();
+    const refusal =
+      'cannot delete category that has transactions — deactivate it instead, or reassign its transactions first';
+    mockedApi.del.mockRejectedValueOnce(new Error(refusal));
+    await renderPhone('admin');
+    await user.click(screen.getByRole('button', { name: 'Actions for Food' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    const confirm = await screen.findByRole('alertdialog');
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Delete category' }),
     );
+
+    await waitFor(() => {
+      expect(mockedToast.error).toHaveBeenCalledWith(refusal);
+    });
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+  });
+});
+
+describe('focus never drops to <body>', () => {
+  /*
+    The overlays on this page — the editor sheet and the delete confirm — are
+    Trigger-less (`open={…}` with no SheetTrigger/AlertDialogTrigger), so
+    Radix's own restore composes `preventDefault(); triggerRef.current?.focus()`
+    against a null ref and every close would land on <body>. Each close path
+    below therefore has an explicit destination, and each is asserted on
+    `document.activeElement` — the same idiom Settings' household-users mobile
+    tests use, proven to observe Radix's close-auto-focus in happy-dom.
+  */
+
+  test('Escape from the row menu keeps focus on its trigger (Radix restore, unbroken)', async () => {
+    // The EXISTING behaviour, pinned: this menu deliberately does NOT opt out
+    // of the dropdown primitive's focus restore (commit 2897054's exception is
+    // TransactionRow's menu, whose trigger unmounts — this one survives).
+    const user = setup();
+    await renderPhone('admin');
+    const trigger = screen.getByRole('button', { name: 'Actions for Food' });
+    await user.click(trigger);
+    await screen.findByRole('menu');
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  test('closing the edit sheet returns focus to that row\'s trigger', async () => {
+    const user = setup();
+    await renderPhone('admin');
+    const trigger = screen.getByRole('button', { name: 'Actions for Food' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: 'Edit' }));
+    await screen.findByRole('dialog');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(trigger);
+    });
+  });
+
+  test('closing the Add sheet returns focus to the Add category button', async () => {
+    // The other anchor: a create was opened from the page button, not a row.
+    const user = setup();
+    await renderPhone('admin');
+    const addButton = screen.getByRole('button', { name: 'Add category' });
+    await user.click(addButton);
+    await screen.findByRole('dialog');
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(addButton);
+    });
+  });
+
+  test('Cancel in the delete confirm returns focus to the row trigger', async () => {
+    const user = setup();
+    mockedApi.del.mockResolvedValue(undefined);
+    await renderPhone('admin');
+    const trigger = screen.getByRole('button', { name: 'Actions for Food' });
+    await user.click(trigger);
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog');
+
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(trigger);
+    });
+    // The gate itself: backing out never touched the API.
+    expect(mockedApi.del).not.toHaveBeenCalled();
+  });
+
+  test('a confirmed delete parks focus on the page heading', async () => {
+    // The row — and the trigger every other path returns to — is gone, so the
+    // heading is the anchor, per the Transactions post-delete precedent.
+    const user = setup();
+    mockedApi.del.mockResolvedValue(undefined);
+    await renderPhone('admin');
+    await user.click(screen.getByRole('button', { name: 'Actions for Food' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+    const confirm = await screen.findByRole('alertdialog');
+
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Delete category' }),
+    );
+
+    await waitFor(() => {
+      expect(mockedApi.del).toHaveBeenCalledWith('categories/1');
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole('heading', { level: 1, name: 'Categories' }),
+      );
+    });
   });
 });
 
