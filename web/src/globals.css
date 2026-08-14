@@ -11,7 +11,9 @@
     --popover:              0 0% 100%;
     --popover-foreground:   240 10% 3.9%;
     --muted:                240 4.8% 95.9%;
-    --muted-foreground:     240 3.8% 46.1%;
+    /* 45% is the ceiling: 46.1% composited on --muted measured 4.40:1; 45%
+       gives 4.57:1 on --muted and 5.02:1 on white (45.5% misses at 4.49). */
+    --muted-foreground:     240 3.8% 45%;
     --border:               240 5.9% 90%;
     --input:                240 5.9% 90%;
     --ring:                 240 5.9% 10%;
@@ -25,26 +27,50 @@
     --destructive:          0 72% 51%;
     --destructive-foreground: 0 0% 98%;
 
-    --chart-1:  263 55% 53%;
-    --chart-2:  226 70% 56%;
-    --chart-3:  206 100% 39%;
-    --chart-4:  189 94% 39%;
-    --chart-5:  173 80% 36%;
-    --chart-6:  142 53% 42%;
-    --chart-7:  88 60% 45%;
-    --chart-8:  48 96% 53%;
-    --chart-9:  25 95% 53%;
-    --chart-10: 346 77% 50%;
-    --chart-11: 286 68% 55%;
-    --chart-12: 6 75% 52%;
-    --chart-13: 37 88% 50%;
-    --chart-14: 68 58% 43%;
-    --chart-15: 115 48% 40%;
-    --chart-16: 157 60% 38%;
-    --chart-17: 244 52% 52%;
-    --chart-18: 305 50% 48%;
-    --chart-19: 328 65% 50%;
-    --chart-20: 100 52% 44%;
+    /* Light palette invariant: every slot must reach >= 5.0:1 as TEXT on
+       white (CategoryChips/CategoryBadge render the raw color over a 12-15%
+       self-tinted wash, which costs ~5-8% of the ratio — 5.0 covers that),
+       and each slot's hue must stay in its dark counterpart's family (a
+       category's identity may not shift between themes), so these are the
+       dark hues re-deepened, not new colors. Both halves are pinned by
+       src/lib/chart-colors.test.ts, which parses THIS block — it runs in the
+       suite, so an edit that breaks either one fails CI.
+       Pair separation is the check no test can gate: run
+       `node scripts/validate_palette.js "<20 hexes>" --mode light` after
+       editing. Do not expect a clean run — 20 slots put adjacent hues ~18°
+       apart, so the script's ΔE>=15 adjacent floor is unreachable at this
+       count and neither theme clears it (light 1 FAIL + 1 WARN, dark 3 FAILs,
+       measured 2026-08-14). It is a comparison tool here: a change should not
+       make the worst pair worse. The relief the script itself names for that
+       band — direct labels — is what every chart carries (ChartLegend name
+       rows, category-named axis ticks), and a chip's color is decoration
+       beside its own text. */
+    --chart-1:  263 72% 59%;
+    --chart-2:  226 44% 39%;
+    --chart-3:  216 100% 48%;
+    --chart-4:  199 100% 27%;
+    --chart-5:  167 96% 25%;
+    --chart-6:  132 80% 28%;
+    --chart-7:  94 60% 23%;
+    --chart-8:  44 100% 28%;
+    --chart-9:  15 96% 29%;
+    --chart-10: 346 76% 48%;
+    --chart-11: 286 68% 50%;
+    --chart-12: 6 84% 32%;
+    --chart-13: 37 80% 33%;
+    --chart-14: 68 96% 18%;
+    --chart-15: 119 88% 27%;
+    --chart-16: 157 92% 21%;
+    --chart-17: 244 56% 60%;
+    --chart-18: 303 64% 31%;
+    --chart-19: 328 72% 47%;
+    --chart-20: 100 52% 31%;
+
+    /* LogoWordmark "Drop" badge. A shared `--primary / 0.4` inverts across
+       themes (98%-white in dark, 10%-black in light — a 40% black slab), so
+       each block picks its own tint+alpha. Light: primary at 0.10 alpha reads
+       as a subtle wash (1.23:1 vs white) and keeps "Drop" at 16.2:1. */
+    --logo-badge: 240 5.9% 10% / 0.1;
 
     --radius: 0.625rem;
   }
@@ -91,6 +117,11 @@
     --chart-18: 305 50% 48%;
     --chart-19: 328 65% 50%;
     --chart-20: 100 52% 44%;
+
+    /* Same rendered result as the pre-token `hsl(var(--primary) / 0.4)`
+       (dark --primary is 0 0% 98%) — see the light block for why the badge
+       cannot share --primary. */
+    --logo-badge: 0 0% 98% / 0.4;
   }
 
   * {

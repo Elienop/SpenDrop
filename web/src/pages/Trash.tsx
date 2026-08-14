@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useId, useMemo, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { toast } from 'sonner';
@@ -302,6 +302,16 @@ function TrashCard({
         the amount: `min-h-11` is the 44px touch floor, and two of these
         plus a 16px gutter do not fit next to a right-aligned amount at
         390px.
+
+        Kept even though `Button` now floors these on a coarse pointer, because
+        the two answer different questions and only overlap: this card renders
+        only below `md`, and at those widths it is 44px for a MOUSE too — which
+        is the density the owner asked to leave exactly as it was. Safe to have
+        both, unlike the `md:min-h-0` half these controls used to carry: same
+        property, same specificity, and `md:` is emitted AFTER `coarse:` in the
+        built stylesheet (measured: offsets 52141 vs 49393), so that pair did
+        not merely look ambiguous — it DEFEATED the primitive's floor on the
+        tablet. Two rules agreeing on 44px cannot.
       */}
       <div className="flex items-center gap-2">
         <Button
@@ -322,6 +332,11 @@ function TrashCard({
             variant="outline"
             size="sm"
             className="min-h-11 flex-1 gap-1.5 text-destructive hover:text-destructive"
+            // The purge dialog's close-focus resolves its return target by
+            // this id — the card and the table row are different elements
+            // for the same row, and this attribute is what makes either one
+            // findable at close time.
+            data-purge-row-id={row.id}
             onClick={() => onPurge(row)}
             disabled={rowBusy}
             aria-label={`Purge ${transactionLabel(row)}`}
@@ -340,6 +355,12 @@ interface ConfirmPurgeDialogProps {
   onCancel: () => void;
   onConfirm: () => void;
   busy: boolean;
+  // Both confirm dialogs on this page are controlled and Trigger-less (the
+  // trigger is per-row / in the toolbar, the dialog is one), so Radix's own
+  // restore aims at a null triggerRef and every close would land on <body>.
+  // The page supplies the explicit target — it knows which row (or toolbar
+  // button) the dialog was opened from; this component does not.
+  onCloseAutoFocus: (e: Event) => void;
 }
 
 function ConfirmPurgeDialog({
@@ -347,6 +368,7 @@ function ConfirmPurgeDialog({
   onCancel,
   onConfirm,
   busy,
+  onCloseAutoFocus,
 }: ConfirmPurgeDialogProps) {
   const open = row !== null;
   return (
@@ -359,7 +381,7 @@ function ConfirmPurgeDialog({
         if (!isOpen) onCancel();
       }}
     >
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Permanently delete this transaction?</DialogTitle>
           <DialogDescription>
@@ -381,7 +403,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="outline"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onCancel}
             disabled={busy}
           >
@@ -390,7 +412,7 @@ function ConfirmPurgeDialog({
           <Button
             type="button"
             variant="destructive"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -408,6 +430,8 @@ interface ConfirmPurgeAllDialogProps {
   onCancel: () => void;
   onConfirm: () => void;
   busy: boolean;
+  // Same Trigger-less-dialog contract as ConfirmPurgeDialogProps.
+  onCloseAutoFocus: (e: Event) => void;
 }
 
 /**
@@ -424,6 +448,7 @@ function ConfirmPurgeAllDialog({
   onCancel,
   onConfirm,
   busy,
+  onCloseAutoFocus,
 }: ConfirmPurgeAllDialogProps) {
   return (
     <Dialog
@@ -435,7 +460,7 @@ function ConfirmPurgeAllDialog({
         if (!isOpen) onCancel();
       }}
     >
-      <DialogContent>
+      <DialogContent onCloseAutoFocus={onCloseAutoFocus}>
         <DialogHeader>
           <DialogTitle>Permanently delete everything in the trash?</DialogTitle>
           <DialogDescription>
@@ -451,7 +476,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="outline"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onCancel}
             disabled={busy}
           >
@@ -460,7 +485,7 @@ function ConfirmPurgeAllDialog({
           <Button
             type="button"
             variant="destructive"
-            className="min-h-11 md:min-h-0"
+            className="max-md:min-h-11"
             onClick={onConfirm}
             disabled={busy}
           >
@@ -503,6 +528,23 @@ export function Trash() {
 
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [batchRestoring, setBatchRestoring] = useState(false);
+
+  // Focus anchors for the Trigger-less confirm dialogs and for actions that
+  // unmount the control they ran from. Radix's restore cannot serve either
+  // case: the dialogs have no DialogTrigger (null triggerRef → <body>), and
+  // a confirmed purge/restore removes the very button focus would return to.
+  // Same shape as Settings' manage dialog and Transactions' delete anchor.
+  const pageRef = useRef<HTMLDivElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const purgeAllButtonRef = useRef<HTMLButtonElement>(null);
+  // Remembered separately from `pendingPurge`, which is already null by the
+  // time the dialog's close-focus hook runs.
+  const lastPurgeRowIdRef = useRef<number | null>(null);
+  // Set only on the success paths: they close the dialog with the target row
+  // (or the whole toolbar) about to unmount, so focus goes to the heading
+  // instead of back to a disappearing button. A dismissal leaves them false.
+  const purgeCommittedRef = useRef(false);
+  const purgeAllCommittedRef = useRef(false);
 
   // Whole-trash bulk actions. `restoringAll` and `purgingAll` gate the
   // header buttons (and each other — you can't run both at once), while
@@ -581,6 +623,10 @@ export function Trash() {
           `Restored "${row.description || '(no description)'}"`,
         );
         await fetchTrash();
+        // The refetch just unmounted the row — and the Restore button that
+        // had focus with it — so without an anchor, keyboard/SR focus drops
+        // to <body>. Same precedent as Transactions' post-delete anchor.
+        headingRef.current?.focus();
       } catch (err) {
         toast.error(
           err instanceof Error ? err.message : 'Failed to restore transaction',
@@ -604,6 +650,8 @@ export function Trash() {
         toast.success(
           `Purged "${row.description || '(no description)'}"`,
         );
+        // Before setPendingPurge: the close this triggers is what reads it.
+        purgeCommittedRef.current = true;
         setPendingPurge(null);
         await fetchTrash();
       } catch (err) {
@@ -616,6 +664,51 @@ export function Trash() {
     },
     [fetchTrash],
   );
+
+  // The one door into the single-row purge dialog, for both presentations.
+  // Recording the row id here (not reading `pendingPurge` later) is what the
+  // dialog's close-focus target is built on — see lastPurgeRowIdRef.
+  const openPurge = useCallback((row: DeletedTransaction) => {
+    lastPurgeRowIdRef.current = row.id;
+    setPendingPurge(row);
+  }, []);
+
+  // Close-focus for the single-row purge dialog. Dismissal returns to the
+  // row's own Purge button — resolved by id against the LIVE tree, because
+  // the button is a different element per presentation (table row vs card)
+  // and may itself be gone by close time. Every miss, and every committed
+  // purge, falls through to the page heading rather than <body>.
+  const handlePurgeDialogCloseFocus = useCallback((e: Event) => {
+    // Belt-and-braces — Radix already prevents it before aiming its own
+    // restore at the null triggerRef.
+    e.preventDefault();
+    if (purgeCommittedRef.current) {
+      purgeCommittedRef.current = false;
+      headingRef.current?.focus();
+      return;
+    }
+    const id = lastPurgeRowIdRef.current;
+    const anchor =
+      id === null
+        ? null
+        : pageRef.current?.querySelector<HTMLElement>(
+            `[data-purge-row-id="${id}"]`,
+          );
+    (anchor ?? headingRef.current)?.focus();
+  }, []);
+
+  // Close-focus for the purge-all dialog: back to the toolbar button that
+  // opened it, unless the purge committed — then the toolbar itself is about
+  // to unmount (total drops to 0) and the heading is the anchor.
+  const handlePurgeAllDialogCloseFocus = useCallback((e: Event) => {
+    e.preventDefault();
+    if (purgeAllCommittedRef.current) {
+      purgeAllCommittedRef.current = false;
+      headingRef.current?.focus();
+      return;
+    }
+    (purgeAllButtonRef.current ?? headingRef.current)?.focus();
+  }, []);
 
   const handleBatchRestore = useCallback(async () => {
     if (selectedIds.size === 0) return;
@@ -650,6 +743,11 @@ export function Trash() {
       }
       setSelectedIds(new Set());
       await fetchTrash();
+      // Clearing the selection unmounts the whole bulk bar — the button that
+      // was just clicked included — so this is the same drop-to-<body> the
+      // single-row restore anchors against. Success only: a failed batch keeps
+      // the bar, and its Restore button, exactly where the user left them.
+      headingRef.current?.focus();
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : 'Failed to restore batch',
@@ -681,6 +779,14 @@ export function Trash() {
       // about to disappear from the list anyway.
       setSelectedIds(new Set());
       await fetchTrash();
+      // An emptied trash takes the toolbar with it (`bulkActions` is gated on
+      // total > 0), so the "Restore all" button that was clicked is gone by the
+      // time this resolves. Unconditional on the success path rather than gated
+      // on `resp.restored`: a 0-restored answer still refetched, and a
+      // conflicted-only batch can leave the toolbar standing — focusing the
+      // heading is right either way, and it is the anchor the purge-all close
+      // already uses for the same unmount.
+      headingRef.current?.focus();
     } catch (err) {
       toast.error(
         err instanceof Error ? err.message : 'Failed to restore all',
@@ -701,6 +807,8 @@ export function Trash() {
       toast.success(
         `Purged ${resp.purged} transaction${resp.purged === 1 ? '' : 's'}`,
       );
+      // Before setPendingPurgeAll: the close this triggers is what reads it.
+      purgeAllCommittedRef.current = true;
       setPendingPurgeAll(false);
       setSelectedIds(new Set());
       await fetchTrash();
@@ -799,7 +907,7 @@ export function Trash() {
           type="button"
           variant="outline"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => void handleRestoreAll()}
           disabled={bulkBusy}
         >
@@ -807,10 +915,11 @@ export function Trash() {
           {restoringAll ? 'Restoring...' : `Restore all ${total}`}
         </Button>
         <Button
+          ref={purgeAllButtonRef}
           type="button"
           variant="destructive"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => setPendingPurgeAll(true)}
           disabled={bulkBusy}
         >
@@ -831,7 +940,7 @@ export function Trash() {
         <Button
           type="button"
           size="sm"
-          className="h-8 min-h-11 gap-1.5 text-xs md:min-h-0"
+          className="h-8 gap-1.5 text-xs max-md:min-h-11"
           onClick={() => void handleBatchRestore()}
           disabled={batchRestoring}
         >
@@ -842,8 +951,14 @@ export function Trash() {
           type="button"
           variant="ghost"
           size="sm"
-          className="h-8 min-h-11 text-xs md:min-h-0"
-          onClick={() => setSelectedIds(new Set())}
+          className="h-8 text-xs max-md:min-h-11"
+          onClick={() => {
+            setSelectedIds(new Set());
+            // This click is the one thing on the page guaranteed to unmount the
+            // element that received it: an empty selection is exactly the
+            // condition this bar renders under.
+            headingRef.current?.focus();
+          }}
           disabled={batchRestoring}
         >
           Clear selection
@@ -852,9 +967,18 @@ export function Trash() {
     ) : null;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div ref={pageRef} className="flex flex-col gap-6">
       <div className="flex flex-col gap-2">
-        <h1 className="text-2xl font-semibold tracking-tight">Trash</h1>
+        {/* tabIndex={-1}: programmatic focus target only — the anchor for
+            every close that unmounts the control focus would return to.
+            Same idiom as the Transactions heading. */}
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-2xl font-semibold tracking-tight outline-none"
+        >
+          Trash
+        </h1>
         <p className="max-w-3xl text-sm text-muted-foreground">
           Recently deleted transactions are kept here so a bulk-delete
           mistake can be recovered. Restored rows reappear in the live
@@ -966,7 +1090,7 @@ export function Trash() {
                     baseCurrency={baseCurrency}
                     onSelect={handleSelect}
                     onRestore={(r) => void handleRestore(r)}
-                    onPurge={setPendingPurge}
+                    onPurge={openPurge}
                   />
                 ))}
               </ul>
@@ -1120,7 +1244,8 @@ export function Trash() {
                             variant="ghost"
                             size="sm"
                             className="h-8 gap-1.5 text-xs text-destructive hover:text-destructive"
-                            onClick={() => setPendingPurge(row)}
+                            data-purge-row-id={row.id}
+                            onClick={() => openPurge(row)}
                             disabled={rowBusy}
                             aria-label={`Purge ${transactionLabel(row)}`}
                           >
@@ -1183,6 +1308,7 @@ export function Trash() {
         onConfirm={() => {
           if (pendingPurge) void handlePurge(pendingPurge);
         }}
+        onCloseAutoFocus={handlePurgeDialogCloseFocus}
       />
 
       <ConfirmPurgeAllDialog
@@ -1191,6 +1317,7 @@ export function Trash() {
         busy={purgingAll}
         onCancel={() => setPendingPurgeAll(false)}
         onConfirm={() => void handlePurgeAll()}
+        onCloseAutoFocus={handlePurgeAllDialogCloseFocus}
       />
     </div>
   );

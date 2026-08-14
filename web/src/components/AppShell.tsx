@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Link, useLocation } from 'react-router-dom';
 import { Sidebar } from './Sidebar';
 import { MobileNav } from './MobileNav';
 import { Dashboard } from '../pages/Dashboard';
@@ -11,8 +11,44 @@ import { Reports } from '../pages/Reports';
 import { Settings } from '../pages/Settings';
 import { Trash } from '../pages/Trash';
 import { Toaster } from '@/components/ui/sonner';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+
+/*
+  Fallback pane for any path the literal routes below don't match. A panel,
+  not a redirect to "/": a typo'd bookmark that silently lands on the
+  dashboard hides the typo, and echoing the attempted path is what lets the
+  user spot it. Shell chrome stays mounted around it, so navigation out is
+  one tap even without the button.
+*/
+function RouteNotFound() {
+  const { pathname } = useLocation();
+  return (
+    <div className="flex flex-col items-start gap-4">
+      <h1 className="text-2xl font-semibold tracking-tight">Page not found</h1>
+      {/* The echoed path is arbitrary user input — a mistyped bookmark can be
+          one long unbroken token. `overflow-wrap:anywhere` rather than
+          `break-words`: only the former lowers the span's min-content
+          contribution, and this paragraph is a flex item in an `items-start`
+          column, so it is sized from its content and would otherwise pan the
+          page sideways at 360px (the same trap Categories' name clamp
+          documents). `max-w-3xl` matches the explainer paragraphs on Trash and
+          Settings. */}
+      <p className="max-w-3xl text-sm text-muted-foreground">
+        Nothing lives at{' '}
+        <span className="font-medium text-foreground [overflow-wrap:anywhere]">
+          {pathname}
+        </span>
+        .
+      </p>
+      {/* Button styles on the Link keep the 44px touch floor. */}
+      <Button asChild variant="outline">
+        <Link to="/">Back to Dashboard</Link>
+      </Button>
+    </div>
+  );
+}
 
 export function AppShell() {
   const [sidebarExpanded, setSidebarExpanded] = useState(
@@ -71,6 +107,7 @@ export function AppShell() {
             <Route path="/categories" element={<Categories />} />
             <Route path="/trash" element={<Trash />} />
             <Route path="/settings" element={<Settings />} />
+            <Route path="*" element={<RouteNotFound />} />
           </Routes>
         </div>
       </main>

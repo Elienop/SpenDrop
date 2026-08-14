@@ -17,12 +17,22 @@ vi.mock('../api/client', () => ({
   },
 }));
 
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { toast } from 'sonner';
 import { Categories } from './Categories';
 
 const mockedUseAuth = vi.mocked(useAuth);
 const mockedApi = vi.mocked(api);
+const mockedToast = vi.mocked(toast);
 
 const mockCategories = [
   {
@@ -301,8 +311,12 @@ describe('Categories', () => {
       });
     });
 
-    test('Delete menu item DELETEs category', async () => {
-      const user = userEvent.setup();
+    test('Delete opens a confirm naming the category, and only confirming DELETEs', async () => {
+      // pointerEventsCheck: 0 — the open AlertDialog sets
+      // `pointer-events: none` on <body>, and happy-dom has no layout engine
+      // to tell the portalled content apart. Same setup Settings' confirm
+      // tests use.
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
       mockedApi.del.mockResolvedValue(undefined);
       renderCategories();
       await waitFor(() => {
@@ -314,18 +328,27 @@ describe('Categories', () => {
       );
       await user.click(screen.getByRole('menuitem', { name: /delete/i }));
 
+      // Opening the confirmation is not the deletion.
+      const confirm = await screen.findByRole('alertdialog');
+      expect(confirm).toHaveTextContent('Delete Food?');
+      // …and the name carries the same register Settings' confirms give a
+      // display name. Exact token, not a substring: `toContain('font-mono')`
+      // would also match a hypothetical `md:font-mono`.
+      const named = within(confirm).getByText('Food');
+      expect(named.className.split(/\s+/)).toContain('font-mono');
+      expect(mockedApi.del).not.toHaveBeenCalled();
+
+      await user.click(
+        within(confirm).getByRole('button', { name: /delete category/i }),
+      );
       await waitFor(() => {
         expect(mockedApi.del).toHaveBeenCalledWith('categories/1');
       });
     });
 
-    test('Delete failure surfaces error in alert banner', async () => {
-      const user = userEvent.setup();
-      mockedApi.del.mockRejectedValueOnce(
-        new Error(
-          'cannot delete category that has transactions — deactivate it instead, or reassign its transactions first',
-        ),
-      );
+    test('Cancel closes the confirm without deleting anything', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      mockedApi.del.mockResolvedValue(undefined);
       renderCategories();
       await waitFor(() => {
         expect(screen.getByText('Food')).toBeInTheDocument();
@@ -335,9 +358,95 @@ describe('Categories', () => {
         screen.getByRole('button', { name: /actions for food/i }),
       );
       await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+      const confirm = await screen.findByRole('alertdialog');
 
-      const banner = await screen.findByRole('alert');
-      expect(banner).toHaveTextContent(/cannot delete category/);
+      await user.click(within(confirm).getByRole('button', { name: /cancel/i }));
+
+      await waitFor(() => {
+        expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+      });
+      expect(mockedApi.del).not.toHaveBeenCalled();
+      // The row is untouched.
+      expect(screen.getByText('Food')).toBeInTheDocument();
+    });
+
+    test('a delete refusal reaches a toast and the confirm stays open', async () => {
+      // A toast, not the page banner: the banner renders BEHIND the confirm's
+      // overlay, where the 409's sentence would never be seen. The dialog
+      // staying open is the Settings delete-user precedent — a failed delete
+      // needs somewhere to report back to.
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const refusal =
+        'cannot delete category that has transactions — deactivate it instead, or reassign its transactions first';
+      mockedApi.del.mockRejectedValueOnce(new Error(refusal));
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+
+      await user.click(
+        screen.getByRole('button', { name: /actions for food/i }),
+      );
+      await user.click(screen.getByRole('menuitem', { name: /delete/i }));
+      const confirm = await screen.findByRole('alertdialog');
+      await user.click(
+        within(confirm).getByRole('button', { name: /delete category/i }),
+      );
+
+      await waitFor(() => {
+        expect(mockedToast.error).toHaveBeenCalledWith(refusal);
+      });
+      expect(screen.getByRole('alertdialog')).toBeInTheDocument();
+    });
+
+    test('a save refusal reaches a toast and the sheet stays open', async () => {
+      // Same reasoning as the delete refusal above, and the same trap: the
+      // page banner sits BEHIND the open sheet's overlay, so a duplicate-name
+      // 409 reported there reads as "Save does nothing".
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      const refusal = 'category name already exists';
+      mockedApi.post.mockRejectedValueOnce(new Error(refusal));
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /add category/i }));
+      await user.type(screen.getByLabelText(/name/i), 'Food');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => {
+        expect(mockedToast.error).toHaveBeenCalledWith(refusal);
+      });
+      // Still open, with the typed name intact — there is a value to correct.
+      const sheet = screen.getByRole('dialog');
+      expect(within(sheet).getByLabelText(/name/i)).toHaveValue('Food');
+      // And the refusal did NOT go to the banner it would have been invisible in.
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    test('Save goes disabled and reads Saving… while the write is in flight', async () => {
+      // A live Save button through the round-trip is a double-POST waiting for
+      // an impatient second tap.
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      mockedApi.post.mockReturnValue(new Promise(() => {}));
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /add category/i }));
+      await user.type(screen.getByLabelText(/name/i), 'Rent');
+      await user.click(screen.getByRole('button', { name: 'Save' }));
+
+      const busy = await screen.findByRole('button', { name: 'Saving…' });
+      expect(busy).toBeDisabled();
+      expect(busy).toHaveAttribute('aria-busy', 'true');
+      // The idle label is gone, not merely duplicated.
+      expect(
+        screen.queryByRole('button', { name: 'Save' }),
+      ).not.toBeInTheDocument();
+      expect(mockedApi.post).toHaveBeenCalledTimes(1);
     });
 
     test('surfaces load failure in an alert banner', async () => {

@@ -16,10 +16,32 @@ const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Trigger>
 >(({ className, children, ...props }, ref) => (
+  // `coarse:min-h-11` is the 44px touch floor for the trigger, and every part
+  // of that token is load-bearing:
+  //
+  //   - `coarse:`, not `md:`. The gate is the POINTER, not the width. The
+  //     household's tablet is ~1130px in landscape — above `md`, so a width
+  //     gate hands a touch screen the 32–40px desktop sizes. Measured, not
+  //     hypothetical. See the variant's own note in `tailwind.config.ts`.
+  //   - gated, not unconditional. `twMerge('h-10 w-full min-h-11', 'h-9')`
+  //     keeps BOTH (`min-h` and `h` are separate conflict groups), so an
+  //     ungated floor would silently inflate every `h-8`/`h-9` trigger on a
+  //     mouse desktop. Desktop density is a stated constraint.
+  //   - `min-h`, not `h`. Because the two do not conflict in tailwind-merge,
+  //     the floor SURVIVES every call site's `h-8`/`h-9`/`h-10` and CSS then
+  //     clamps the used height up to 44px. A gated fixed height instead
+  //     (a `coarse:h-*` token) would leave both classes standing with equal
+  //     specificity — a media query adds no specificity — and let stylesheet
+  //     order decide the winner.
+  //
+  // So call sites need no edit and must not re-fix a height below the floor:
+  // there is nothing to opt out of, because on a fine pointer the rule never
+  // matches. `SelectItem` carries the matching floor — a big trigger opening
+  // onto 32px rows is no floor at all.
   <SelectPrimitive.Trigger
     ref={ref}
     className={cn(
-      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background data-[placeholder]:text-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
+      "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background coarse:min-h-11 data-[placeholder]:text-muted-foreground focus:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
       className
     )}
     {...props}
@@ -152,14 +174,22 @@ const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
 >(({ className, children, ...props }, ref) => (
-  // `min-h-11` (44px) is the touch floor, and it lives here rather than at the
-  // call sites: the option is the element the user actually taps to CHOOSE,
-  // and stock `py-1.5` around `text-sm` measured 32px in Chrome at 360px. A
-  // floor on the trigger you open and not on the row you then hit is no floor
-  // at all. Deliberately NOT gated behind `md:` (the idiom `PaginationBar`
-  // uses on its trigger): a touch tablet held in landscape is above `md` and
-  // would keep the 32px rows. A floor, not a height — a two-line option still
-  // grows past 44px.
+  // `coarse:min-h-11` is the 44px touch floor, and it lives here rather than
+  // at the call sites: the option is the element the user actually taps to
+  // CHOOSE, and stock `py-1.5` around `text-sm` measured 32px in Chrome at
+  // 360px. A floor on the trigger you open and not on the row you then hit is
+  // no floor at all. Pointer-gated, never `md:`: a touch tablet held in
+  // landscape is above `md` and would keep the 32px rows.
+  //
+  // Gated like the trigger above and like `DropdownMenuItem` — an owner
+  // decision (2026-08-14) that reversed this file's earlier ungated floor.
+  // The argument that an option row "has no desktop density worth defending"
+  // lost: the owner chose to leave the mouse desktop's dense rows exactly as
+  // they are, and two sibling menu primitives disagreeing on when the floor
+  // applies is a drift magnet — the same tap on a Select option and a
+  // dropdown action must obey the same gate. On coarse pointers nothing
+  // changes: the floor still holds, and the wrap/floor interplay below
+  // ([overflow-wrap:anywhere] + grows-past-44) still applies there.
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -168,8 +198,8 @@ const SelectItem = React.forwardRef<
       // `overflow-x-hidden` would CLIP a long name instead of showing it.
       // `anywhere` (not `break-words`) because it also shrinks the intrinsic
       // min-content size, which is what the flex automatic minimum floors the
-      // text at — the same reason the category chips use it. `min-h-11` is a
-      // floor, so a wrapped option grows instead of clipping.
+      // text at — the same reason the category chips use it. The floor is a
+      // floor, not a height, so a wrapped option grows instead of clipping.
       //
       // NO `line-clamp-*` here, and that is a deliberate deviation from the
       // table-cell recipe (which pairs the wrap with a clamp, enforced by the
@@ -179,7 +209,7 @@ const SelectItem = React.forwardRef<
       // indistinguishable the moment the tail is clamped away. The vertical
       // growth is contained anyway — the viewport scrolls and the content has a
       // max-height — so the trade the clamp exists to make does not apply.
-      "relative flex min-h-11 w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none [overflow-wrap:anywhere] focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none coarse:min-h-11 [overflow-wrap:anywhere] focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}

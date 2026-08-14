@@ -303,6 +303,22 @@ export function Transactions() {
         await deleteTransaction(id);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : 'Delete failed');
+        // A refusal leaves the row exactly where it was, but focus has already
+        // been given up: the desktop row's menu opted out of Radix's restore
+        // on the way in (its trigger was about to unmount), and the phone
+        // sheet's close-focus hook stood down for the same reason. So the
+        // surface the delete came FROM has to be re-focused here or the
+        // keyboard user restarts at the top of the page. Whichever
+        // presentation is mounted supplies one of these two anchors; the
+        // heading covers a row that has since left the page.
+        const anchor =
+          cardRef.current?.querySelector<HTMLElement>(
+            `[data-txn-actions-id="${id}"]`,
+          ) ??
+          cardRef.current?.querySelector<HTMLElement>(
+            `[data-transaction-id="${id}"]`,
+          );
+        (anchor ?? pageHeadingRef.current)?.focus();
         return;
       }
       pageHeadingRef.current?.focus();
@@ -903,7 +919,7 @@ export function Transactions() {
                 type="button"
                 variant="link"
                 size="sm"
-                className="h-auto min-h-11 p-0 text-xs md:min-h-0"
+                className="h-auto p-0 text-xs max-md:min-h-11"
                 onClick={handleSelectAllMatching}
               >
                 Select all {total} matching
@@ -1012,6 +1028,14 @@ export function Transactions() {
                   if (e.key === 'Enter') handleReplaceAll();
                 }}
                 placeholder="New description..."
+                // No touch class here: the Input primitive carries
+                // `coarse:min-h-11` itself (the 2026-08 fix batch took the
+                // decision this comment used to defer), so on the household's
+                // coarse tablet above `md` this field keeps up with the two
+                // pointer-gated Buttons it shares an `items-center` row with
+                // instead of stepping down to 32px beside them. `h-11 md:h-8`
+                // is a different axis — fine-pointer density, matching the
+                // buttons' own explicit heights in this strip.
                 className="h-11 max-w-xs text-xs md:h-8"
                 disabled={replacing}
               />
@@ -1061,7 +1085,21 @@ export function Transactions() {
                   // sit 6px apart, so a 44px invisible ring around each X would
                   // overlap its neighbour and let one chip eat a tap meant for
                   // the next. A taller chip row on a phone is the honest cost.
-                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
+                  // `max-md:` rather than the retired md-gated zero half. Those
+                  // set the same property at the same specificity — a media
+                  // query adds none — and Tailwind emits screen variants AFTER
+                  // plugin-registered ones, so the md rule simply WON above
+                  // 768px and switched the floor off, on precisely the touch
+                  // tablet in landscape the floor exists for. Measured by byte
+                  // offset in the built stylesheet: the md zero rule at 52213,
+                  // the coarse floor at 49393. `max-md:` never overlaps the
+                  // coarse rule, so emission order stops mattering.
+                  //
+                  // The class names above are written in prose deliberately —
+                  // Tailwind SCANS COMMENTS, so spelling the retired token here
+                  // would emit a live CSS rule for the very thing this warns
+                  // against.
+                  'flex items-center justify-center max-md:min-h-11 max-md:min-w-11 coarse:min-h-11 coarse:min-w-11',
                 )}
                 onClick={chip.onClear}
                 aria-label={`Clear ${chip.label} filter`}
@@ -1150,7 +1188,21 @@ export function Transactions() {
                   'shrink-0 rounded-sm opacity-70 ring-offset-background',
                   'transition-opacity hover:opacity-100',
                   'focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2',
-                  'flex min-h-11 min-w-11 items-center justify-center md:min-h-0 md:min-w-0',
+                  // `max-md:` rather than the retired md-gated zero half. Those
+                  // set the same property at the same specificity — a media
+                  // query adds none — and Tailwind emits screen variants AFTER
+                  // plugin-registered ones, so the md rule simply WON above
+                  // 768px and switched the floor off, on precisely the touch
+                  // tablet in landscape the floor exists for. Measured by byte
+                  // offset in the built stylesheet: the md zero rule at 52213,
+                  // the coarse floor at 49393. `max-md:` never overlaps the
+                  // coarse rule, so emission order stops mattering.
+                  //
+                  // The class names above are written in prose deliberately —
+                  // Tailwind SCANS COMMENTS, so spelling the retired token here
+                  // would emit a live CSS rule for the very thing this warns
+                  // against.
+                  'flex items-center justify-center max-md:min-h-11 max-md:min-w-11 coarse:min-h-11 coarse:min-w-11',
                 )}
               >
                 <X className="size-4" />

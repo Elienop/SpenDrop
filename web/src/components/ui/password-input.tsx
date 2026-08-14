@@ -66,7 +66,22 @@ const PasswordInput = React.forwardRef<HTMLInputElement, PasswordInputProps>(
           onClick={() => setVisible((v) => !v)}
           // h-8 inside the h-10 input leaves clearance; ring-offset-0 stops the
           // focus ring landing on the input's border and reading as a glitch.
-          className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground focus-visible:ring-offset-0"
+          //
+          // The only place in the app that opts OUT of Button's `coarse:` touch
+          // floor, because this is the case `@/lib/touch-target` calls "grow
+          // only the hit area": the visible box is load-bearing. Let the box
+          // reach 44px and it overhangs a 40px Input by 2px top and bottom,
+          // where `hover:bg-accent` and the focus ring then paint outside the
+          // field's rounded border. So the box stays 32px and the pseudo-
+          // element carries the target instead — `-inset-1.5` is 6px on every
+          // side, 32 + 2x6 = 44 — exactly as `TOUCH_TARGET_CHECKBOX` does for a
+          // 16px box. Not that constant: the inset is derived from THIS box, and
+          // a shared name would invite it onto a control of another size.
+          //
+          // `coarse:min-h-0 coarse:min-w-0` and not a bare `min-h-0`: same group
+          // AND same modifier is what makes tailwind-merge drop the primitive's
+          // token rather than leave two rules fighting on stylesheet order.
+          className="absolute right-1 top-1/2 h-8 w-8 -translate-y-1/2 text-muted-foreground before:absolute before:-inset-1.5 before:content-[''] coarse:min-h-0 coarse:min-w-0 focus-visible:ring-offset-0"
         >
           <Icon aria-hidden="true" />
         </Button>

@@ -121,6 +121,16 @@ func NewRouterWithHandler(queries *database.Queries, db *sql.DB, cfg *config.Con
 		// identity.
 		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).Get("/me", h.handleMe)
 
+		// Self-service profile edit — the WRITE half of /me, on the same
+		// path for that reason. Auth-required (any role) and JSON-only,
+		// the same chain /password below carries. display_name is the only
+		// writable field; renaming ANYONE ELSE stays on the admin-gated
+		// PUT /api/users/{id}, and this route has no {id} to point at
+		// another user with.
+		r.With(auth.RequireAuthOrAPIToken(queries, authFailLimiter)).
+			With(requireJSONContentType).
+			Patch("/me", h.handleUpdateMe)
+
 		// Self-service password change. Auth-required (any user) and
 		// JSON-only (requireJSONContentType blocks cross-site form POSTs).
 		// Rotates the caller's password and cascades a token revoke +

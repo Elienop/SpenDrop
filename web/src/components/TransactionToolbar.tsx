@@ -88,6 +88,11 @@ export function TransactionToolbar({
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search transactions..."
           aria-label="Search transactions"
+          // No touch class here: the Input primitive itself carries
+          // `coarse:min-h-11` (the separate decision the old comment deferred
+          // was taken in the 2026-08 fix batch), so this field already matches
+          // the floored Buttons it shares an `items-center` row with. `h-9` is
+          // the fine-pointer height only.
           className="h-9 pl-8"
         />
       </div>

@@ -4,6 +4,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
+import type { Control } from 'react-hook-form';
 import * as z from 'zod';
 import {
   AlertCircle,
@@ -67,7 +68,7 @@ import {
 } from '@/components/ui/tabs';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import {
-  isValidTab,
+  resolveSettingsTab,
   settingsSectionLabel,
   visibleSettingsSections,
   type SettingsTab,
@@ -184,6 +185,63 @@ function autoMapCategories(
   return map;
 }
 
+/* ---------- Shared: the display-name editor ---------- */
+
+// Counted with charCount, not `.length`: MAX_DISPLAY_NAME_LENGTH mirrors the
+// server's `MaxDisplayNameLength`, which is applied through `charLen` (a rune
+// count), so `.length` would count an emoji as 2 and refuse a name the server
+// accepts.
+//
+// Empty is a validation error rather than a way to clear the name. Neither
+// write path lets you clear it: the admin PUT merges, so "" leaves the stored
+// name untouched (and, sent alone, 400s as "display_name or role is
+// required"), and PATCH /auth/me refuses "" outright because the whole request
+// IS the new name. Letting the submit through would look like a save that
+// quietly did nothing. Trim first so " " is empty here exactly as on the server.
+const displayNameSchema = z.object({
+  display_name: z
+    .string()
+    .trim()
+    .min(1, 'Display name is required')
+    .refine((value) => charCount(value) <= MAX_DISPLAY_NAME_LENGTH, {
+      message: `Display name must be ${MAX_DISPLAY_NAME_LENGTH} characters or fewer`,
+    }),
+});
+type DisplayNameValues = z.infer<typeof displayNameSchema>;
+
+/**
+ * The one display-name input, shared by all three editors on this page: a
+ * member (or admin) renaming themselves in their own account card, the admin's
+ * table-row rename dialog, and the phone's manage-user dialog.
+ *
+ * Extracted rather than copied because the three would otherwise drift on the
+ * things that are easy to get wrong once and never notice twice —
+ * `autoComplete="off"` (a browser offering a saved username here is offering
+ * the wrong field), and the FormMessage slot that both the client schema and
+ * the server's 400 write into.
+ */
+function DisplayNameField({
+  control,
+}: {
+  control: Control<DisplayNameValues>;
+}) {
+  return (
+    <FormField
+      control={control}
+      name="display_name"
+      render={({ field }) => (
+        <FormItem>
+          <FormLabel>Display name</FormLabel>
+          <FormControl>
+            <Input autoComplete="off" {...field} />
+          </FormControl>
+          <FormMessage />
+        </FormItem>
+      )}
+    />
+  );
+}
+
 /* ---------- Account Tab ---------- */
 
 // Client-side floor for a new password. The backend enforces its own
@@ -210,9 +268,100 @@ const changePasswordSchema = z
   });
 type ChangePasswordValues = z.infer<typeof changePasswordSchema>;
 
-function AccountSection() {
-  const { logout } = useAuth();
+/**
+ * The `account` panel.
+ *
+ * THE ONLY PLACE THE ROLE FLAG ENTERS THIS SECTION. Everything a member may do
+ * lives in `<SelfAccountCard>`, which takes no props at all — there is no role
+ * flag in its scope to gate anything on, so gating something there would mean
+ * adding a prop and threading it down, which a reviewer sees in the diff.
+ * Everything a member may NOT do lives in `<HouseholdUsersCard>`, behind the
+ * one `admin &&` below.
+ *
+ * The boundary is here rather than on the section entry in
+ * `settings-sections.ts` because `adminOnly` is all-or-nothing — it hides the
+ * control AND the panel — and cannot express "this section minus one card",
+ * which is exactly what a merged Account/Users panel is. Same shape as
+ * `<DataSection>`, whose Import card is admin-only inside a section both roles
+ * open.
+ *
+ * Self card FIRST. A member's entire panel is the self card, so putting the
+ * household table above it would open the two roles on different content.
+ */
+function AccountSection({ admin }: { admin: boolean }) {
+  return (
+    <div className="flex flex-col gap-6">
+      <SelfAccountCard />
+      {admin && <HouseholdUsersCard />}
+    </div>
+  );
+}
+
+const SELF_ACCOUNT_HEADING_ID = 'self-account-heading';
+const HOUSEHOLD_USERS_HEADING_ID = 'household-users-heading';
+
+function SelfAccountCard() {
+  const { user, logout, refreshUser } = useAuth();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [savingName, setSavingName] = useState(false);
+
+  const nameForm = useForm<DisplayNameValues>({
+    resolver: zodResolver(displayNameSchema),
+    defaultValues: { display_name: user?.display_name ?? '' },
+  });
+
+  // The auth context is the source of truth for this value, and it moves
+  // underneath the form twice: once when `/auth/me` first resolves after a
+  // reload, and once when our own save calls `refreshUser`. Resetting on the
+  // value (not the object) keeps the box showing what the server holds and
+  // drops the dirty state after a successful save.
+  const storedName = user?.display_name ?? '';
+  // `reset` destructured rather than depending on `nameForm`: react-hook-form
+  // guarantees it is referentially stable, so the effect keys on the VALUE and
+  // nothing else. (Holding the form in a ref and writing it during render is
+  // what this used to do, and `react-hooks/refs` rejects it.)
+  const { reset: resetNameForm } = nameForm;
+  useEffect(() => {
+    resetNameForm({ display_name: storedName });
+  }, [resetNameForm, storedName]);
+
+  async function onSaveDisplayName(values: DisplayNameValues) {
+    setSavingName(true);
+    try {
+      // PATCH /auth/me, NOT PUT /users/{id}: the admin route is behind
+      // RequireAdmin, so it is not a path a member has, and this endpoint takes
+      // its target from the session rather than from a URL segment. An admin
+      // renaming THEMSELVES goes through here too — this card is role-blind on
+      // purpose, and the endpoint is open to every authenticated role.
+      await api.patch<User>('auth/me', { display_name: values.display_name });
+      toast.success(`Display name updated to ${values.display_name}`);
+      // The shell renders this name (Sidebar and MobileNav both read
+      // `user.display_name`), and nothing else refreshes the auth context.
+      void refreshUser();
+      // Display names are resolved server-side into every transaction's
+      // `created_by`, and this PATCH emits no SSE event. Without it the
+      // Transactions table and the /quick recently-added panel keep serving the
+      // old name from cache. Same reason the admin rename does it.
+      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
+    } catch (err) {
+      // A 400 is the server judging THIS VALUE — too long after its own rune
+      // count, empty after its own trim, or carrying a codepoint it refuses
+      // because that character can forge structure in a push notification body
+      // (control characters, U+2028/9, bidi overrides). All three are sentences
+      // the person has to read next to the box they must fix, so the server's
+      // own words go on the field rather than into a toast that swallows them.
+      if (err instanceof ApiError && err.status === 400) {
+        nameForm.setError('display_name', { message: err.message });
+      } else {
+        toast.error(
+          err instanceof Error ? err.message : 'Failed to update display name',
+        );
+      }
+    } finally {
+      setSavingName(false);
+    }
+  }
 
   const form = useForm<ChangePasswordValues>({
     resolver: zodResolver(changePasswordSchema),
@@ -264,14 +413,78 @@ function AccountSection() {
   }
 
   return (
-    <Card>
+    // `role="group"` + `aria-labelledby`, on both cards in this panel. It is
+    // the only Settings section that holds TWO independent cards, so without a
+    // name a screen-reader user arriving at the password fields has nothing to
+    // tell them whether they are in their own account or in somebody's row of
+    // the household table. `group` rather than `region`: these are sets of
+    // related controls inside a section that is already a landmark, and two
+    // more landmarks here would be noise.
+    //
+    // Static ids rather than `useId`, because both cards are singletons within
+    // the page — there is no second instance for them to collide with.
+    <Card role="group" aria-labelledby={SELF_ACCOUNT_HEADING_ID}>
       <CardHeader>
-        <CardTitle className="text-base">Change password</CardTitle>
+        <CardTitle id={SELF_ACCOUNT_HEADING_ID} className="text-base">
+          Your account
+        </CardTitle>
         <CardDescription>
-          Update the password you use to sign in to SpenDrop.
+          Who SpenDrop shows you as, and the password you sign in with.
         </CardDescription>
       </CardHeader>
-      <CardContent className="flex flex-col gap-4">
+      <CardContent className="flex flex-col gap-6">
+        {/* Identity, read-only. The username is the login and cannot be
+            changed by anybody, including an admin — there is no write path for
+            `users.username` anywhere in the API — and the role is a fact about
+            this account that the person needs in order to make sense of what
+            the rest of Settings does and does not offer them.
+
+            The role appears here as TEXT and nothing on this card branches on
+            it. That is what keeps this component prop-less: a gate here would
+            have to be written as a gate. */}
+        <dl className="flex flex-col gap-3 text-sm sm:flex-row sm:gap-8">
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">Username</dt>
+            <dd className="font-mono">{user?.username ?? '—'}</dd>
+          </div>
+          <div className="flex flex-col gap-1">
+            <dt className="text-muted-foreground">Role</dt>
+            <dd>
+              <Badge variant={isAdmin(user) ? 'default' : 'secondary'}>
+                {isAdmin(user) ? 'Admin' : 'Member'}
+              </Badge>
+            </dd>
+          </div>
+        </dl>
+        {/* A member's only route to this column. `PUT /api/users/{id}` is
+            behind RequireAdmin, so before PATCH /auth/me existed a member was
+            stuck with whatever name an admin typed at account creation — on a
+            value that labels every transaction they enter, household-wide. */}
+        <Form {...nameForm}>
+          <form
+            onSubmit={(e) => void nameForm.handleSubmit(onSaveDisplayName)(e)}
+            className="flex max-w-md flex-col gap-4"
+            noValidate
+          >
+            <DisplayNameField control={nameForm.control} />
+            <p className="text-sm text-muted-foreground">
+              This is the name SpenDrop shows for you, including on every
+              transaction you enter. Your username and password are unchanged.
+            </p>
+            <Button type="submit" className="w-fit" disabled={savingName}>
+              {savingName ? 'Saving…' : 'Save display name'}
+            </Button>
+          </form>
+        </Form>
+        <Separator />
+        {/* A heading rather than a second Card. The whole panel is this one
+            card for a member, and splitting "who you are" from "how you sign
+            in" into two cards would put a card boundary where there is no
+            change of subject. */}
+        <div className="flex flex-col gap-4">
+        <h3 className="text-base font-semibold leading-none tracking-tight">
+          Change password
+        </h3>
         <Alert variant="warning">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>This signs you out everywhere</AlertTitle>
@@ -349,6 +562,7 @@ function AccountSection() {
             </Button>
           </form>
         </Form>
+        </div>
       </CardContent>
     </Card>
   );
@@ -625,7 +839,7 @@ function CurrenciesSection() {
   );
 }
 
-/* ---------- Users Tab (Admin only) ---------- */
+/* ---------- Household users (admin only, inside the Account panel) ---------- */
 
 const newUserSchema = z.object({
   username: z.string().min(1, 'Username required'),
@@ -634,27 +848,6 @@ const newUserSchema = z.object({
   role: z.enum([ROLE_ADMIN, ROLE_MEMBER] as const),
 });
 type NewUserValues = z.infer<typeof newUserSchema>;
-
-// Counted with charCount, not `.length`: MAX_DISPLAY_NAME_LENGTH mirrors the
-// server's `MaxDisplayNameLength`, which is applied through `charLen` (a rune
-// count), so `.length` would count an emoji as 2 and refuse a name the server
-// accepts.
-//
-// The PUT merges: a display_name of "" leaves the stored name untouched (and,
-// sent alone, 400s as "display_name or role is required"). So an empty box is a
-// validation error rather than a way to clear the name — there is no clearing
-// it, and letting the submit through would look like a save that did nothing.
-// Trim first so " " is empty here exactly as it is on the server.
-const displayNameSchema = z.object({
-  display_name: z
-    .string()
-    .trim()
-    .min(1, 'Display name is required')
-    .refine((value) => charCount(value) <= MAX_DISPLAY_NAME_LENGTH, {
-      message: `Display name must be ${MAX_DISPLAY_NAME_LENGTH} characters or fewer`,
-    }),
-});
-type DisplayNameValues = z.infer<typeof displayNameSchema>;
 
 const resetPasswordSchema = z
   .object({
@@ -672,11 +865,73 @@ const resetPasswordSchema = z
   });
 type ResetPasswordValues = z.infer<typeof resetPasswordSchema>;
 
-function UsersSection() {
+/**
+ * One household member as a stacked card — the below-`md` presentation of the
+ * table to the right of this file.
+ *
+ * Modelled on `<TrashCard>`, NOT `<TransactionCard>`, and the difference is the
+ * interaction model rather than the styling. The ledger card makes the whole
+ * row one tap target and adds long-press selection; neither fits here. There is
+ * no selection on this surface, and "what does tapping a PERSON do" has no
+ * obvious answer — rename? promote? delete? So the card is inert and the one
+ * explicit button says what it opens.
+ *
+ * Username first and in `font-mono`, exactly as the table renders it: it is the
+ * login, it is unique, and it is the string every aria-label on this surface is
+ * built from. The display name sits under it as the mutable label.
+ */
+function UserCard({
+  user,
+  onManage,
+}: {
+  user: User;
+  onManage: (u: User) => void;
+}) {
+  return (
+    <li className="flex flex-col gap-3 p-4">
+      {/* min-w-0 is what lets `truncate` do anything on a flex child. */}
+      <div className="flex min-w-0 flex-col gap-1">
+        <div className="truncate font-mono font-medium">{user.username}</div>
+        <div className="truncate text-sm text-muted-foreground">
+          {user.display_name}
+        </div>
+      </div>
+      {/* `min-h-11` even though `Button` now floors itself on a coarse pointer:
+          this card renders only below `md`, where 44px is right for a mouse
+          too. Same reasoning, and the same deliberate redundancy, as
+          <TrashCard>'s action row — and emphatically NOT paired with a
+          `md:min-h-0`, which is emitted after the pointer variant and would
+          defeat the primitive's floor on the tablet. */}
+      <Button
+        type="button"
+        variant="outline"
+        className="min-h-11 w-full"
+        data-manage-user-id={user.id}
+        aria-label={`Manage ${user.username}`}
+        onClick={() => onManage(user)}
+      >
+        Manage
+      </Button>
+    </li>
+  );
+}
+
+function HouseholdUsersCard() {
   const { user: currentUser, refreshUser } = useAuth();
   const queryClient = useQueryClient();
+  const isMobile = useIsMobileViewport();
   const [users, setUsers] = useState<User[]>([]);
   const [addOpen, setAddOpen] = useState(false);
+  // The row the phone's manage dialog is pointed at. Null = closed.
+  const [managingUser, setManagingUser] = useState<User | null>(null);
+  // Sticky copies, for the same reason every other dialog on this page keeps
+  // one: the target flips to null the instant the close animation starts, and
+  // reading the name off it would blank the title mid-animation. Two of them,
+  // because the two strings answer different questions — the username labels
+  // the controls (it is unique) and the display name is what the copy reads.
+  const [managingUserName, setManagingUserName] = useState('');
+  const [managingUsername, setManagingUsername] = useState('');
+  const [savingManagedName, setSavingManagedName] = useState(false);
   // The user currently targeted by the reset-password dialog. Null = closed.
   const [resettingUser, setResettingUser] = useState<User | null>(null);
   // Sticky display-name so the dialog title can keep showing the target's
@@ -704,6 +959,14 @@ function UsersSection() {
   });
 
   const renameForm = useForm<DisplayNameValues>({
+    resolver: zodResolver(displayNameSchema),
+    defaultValues: { display_name: '' },
+  });
+
+  // A SECOND instance rather than sharing `renameForm`: the two editors are
+  // open at different times but hold different targets, and one shared
+  // form would carry the last dialog's field-level 400 into the next one.
+  const manageNameForm = useForm<DisplayNameValues>({
     resolver: zodResolver(displayNameSchema),
     defaultValues: { display_name: '' },
   });
@@ -754,6 +1017,14 @@ function UsersSection() {
     }
   }
 
+  // `{ role }` ALONE, for the mirror image of the reason the rename sends
+  // `{ display_name }` alone. handleUpdateUser merges against the stored row,
+  // so a payload carrying both makes the client authoritative on BOTH: a role
+  // echoed back from a stale snapshot reverts a change made elsewhere and drops
+  // that user's sessions, and a display name echoed back overwrites a rename
+  // the other admin just made. Two facts, two writes, neither carrying the
+  // other. This is why the manage dialog is deliberately NOT a "save
+  // everything" form.
   async function handleRoleChange(userId: number, role: Role) {
     try {
       await api.put(`users/${userId}`, { role });
@@ -761,6 +1032,155 @@ function UsersSection() {
       refreshUsers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update role');
+    }
+  }
+
+  /* --- the phone's manage dialog, and its focus handoff --- */
+
+  const usersListRef = useRef<HTMLUListElement>(null);
+  const cardTitleRef = useRef<HTMLDivElement>(null);
+  // Remembered separately from `managingUser`, which is already null by the
+  // time the close-focus hook runs.
+  const lastManagedIdRef = useRef<number | null>(null);
+  // Set only on the two paths that close this dialog IN ORDER TO OPEN A
+  // CONFIRM. Load-bearing, not a guard against Radix: without it the manage
+  // dialog's close-focus hook fires on unmount and yanks focus back to the card
+  // AFTER the AlertDialog has already focused its Cancel button.
+  const confirmHandoffRef = useRef(false);
+  // Which surface opened the confirm that is now showing, remembered so its
+  // close can send focus back there: the phone path returns to the card's
+  // Manage button (focusAfterManageClose resolves it), the desktop path to
+  // the table-row button that opened it. A ref, not state, for the same
+  // reason as `lastManagedIdRef`: the confirm's target state is already null
+  // by the time `onCloseAutoFocus` runs.
+  const confirmOpenerRef = useRef<
+    | { source: 'manage' }
+    | { source: 'table'; kind: 'reset' | 'delete'; userId: number }
+    | null
+  >(null);
+  // Set only by a delete the server ACCEPTED: that row is gone, and both
+  // per-row anchors go with it, so the close falls back to the card title. A
+  // failed delete keeps the dialog open and never sets this.
+  const deleteSucceededRef = useRef(false);
+  // The rename dialog's opener. Only the table opens it — the phone edits the
+  // name inside the manage dialog — so one id is enough, and unlike the
+  // confirms there is no removed-row case: a rename never takes the row away.
+  const lastRenamedIdRef = useRef<number | null>(null);
+
+  // Resolved against the LIVE list rather than the snapshot the dialog opened
+  // with: a role change refetches the list, and the Select has to show what the
+  // server now holds instead of the value it was opened with. Falls back to the
+  // snapshot so the dialog keeps its contents through the close animation after
+  // a delete drops the row. Same pattern as Transactions' `editingTx`.
+  const managingRow = managingUser
+    ? (users.find((u) => u.id === managingUser.id) ?? managingUser)
+    : null;
+
+  function openManage(u: User) {
+    manageNameForm.reset({ display_name: u.display_name });
+    lastManagedIdRef.current = u.id;
+    setManagingUserName(u.display_name);
+    setManagingUsername(u.username);
+    setManagingUser(u);
+  }
+
+  // Where focus goes when the manage dialog closes on save, cancel, Escape or
+  // an overlay tap: back to the Manage button that opened it, which is where
+  // the user's attention was. The card title is the fallback for the row that
+  // is no longer there.
+  //
+  // Radix's own restore cannot do this. `DialogContentModal` composes
+  // `preventDefault(); context.triggerRef.current?.focus()`, and `triggerRef`
+  // is only populated by a `DialogTrigger` — this dialog is opened
+  // programmatically from a card tap and has none, so every close would land on
+  // `<body>`. (There is no `AlertDialogTrigger` anywhere in this app either,
+  // which is the same reason the confirms below are page-level rather than
+  // nested inside this one.)
+  function focusAfterManageClose() {
+    const id = lastManagedIdRef.current;
+    const anchor =
+      id === null
+        ? null
+        : usersListRef.current?.querySelector<HTMLElement>(
+            `[data-manage-user-id="${id}"]`,
+          );
+    (anchor ?? cardTitleRef.current)?.focus();
+  }
+
+  // The confirms' counterpart to focusAfterManageClose, needed for the same
+  // reason: no `AlertDialogTrigger` exists anywhere in this app, so Radix's
+  // own restore runs `triggerRef.current?.focus()` against null and every
+  // close would land focus on `<body>`. Anchors are re-queried at close time
+  // rather than held as elements — a refetch can have re-rendered the row
+  // since the confirm opened — and a missing anchor falls back to the card
+  // title, the one node on this surface that outlives any row.
+  function focusAfterConfirmClose(rowRemoved: boolean) {
+    const opener = confirmOpenerRef.current;
+    confirmOpenerRef.current = null;
+    if (rowRemoved || opener === null) {
+      cardTitleRef.current?.focus();
+      return;
+    }
+    if (opener.source === 'manage') {
+      focusAfterManageClose();
+      return;
+    }
+    const anchor = document.querySelector<HTMLElement>(
+      opener.kind === 'reset'
+        ? `[data-reset-user-id="${opener.userId}"]`
+        : `[data-delete-user-id="${opener.userId}"]`,
+    );
+    (anchor ?? cardTitleRef.current)?.focus();
+  }
+
+  // Same Trigger-less shape again, for the rename dialog: save, cancel, Escape
+  // and an overlay tap all return to the row's own Edit button. Queried at
+  // close time because a rename refetches the list, which re-renders the row
+  // the dialog was opened from.
+  function focusAfterRenameClose() {
+    const id = lastRenamedIdRef.current;
+    const anchor =
+      id === null
+        ? null
+        : document.querySelector<HTMLElement>(`[data-rename-user-id="${id}"]`);
+    (anchor ?? cardTitleRef.current)?.focus();
+  }
+
+  // Reset and Delete CLOSE this dialog and open the page-level confirm.
+  // Sequential, single-layer — never nested. Nesting stacks two `bg-black/80`
+  // scrims (~4% of the page still visible), and Radix's `hideOthers()` puts
+  // `aria-hidden` on the outer dialog, so the manage dialog would stop being
+  // reachable by assistive tech and unqueryable in tests, while the confirm's
+  // own close would restore focus to a null triggerRef and drop it on `<body>`.
+  function confirmFromManage(open: (u: User) => void, u: User) {
+    confirmHandoffRef.current = true;
+    confirmOpenerRef.current = { source: 'manage' };
+    setManagingUser(null);
+    open(u);
+  }
+
+  // The table-row openers record themselves before opening, so the confirm's
+  // close can find its way back to the exact button that started the chain.
+  function openResetFromTable(u: User) {
+    confirmOpenerRef.current = { source: 'table', kind: 'reset', userId: u.id };
+    openReset(u);
+  }
+
+  function openDeleteFromTable(u: User) {
+    confirmOpenerRef.current = { source: 'table', kind: 'delete', userId: u.id };
+    openDelete(u);
+  }
+
+  async function onSaveManagedName(values: DisplayNameValues) {
+    if (!managingUser) return;
+    setSavingManagedName(true);
+    try {
+      await submitRename(managingUser, values.display_name);
+      setManagingUser(null);
+    } catch (err) {
+      reportRenameError(err, manageNameForm);
+    } finally {
+      setSavingManagedName(false);
     }
   }
 
@@ -775,6 +1195,9 @@ function UsersSection() {
     try {
       await api.del(`users/${deletingUser.id}`);
       toast.success('User deleted');
+      // Before the state flip: the close this triggers must know the row is
+      // gone so its focus restore skips the row anchors.
+      deleteSucceededRef.current = true;
       setDeletingUser(null);
       refreshUsers();
     } catch (err) {
@@ -798,57 +1221,70 @@ function UsersSection() {
   // that is already there, not inventing one.
   function openRename(u: User) {
     renameForm.reset({ display_name: u.display_name });
+    lastRenamedIdRef.current = u.id;
     setRenamingUserName(u.display_name);
     setRenamingSelf(currentUser !== null && u.id === currentUser.id);
     setRenamingUser(u);
+  }
+
+  // The write itself, shared by the table's rename dialog and the phone's
+  // manage dialog. Throws on failure so each caller decides what to close and
+  // which form gets the field-level message.
+  async function submitRename(target: User, displayName: string) {
+    // display_name ALONE. The handler merges, so omitting `role` preserves
+    // it; sending the row's current role back would turn every rename into a
+    // role write, and a role write that differs from the stored one drops
+    // that user's sessions.
+    await api.put(`users/${target.id}`, { display_name: displayName });
+    toast.success(`Display name updated to ${displayName}`);
+    // The response is {"status":"updated"} — no user object — so the table
+    // can only be corrected by asking again.
+    refreshUsers();
+    // Display names are resolved server-side into every transaction's
+    // `created_by`, and a user PUT emits no SSE event. Without this the
+    // Transactions table and the /quick recently-added panel keep serving
+    // the old name from cache until something else invalidates them. The
+    // key is the prefix, so it also catches recent/suggestions/history.
+    void queryClient.invalidateQueries({ queryKey: ['transactions'] });
+    // Renaming YOURSELF also moves the name the shell renders out of the
+    // auth context (Sidebar and MobileNav both read user.display_name), and
+    // nothing above touches that. Only for your own row: every other row is
+    // somebody else's identity, and a /auth/me round-trip would answer with
+    // your own unchanged profile.
+    if (currentUser && target.id === currentUser.id) {
+      void refreshUser();
+    }
+  }
+
+  // Two different failures, two different places to say so.
+  //
+  // A 400 is the server judging THIS VALUE — too long, empty after its own
+  // trim, or carrying a codepoint it refuses — so it belongs on the field, next
+  // to the box the user has to fix. Anything else (a dropped request, a 500) is
+  // not about the name at all, and rendering "Failed to fetch" as field
+  // validation tells the admin their name is wrong when it is fine. That goes
+  // to a toast, where the page's other transient failures already live.
+  function reportRenameError(
+    err: unknown,
+    target: ReturnType<typeof useForm<DisplayNameValues>>,
+  ) {
+    if (err instanceof ApiError && err.status === 400) {
+      target.setError('display_name', { message: err.message });
+    } else {
+      toast.error(
+        err instanceof Error ? err.message : 'Failed to update display name',
+      );
+    }
   }
 
   async function onRenameUser(values: DisplayNameValues) {
     if (!renamingUser) return;
     setRenaming(true);
     try {
-      // display_name ALONE. The handler merges, so omitting `role` preserves
-      // it; sending the row's current role back would turn every rename into a
-      // role write, and a role write that differs from the stored one drops
-      // that user's sessions.
-      await api.put(`users/${renamingUser.id}`, {
-        display_name: values.display_name,
-      });
-      toast.success(`Display name updated to ${values.display_name}`);
+      await submitRename(renamingUser, values.display_name);
       setRenamingUser(null);
-      // The response is {"status":"updated"} — no user object — so the table
-      // can only be corrected by asking again.
-      refreshUsers();
-      // Display names are resolved server-side into every transaction's
-      // `created_by`, and a user PUT emits no SSE event. Without this the
-      // Transactions table and the /quick recently-added panel keep serving
-      // the old name from cache until something else invalidates them. The
-      // key is the prefix, so it also catches recent/suggestions/history.
-      void queryClient.invalidateQueries({ queryKey: ['transactions'] });
-      // Renaming YOURSELF also moves the name the shell renders out of the
-      // auth context (Sidebar and MobileNav both read user.display_name), and
-      // nothing above touches that. Only for your own row: every other row is
-      // somebody else's identity, and a /auth/me round-trip would answer with
-      // your own unchanged profile.
-      if (currentUser && renamingUser.id === currentUser.id) {
-        void refreshUser();
-      }
     } catch (err) {
-      // Two different failures, two different places to say so.
-      //
-      // A 400 is the server judging THIS VALUE — too long, or empty after its
-      // own trim — so it belongs on the field, next to the box the user has to
-      // fix. Anything else (a dropped request, a 500) is not about the name at
-      // all, and rendering "Failed to fetch" as field validation tells the
-      // admin their name is wrong when it is fine. That goes to a toast, where
-      // the page's other transient failures already live.
-      if (err instanceof ApiError && err.status === 400) {
-        renameForm.setError('display_name', { message: err.message });
-      } else {
-        toast.error(
-          err instanceof Error ? err.message : 'Failed to update display name',
-        );
-      }
+      reportRenameError(err, renameForm);
     } finally {
       setRenaming(false);
     }
@@ -879,9 +1315,19 @@ function UsersSection() {
 
   return (
     <>
-    <Card>
+    <Card role="group" aria-labelledby={HOUSEHOLD_USERS_HEADING_ID}>
       <CardHeader className="flex flex-row items-center justify-between">
-        <CardTitle className="text-base">Users</CardTitle>
+        {/* `tabIndex={-1}` makes this a focus anchor, not a tab stop: it is
+            where the manage dialog parks focus when the row it was pointed at
+            has left the list. */}
+        <CardTitle
+          id={HOUSEHOLD_USERS_HEADING_ID}
+          className="text-base"
+          ref={cardTitleRef}
+          tabIndex={-1}
+        >
+          Household users
+        </CardTitle>
         <Dialog open={addOpen} onOpenChange={(open) => {
           setAddOpen(open);
           if (!open) form.reset();
@@ -982,6 +1428,27 @@ function UsersSection() {
           </DialogContent>
         </Dialog>
       </CardHeader>
+      {/* ONE tree or the other, chosen in JS. Not `md:hidden` on two: two trees
+          for the same people would put every row's accessible name in the
+          document twice ("Manage alice" and the table's three per-row buttons),
+          and `display: none` removes the loser from the a11y tree but never
+          from React. See `useIsMobileViewport`. */}
+      {isMobile ? (
+        <CardContent className="px-0 pb-2">
+          {/* Tailwind's preflight strips the list-style and Safari drops the
+              list role with it — hence the explicit `role`. */}
+          <ul
+            ref={usersListRef}
+            role="list"
+            aria-label="Household users"
+            className="flex flex-col divide-y divide-border border-t"
+          >
+            {users.map((u) => (
+              <UserCard key={u.id} user={u} onManage={openManage} />
+            ))}
+          </ul>
+        </CardContent>
+      ) : (
       <CardContent>
         <Table>
           <TableHeader>
@@ -1028,6 +1495,7 @@ function UsersSection() {
                       type="button"
                       variant="outline"
                       size="sm"
+                      data-rename-user-id={u.id}
                       onClick={() => openRename(u)}
                       aria-label={`Edit display name for ${u.username}`}
                     >
@@ -1042,7 +1510,8 @@ function UsersSection() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => openReset(u)}
+                        data-reset-user-id={u.id}
+                        onClick={() => openResetFromTable(u)}
                         aria-label={`Reset password for ${u.username}`}
                       >
                         Reset password
@@ -1056,7 +1525,8 @@ function UsersSection() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => openDelete(u)}
+                      data-delete-user-id={u.id}
+                      onClick={() => openDeleteFromTable(u)}
                       aria-label={`Delete ${u.username}`}
                     >
                       Delete
@@ -1068,6 +1538,7 @@ function UsersSection() {
           </TableBody>
         </Table>
       </CardContent>
+      )}
     </Card>
       <AlertDialog
         open={resettingUser !== null}
@@ -1076,7 +1547,16 @@ function UsersSection() {
           if (!open) setResettingUser(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            // Same Trigger-less shape as the manage dialog below — see
+            // focusAfterConfirmClose. `false` on every close: a confirmed
+            // reset keeps the row, so even that path returns to the button
+            // that opened the chain.
+            e.preventDefault();
+            focusAfterConfirmClose(false);
+          }}
+        >
           <Form {...resetForm}>
             <form
               onSubmit={(e) => void resetForm.handleSubmit(onConfirmReset)(e)}
@@ -1171,7 +1651,18 @@ function UsersSection() {
           if (!open) setDeletingUser(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            // Consumed here rather than inside the helper: only this
+            // dialog's close can follow a successful delete, and reading the
+            // flag anywhere shared would let one confirm's outcome leak into
+            // the next one's focus restore.
+            const removed = deleteSucceededRef.current;
+            deleteSucceededRef.current = false;
+            focusAfterConfirmClose(removed);
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               Delete <span className="font-mono">{deletingUserName}</span>?
@@ -1216,7 +1707,12 @@ function UsersSection() {
           if (!open) setRenamingUser(null);
         }}
       >
-        <DialogContent>
+        <DialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            focusAfterRenameClose();
+          }}
+        >
           <Form {...renameForm}>
             <form
               onSubmit={(e) => void renameForm.handleSubmit(onRenameUser)(e)}
@@ -1244,19 +1740,7 @@ function UsersSection() {
                   )}
                 </DialogDescription>
               </DialogHeader>
-              <FormField
-                control={renameForm.control}
-                name="display_name"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Display name</FormLabel>
-                    <FormControl>
-                      <Input autoComplete="off" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+              <DisplayNameField control={renameForm.control} />
               <DialogFooter>
                 <Button
                   type="button"
@@ -1272,6 +1756,132 @@ function UsersSection() {
               </DialogFooter>
             </form>
           </Form>
+        </DialogContent>
+      </Dialog>
+      {/* The phone's one-and-only per-user surface. The table offers four
+          controls on one row; a 360px card cannot, so the card offers one
+          button and this dialog holds everything behind it.
+
+          CONTROLLED, WITH NO `DialogTrigger` — matching the five other
+          Trigger-less overlays in this app. That is not a style choice: the
+          trigger is per-row and the dialog is one, so a trigger would have to
+          be rendered inside every card and the last one mounted would win.
+          The cost is that Radix's focus restore has nothing to restore to,
+          which `onCloseAutoFocus` below pays.
+
+          Not mounted behind `isMobile`, deliberately: rotating a phone
+          mid-edit would otherwise discard what has been typed. Only a card can
+          open it, so it cannot appear on a desktop that has no cards. */}
+      <Dialog
+        open={managingUser !== null}
+        onOpenChange={(open) => {
+          if (savingManagedName) return;
+          if (!open) setManagingUser(null);
+        }}
+      >
+        <DialogContent onCloseAutoFocus={(e) => {
+          // `preventDefault` is belt-and-braces — Radix already calls it — so
+          // the outcome does not depend on that continuing to be true.
+          e.preventDefault();
+          if (confirmHandoffRef.current) {
+            // A confirm is opening. Its own FocusScope has already taken
+            // focus; moving it back to the card now would steal it from the
+            // Cancel button the user is about to reach for.
+            confirmHandoffRef.current = false;
+            return;
+          }
+          focusAfterManageClose();
+        }}>
+          <DialogHeader>
+            <DialogTitle>
+              Manage <span className="font-mono">{managingUsername}</span>
+            </DialogTitle>
+            {/* Says the two-writes rule out loud, because the dialog LOOKS
+                like a form with a single Save and is not one. */}
+            <DialogDescription>
+              Everything you can change about {managingUserName}. The display
+              name and the role save separately.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-col gap-6">
+            <Form {...manageNameForm}>
+              <form
+                onSubmit={(e) =>
+                  void manageNameForm.handleSubmit(onSaveManagedName)(e)
+                }
+                className="flex flex-col gap-4"
+                noValidate
+              >
+                <DisplayNameField control={manageNameForm.control} />
+                <Button
+                  type="submit"
+                  className="w-full"
+                  disabled={savingManagedName}
+                >
+                  {savingManagedName ? 'Saving…' : 'Save display name'}
+                </Button>
+              </form>
+            </Form>
+            <Separator />
+            {/* Offered on your own row exactly as the table offers it. The
+                server refuses a self-demotion with a 400 that arrives as a
+                toast, and adding a frontend gate here would be a behaviour
+                change nobody asked for — the two surfaces would then disagree
+                about what is even attemptable. */}
+            <div className="flex flex-col gap-2">
+              <Label htmlFor="manage-user-role">Role</Label>
+              <Select
+                value={managingRow?.role ?? ROLE_MEMBER}
+                onValueChange={(v) => {
+                  if (v !== ROLE_ADMIN && v !== ROLE_MEMBER) return;
+                  if (!managingRow) return;
+                  void handleRoleChange(managingRow.id, v);
+                }}
+              >
+                <SelectTrigger
+                  id="manage-user-role"
+                  aria-label={`Role for ${managingUsername}`}
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectGroup>
+                    <SelectItem value={ROLE_ADMIN}>Admin</SelectItem>
+                    <SelectItem value={ROLE_MEMBER}>Member</SelectItem>
+                  </SelectGroup>
+                </SelectContent>
+              </Select>
+            </div>
+            <Separator />
+            <div className="flex flex-col gap-2">
+              {/* Hidden on your own row, exactly as in the table: you rotate
+                  your own password in the account card above, which runs the
+                  same cascade WITH a current-password check. The admin reset
+                  deliberately has none. */}
+              {managingRow && currentUser && managingRow.id !== currentUser.id && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="w-full"
+                  aria-label={`Reset password for ${managingUsername}`}
+                  onClick={() => confirmFromManage(openReset, managingRow)}
+                >
+                  Reset password
+                </Button>
+              )}
+              {managingRow && (
+                <Button
+                  type="button"
+                  variant="destructive"
+                  className="w-full"
+                  aria-label={`Delete ${managingUsername}`}
+                  onClick={() => confirmFromManage(openDelete, managingRow)}
+                >
+                  Delete
+                </Button>
+              )}
+            </div>
+          </div>
         </DialogContent>
       </Dialog>
     </>
@@ -2384,7 +2994,20 @@ function DataSection({ admin }: DataSectionProps) {
               </Button>
             ))}
           </ButtonGroup>
-          <div className="flex max-w-md items-end gap-3">
+          {/* `flex-wrap`, and `max-w-md` stays. Without the wrap this row's
+              natural width is 355px — Year `w-28` (112) + gap 12 + Month
+              `w-36` (144, mounted by default since exportMode starts
+              'monthly') + gap 12 + the Export button (~75, whitespace-nowrap
+              from buttonVariants) — against 278px of content box at a 360px
+              viewport (360 − 32 AppShell px-4 − 2 card border − 48
+              CardContent p-6). It panned the whole page 36px.
+              Wrapped, line 1 is 268 of 278 and no single child exceeds 144px,
+              so the row cannot overflow above roughly a 226px viewport.
+              Desktop is bit-identical: 355 natural is under `max-w-md`'s 448,
+              so it never wraps once there is room — and REMOVING max-w-md
+              instead would throw the Export button to the far right of a
+              1400px column. Same idiom as `Budgets.tsx`'s filter row. */}
+          <div className="flex max-w-md flex-wrap items-end gap-3">
             <div className="flex flex-col gap-2">
               <Label htmlFor="export-year">Year</Label>
               <Input
@@ -2667,24 +3290,34 @@ export function NotificationsSection() {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
           <div className="flex flex-col gap-4">
-            {TYPE_ROWS.map(({ key, label }) => {
-              const id = `notif-type-${key}`;
-              return (
-                <div
-                  key={key}
-                  className="flex max-w-md items-center justify-between gap-4"
-                >
-                  <Label htmlFor={id}>{label}</Label>
-                  <Switch
-                    id={id}
-                    checked={Boolean(settings[key])}
-                    disabled={!canEdit}
-                    onCheckedChange={(v) => void handleTypeToggle(key, v)}
-                    aria-label={label}
-                  />
-                </div>
-              );
-            })}
+            {/* `coarse:gap-5` on the switch rows ONLY. Switch grows its hit
+                area with a `-inset-y-2.5` pseudo-element (10px above and
+                below), so two consecutive toggle rows 16px apart have 4px of
+                overlapping target on a touch screen — the boundary tap goes to
+                whichever row paints its pseudo last, not to the one under the
+                thumb. 20px is exactly two extensions, so they meet instead.
+                The rows below hold Inputs and Selects, whose targets are their
+                own boxes, and the fine-pointer rhythm is unchanged. */}
+            <div className="flex flex-col gap-4 coarse:gap-5">
+              {TYPE_ROWS.map(({ key, label }) => {
+                const id = `notif-type-${key}`;
+                return (
+                  <div
+                    key={key}
+                    className="flex max-w-md items-center justify-between gap-4"
+                  >
+                    <Label htmlFor={id}>{label}</Label>
+                    <Switch
+                      id={id}
+                      checked={Boolean(settings[key])}
+                      disabled={!canEdit}
+                      onCheckedChange={(v) => void handleTypeToggle(key, v)}
+                      aria-label={label}
+                    />
+                  </div>
+                );
+              })}
+            </div>
 
             <div className="flex max-w-md items-center justify-between gap-4">
               <Label
@@ -2749,10 +3382,14 @@ export function NotificationsSection() {
                     When the daily summary push goes out.
                   </span>
                 </Label>
+                {/* `w-36`, not `w-28`, on all three time inputs: the 12h
+                    "hh:mm AM" rendering needs ~140px at the phone's 16px
+                    font, and 112px clipped the value the field exists to
+                    show (measured scrollWidth 128-134 vs clientWidth 110). */}
                 <Input
                   id="digest-time"
                   type="time"
-                  className="w-28"
+                  className="w-36"
                   disabled={!canEdit}
                   aria-label="Digest send time"
                   defaultValue={settings.digest_time}
@@ -2766,7 +3403,7 @@ export function NotificationsSection() {
               <Input
                 id="quiet-start"
                 type="time"
-                className="w-28"
+                className="w-36"
                 disabled={!canEdit}
                 aria-label="Quiet hours start"
                 ref={quietStartRef}
@@ -2781,7 +3418,7 @@ export function NotificationsSection() {
               <Input
                 id="quiet-end"
                 type="time"
-                className="w-28"
+                className="w-36"
                 disabled={!canEdit}
                 aria-label="Quiet hours end"
                 ref={quietEndRef}
@@ -2862,11 +3499,9 @@ const MOVED_TABS: Record<string, { route: string; label: string }> = {
 function renderSettingsSection(value: SettingsTab, admin: boolean) {
   switch (value) {
     case 'account':
-      return <AccountSection />;
+      return <AccountSection admin={admin} />;
     case 'currencies':
       return <CurrenciesSection />;
-    case 'users':
-      return <UsersSection />;
     case 'api-tokens':
       return <ApiTokensSection />;
     case 'notifications':
@@ -2951,7 +3586,10 @@ export function Settings() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
-  const initialTab = isValidTab(tabParam) ? tabParam : 'account';
+  // Role-clamped, not merely validated — see `resolveSettingsTab`. A member
+  // arriving on `?tab=users` lands on `account`, because the phone surface
+  // renders whatever value it is handed.
+  const initialTab = resolveSettingsTab(tabParam, admin);
   const [activeTab, setActiveTab] = useState<SettingsTab>(initialTab);
 
   // One-shot forwarding toast for `?tab=savings|budgets|general`
@@ -2972,8 +3610,12 @@ export function Settings() {
   }, []);
 
   useEffect(() => {
-    if (isValidTab(tabParam) && tabParam !== activeTab) {
-      setActiveTab(tabParam);
+    // Clamped here too, not just on the initial value: this is the second way
+    // a `?tab=` reaches state, so validating without the role check would let
+    // a later in-app navigation reopen the hole the initial clamp closes.
+    const resolved = resolveSettingsTab(tabParam, admin);
+    if (tabParam !== null && resolved !== activeTab) {
+      setActiveTab(resolved);
     }
     // activeTab is intentionally excluded from deps: this effect is a
     // one-way URL → state sync. Including activeTab would re-run the

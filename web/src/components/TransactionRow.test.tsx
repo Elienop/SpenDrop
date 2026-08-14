@@ -195,6 +195,59 @@ describe('TransactionRow actions menu', () => {
     await user.click(screen.getByRole('menuitem', { name: /delete/i }));
     expect(onDelete).toHaveBeenCalledWith(1);
   });
+
+  // The opt-out from Radix's focus-to-trigger restore is CONDITIONAL. It
+  // exists for the two items, whose runs unmount the trigger (Delete removes
+  // the row, Edit replaces it with the edit form) — but on a plain dismissal
+  // the trigger survives and is exactly what keyboard focus must return to.
+  // Measured pre-fix on the built app: Escape after opening a row menu left
+  // document.activeElement on <body>.
+  it('returns focus to the trigger when the menu is dismissed without an action', async () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for Weekly groceries',
+    });
+    const user = await openActionsMenu('Weekly groceries');
+    // Positive control: the menu really opened, so the focus assertion below
+    // cannot pass because focus never left the trigger in the first place.
+    expect(await screen.findByRole('menuitem', { name: /edit/i })).toBeVisible();
+
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menuitem')).toBeNull());
+
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  // Where focus goes after Edit is the row's own business, not the opt-out's —
+  // the form's date field takes it, asserted separately below. The contract
+  // this pins instead is the read-AND-CLEAR half: an action's suppression must
+  // not latch, or every dismissal after the first Edit strands focus again.
+  // Kills the mutant that sets the ran-flag in the items but never clears it in
+  // onCloseAutoFocus.
+  it('an action does not latch the opt-out — the next plain dismissal still restores', async () => {
+    renderRow(makeTx({ description: 'Weekly groceries' }));
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    // Positive control: Edit really ran — the row is now the edit form.
+    expect(
+      await screen.findByRole('button', { name: /save/i }),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+
+    // Fresh display row, fresh trigger element — grab it after the remount.
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for Weekly groceries',
+    });
+    await user.click(trigger);
+    expect(await screen.findByRole('menuitem', { name: /edit/i })).toBeVisible();
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('menuitem')).toBeNull());
+
+    await waitFor(() => expect(trigger).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
 });
 
 describe('TransactionRow tags editing', () => {
@@ -594,6 +647,82 @@ describe('TransactionRow — keyboard shortcuts', () => {
       expect(screen.queryByRole('button', { name: /save/i })).not.toBeInTheDocument(),
     );
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+});
+
+describe('TransactionRow edit — focus handoff', () => {
+  // The actions menu suppresses Radix's focus-to-trigger restore when Edit runs
+  // (the trigger unmounts with the display row), so the row itself owns both
+  // ends of the swap. Measured pre-fix on the built app: Edit from the keyboard
+  // left document.activeElement on <body>, and the next Tab restarted at the
+  // top of the page.
+
+  /** Open Edit and wait for the form that replaces the row. */
+  async function openEdit() {
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    // Positive control: the swap really happened, so a focus assertion below
+    // cannot pass against a row that never turned into a form.
+    expect(
+      await screen.findByRole('button', { name: /save/i }),
+    ).toBeInTheDocument();
+    return user;
+  }
+
+  it('lands focus on the date field when Edit opens', async () => {
+    renderRow(makeTx());
+    await openEdit();
+
+    const date = screen.getByDisplayValue('2026-04-01');
+    await waitFor(() => expect(date).toHaveFocus());
+    expect(document.activeElement).not.toBe(document.body);
+  });
+
+  it('hands focus back to the row’s menu trigger when Escape cancels', async () => {
+    renderRow(makeTx());
+    await openEdit();
+    const date = screen.getByDisplayValue('2026-04-01');
+    await waitFor(() => expect(date).toHaveFocus());
+
+    // Dispatched at the field focus is actually in — the row's keydown handler
+    // is what reads it. user-event's '{Escape}' would do the same thing from
+    // the same element, but keyboard synthesis is unreliable in happy-dom.
+    fireEvent.keyDown(date, { key: 'Escape' });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: /save/i }),
+      ).not.toBeInTheDocument(),
+    );
+    // The display row has remounted, so this is a NEW element — which is why
+    // the component cannot restore focus by remembering the old one.
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for Weekly groceries',
+    });
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  it('hands focus back to the row’s menu trigger after a successful save', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx(), onUpdate);
+    await openEdit();
+
+    const save = screen.getByRole('button', { name: /save/i });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.submit(save.closest('form')!);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: /save/i }),
+      ).not.toBeInTheDocument(),
+    );
+    const trigger = screen.getByRole('button', {
+      name: 'Actions for Weekly groceries',
+    });
+    await waitFor(() => expect(trigger).toHaveFocus());
   });
 });
 

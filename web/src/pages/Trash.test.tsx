@@ -228,9 +228,24 @@ function spacingPx(steps: number): number {
  * `min-h-*` is authoritative when present: CSS clamps a fixed `height` up
  * to `min-height`, which is why shadcn Button's own `h-9` can sit
  * alongside `min-h-11` and the control still renders 44px.
+ *
+ * `coarse:min-h-*` counts the same way, and the number it yields is the floor
+ * A TOUCH POINTER GETS — on a mouse the rule never matches and the control
+ * keeps its fixed height. That is the point of the gate rather than a gap in
+ * the helper: the controls carrying it are meant to stay dense for a mouse at
+ * every width. Callers asserting a floor are asking the touch question.
+ *
+ * WHAT IT CANNOT DISCRIMINATE, since the floor moved into `Button` itself:
+ * every shadcn `<Button>` in the app now carries `coarse:min-h-11`, so this
+ * returns >= 44 for ALL of them and `touchFloorPx(someButton) >= 44` no longer
+ * has a failing case. It still discriminates for anything the primitive does
+ * not size — a `<label>`, a raw `<button>`, a `<span>` spacer — which is what
+ * the remaining callers below use it for. Consumer-level Button assertions
+ * moved to the pair "the primitive's token is present AND the retired width
+ * gate is absent"; the second half is the one that can fail.
  */
 function touchFloorPx(el: Element): number {
-  const minH = tokenSteps(el, /^min-h-([\d.]+)$/);
+  const minH = tokenSteps(el, /^(?:coarse:)?min-h-([\d.]+)$/);
   if (minH !== null) return spacingPx(minH);
   const fixed = tokenSteps(el, /^(?:size|h)-([\d.]+)$/);
   if (fixed === null) {
@@ -1043,33 +1058,49 @@ describe('Trash', () => {
   });
 
   // -------------------------------------------------------------------------
-  // Phone touch floor on the controls BOTH presentations share
+  // Touch floor on the controls BOTH presentations share
   // -------------------------------------------------------------------------
   //
-  // These render at every width, so the fix has to raise the phone target
-  // without touching the desktop toolbar. The class tokens are static, so
-  // this runs at the default width — what is being asserted is the pair,
-  // not the rendering.
-  describe('44px touch floor on shared controls', () => {
+  // These render at every width. They used to carry a local `min-h-11
+  // md:min-h-0` pair — a WIDTH gate, which left the household's ~1130px touch
+  // tablet on the 32px desktop side — and the floor now comes from `Button`
+  // itself on a POINTER gate. `web/src/components/ui/button.test.tsx` owns the
+  // primitive; what is left to check here is that this page did not keep a
+  // second, contradicting rule for the same property.
+  //
+  // BE HONEST ABOUT THE HALVES. `coarse:min-h-11` being present is nearly
+  // vacuous now — every `<Button>` in the app has it — and would only fail if
+  // one of these became a raw `<button>`. The two halves with a live failing
+  // case are the other two:
+  //
+  //   - `md:min-h-0` must be ABSENT. It is not merely redundant: it sets the
+  //     same property at the same specificity and Tailwind emits it AFTER the
+  //     plugin's `coarse:` rule, so above 768px it wins and switches the
+  //     primitive's floor back OFF — on precisely the coarse tablet the floor
+  //     exists for. Measured in the built bundle, not inferred.
+  //   - `max-md:min-h-11` must be PRESENT. These controls were 44px for a mouse
+  //     below `md` before any of this, and desktop density is meant to be
+  //     preserved exactly; dropping it shrank them to 32px there, which a
+  //     browser pass caught and no class assertion would have.
+  describe('touch floor on shared controls', () => {
     beforeEach(asAdmin);
 
-    /**
-     * Both halves of the swap, and neither works alone: without `min-h-11`
-     * the phone target is the base `h-8` (32px, well under the floor);
-     * without `md:min-h-0` the 44px floor leaks up into the desktop
-     * toolbar these controls have always been 32px in.
-     */
-    function expectPhoneOnlyTouchFloor(el: Element): void {
-      expect(touchFloorPx(el)).toBeGreaterThanOrEqual(44);
-      expect(classes(el)).toContain('md:min-h-0');
+    function expectPointerGatedFloor(el: Element): void {
+      expect(classes(el)).toContain('coarse:min-h-11');
+      expect(classes(el)).toContain('max-md:min-h-11');
+      expect(classes(el)).not.toContain('md:min-h-0');
+      // The unprefixed form would floor a mouse desktop at 44px at EVERY width,
+      // which the owner ruled out; it is also how a well-meaning "just make it
+      // always 44" edit would look.
+      expect(classes(el)).not.toContain('min-h-11');
     }
 
     test('the whole-trash bulk actions clear it', async () => {
       renderTrash();
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         await screen.findByRole('button', { name: /restore all 2/i }),
       );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         screen.getByRole('button', { name: /purge all 2/i }),
       );
     });
@@ -1082,10 +1113,8 @@ describe('Trash', () => {
         screen.getByRole('checkbox', { name: /select all on this page/i }),
       );
 
-      expectPhoneOnlyTouchFloor(
-        screen.getByRole('button', { name: 'Restore 2' }),
-      );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(screen.getByRole('button', { name: 'Restore 2' }));
+      expectPointerGatedFloor(
         screen.getByRole('button', { name: /clear selection/i }),
       );
     });
@@ -1101,10 +1130,10 @@ describe('Trash', () => {
       const dialog = screen.getByRole('dialog');
       // The destructive confirm especially: it is the last control before
       // an irreversible action, and a 40px mis-tap lands on Cancel.
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /purge permanently/i }),
       );
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /^cancel$/i }),
       );
     });
@@ -1116,7 +1145,7 @@ describe('Trash', () => {
       await user.click(screen.getByRole('button', { name: /purge all 2/i }));
 
       const dialog = screen.getByRole('dialog');
-      expectPhoneOnlyTouchFloor(
+      expectPointerGatedFloor(
         within(dialog).getByRole('button', { name: /purge all permanently/i }),
       );
     });
@@ -1192,10 +1221,15 @@ describe('Trash', () => {
       expect(screen.queryByText(/^Page 1 of 1$/)).not.toBeInTheDocument();
     });
 
-    test('the phone pager controls clear the 44px floor', async () => {
-      // A consumer-level pin, deliberately: <PaginationBar> ships with no test
-      // file of its own, so without this the 44px half of UX-D5 is asserted
-      // nowhere on this page.
+    test('the pager controls clear the 44px floor for a touch pointer', async () => {
+      // A consumer-level pin: PaginationBar has its own tests, but this is the
+      // one place that proves TRASH still gets the floored pager rather than a
+      // local copy that drifted.
+      //
+      // The pager's floor is gated on the POINTER, not the width, so unlike
+      // the controls above it carries no `md:` half — and this test renders at
+      // phone width only because the rest of the block does. The tokens are
+      // static; the width is not what is being asserted.
       setViewportWidth(PHONE_WIDTH);
       renderTrash();
       await screen.findByRole('list', { name: /deleted transactions/i });
@@ -1203,8 +1237,14 @@ describe('Trash', () => {
       const next = screen.getAllByRole('button', {
         name: /go to next page/i,
       })[0];
-      expect(touchFloorPx(next)).toBeGreaterThanOrEqual(44);
-      expect(classes(next)).toContain('md:size-8');
+      expect(classes(next)).toContain('coarse:min-h-11');
+      // The WIDTH half, which is the one still worth asserting at this level:
+      // it rides `size="icon"` rather than Button's base, so it disappears if
+      // the pager ever drops that prop — and a square control floored in height
+      // alone is a 44x32 rectangle that still misses a thumb.
+      expect(classes(next)).toContain('coarse:min-w-11');
+      // The retired width gate: it left a ~1130px touch tablet at 32px.
+      expect(classes(next)).not.toContain('md:size-8');
     });
 
     test('the selection bar is sticky and sits above the pager on a phone', async () => {
@@ -1621,7 +1661,14 @@ describe('Trash', () => {
         // Restore cannot retreat into a menu — it is the reason the page
         // exists.
         expect(restore).toBeVisible();
-        expect(touchFloorPx(restore)).toBeGreaterThanOrEqual(44);
+        // Not `touchFloorPx` any more: the floor comes from `Button` too now,
+        // so that helper returns 44 for every button on the page and would pass
+        // with the card's own `min-h-11` deleted. The card keeps its own
+        // because this surface is 44px for a MOUSE as well — it only renders
+        // below `md` — and that half is what has a failing case.
+        expect(classes(restore)).toContain('min-h-11');
+        expect(classes(restore)).toContain('coarse:min-h-11');
+        expect(classes(restore)).not.toContain('md:min-h-0');
       });
 
       test('tapping Restore on a card POSTs to the restore endpoint', async () => {
@@ -1779,6 +1826,295 @@ describe('Trash', () => {
         expect(
           within(card!).getByText('Bob').closest('p'),
         ).toHaveTextContent('Entered by Bob');
+      });
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Focus anchors. Both confirm dialogs are controlled and Trigger-less, so
+  // Radix's own restore aims at a null triggerRef — measured pre-fix on the
+  // built app (coarse pointer): Escape OR Cancel on either dialog, and a
+  // completed restore, all left document.activeElement on <body>.
+  // -------------------------------------------------------------------------
+  describe('purge and restore focus anchors', () => {
+    beforeEach(asAdmin);
+
+    test("Cancel on the purge dialog returns focus to that row's Purge button", async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeButton = screen.getByRole('button', {
+        name: /purge weekly groceries/i,
+      });
+
+      await user.click(purgeButton);
+      // Positive control: the dialog really opened, so the focus assertion
+      // below is not passing because focus never left the button.
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test("Escape on the purge dialog returns focus to that row's Purge button", async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeButton = screen.getByRole('button', {
+        name: /purge weekly groceries/i,
+      });
+
+      await user.click(purgeButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a confirmed purge parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue(undefined);
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('button', { name: /purge weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /purge permanently/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.del).toHaveBeenCalledWith('transactions/101/purge'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      // Fixture proof that the assertion above discriminates: the refetch
+      // mock returns the same list, so the row's Purge button is STILL
+      // MOUNTED at close time — the heading won over a live return target,
+      // not by being the only thing left.
+      expect(
+        screen.getByRole('button', { name: /purge weekly groceries/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('Cancel on the purge-all dialog returns focus to the toolbar Purge-all button', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      // Exact-anchored: /purge all/i alone would also match the dialog's
+      // "Purge all permanently" confirm button.
+      const purgeAllButton = screen.getByRole('button', {
+        name: /^purge all 2$/i,
+      });
+
+      await user.click(purgeAllButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeAllButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('Escape on the purge-all dialog returns focus to the toolbar Purge-all button', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeAllButton = screen.getByRole('button', {
+        name: /^purge all 2$/i,
+      });
+
+      await user.click(purgeAllButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeAllButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a confirmed purge-all parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue({ purged: 2 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(screen.getByRole('button', { name: /^purge all 2$/i }));
+      await user.click(
+        screen.getByRole('button', { name: /purge all permanently/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.del).toHaveBeenCalledWith('transactions/trash'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+    });
+
+    test('a single-row restore parks focus on the page heading once the row unmounts', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({});
+      // The refetch after a successful restore genuinely drops the row here,
+      // because the button focus sat on unmounting IS the defect shape —
+      // pre-fix, focus fell to <body> with it.
+      mockedApi.get.mockResolvedValueOnce(defaultDeletedList).mockResolvedValue({
+        ...defaultDeletedList,
+        transactions: [defaultDeletedList.transactions[1]],
+        total: 1,
+      });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('button', { name: /restore weekly groceries/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith('transactions/101/restore'),
+      );
+      await waitFor(() =>
+        expect(screen.queryByText('Weekly groceries')).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a restore-all parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 2, conflicted: 0 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(screen.getByRole('button', { name: /^restore all 2$/i }));
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith('transactions/restore-all'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      // Same fixture proof the confirmed-purge test uses: the refetch mock
+      // answers with the SAME list, so the toolbar button the click focused is
+      // still mounted. The heading therefore won over a live element rather
+      // than by default — pre-fix, focus simply stayed on that button, which
+      // in the real emptied-trash case unmounts and drops focus on <body>.
+      expect(
+        screen.getByRole('button', { name: /^restore all 2$/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('a batch restore parks focus on the page heading once the bulk bar unmounts', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 2, conflicted: 0, skipped: 0 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select all on this page/i }),
+      );
+      // Positive control: the bar the assertion is about really rendered.
+      expect(screen.getByText(/2 selected/i)).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^restore 2$/i }));
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'transactions/restore-batch',
+          { ids: [101, 102] },
+        ),
+      );
+      // Clearing the selection is what takes the clicked button away with it.
+      await waitFor(() =>
+        expect(screen.queryByText(/2 selected/i)).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('"Clear selection" parks focus on the page heading — it unmounts its own bar', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select all on this page/i }),
+      );
+      expect(screen.getByText(/2 selected/i)).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /clear selection/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByText(/2 selected/i)).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    // The dismissal target is resolved by data-purge-row-id against the live
+    // tree because the Purge button is a DIFFERENT ELEMENT per presentation.
+    // The desktop tests above prove the table's; this proves the card's.
+    describe('on the phone card list', () => {
+      beforeEach(() => setViewportWidth(PHONE_WIDTH));
+      afterEach(() => setViewportWidth(DESKTOP_WIDTH));
+
+      test("dismissing the purge dialog returns focus to the card's Purge button", async () => {
+        const user = userEvent.setup();
+        renderTrash();
+        const list = await screen.findByRole('list', {
+          name: /deleted transactions/i,
+        });
+        const card = within(list).getByText('Weekly groceries').closest('li');
+        const purgeButton = within(card!).getByRole('button', {
+          name: /purge weekly groceries/i,
+        });
+
+        await user.click(purgeButton);
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        );
+
+        await waitFor(() => expect(purgeButton).toHaveFocus());
+        expect(document.activeElement).not.toBe(document.body);
       });
     });
   });

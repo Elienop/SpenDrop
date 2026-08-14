@@ -187,41 +187,133 @@ describe('PaginationBar compact mode', () => {
   });
 });
 
+/**
+ * WHAT THESE CAN AND CANNOT PROVE. No test in this repo measures a pixel for
+ * the touch floor: happy-dom runs no layout, and the Tailwind stylesheet is
+ * never loaded in tests (`globals.css` is imported only by `main.tsx`, which
+ * no test renders). A class token is in the DOM at every pointer state, so
+ * asserting that `coarse:min-h-11` is present proves the wiring, never the
+ * 44px. The pixels are the browser check's job.
+ *
+ * The wiring is worth pinning anyway, because the bar's failure mode is
+ * RAGGEDNESS rather than smallness — one control on a different gate from its
+ * neighbours. It used to read `size-11 md:size-8`, a WIDTH gate, while the
+ * trigger's floor comes from `SelectTrigger` and is a POINTER gate: on the
+ * household's ~1130px tablet in landscape that mix would put one 44px Select
+ * beside six 32px buttons in a single flex row. So each assertion below
+ * carries the negative half too — the retired width tokens must be gone, not
+ * merely joined by the new ones.
+ *
+ * WHERE THE TOKENS COME FROM, since the answer changed and the file reads
+ * wrongly otherwise: not one of these controls sets a floor of its own any
+ * more. The trigger's is `SelectTrigger`'s, and the six buttons' is `Button`'s
+ * (`size="icon"`, which is what adds the width half) — the local
+ * `TOUCH_TARGET_SQUARE` they used to carry was exactly redundant and is gone.
+ * That weakens "the token is present" here, because it is now present on every
+ * button in the app; it does NOT weaken the two assertions that matter at this
+ * level, which are that the retired width idiom is absent and that the trigger
+ * and its neighbours end up on the SAME gate. The ellipsis is the one control
+ * that still floors itself: a `<span>` no primitive can size.
+ */
 describe('PaginationBar touch targets', () => {
-  // A pager is mostly small icon buttons packed side by side, which is the
-  // worst shape for a thumb — and unlike a checkbox nothing here has a visible
-  // size that must stay put, so the box grows rather than just the hit area.
-  // Both halves of the swap are pinned: `md:size-8` alone would leave the
-  // phone at 32px, and `size-11` alone would inflate the desktop pager.
-  it('sizes prev/next for a thumb on a phone and for density above md', () => {
+  // Every square control in the bar, by accessible name. The ellipsis is not
+  // in here (it is aria-hidden and unnamed) and is covered separately.
+  const SQUARE_CONTROLS = [
+    'Go to previous page',
+    'Go to next page',
+    'Go to first page',
+    'Go to last page',
+    '3',
+  ];
+
+  it('floors every square control on both axes when the pointer is coarse', () => {
     renderBar({ page: 2, totalPages: 5 });
-    for (const name of ['Go to previous page', 'Go to next page']) {
+    for (const name of SQUARE_CONTROLS) {
       const button = screen.getByRole('button', { name });
-      expect(button).toHaveClass('size-11', 'md:size-8');
-      expect(button).not.toHaveClass('size-8');
+      // Both axes: a height-only floor leaves a 32px-wide button that is
+      // merely taller, which is still a miss for a thumb. The width half is
+      // the load-bearing one to assert here — it comes from `size="icon"`, so
+      // this fails if the pager stops declaring these as icon buttons, whereas
+      // the height half arrives from Button's base on any Button at all.
+      expect(button).toHaveClass('coarse:min-h-11', 'coarse:min-w-11');
     }
   });
 
-  it('sizes the numbered buttons the same way', () => {
+  it('leaves the fine-pointer density at 32px, unchanged at every width', () => {
     renderBar({ page: 2, totalPages: 5 });
-    const button = screen.getByRole('button', { name: '3' });
-    expect(button).toHaveClass('size-11', 'md:size-8');
-    expect(button).not.toHaveClass('size-8');
+    for (const name of SQUARE_CONTROLS) {
+      const button = screen.getByRole('button', { name });
+      expect(button).toHaveClass('size-8');
+      // The retired width idiom. `size-11` is what made the desktop pager
+      // inflate below `md`; `md:size-8` is what left the touch tablet at 32px.
+      expect(button).not.toHaveClass('size-11');
+      expect(button).not.toHaveClass('md:size-8');
+    }
   });
 
-  it('sizes the first/last jumps the same way, while keeping them lg-only', () => {
+  it('keeps the first/last jumps lg-only while flooring them', () => {
     renderBar({ page: 2, totalPages: 5 });
     for (const name of ['Go to first page', 'Go to last page']) {
       const button = screen.getByRole('button', { name });
-      expect(button).toHaveClass('size-11', 'md:size-8', 'hidden', 'lg:flex');
+      // `lg:` here is a genuine room question — two extra buttons do not fit —
+      // and is deliberately NOT converted to a pointer gate.
+      expect(button).toHaveClass('hidden', 'lg:flex');
     }
   });
 
-  it('sizes the rows-per-page trigger the same way', () => {
+  it('gives the ellipsis spacer the same box as the buttons it sits between', () => {
+    // It is aria-hidden decoration, but it holds a slot in the same flex row:
+    // sized differently it staggers the numbers on one side of the gap.
+    renderBar({ page: 4, totalPages: 10 });
+    // Two gaps at page 4 of 10 — both spacers, so assert on both rather than
+    // picking one and hoping the other matches.
+    const spacers = screen.getAllByText('...');
+    expect(spacers).toHaveLength(2);
+    for (const spacer of spacers) {
+      expect(spacer).toHaveClass(
+        'size-8',
+        'coarse:min-h-11',
+        'coarse:min-w-11',
+      );
+      expect(spacer).not.toHaveClass('md:size-8');
+    }
+  });
+
+  it('takes both floors from the primitives and adds only density', () => {
+    // Neither call site sets a floor of its own — `SelectTrigger` and `Button`
+    // carry `coarse:min-h-11`, and it survives the `h-8`/`size-8` here because
+    // `min-h`/`min-w` and `h`/`w` are separate tailwind-merge conflict groups.
+    // If a future edit re-fixes the height with a gated `coarse:h-*` the token
+    // vanishes and this fails.
     renderBar();
-    expect(screen.getByRole('combobox', { name: 'Rows per page' })).toHaveClass(
-      'h-11',
-      'md:h-8',
+    const trigger = screen.getByRole('combobox', { name: 'Rows per page' });
+    expect(trigger).toHaveClass('h-8', 'coarse:min-h-11');
+    expect(trigger).not.toHaveClass('h-11');
+    expect(trigger).not.toHaveClass('md:h-8');
+
+    const button = screen.getByRole('button', { name: 'Go to next page' });
+    expect(button).toHaveClass('size-8', 'coarse:min-h-11');
+    // The density class really did replace the icon variant's 40px box, so the
+    // line above is not passing on a button that simply kept both.
+    expect(button).not.toHaveClass('h-10', 'w-10');
+  });
+
+  it('puts the trigger and its neighbours on the same gate', () => {
+    // The point of the migration, stated as one assertion: on a coarse pointer
+    // both reach 44px, and on a fine one both stay 32px. A mixed pair is the
+    // 12px step this replaced, and it is invisible to the per-control tests
+    // above because each of them passes on its own.
+    renderBar({ page: 2, totalPages: 5 });
+    const trigger = screen.getByRole('combobox', { name: 'Rows per page' });
+    const button = screen.getByRole('button', { name: 'Go to next page' });
+
+    expect(trigger).toHaveClass('coarse:min-h-11');
+    expect(button).toHaveClass('coarse:min-h-11');
+    expect(Array.from(trigger.classList).some((t) => t.startsWith('md:'))).toBe(
+      false,
+    );
+    expect(Array.from(button.classList).some((t) => t.startsWith('md:'))).toBe(
+      false,
     );
   });
 });

@@ -64,6 +64,22 @@ describe('Register', () => {
     ).toBeInTheDocument();
   });
 
+  test('the login link carries the pointer-gated 44px floor', () => {
+    // WIRING pin, not a pixel proof — the full rationale is on Login's twin
+    // test; this one exists because the two pages are separate files and the
+    // recipe can rot on one while the other stays pinned. `inline-flex` is
+    // load-bearing, not styling: an inline box ignores min-height, so
+    // without it the floor token is decorative.
+    renderRegister();
+    const link = screen.getByRole('link', { name: 'Log in' });
+
+    expect(link.classList.contains('coarse:min-h-11')).toBe(true);
+    expect(link.classList.contains('min-h-11')).toBe(false);
+    expect(link.classList.contains('md:min-h-11')).toBe(false);
+    expect(link.classList.contains('inline-flex')).toBe(true);
+    expect(link.classList.contains('items-center')).toBe(true);
+  });
+
   test('calls register with username, password, and display name on submit', async () => {
     mockRegister.mockResolvedValueOnce(undefined);
     const user = userEvent.setup();

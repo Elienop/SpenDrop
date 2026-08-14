@@ -1,4 +1,5 @@
 import type { Config } from 'tailwindcss';
+import plugin from 'tailwindcss/plugin';
 
 const config: Config = {
   darkMode: 'class',
@@ -99,7 +100,24 @@ const config: Config = {
       },
     },
   },
-  plugins: [require('tailwindcss-animate')],
+  plugins: [
+    require('tailwindcss-animate'),
+    // `coarse:` — a POINTER gate, not a width gate. The two are not
+    // interchangeable and the difference is measured, not theoretical: the
+    // household's Galaxy Tab S10 FE is ~1130px in landscape, so it takes the
+    // desktop side of every `md:` breakpoint while still being a touch screen.
+    // A control sized `h-11 md:h-8` gives that tablet a 32px target. Gating on
+    // `(pointer: coarse)` instead asks the question the 44px floor is actually
+    // about — "is this a finger?" — and leaves a mouse desktop at any width
+    // untouched, which is the owner's explicit constraint.
+    //
+    // Tailwind v4 ships this as the built-in `pointer-coarse:`; until the
+    // upgrade this plugin is the local equivalent. See `src/lib/touch-target.ts`
+    // for when to reach for it versus the hit-area-only recipe.
+    plugin(({ addVariant }) => {
+      addVariant('coarse', '@media (pointer: coarse)');
+    }),
+  ],
 };
 
 export default config;

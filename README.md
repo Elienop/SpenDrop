@@ -122,7 +122,7 @@ Tabbed settings page covering account and system configuration. Monthly Budgets,
 
 ### Authentication
 
-Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles. Users can change their own password from **Settings → Account** (which logs them out everywhere and revokes their API tokens); admins can reset any member's password from **Settings → Users**.
+Simple username/password auth with bcrypt hashing and HTTP-only session cookies. Any `/api/*` route additionally accepts `Authorization: Bearer <token>` for programmatic callers — issue a token from **Settings → API tokens** and paste it into your client's config (curl, shell scripts, dashboards, third-party integrations). Bearer requests skip CSRF (session cookies are only attached to browser requests) and are rate-limited per source IP on authentication failures. The first registered user automatically becomes admin. Supports admin and member roles. Users can change their own display name and password from **Settings → Account** (the password change logs them out everywhere and revokes their API tokens); admins get the household user list on that same panel, labelled **Settings → Account & users**, and can reset any member's password from there. Legacy `?tab=users` bookmarks resolve to it.
 
 ![Login](docs/screenshots/09-login.png)
 ![Register](docs/screenshots/10-register.png)
@@ -171,7 +171,7 @@ SpenDrop is now running at **http://localhost:3535**. Data is persisted in a Doc
 1. Open http://localhost:3535
 2. Click **Register** to create your account
 3. The first user automatically becomes **admin** with full access
-4. Additional users can be created from Settings > Users as members
+4. Additional users can be created from Settings > Account & users as members
 
 ## Development Setup
 
@@ -962,6 +962,7 @@ SpenDrop exposes a RESTful JSON API. All endpoints (except auth and health) requ
 | POST | `/api/auth/login` | Log in |
 | POST | `/api/auth/logout` | Log out |
 | GET | `/api/auth/me` | Get current user info |
+| PATCH | `/api/auth/me` | Change the caller's own display name. Body `{"display_name":"<=64 chars"}`; returns the same profile object `GET /api/auth/me` does. Open to members and admins alike — the target is always the session's own user, so there is no id to name someone else with. `display_name` is the only writable field, and nothing is revoked: sessions, API tokens and push subscriptions all survive a rename. Renaming *another* user stays on the admin-only `PUT /api/users/{id}`. |
 | POST | `/api/auth/password` | Change the caller's own password. Body `{"current_password","new_password"}`. Verifies the current password, then in one transaction updates the hash, revokes the caller's API tokens, and deletes all their sessions (logout-everywhere). Rate-limited per user. |
 
 ### API Tokens

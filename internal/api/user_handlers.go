@@ -107,8 +107,12 @@ func (h *Handler) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if charLen(req.DisplayName) > MaxDisplayNameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
+	// LENGTH AND CONTENT, the same call the other three display_name write paths
+	// make — see display_name.go. The fallback below needs no check of its own:
+	// req.Username is already past isValidUsername, which admits only
+	// [a-zA-Z0-9_-].
+	if err := validateDisplayName(req.DisplayName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if req.DisplayName == "" {
@@ -169,8 +173,17 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.DisplayName != "" && charLen(req.DisplayName) > MaxDisplayNameLength {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("display name must be %d characters or less", MaxDisplayNameLength))
+	// LENGTH AND CONTENT — see display_name.go. The `!= ""` guard the length
+	// check used to carry is gone rather than moved: validateDisplayName returns
+	// nil for "", which is what this handler means by "not supplied" (it merges
+	// the stored name in below). Keeping the guard would only restate that.
+	//
+	// It validates the REQUEST field, not the merged value. A role-only edit of
+	// a user whose STORED name predates this rule must still succeed — refusing
+	// it would leave an admin unable to change that user's role at all, which is
+	// a worse failure than a legacy name keeping its contents.
+	if err := validateDisplayName(req.DisplayName); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 

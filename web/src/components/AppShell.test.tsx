@@ -5,7 +5,11 @@ import { MemoryRouter } from 'react-router-dom';
 // The shell's routes pull in every page (and their data layers). This suite
 // is about the layout contract of <main>, so the pages, the two navigation
 // surfaces and the toaster are stubbed out.
-vi.mock('../pages/Dashboard', () => ({ Dashboard: () => <div /> }));
+vi.mock('../pages/Dashboard', () => ({
+  // The testid is the routing suite's positive control: "not-found panel
+  // absent on /" only proves anything if / demonstrably rendered its page.
+  Dashboard: () => <div data-testid="page-dashboard" />,
+}));
 vi.mock('../pages/Transactions', () => ({ Transactions: () => <div /> }));
 vi.mock('../pages/Budgets', () => ({ Budgets: () => <div /> }));
 vi.mock('../pages/Savings', () => ({ Savings: () => <div /> }));
@@ -21,7 +25,23 @@ vi.mock('./MobileNav', () => ({
   MobileNav: () => <div data-testid="mobile-nav" />,
 }));
 
+// The routing suite renders through ProtectedRoute, which consumes useAuth.
+// Mocked so the tests control the answer; an anonymous render would bounce to
+// /login before AppShell's Routes ever saw the path, and a "not-found panel
+// absent" assertion would then pass with the fallback route deleted.
+vi.mock('../hooks/useAuth', () => ({
+  useAuth: vi.fn(),
+  AuthProvider: ({ children }: { children: React.ReactNode }) => (
+    <>{children}</>
+  ),
+}));
+
+import React from 'react';
 import { AppShell } from './AppShell';
+import { ProtectedRoute } from './ProtectedRoute';
+import { useAuth } from '../hooks/useAuth';
+
+const mockedUseAuth = vi.mocked(useAuth);
 
 function renderShell() {
   return render(
@@ -87,5 +107,75 @@ describe('AppShell layout', () => {
     expect(gutters).toContain('px-4');
     expect(gutters).toContain('md:px-10');
     expect(gutters).not.toContain('px-10');
+  });
+});
+
+describe('AppShell routing', () => {
+  // Through ProtectedRoute, as production mounts the shell (App.tsx sends
+  // "/*" into it) — auth answers before the inner Routes do, so an
+  // unauthenticated probe would never reach them.
+  function renderShellAt(path: string) {
+    return render(
+      <MemoryRouter initialEntries={[path]}>
+        <ProtectedRoute>
+          <AppShell />
+        </ProtectedRoute>
+      </MemoryRouter>,
+    );
+  }
+
+  beforeEach(() => {
+    localStorage.clear();
+    mockedUseAuth.mockReturnValue({
+      user: {
+        id: 1,
+        username: 'alice',
+        display_name: 'Alice',
+        role: 'admin' as const,
+        created_at: '2024-01-01',
+      },
+      loading: false,
+      unverified: false,
+      refreshUser: vi.fn(),
+      login: vi.fn(),
+      register: vi.fn(),
+      logout: vi.fn(),
+    });
+  });
+
+  test('unknown path renders the not-found panel with the attempted path', () => {
+    renderShellAt('/nonsense');
+    expect(
+      screen.getByRole('heading', { level: 1, name: 'Page not found' }),
+    ).toBeInTheDocument();
+    // The echoed path is the point of a panel over a redirect: it is what
+    // shows a typo'd bookmark its typo.
+    expect(screen.getByText('/nonsense')).toBeInTheDocument();
+    expect(
+      screen.getByRole('link', { name: 'Back to Dashboard' }),
+    ).toHaveAttribute('href', '/');
+  });
+
+  test('known path renders its page, not the not-found panel', () => {
+    renderShellAt('/');
+    // Positive control first: without it, "panel absent" also passes when
+    // nothing rendered at all (e.g. an unauthenticated bounce to /login).
+    expect(screen.getByTestId('page-dashboard')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('heading', { name: 'Page not found' }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('the echoed path is allowed to break mid-token', () => {
+    // A URL is one long token as far as line-breaking is concerned, and this
+    // paragraph is a content-sized flex item — so an unbounded span pans the
+    // whole page sideways on a 360px phone. Token assertion because happy-dom
+    // lays nothing out; the exact form matters, `break-words` does NOT lower
+    // min-content and would not fix it.
+    const longPath =
+      '/reports/monthly-category-breakdown-for-the-whole-household-2026';
+    renderShellAt(longPath);
+    const echoed = screen.getByText(longPath);
+    expect(echoed.className.split(/\s+/)).toContain('[overflow-wrap:anywhere]');
   });
 });

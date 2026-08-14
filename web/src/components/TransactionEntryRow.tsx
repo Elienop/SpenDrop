@@ -676,7 +676,10 @@ export function TransactionEntryRow({
           */}
           <div className="space-y-2">
             <Label aria-hidden="true">&nbsp;</Label>
-            <div className="flex h-10 items-center">
+            {/* `coarse:h-11` tracks the Input primitive's pointer-gated floor —
+                peer inputs are 44px there, and a 40px box would float the
+                button ~2px above their midline. */}
+            <div className="flex h-10 items-center coarse:h-11">
               <Button
                 type="submit"
                 size="sm"

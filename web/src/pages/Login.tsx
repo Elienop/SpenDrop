@@ -131,9 +131,19 @@ export function Login() {
               </Button>
               <p className="text-center text-sm text-muted-foreground">
                 No account?{' '}
+                {/* `inline-flex items-center coarse:min-h-11`: the smallest
+                    target in the app (18px — one line of text-sm). The floor
+                    grows the BOX, not just the hit area, which is fine here
+                    because nothing is optically pinned to this link (unlike
+                    the eye button inside a field): on a fine pointer `min-h`
+                    never matches and a one-word inline-flex box renders
+                    identically to the inline it replaces — same baseline,
+                    and the underline still propagates into the flex item.
+                    On coarse the line box grows around the 44px link, which
+                    is just the last line of the card getting taller. */}
                 <Link
                   to="/register"
-                  className="font-medium text-foreground underline-offset-4 hover:underline"
+                  className="inline-flex items-center font-medium text-foreground underline-offset-4 coarse:min-h-11 hover:underline"
                 >
                   Register
                 </Link>

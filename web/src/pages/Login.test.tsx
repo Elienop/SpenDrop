@@ -109,6 +109,27 @@ describe('Login', () => {
     ).toBeInTheDocument();
   });
 
+  test('the register link carries the pointer-gated 44px floor', () => {
+    // WIRING pin, not a pixel proof — same register as the floor block in
+    // dropdown-menu.test.tsx: happy-dom runs no layout and never loads the
+    // Tailwind stylesheet, so the token is in the DOM at every pointer state
+    // and the 44px itself is the browser pass's job. What this pins is that
+    // the smallest target in the app (18px — one line of text-sm) keeps its
+    // floor, that the token is the pointer-gated one (not bare, which would
+    // change the fine-pointer sentence; not `md:`, which hands the coarse
+    // tablet the 18px link), and that the two tokens that make the floor
+    // ACT on an inline element are both present — an inline box ignores
+    // min-height, so dropping `inline-flex` leaves the token decorative.
+    renderLogin();
+    const link = screen.getByRole('link', { name: 'Register' });
+
+    expect(link.classList.contains('coarse:min-h-11')).toBe(true);
+    expect(link.classList.contains('min-h-11')).toBe(false);
+    expect(link.classList.contains('md:min-h-11')).toBe(false);
+    expect(link.classList.contains('inline-flex')).toBe(true);
+    expect(link.classList.contains('items-center')).toBe(true);
+  });
+
   test('calls login with username and password on submit', async () => {
     mockLogin.mockResolvedValueOnce(undefined);
     const user = userEvent.setup();

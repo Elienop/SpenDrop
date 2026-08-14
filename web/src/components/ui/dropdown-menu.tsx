@@ -27,7 +27,7 @@ const DropdownMenuSubTrigger = React.forwardRef<
   <DropdownMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none focus:bg-accent data-[state=open]:bg-accent [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      "flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none coarse:min-h-11 focus:bg-accent data-[state=open]:bg-accent [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
       inset && "pl-8",
       className
     )}
@@ -59,7 +59,32 @@ DropdownMenuSubContent.displayName =
 const DropdownMenuContent = React.forwardRef<
   React.ElementRef<typeof DropdownMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof DropdownMenuPrimitive.Content>
->(({ className, sideOffset = 4, onCloseAutoFocus, ...props }, ref) => (
+// `onCloseAutoFocus` is passed straight through (via `props`) and is NOT
+// defaulted to `e.preventDefault()`. It used to be, to suppress a focus ring
+// after a mouse pick — the same local deviation `ui/select.tsx` carried, with
+// the same consequence.
+//
+// Radix composes the consumer handler with its own restore using
+// `composeEventHandlers`, which SKIPS the rest on `defaultPrevented`. The rest
+// is `context.triggerRef.current?.focus()`. Preventing here therefore cancelled
+// the one call that puts focus back on the trigger. Unlike the AlertDialog case
+// — where no `AlertDialogTrigger` exists in this app, so the ref is null anyway
+// — this menu has 12 real `DropdownMenuTrigger` sites, so the restore had a
+// live target and was simply being thrown away.
+//
+// REPRODUCED on the built app before this change: focus a row-actions trigger,
+// Enter to open, Escape to close, `document.activeElement` is `<body>`. A
+// keyboard user loses their place in the table every time they open and dismiss
+// a row menu.
+//
+// The ring that default was avoiding does come back on a mouse pick, and that
+// is the accepted trade rather than a solved problem — Chrome treats a
+// PROGRAMMATIC `.focus()` as focus-visible regardless of the modality that
+// caused it, so `focus-visible:` buys nothing across a Radix restore. A ring
+// after a mouse pick is cosmetic; dropping a keyboard user to the top of the
+// document is a barrier. Do not "fix" the ring by restoring the blanket
+// preventDefault — that is the focus drop, not a styling choice.
+>(({ className, sideOffset = 4, ...props }, ref) => (
   <DropdownMenuPrimitive.Portal>
     <DropdownMenuPrimitive.Content
       ref={ref}
@@ -68,15 +93,6 @@ const DropdownMenuContent = React.forwardRef<
         "z-50 max-h-[var(--radix-dropdown-menu-content-available-height)] min-w-[8rem] overflow-y-auto overflow-x-hidden rounded-md border bg-popover p-1 text-popover-foreground shadow-md data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 origin-[--radix-dropdown-menu-content-transform-origin]",
         className
       )}
-      onCloseAutoFocus={(e) => {
-        if (onCloseAutoFocus) {
-          onCloseAutoFocus(e);
-        } else {
-          // Prevent Radix from programmatically refocusing the trigger,
-          // which causes a visible focus ring on mouse interactions.
-          e.preventDefault();
-        }
-      }}
       {...props}
     />
   </DropdownMenuPrimitive.Portal>
@@ -93,7 +109,18 @@ const DropdownMenuItem = React.forwardRef<
   <DropdownMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
+      // `coarse:min-h-11` — the same touch floor Select's option and Button
+      // carry, and here for the same reason those needed it: the TRIGGER that
+      // opens this menu is already 44px, and the row you then tap to actually
+      // perform the action was 32px (`py-1.5` around `text-sm`). A floor on the
+      // control you open and not on the thing you hit is no floor at all.
+      //
+      // Pointer-gated, never `md:` — a touch tablet in landscape is above that
+      // breakpoint and would keep the 32px rows — and never unconditional,
+      // because `min-h` and `h` are separate tailwind-merge groups, so an
+      // ungated floor survives every call site and would inflate these menus on
+      // a mouse desktop, which is a stated constraint.
+      "relative flex cursor-default select-none items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none transition-colors coarse:min-h-11 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&_svg]:pointer-events-none [&_svg]:size-4 [&_svg]:shrink-0",
       variant === "default" && "focus:bg-accent focus:text-accent-foreground",
       variant === "destructive" &&
         "text-destructive focus:bg-destructive/10 focus:text-destructive",
@@ -112,7 +139,7 @@ const DropdownMenuCheckboxItem = React.forwardRef<
   <DropdownMenuPrimitive.CheckboxItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors coarse:min-h-11 focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     checked={checked}
@@ -136,7 +163,7 @@ const DropdownMenuRadioItem = React.forwardRef<
   <DropdownMenuPrimitive.RadioItem
     ref={ref}
     className={cn(
-      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none transition-colors coarse:min-h-11 focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}
