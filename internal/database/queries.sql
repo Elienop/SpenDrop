@@ -338,14 +338,12 @@ WHERE t.id = ?;
 -- column the batch patch cannot touch, so a tags/date/category patch carries
 -- the stored rate through untouched.
 --
--- TODO(b10-booked-rate): TransactionStore.Update (the PUT full-replace path)
--- does not yet derive this value — its callers pass the zero value, so an edit
--- writes NULL. That is unobservable today because nothing populates the column
--- yet: the rate capture in resolveCurrency and the freeze carry-forward beside
--- `p.AmountCents = before.AmountCents` land in the same branch, and the
--- invariant they must establish is that the stored rate always describes the
--- stored amount_cents — a frozen save carries both forward from `before`, a
--- repricing save stores the rate the handler just resolved.
+-- TransactionStore.Update (the PUT full-replace path) supplies it two ways, and
+-- both uphold the same invariant — the stored rate always describes the stored
+-- amount_cents. A repricing save passes the rate resolveCurrency just divided
+-- by; a frozen save (the request restated the same foreign money) carries the
+-- rate forward from `before` in the same branch that carries amount_cents
+-- forward. The two are frozen or replaced together, never one without the other.
 UPDATE transactions
 SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, booked_rate = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
@@ -794,7 +792,17 @@ LIMIT sqlc.arg(limit);
 -- Spending Heatmap
 
 -- name: SumExpensesByDay :many
-SELECT t.date, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
+-- B10: total_cents is a SIGNED net and can be zero or negative on a day whose
+-- refunds outweigh its purchases, so the heatmap cannot use "total > 0" to
+-- decide whether a day has activity. txn_count carries that answer separately:
+-- it counts the same live, in-year, expense-category rows the SUM runs over, so
+-- a day present in this result set with txn_count >= 1 has rows to show even
+-- when its net is <= 0. Both columns share one predicate set by construction —
+-- they are two aggregates over the same FROM/WHERE, not two queries that could
+-- drift.
+SELECT t.date,
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents,
+       CAST(COUNT(t.id) AS INTEGER) AS txn_count
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'

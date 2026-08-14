@@ -19,6 +19,11 @@ import (
 
 // --- Budget vs Actual ---
 
+// budgetVsActualEntry pairs a month's budget with what was actually spent.
+//
+// B10: `actual` is the SIGNED net of the month's expense rows and may be
+// negative when refunds outweigh purchases. `budget` cannot — category and
+// monthly budget limits keep their own CHECK(amount_cents > 0).
 type budgetVsActualEntry struct {
 	Month  int     `json:"month"`
 	Budget float64 `json:"budget"`
@@ -103,6 +108,11 @@ func (h *Handler) handleBudgetVsActual(w http.ResponseWriter, r *http.Request) {
 
 // --- Expense Velocity ---
 
+// dailyEntry is one day of the expense-velocity series.
+//
+// B10: `daily_total` is a SIGNED net and may be negative, so a cumulative
+// spend line built from these entries can legitimately dip rather than rise
+// monotonically.
 type dailyEntry struct {
 	Day        int     `json:"day"`
 	DailyTotal float64 `json:"daily_total"`
@@ -189,9 +199,19 @@ func (h *Handler) handleExpenseVelocity(w http.ResponseWriter, r *http.Request) 
 
 // --- Spending Heatmap ---
 
+// heatmapEntry is one day of the spending heatmap.
+//
+// B10 wire contract: `total` is a SIGNED net in dollars and may be zero or
+// negative when a day's refunds meet or outweigh its purchases. A consumer must
+// therefore key "does this day have activity?" on `txn_count`, never on
+// `total > 0` — the two answers diverge on exactly the days a refund landed,
+// and those are the days whose rows a user most wants to open. `txn_count` is
+// the number of live expense rows that fed `total`, so it is >= 1 for every day
+// present in the response.
 type heatmapEntry struct {
-	Date  string  `json:"date"`
-	Total float64 `json:"total"`
+	Date     string  `json:"date"`
+	Total    float64 `json:"total"`
+	TxnCount int64   `json:"txn_count"`
 }
 
 func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +238,11 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 
 	data := make([]heatmapEntry, len(rows))
 	for i, row := range rows {
-		data[i] = heatmapEntry{Date: row.Date.Format("2006-01-02"), Total: centsToDollars(row.TotalCents)}
+		data[i] = heatmapEntry{
+			Date:     row.Date.Format("2006-01-02"),
+			Total:    centsToDollars(row.TotalCents),
+			TxnCount: row.TxnCount,
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": data})
@@ -226,6 +250,12 @@ func (h *Handler) handleSpendingHeatmap(w http.ResponseWriter, r *http.Request) 
 
 // --- Recurring Expenses ---
 
+// recurringEntry is one recurring description's yearly rollup.
+//
+// B10: `annual_total` and therefore `monthly_avg` are SIGNED and may be
+// negative for a description whose refunds outweigh its charges. The division
+// stays safe regardless: RecurringDescriptions' HAVING requires month_count
+// >= 3, so the denominator can never be zero.
 type recurringEntry struct {
 	Description string  `json:"description"`
 	MonthlyAvg  float64 `json:"monthly_avg"`
@@ -369,6 +399,12 @@ func (h *Handler) handleDismissRecurring(w http.ResponseWriter, r *http.Request)
 
 // --- Tag Breakdown ---
 
+// tagEntry is one tag's rollup over the requested window.
+//
+// B10: `total` is a SIGNED net and may be negative; `count` is the number of
+// rows carrying the tag and is always >= 1, so the two disagree about "is
+// there anything here" exactly on refund-dominated tags. The DESC sort on
+// `total` is a signed sort — a refunded tag ranks below a zero one.
 type tagEntry struct {
 	Tag   string  `json:"tag"`
 	Total float64 `json:"total"`

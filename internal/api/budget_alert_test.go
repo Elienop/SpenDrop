@@ -218,6 +218,91 @@ func TestEvaluateBudgetAlerts_DropUnderClearsThenReCrossSendsAgain(t *testing.T)
 	}
 }
 
+// B10: a REFUND is a third way a category drops back under its limit, and
+// before signed amounts it did not exist. The two paths that did — deleting the
+// over row and editing it down — both shrink the row set or the row; a refund
+// leaves the over row untouched and adds a negative one beside it. cellOverBudget
+// compares SumByCategoryForMonth's net against the limit, so the comparison is
+// sign-agnostic and this should just work — "should" being the reason it needs a
+// test rather than a reading.
+//
+// The shape is deliberately cross-then-clear-then-re-cross: asserting only that
+// the refund stops a NEW send would be vacuous, because the latch already
+// dedups a steady over-state. What has to hold is that the latch is CLEARED, and
+// the only way to observe that from outside is a later re-crossing that fires
+// again.
+func TestEvaluateBudgetAlerts_RefundDropsUnderClearsThenReCrossSendsAgain(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-refund")
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000, // 100.00 limit
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+	cell := budgetCell{CategoryID: catID, Year: 2026, Month: 5}
+
+	// Cross over: 150.00 against a 100.00 limit. Send 1, latch set.
+	seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 15000)
+	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
+	if rec.count() != 1 {
+		t.Fatalf("cross: want 1 send, got %d", rec.count())
+	}
+
+	// Refund 80.00 of it. The over row is still there and still 150.00; the
+	// category's NET is now 70.00, under the limit. Latch clears, no new send.
+	seedRefundRow(t, q, user.ID, catID, "2026-05-14", -8000)
+	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
+	if rec.count() != 1 {
+		t.Fatalf("refund drop-under: want still 1 (no new send), got %d", rec.count())
+	}
+
+	// Re-cross: 70.00 + 40.00 = 110.00. Only a CLEARED latch sends again, so
+	// this is what distinguishes "cleared" from "dedup is still holding".
+	seedExpenseRow(t, q, user.ID, catID, "2026-05-20", 4000)
+	h.evaluateBudgetAlerts(context.Background(), []budgetCell{cell})
+	waitPush(t, h)
+	if rec.count() != 2 {
+		t.Fatalf("re-cross after a refund-driven clear: want 2 sends total, got %d — the refund did not clear the latch", rec.count())
+	}
+}
+
+// A refund large enough to drive the category NET NEGATIVE must not trip the
+// alert, and must not confuse the comparison into treating a big magnitude as
+// big spending. The limit CHECK keeps limits positive (migration 012), so
+// `net > limit` is false for every negative net.
+func TestEvaluateBudgetAlerts_NetNegativeCategoryNeverAlerts(t *testing.T) {
+	q, db := setupTestDB(t)
+	rec := &recordingSender{}
+	h := NewHandler(q, db)
+	h.pushTesterForBudgetAlerts = rec
+
+	user := seedTestUser(t, q, "alice", RoleMember)
+	catID := seedExpenseCategory(t, q, "Electronics")
+	seedPushSub(t, q, user.ID, "https://push.example/ep-neg")
+	if err := q.UpsertCategoryBudget(context.Background(), database.UpsertCategoryBudgetParams{
+		Year: 2026, Month: 5, CategoryID: catID, AmountCents: 10000, // 100.00 limit
+	}); err != nil {
+		t.Fatalf("budget: %v", err)
+	}
+
+	seedExpenseRow(t, q, user.ID, catID, "2026-05-10", 4000)  // 40.00
+	seedRefundRow(t, q, user.ID, catID, "2026-05-12", -90000) // -900.00 returned
+	h.evaluateBudgetAlerts(context.Background(),
+		[]budgetCell{{CategoryID: catID, Year: 2026, Month: 5}})
+	waitPush(t, h)
+	if rec.count() != 0 {
+		t.Fatalf("a net of -860.00 against a 100.00 limit must not alert: got %d sends", rec.count())
+	}
+}
+
 func TestEvaluateBudgetAlerts_HidesTombstoned(t *testing.T) {
 	q, db := setupTestDB(t)
 	rec := &recordingSender{}

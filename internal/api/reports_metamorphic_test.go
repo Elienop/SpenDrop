@@ -170,9 +170,23 @@ func lastDayOfMonth(year int, month time.Month) int {
 //     (expense), which does not affect whether the bug fires — both
 //     sides of the rollup have the same window predicate.
 //
-//   - `amountCents` is in [1, 1_000_000] (1¢ to $10,000). Non-zero so
-//     it is visible in the rollup after cents→dollars round-tripping,
-//     and bounded so per-sample sums stay inside float64 precision.
+//   - `amountCents` is a SIGNED non-zero value with magnitude in
+//     [1, 1_000_000] (1¢ to $10,000 either way). B10 made a negative
+//     amount storable — a refund on an expense row, an income reversal
+//     on an income row — and while the positive-only domain this
+//     generator used to draw from stayed green under signed amounts, it
+//     was green the way a canary in fresh air is: it could not have
+//     reported a regression in the half of the value space that had
+//     just opened up. Zero stays excluded because migration 019's
+//     CHECK(amount_cents != 0) makes it unstorable, so a zero draw would
+//     fail at seed time rather than test anything. The magnitude bound
+//     is unchanged, so per-sample sums stay inside float64 precision and
+//     the sign draw cannot make them larger.
+//
+//     Sign is drawn as a separate fair coin rather than by widening the
+//     range to [-1_000_000, 1_000_000]: rapid.IntRange shrinks toward
+//     zero, and over a range that straddles zero the shrinker would walk
+//     failing amounts toward the one value the schema forbids.
 //
 //   - `deletedKind` draws from [0, 9] and only 0 means "deleted". That
 //     gives ~10% tombstoned rows in the population (enough to
@@ -209,7 +223,10 @@ func drawTestSample(rt *rapid.T, fix *reportsFixture, months int) testSample {
 		catType = "expense"
 	}
 
-	amountCents := int64(rapid.IntRange(1, 1_000_000).Draw(rt, "amountCents"))
+	amountCents := int64(rapid.IntRange(1, 1_000_000).Draw(rt, "amountMagnitudeCents"))
+	if rapid.Bool().Draw(rt, "isRefund") {
+		amountCents = -amountCents
+	}
 	deleted := rapid.IntRange(0, 9).Draw(rt, "deletedKind") == 0
 
 	return testSample{

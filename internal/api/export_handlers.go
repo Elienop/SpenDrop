@@ -67,6 +67,20 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 	// `amount_cents <= ?` into a match-nothing one — the filter silently
 	// inverted instead of erroring. An unrepresentable bound is now skipped,
 	// exactly as an unparseable one already was.
+	//
+	// B10: the comparison is SIGNED, deliberately. safeDollarsToCents already
+	// accepted negative bounds, so this clause was signed-ready before refunds
+	// existed; the decision is to leave it that way rather than compare
+	// magnitudes, because "amount_min = -50" then means what it reads as. The
+	// consequence to know: an `amount_max` bound written before refunds
+	// existed — "everything under $20" — now also matches every refund row,
+	// however large, because every refund is below every positive bound. That
+	// widens saved filters and, through the shared clause, the write scope of
+	// update-by-filter and delete-by-filter. Preview count and write scope
+	// still come from this one clause, so the confirm dialog's number stays
+	// truthful; the selection is just wider than its author expected. Saved
+	// filter blobs are NOT migrated — a stored bound keeps meaning exactly
+	// what the SQL says it means.
 	if v := q.Get("amount_min"); v != "" {
 		if min, err := strconv.ParseFloat(v, 64); err == nil {
 			if cents, ok := safeDollarsToCents(min); ok {
@@ -115,31 +129,44 @@ func buildTransactionWhereClause(q url.Values) (string, []any) {
 	return " WHERE " + strings.Join(conditions, " AND "), args
 }
 
-// searchAmountPattern recognises a search term that is a bare positive decimal
-// number, optionally written with canonical three-digit thousands separators.
-// It anchors both ends, so a term with any other character in it — a currency
-// symbol, a minus sign, an exponent, a stray letter — is not a number and never
-// reaches the foreign-amount arm below.
+// searchAmountPattern recognises a search term that is a bare decimal number,
+// optionally negative and optionally written with canonical three-digit
+// thousands separators. It anchors both ends, so a term with any other
+// character in it — a currency symbol, an exponent, a stray letter — is not a
+// number and never reaches the foreign-amount arm below.
+//
+// B10: the leading minus is accepted because amounts are signed. A refund is a
+// negative row, and without it typing the amount off a refund receipt found
+// nothing by amount — the one row shape the user is most likely to go looking
+// for by number. The minus is OPTIONAL, so every term that matched before
+// still matches and still yields the same cents.
 //
 // The alternation is what rejects "1,2,3": a comma-grouped number must be one
 // to three leading digits followed by groups of exactly three, while a plain
 // number carries no commas at all. Fractions are capped at two digits because
 // the column stores cents; "1500000.005" is not a value any row can hold.
-var searchAmountPattern = regexp.MustCompile(`^(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?$`)
+var searchAmountPattern = regexp.MustCompile(`^-?(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]{1,2})?$`)
 
 // searchAmountCents interprets a search term as a foreign-currency amount and
 // returns it in cents, reporting false for any term that is not a bare number.
+// The result is SIGNED: "-100" yields -10000 cents and matches refund rows.
 //
 // The term is trimmed and stripped of thousands separators for THIS test only —
 // the LIKE arms keep matching the term exactly as typed, so widening the search
 // cannot change which rows the text arms already matched.
 //
-// A term above MaxTransactionAmount is rejected rather than clamped, for the
-// same reason the amount_min/amount_max bounds are (see safeDollarsToCents): an
-// out-of-range float converts to int64 minimum and would turn the equality into
-// a match against a nonsense value. No storable row can carry such an amount
-// anyway — validateMoneyAmount bounds original_amount on the write path — so a
-// term past the cap has nothing to find.
+// A term whose MAGNITUDE exceeds MaxTransactionAmount is rejected rather than
+// clamped, for the same reason the amount_min/amount_max bounds are (see
+// safeDollarsToCents): an out-of-range float converts to int64 minimum and
+// would turn the equality into a match against a nonsense value. No storable
+// row can carry such an amount anyway — validateMoneyAmount bounds
+// original_amount's magnitude on the write path — so a term past the cap has
+// nothing to find. safeDollarsToCents bounds both directions, so the negative
+// half needs no separate guard.
+//
+// "0" and "-0" both parse to 0 cents and simply match nothing: migration 019's
+// CHECK(original_amount_cents IS NULL OR original_amount_cents != 0) means no
+// row can carry a zero foreign amount.
 func searchAmountCents(term string) (int64, bool) {
 	trimmed := strings.TrimSpace(term)
 	if !searchAmountPattern.MatchString(trimmed) {
@@ -776,15 +803,33 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Soft-delete filter placement is defensive: `t.deleted_at IS NULL` lives
-	// in the LEFT JOIN ON clause so the JOIN shape is preserved. The HAVING
-	// clause below still hides zero-total rows from the final output, so in
-	// steady state the ON vs WHERE distinction is not observable - but if the
-	// HAVING were ever relaxed (e.g. to show empty categories in the export),
-	// a WHERE-placed filter would silently collapse the LEFT JOIN to inner-
-	// join semantics and drop any category whose only rows were tombstoned.
-	// Keeping the predicate in ON means that change stays a one-line tweak
-	// instead of a silent correctness regression.
+	// B10: the summary is gated on "this category HAS live rows in the
+	// window" — HAVING COUNT(t.id) > 0 — not on a positive total. Amounts are
+	// signed now, so a category whose purchases are cancelled by refunds nets
+	// to zero or below while still holding rows. Gating on the total would
+	// drop it from this sheet while its rows still print on the Transactions
+	// sheet of the SAME workbook, and the two sheets would stop adding up.
+	//
+	// COUNT(t.id), never COUNT(*), is what does the hiding. A LEFT JOIN gives
+	// an unmatched category one NULL-extended row, which COUNT(*) counts as 1
+	// — every empty, tombstone-only and out-of-window category would come
+	// back as a zero-total line. Counting the joined column counts only real
+	// matches.
+	//
+	// Soft-delete filter placement stays defensive, and the HAVING swap does
+	// not change why. ON vs WHERE is still not observable today: measured
+	// across live-only, tombstone-only, mixed, net-zero, empty and
+	// out-of-window categories the two placements agree row for row, because
+	// `t.deleted_at IS NULL` is the one predicate shape a NULL-extended row
+	// satisfies, and a tombstone-only category loses its entire group to a
+	// WHERE rather than surviving with a zero count. What ON placement
+	// protects is the FUTURE relaxation: drop the HAVING to list empty
+	// categories and a WHERE-placed filter makes tombstone-only categories
+	// vanish while genuinely empty ones stay — a silent, category-shaped
+	// hole. In ON, that relaxation stays a one-line edit.
+	//
+	// ORDER BY total_cents DESC is a signed sort by decision: a
+	// refund-dominated category sorts below a zero-total one within its type.
 	//
 	// Phase 3.1a: sums t.amount_cents (int64) instead of t.amount (float64)
 	// and scans total_cents into int64, converting to float at the Excel
@@ -793,7 +838,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 		FROM categories c
 		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		GROUP BY c.id
-		HAVING total_cents > 0
+		HAVING COUNT(t.id) > 0
 		ORDER BY c.type, total_cents DESC`
 
 	// Phase 3.1a: same cents->float conversion as handleExportTransactions.
@@ -924,22 +969,22 @@ func (h *Handler) handleExportYearly(w http.ResponseWriter, r *http.Request) {
 		GROUP BY month_num
 		ORDER BY month_num`
 
-	// Soft-delete filter placement is defensive: `t.deleted_at IS NULL` lives
-	// in the LEFT JOIN ON clause so the JOIN shape is preserved. The HAVING
-	// clause below still hides zero-total rows from the final output, so in
-	// steady state the ON vs WHERE distinction is not observable — but if the
-	// HAVING were ever relaxed (e.g. to show empty categories in the export),
-	// a WHERE-placed filter would silently collapse the LEFT JOIN to inner-
-	// join semantics and drop any category whose only rows were tombstoned.
-	// Keeping the predicate in ON means that change stays a one-line tweak
-	// instead of a silent correctness regression.
+	// B10: same "has live rows" gate as the monthly Summary sheet, for the
+	// same reason and with the same three properties — see the full
+	// derivation above handleExportMonthly's summaryQuery. In short:
+	// HAVING COUNT(t.id) > 0 keeps a refund-netted category on this sheet so
+	// it cannot contradict the workbook's other sheets; COUNT(t.id) rather
+	// than COUNT(*) is what still hides empty and tombstone-only categories
+	// over the LEFT JOIN; and `t.deleted_at IS NULL` stays in ON because that
+	// is what keeps "show empty categories" a one-line HAVING edit rather
+	// than a silent hole where tombstone-only categories used to be.
 	// Phase 3.1a: sums t.amount_cents (int64) and exposes total_cents; the
 	// Go side scans int64 and converts at the Excel cell boundary.
 	catQuery := `SELECT c.name, c.type, COALESCE(SUM(t.amount_cents), 0) AS total_cents
 		FROM categories c
 		LEFT JOIN transactions t ON t.category_id = c.id AND t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?
 		GROUP BY c.id
-		HAVING total_cents > 0
+		HAVING COUNT(t.id) > 0
 		ORDER BY c.type, total_cents DESC`
 
 	// Every read first, workbook second — same ordering rule as the monthly

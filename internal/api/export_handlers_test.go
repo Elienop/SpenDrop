@@ -129,11 +129,42 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
 			wantArgs:  []any{"%9999999999%", "%9999999999%", "%9999999999%"},
 		},
-		// The next three are the anchors on searchAmountPattern earning their
-		// keep. ParseFloat alone is NOT the guard: it happily accepts every one
-		// of these, so an unanchored pattern would hand the amount arm a value
-		// the user never typed — 100,000 for "1e5", a negative for "-100", and
-		// 123 for a term whose comma groups are not thousands.
+		// B10: a refund is a negative row, so a bare negative number is now a
+		// searchable amount rather than plain text. The arm carries the SIGN —
+		// "-100" must not find the +100 purchase.
+		{
+			name:      "negative number matches refunds",
+			q:         url.Values{"search": {"-100"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR t.original_amount_cents = ?)",
+			wantArgs:  []any{"%-100%", "%-100%", "%-100%", int64(-10000)},
+		},
+		{
+			name:      "negative number keeps its fraction",
+			q:         url.Values{"search": {"-12.50"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR t.original_amount_cents = ?)",
+			wantArgs:  []any{"%-12.50%", "%-12.50%", "%-12.50%", int64(-1250)},
+		},
+		{
+			name:      "negative number accepts thousands separators",
+			q:         url.Values{"search": {"-1,500,000"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' OR t.original_amount_cents = ?)",
+			wantArgs:  []any{"%-1,500,000%", "%-1,500,000%", "%-1,500,000%", int64(-150000000)},
+		},
+		{
+			// safeDollarsToCents bounds MAGNITUDE, so the cap holds on the
+			// negative side without a second guard.
+			name:      "out-of-range negative gets no amount arm",
+			q:         url.Values{"search": {"-9999999999"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%-9999999999%", "%-9999999999%", "%-9999999999%"},
+		},
+		// The next four are the anchors on searchAmountPattern earning their
+		// keep. ParseFloat alone is NOT the guard: it happily accepts "1e5" and
+		// "-100", so an unanchored pattern would hand the amount arm a value
+		// the user never typed — 100,000 for "1e5", and 123 for a term whose
+		// comma groups are not thousands. The minus that B10 added is ONE
+		// optional leading character, so a lone, doubled or trailing minus is
+		// still text.
 		{
 			name:      "exponent notation gets no amount arm",
 			q:         url.Values{"search": {"1e5"}},
@@ -141,10 +172,22 @@ func TestBuildTransactionWhereClause(t *testing.T) {
 			wantArgs:  []any{"%1e5%", "%1e5%", "%1e5%"},
 		},
 		{
-			name:      "signed number gets no amount arm",
-			q:         url.Values{"search": {"-100"}},
+			name:      "lone minus gets no amount arm",
+			q:         url.Values{"search": {"-"}},
 			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
-			wantArgs:  []any{"%-100%", "%-100%", "%-100%"},
+			wantArgs:  []any{"%-%", "%-%", "%-%"},
+		},
+		{
+			name:      "doubled minus gets no amount arm",
+			q:         url.Values{"search": {"--100"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%--100%", "%--100%", "%--100%"},
+		},
+		{
+			name:      "trailing minus gets no amount arm",
+			q:         url.Values{"search": {"100-"}},
+			wantWhere: " WHERE (t.description LIKE ? ESCAPE '\\' OR t.notes LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\')",
+			wantArgs:  []any{"%100-%", "%100-%", "%100-%"},
 		},
 		{
 			name:      "malformed comma groups get no amount arm",
@@ -622,29 +665,39 @@ func TestHandleExportYearly_HidesTombstoned(t *testing.T) {
 }
 
 // FuzzSearchAmountCents drives the ?search= numeric parser with arbitrary
-// input. The parser sits at an unauthenticated-reachable boundary (any
-// authenticated household member can put any string in the querystring), and it
-// feeds a value straight into a SQL comparison, so the two properties that
-// matter are:
+// input. The parser sits at an authenticated-reachable boundary (any household
+// member can put any string in the querystring), and it feeds a value straight
+// into a SQL comparison, so the two properties that matter are:
 //
 //   - it never panics, and
-//   - when it reports ok, the cents value is in range: 0 <= cents <=
-//     100*MaxTransactionAmount. A negative or overflowed value would compare
+//   - when it reports ok, the cents value is in range by MAGNITUDE:
+//     |cents| <= 100*MaxTransactionAmount. An overflowed value would compare
 //     against original_amount_cents as nonsense, and the amount_min/amount_max
 //     incident (see safeDollarsToCents) is the precedent for how int64 minimum
-//     gets laundered in through a float.
+//     gets laundered in through a float — note that int64 minimum is itself a
+//     hugely negative number, so a bound written only against positives would
+//     miss the exact failure this property exists to catch.
 //
-// The lower bound is 0 rather than 1 because "0" is a legal parse; no row can
-// carry a zero original amount (CHECK(amount_cents > 0) and the handler's own
-// validation), so it simply matches nothing.
+// B10 replaced the old `cents >= 0` half of the property. Negative results are
+// now the point: refunds are negative rows and the search has to reach them.
+// What survives the change is the cap, applied symmetrically — safeDollarsToCents
+// rejects any |d| > MaxTransactionAmount, so the bound below is what proves the
+// negative half of that guard is real rather than assumed.
+//
+// Zero remains a legal parse ("0", "-0", "0.00") and simply matches nothing:
+// migration 019's CHECK(original_amount_cents IS NULL OR original_amount_cents
+// != 0) means no row can carry a zero amount.
 func FuzzSearchAmountCents(f *testing.F) {
 	seeds := []string{
 		// The unit-table cases, so the corpus starts from known behaviour.
 		"1500000", "1,500,000", "1500000.50", "1,500,000.50", "1500", "0",
 		"1500000 LBP", "9999999999", "Coffee", "",
 		// Nasties from the security review.
-		"1e5", "-100", "1,2,3", "١٥٠٠", "999999999999999999999999",
+		"1e5", "1,2,3", "١٥٠٠", "999999999999999999999999",
 		strings.Repeat("9", 400),
+		// B10 negatives: accepted shapes, rejected shapes, and the cap.
+		"-100", "-12.50", "-1,500,000", "-0", "-9999999999",
+		"-", "--100", "100-", "-" + strings.Repeat("9", 400),
 		// Shapes the regex alternation has to decide between.
 		"1,500", "12,34", ".50", "1500000.", "+1500", "1_500", "  1500  ",
 		"NaN", "Inf", "-Inf", "0x1p4", "1500000.005",
@@ -660,12 +713,10 @@ func FuzzSearchAmountCents(f *testing.F) {
 			// the caller adds no arm at all.
 			return
 		}
-		if cents < 0 {
-			t.Fatalf("searchAmountCents(%q) accepted a NEGATIVE cents value %d", term, cents)
-		}
-		if cents > 100*MaxTransactionAmount {
-			t.Fatalf("searchAmountCents(%q) accepted %d, above the %d cents cap",
-				term, cents, int64(100*MaxTransactionAmount))
+		const cap = int64(100 * MaxTransactionAmount)
+		if cents > cap || cents < -cap {
+			t.Fatalf("searchAmountCents(%q) accepted %d, outside the +/-%d cents cap",
+				term, cents, cap)
 		}
 	})
 }

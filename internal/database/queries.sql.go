@@ -1979,7 +1979,9 @@ func (q *Queries) SumByMonthRange(ctx context.Context, arg SumByMonthRangeParams
 
 const sumExpensesByDay = `-- name: SumExpensesByDay :many
 
-SELECT t.date, CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents
+SELECT t.date,
+       CAST(COALESCE(SUM(t.amount_cents), 0) AS INTEGER) AS total_cents,
+       CAST(COUNT(t.id) AS INTEGER) AS txn_count
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE c.type = 'expense'
@@ -1992,9 +1994,19 @@ ORDER BY t.date
 type SumExpensesByDayRow struct {
 	Date       time.Time `json:"date"`
 	TotalCents int64     `json:"total_cents"`
+	TxnCount   int64     `json:"txn_count"`
 }
 
 // Spending Heatmap
+//
+// B10: total_cents is a SIGNED net and can be zero or negative on a day whose
+// refunds outweigh its purchases, so the heatmap cannot use "total > 0" to
+// decide whether a day has activity. txn_count carries that answer separately:
+// it counts the same live, in-year, expense-category rows the SUM runs over, so
+// a day present in this result set with txn_count >= 1 has rows to show even
+// when its net is <= 0. Both columns share one predicate set by construction —
+// they are two aggregates over the same FROM/WHERE, not two queries that could
+// drift.
 func (q *Queries) SumExpensesByDay(ctx context.Context, year string) ([]SumExpensesByDayRow, error) {
 	rows, err := q.db.QueryContext(ctx, sumExpensesByDay, year)
 	if err != nil {
@@ -2004,7 +2016,7 @@ func (q *Queries) SumExpensesByDay(ctx context.Context, year string) ([]SumExpen
 	items := []SumExpensesByDayRow{}
 	for rows.Next() {
 		var i SumExpensesByDayRow
-		if err := rows.Scan(&i.Date, &i.TotalCents); err != nil {
+		if err := rows.Scan(&i.Date, &i.TotalCents, &i.TxnCount); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2453,14 +2465,12 @@ type UpdateTransactionParams struct {
 // column the batch patch cannot touch, so a tags/date/category patch carries
 // the stored rate through untouched.
 //
-// TODO(b10-booked-rate): TransactionStore.Update (the PUT full-replace path)
-// does not yet derive this value — its callers pass the zero value, so an edit
-// writes NULL. That is unobservable today because nothing populates the column
-// yet: the rate capture in resolveCurrency and the freeze carry-forward beside
-// `p.AmountCents = before.AmountCents` land in the same branch, and the
-// invariant they must establish is that the stored rate always describes the
-// stored amount_cents — a frozen save carries both forward from `before`, a
-// repricing save stores the rate the handler just resolved.
+// TransactionStore.Update (the PUT full-replace path) supplies it two ways, and
+// both uphold the same invariant — the stored rate always describes the stored
+// amount_cents. A repricing save passes the rate resolveCurrency just divided
+// by; a frozen save (the request restated the same foreign money) carries the
+// rate forward from `before` in the same branch that carries amount_cents
+// forward. The two are frozen or replaced together, never one without the other.
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
