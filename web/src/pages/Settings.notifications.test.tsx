@@ -307,3 +307,44 @@ describe('NotificationsSection — digest + quiet hours', () => {
     });
   });
 });
+
+describe('NotificationsSection — adjacent switch targets do not overlap', () => {
+  test('the toggle rows sit in their own container with a coarse gap', () => {
+    render(<NotificationsSection />);
+    // Two Switches one above the other, each with a `-inset-y-2.5` (10px)
+    // pseudo target: at `gap-4` their expanded areas overlap by 4px on a touch
+    // screen. `coarse:gap-5` is exactly two extensions. Token assertion because
+    // happy-dom lays nothing out — and scoped to the container the switch rows
+    // share, so widening the whole section instead would not satisfy it.
+    const row = screen.getByLabelText('Over budget').closest('div');
+    const container = row?.parentElement;
+    const tokens = container?.className.split(/\s+/) ?? [];
+    expect(tokens).toContain('coarse:gap-5');
+    expect(tokens).toContain('gap-4');
+    // The container holds the switch rows and nothing else: a threshold or
+    // digest row swept in here would get the coarse gap for no reason.
+    expect(container?.querySelectorAll('input,button[role="switch"]').length).toBe(
+      container?.querySelectorAll('button[role="switch"]').length,
+    );
+  });
+});
+
+describe('NotificationsSection — the time inputs fit their own value', () => {
+  test('digest, quiet-start and quiet-end carry w-36, not the clipping w-28', () => {
+    prefsHook.settings = { ...SETTINGS, digest_mode: 'daily' };
+    render(<NotificationsSection />);
+    for (const label of [
+      'Digest send time',
+      'Quiet hours start',
+      'Quiet hours end',
+    ]) {
+      const input = screen.getByLabelText(label);
+      // Exact tokens via classList, and the token IS the assertion: happy-dom
+      // lays nothing out. Measured in a real browser: the 12h "hh:mm AM"
+      // rendering needs ~140px at the phone's 16px font, and `w-28` (112px)
+      // clipped the value (scrollWidth 128-134 against clientWidth 110).
+      expect(input.classList.contains('w-36')).toBe(true);
+      expect(input.classList.contains('w-28')).toBe(false);
+    }
+  });
+});

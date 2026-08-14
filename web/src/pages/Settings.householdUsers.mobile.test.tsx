@@ -557,3 +557,339 @@ describe('focus comes back to the card', () => {
     });
   });
 });
+
+describe('the dialogs scroll instead of spilling on short viewports', () => {
+  // happy-dom lays nothing out, so these pin the STRUCTURE the pixels depend
+  // on, measured in a real browser at 411x500: without an explicit shrinkable
+  // row, Chromium keeps the dialog's implicit `auto` grid row at content
+  // height (487px) while `max-h` clamps the box (468px), so the wrapper that
+  // owns `overflow-y-auto` is laid out taller than the dialog, never
+  // overflows internally, and the bottom controls render past the border —
+  // unreachable by any scroll. `grid-rows-[minmax(0,1fr)]` is what lets the
+  // row shrink to the clamped box; the pixel proof is a browser pass.
+  test('every manage-dialog control renders inside the dialog’s scroll wrapper', async () => {
+    const user = setup();
+    const { dialog } = await openManage(user, 'bob');
+
+    expect(dialog.classList.contains('grid-rows-[minmax(0,1fr)]')).toBe(true);
+    for (const name of [
+      'Save display name',
+      'Reset password for bob',
+      'Delete bob',
+    ]) {
+      const control = within(dialog).getByRole('button', { name });
+      // Inside the wrapper that scrolls, not a sibling of it: a control
+      // outside `overflow-y-auto` can never be scrolled into view.
+      const scroller = control.closest('.overflow-y-auto');
+      expect(scroller).not.toBeNull();
+      expect(dialog.contains(scroller)).toBe(true);
+      expect(scroller?.classList.contains('min-h-0')).toBe(true);
+    }
+  });
+
+  test('the delete confirm’s actions render inside its scroll wrapper', async () => {
+    const user = setup();
+    const { dialog } = await openManage(user, 'bob');
+    await user.click(
+      within(dialog).getByRole('button', { name: 'Delete bob' }),
+    );
+    const confirm = await screen.findByRole('alertdialog');
+
+    expect(confirm.classList.contains('grid-rows-[minmax(0,1fr)]')).toBe(true);
+    for (const name of ['Cancel', 'Delete user']) {
+      const control = within(confirm).getByRole('button', { name });
+      const scroller = control.closest('.overflow-y-auto');
+      expect(scroller).not.toBeNull();
+      expect(confirm.contains(scroller)).toBe(true);
+    }
+  });
+});
+
+describe('the confirms hand focus back', () => {
+  // Radix's own restore cannot do any of this: the confirms are controlled
+  // and page-level, no `AlertDialogTrigger` exists, so its
+  // `triggerRef.current?.focus()` is a no-op on null and every dismissal
+  // dropped focus on <body> — measured on the running app at 360 and 1440.
+
+  /** Open the manage dialog for bob, then one of its two confirms. */
+  async function openConfirmFromCard(
+    user: ReturnType<typeof setup>,
+    action: 'Delete bob' | 'Reset password for bob',
+  ) {
+    const { dialog, button } = await openManage(user, 'bob');
+    await user.click(within(dialog).getByRole('button', { name: action }));
+    const confirm = await screen.findByRole('alertdialog');
+    return { confirm, manageButton: button };
+  }
+
+  test('delete confirm cancelled — back to the card’s Manage button', async () => {
+    const user = setup();
+    const { confirm, manageButton } = await openConfirmFromCard(
+      user,
+      'Delete bob',
+    );
+
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(manageButton);
+    });
+  });
+
+  test('delete confirm Escaped — back to the card’s Manage button', async () => {
+    const user = setup();
+    const { manageButton } = await openConfirmFromCard(user, 'Delete bob');
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(manageButton);
+    });
+  });
+
+  test('reset confirm cancelled — back to the card’s Manage button', async () => {
+    const user = setup();
+    const { confirm, manageButton } = await openConfirmFromCard(
+      user,
+      'Reset password for bob',
+    );
+
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(manageButton);
+    });
+  });
+
+  test('reset confirm Escaped — back to the card’s Manage button', async () => {
+    const user = setup();
+    const { manageButton } = await openConfirmFromCard(
+      user,
+      'Reset password for bob',
+    );
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(manageButton);
+    });
+  });
+
+  test('a confirmed delete parks focus on the card title — the row is gone', async () => {
+    // The refetch after the delete returns a list without bob, so both row
+    // anchors (card button, table button) are about to vanish; the card
+    // title is the one node that outlives the row. Without the shrunken
+    // refetch this test could pass by focusing a button that only still
+    // exists because the fixture forgot to delete anything.
+    let deleted = false;
+    mockedApi.get.mockImplementation((path: string) => {
+      if (path === 'users')
+        return Promise.resolve(deleted ? [alice] : [alice, bob]);
+      if (path === 'api-tokens') return Promise.resolve({ tokens: [] });
+      return Promise.resolve([]);
+    });
+    mockedApi.del.mockImplementation(() => {
+      deleted = true;
+      return Promise.resolve({});
+    });
+
+    const user = setup();
+    const { confirm } = await openConfirmFromCard(user, 'Delete bob');
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Delete user' }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByText('Household users'));
+    });
+  });
+
+  test('a confirmed reset returns to the Manage button — the row survives', async () => {
+    mockedApi.post.mockResolvedValue({ tokens_revoked: 0 });
+
+    const user = setup();
+    const { confirm, manageButton } = await openConfirmFromCard(
+      user,
+      'Reset password for bob',
+    );
+    await user.type(
+      within(confirm).getByLabelText('New password'),
+      'longenough1',
+    );
+    await user.type(
+      within(confirm).getByLabelText('Confirm new password'),
+      'longenough1',
+    );
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Reset password' }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(manageButton);
+    });
+  });
+
+  test('desktop: delete confirm cancelled — back to the row’s Delete button', async () => {
+    const user = setup();
+    const table = await renderDesktop();
+    const rowButton = within(table).getByRole('button', { name: 'Delete bob' });
+
+    await user.click(rowButton);
+    const confirm = await screen.findByRole('alertdialog');
+    await user.click(within(confirm).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rowButton);
+    });
+  });
+
+  test('desktop: reset confirm Escaped — back to the row’s Reset button', async () => {
+    const user = setup();
+    const table = await renderDesktop();
+    const rowButton = within(table).getByRole('button', {
+      name: 'Reset password for bob',
+    });
+
+    await user.click(rowButton);
+    await screen.findByRole('alertdialog');
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rowButton);
+    });
+  });
+
+  test('desktop: a confirmed delete parks focus on the card title', async () => {
+    let deleted = false;
+    mockedApi.get.mockImplementation((path: string) => {
+      if (path === 'users')
+        return Promise.resolve(deleted ? [alice] : [alice, bob]);
+      if (path === 'api-tokens') return Promise.resolve({ tokens: [] });
+      return Promise.resolve([]);
+    });
+    mockedApi.del.mockImplementation(() => {
+      deleted = true;
+      return Promise.resolve({});
+    });
+
+    const user = setup();
+    const table = await renderDesktop();
+    await user.click(within(table).getByRole('button', { name: 'Delete bob' }));
+    const confirm = await screen.findByRole('alertdialog');
+    await user.click(
+      within(confirm).getByRole('button', { name: 'Delete user' }),
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(screen.getByText('Household users'));
+    });
+  });
+});
+
+describe('the rename dialog hands focus back', () => {
+  // Table-only: the phone edits the display name inside the manage dialog.
+  // Trigger-less like every other overlay here, so without its own
+  // `onCloseAutoFocus` each dismissal leaves focus on <body> and the next Tab
+  // restarts at the top of the page.
+
+  /** Open the rename dialog from bob's row, keeping hold of the opener. */
+  async function openRenameFromRow(user: ReturnType<typeof setup>) {
+    const table = await renderDesktop();
+    const rowButton = within(table).getByRole('button', {
+      name: 'Edit display name for bob',
+    });
+    await user.click(rowButton);
+    return { dialog: await screen.findByRole('dialog'), rowButton };
+  }
+
+  test('cancelled — back to the row’s Edit display name button', async () => {
+    const user = setup();
+    const { dialog, rowButton } = await openRenameFromRow(user);
+
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rowButton);
+    });
+  });
+
+  test('Escaped — back to the row’s Edit display name button', async () => {
+    const user = setup();
+    const { rowButton } = await openRenameFromRow(user);
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await waitFor(() => {
+      expect(document.activeElement).toBe(rowButton);
+    });
+  });
+
+  test('saved — back to the row, whose label the refetch has rewritten', async () => {
+    // The refetch answers with the NEW name, so the row the dialog returns to
+    // is a re-rendered one; the anchor is a data attribute keyed on the id
+    // rather than the visible label, which the rename has just changed.
+    let renamed = false;
+    mockedApi.get.mockImplementation((path: string) => {
+      if (path === 'users')
+        return Promise.resolve(
+          renamed ? [alice, { ...bob, display_name: 'Bobby' }] : [alice, bob],
+        );
+      if (path === 'api-tokens') return Promise.resolve({ tokens: [] });
+      return Promise.resolve([]);
+    });
+    mockedApi.put.mockImplementation(() => {
+      renamed = true;
+      return Promise.resolve({ status: 'updated' });
+    });
+
+    const user = setup();
+    const { dialog } = await openRenameFromRow(user);
+    const field = within(dialog).getByLabelText('Display name');
+    await user.clear(field);
+    await user.type(field, 'Bobby');
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+    await screen.findByText('Bobby');
+    await waitFor(() => {
+      expect(document.activeElement).toBe(
+        screen.getByRole('button', { name: 'Edit display name for bob' }),
+      );
+    });
+  });
+});

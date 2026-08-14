@@ -1047,6 +1047,25 @@ function HouseholdUsersCard() {
   // dialog's close-focus hook fires on unmount and yanks focus back to the card
   // AFTER the AlertDialog has already focused its Cancel button.
   const confirmHandoffRef = useRef(false);
+  // Which surface opened the confirm that is now showing, remembered so its
+  // close can send focus back there: the phone path returns to the card's
+  // Manage button (focusAfterManageClose resolves it), the desktop path to
+  // the table-row button that opened it. A ref, not state, for the same
+  // reason as `lastManagedIdRef`: the confirm's target state is already null
+  // by the time `onCloseAutoFocus` runs.
+  const confirmOpenerRef = useRef<
+    | { source: 'manage' }
+    | { source: 'table'; kind: 'reset' | 'delete'; userId: number }
+    | null
+  >(null);
+  // Set only by a delete the server ACCEPTED: that row is gone, and both
+  // per-row anchors go with it, so the close falls back to the card title. A
+  // failed delete keeps the dialog open and never sets this.
+  const deleteSucceededRef = useRef(false);
+  // The rename dialog's opener. Only the table opens it — the phone edits the
+  // name inside the manage dialog — so one id is enough, and unlike the
+  // confirms there is no removed-row case: a rename never takes the row away.
+  const lastRenamedIdRef = useRef<number | null>(null);
 
   // Resolved against the LIVE list rather than the snapshot the dialog opened
   // with: a role change refetches the list, and the Select has to show what the
@@ -1088,6 +1107,45 @@ function HouseholdUsersCard() {
     (anchor ?? cardTitleRef.current)?.focus();
   }
 
+  // The confirms' counterpart to focusAfterManageClose, needed for the same
+  // reason: no `AlertDialogTrigger` exists anywhere in this app, so Radix's
+  // own restore runs `triggerRef.current?.focus()` against null and every
+  // close would land focus on `<body>`. Anchors are re-queried at close time
+  // rather than held as elements — a refetch can have re-rendered the row
+  // since the confirm opened — and a missing anchor falls back to the card
+  // title, the one node on this surface that outlives any row.
+  function focusAfterConfirmClose(rowRemoved: boolean) {
+    const opener = confirmOpenerRef.current;
+    confirmOpenerRef.current = null;
+    if (rowRemoved || opener === null) {
+      cardTitleRef.current?.focus();
+      return;
+    }
+    if (opener.source === 'manage') {
+      focusAfterManageClose();
+      return;
+    }
+    const anchor = document.querySelector<HTMLElement>(
+      opener.kind === 'reset'
+        ? `[data-reset-user-id="${opener.userId}"]`
+        : `[data-delete-user-id="${opener.userId}"]`,
+    );
+    (anchor ?? cardTitleRef.current)?.focus();
+  }
+
+  // Same Trigger-less shape again, for the rename dialog: save, cancel, Escape
+  // and an overlay tap all return to the row's own Edit button. Queried at
+  // close time because a rename refetches the list, which re-renders the row
+  // the dialog was opened from.
+  function focusAfterRenameClose() {
+    const id = lastRenamedIdRef.current;
+    const anchor =
+      id === null
+        ? null
+        : document.querySelector<HTMLElement>(`[data-rename-user-id="${id}"]`);
+    (anchor ?? cardTitleRef.current)?.focus();
+  }
+
   // Reset and Delete CLOSE this dialog and open the page-level confirm.
   // Sequential, single-layer — never nested. Nesting stacks two `bg-black/80`
   // scrims (~4% of the page still visible), and Radix's `hideOthers()` puts
@@ -1096,8 +1154,21 @@ function HouseholdUsersCard() {
   // own close would restore focus to a null triggerRef and drop it on `<body>`.
   function confirmFromManage(open: (u: User) => void, u: User) {
     confirmHandoffRef.current = true;
+    confirmOpenerRef.current = { source: 'manage' };
     setManagingUser(null);
     open(u);
+  }
+
+  // The table-row openers record themselves before opening, so the confirm's
+  // close can find its way back to the exact button that started the chain.
+  function openResetFromTable(u: User) {
+    confirmOpenerRef.current = { source: 'table', kind: 'reset', userId: u.id };
+    openReset(u);
+  }
+
+  function openDeleteFromTable(u: User) {
+    confirmOpenerRef.current = { source: 'table', kind: 'delete', userId: u.id };
+    openDelete(u);
   }
 
   async function onSaveManagedName(values: DisplayNameValues) {
@@ -1124,6 +1195,9 @@ function HouseholdUsersCard() {
     try {
       await api.del(`users/${deletingUser.id}`);
       toast.success('User deleted');
+      // Before the state flip: the close this triggers must know the row is
+      // gone so its focus restore skips the row anchors.
+      deleteSucceededRef.current = true;
       setDeletingUser(null);
       refreshUsers();
     } catch (err) {
@@ -1147,6 +1221,7 @@ function HouseholdUsersCard() {
   // that is already there, not inventing one.
   function openRename(u: User) {
     renameForm.reset({ display_name: u.display_name });
+    lastRenamedIdRef.current = u.id;
     setRenamingUserName(u.display_name);
     setRenamingSelf(currentUser !== null && u.id === currentUser.id);
     setRenamingUser(u);
@@ -1420,6 +1495,7 @@ function HouseholdUsersCard() {
                       type="button"
                       variant="outline"
                       size="sm"
+                      data-rename-user-id={u.id}
                       onClick={() => openRename(u)}
                       aria-label={`Edit display name for ${u.username}`}
                     >
@@ -1434,7 +1510,8 @@ function HouseholdUsersCard() {
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => openReset(u)}
+                        data-reset-user-id={u.id}
+                        onClick={() => openResetFromTable(u)}
                         aria-label={`Reset password for ${u.username}`}
                       >
                         Reset password
@@ -1448,7 +1525,8 @@ function HouseholdUsersCard() {
                       type="button"
                       variant="destructive"
                       size="sm"
-                      onClick={() => openDelete(u)}
+                      data-delete-user-id={u.id}
+                      onClick={() => openDeleteFromTable(u)}
                       aria-label={`Delete ${u.username}`}
                     >
                       Delete
@@ -1469,7 +1547,16 @@ function HouseholdUsersCard() {
           if (!open) setResettingUser(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            // Same Trigger-less shape as the manage dialog below — see
+            // focusAfterConfirmClose. `false` on every close: a confirmed
+            // reset keeps the row, so even that path returns to the button
+            // that opened the chain.
+            e.preventDefault();
+            focusAfterConfirmClose(false);
+          }}
+        >
           <Form {...resetForm}>
             <form
               onSubmit={(e) => void resetForm.handleSubmit(onConfirmReset)(e)}
@@ -1564,7 +1651,18 @@ function HouseholdUsersCard() {
           if (!open) setDeletingUser(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            // Consumed here rather than inside the helper: only this
+            // dialog's close can follow a successful delete, and reading the
+            // flag anywhere shared would let one confirm's outcome leak into
+            // the next one's focus restore.
+            const removed = deleteSucceededRef.current;
+            deleteSucceededRef.current = false;
+            focusAfterConfirmClose(removed);
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               Delete <span className="font-mono">{deletingUserName}</span>?
@@ -1609,7 +1707,12 @@ function HouseholdUsersCard() {
           if (!open) setRenamingUser(null);
         }}
       >
-        <DialogContent>
+        <DialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            focusAfterRenameClose();
+          }}
+        >
           <Form {...renameForm}>
             <form
               onSubmit={(e) => void renameForm.handleSubmit(onRenameUser)(e)}
@@ -3187,24 +3290,34 @@ export function NotificationsSection() {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
           <div className="flex flex-col gap-4">
-            {TYPE_ROWS.map(({ key, label }) => {
-              const id = `notif-type-${key}`;
-              return (
-                <div
-                  key={key}
-                  className="flex max-w-md items-center justify-between gap-4"
-                >
-                  <Label htmlFor={id}>{label}</Label>
-                  <Switch
-                    id={id}
-                    checked={Boolean(settings[key])}
-                    disabled={!canEdit}
-                    onCheckedChange={(v) => void handleTypeToggle(key, v)}
-                    aria-label={label}
-                  />
-                </div>
-              );
-            })}
+            {/* `coarse:gap-5` on the switch rows ONLY. Switch grows its hit
+                area with a `-inset-y-2.5` pseudo-element (10px above and
+                below), so two consecutive toggle rows 16px apart have 4px of
+                overlapping target on a touch screen — the boundary tap goes to
+                whichever row paints its pseudo last, not to the one under the
+                thumb. 20px is exactly two extensions, so they meet instead.
+                The rows below hold Inputs and Selects, whose targets are their
+                own boxes, and the fine-pointer rhythm is unchanged. */}
+            <div className="flex flex-col gap-4 coarse:gap-5">
+              {TYPE_ROWS.map(({ key, label }) => {
+                const id = `notif-type-${key}`;
+                return (
+                  <div
+                    key={key}
+                    className="flex max-w-md items-center justify-between gap-4"
+                  >
+                    <Label htmlFor={id}>{label}</Label>
+                    <Switch
+                      id={id}
+                      checked={Boolean(settings[key])}
+                      disabled={!canEdit}
+                      onCheckedChange={(v) => void handleTypeToggle(key, v)}
+                      aria-label={label}
+                    />
+                  </div>
+                );
+              })}
+            </div>
 
             <div className="flex max-w-md items-center justify-between gap-4">
               <Label
@@ -3269,10 +3382,14 @@ export function NotificationsSection() {
                     When the daily summary push goes out.
                   </span>
                 </Label>
+                {/* `w-36`, not `w-28`, on all three time inputs: the 12h
+                    "hh:mm AM" rendering needs ~140px at the phone's 16px
+                    font, and 112px clipped the value the field exists to
+                    show (measured scrollWidth 128-134 vs clientWidth 110). */}
                 <Input
                   id="digest-time"
                   type="time"
-                  className="w-28"
+                  className="w-36"
                   disabled={!canEdit}
                   aria-label="Digest send time"
                   defaultValue={settings.digest_time}
@@ -3286,7 +3403,7 @@ export function NotificationsSection() {
               <Input
                 id="quiet-start"
                 type="time"
-                className="w-28"
+                className="w-36"
                 disabled={!canEdit}
                 aria-label="Quiet hours start"
                 ref={quietStartRef}
@@ -3301,7 +3418,7 @@ export function NotificationsSection() {
               <Input
                 id="quiet-end"
                 type="time"
-                className="w-28"
+                className="w-36"
                 disabled={!canEdit}
                 aria-label="Quiet hours end"
                 ref={quietEndRef}
