@@ -954,21 +954,25 @@ describe('Settings', () => {
       expect(mockedToast.info).not.toHaveBeenCalled();
     });
 
-    test('toast Open action navigates to the new page', () => {
+    test('the toast carries an Open action that can be invoked', () => {
       renderAt('/settings?tab=savings');
-      // Read the action callback handed to toast.info and invoke it.
-      // We don't want to spy on react-router internally — just check
-      // the action is wired to a function and clicking it produces
-      // something callable.
       const calls = mockedToast.info.mock.calls;
       expect(calls.length).toBeGreaterThan(0);
       const arg = calls[0][1] as { action?: { onClick: () => void } };
       expect(typeof arg.action?.onClick).toBe('function');
-      // Calling it shouldn't throw — react-router's navigate inside
-      // MemoryRouter is a no-op for our purposes here; the contract
-      // is "Open action calls a function tied to the moved route".
       arg.action!.onClick();
     });
+    // WHAT THE CASE ABOVE DOES NOT PROVE, said plainly because its previous
+    // note claimed otherwise ("the contract is 'Open action calls a function
+    // tied to the moved route'") and the claim was false: it never looks at
+    // WHERE the action goes. Both routes in `MOVED_TABS` were repointed at
+    // `/trash` during a deep review and the entire suite stayed green.
+    //
+    // The destination is pinned in `Settings.urlstate.test.tsx`, over every
+    // entry in the table, against a router that actually mounts the pages —
+    // which needs a location probe and real `<Routes>`, neither of which
+    // belongs in this file. Left here as the callable-wiring smoke check it
+    // really is rather than deleted, and not re-proved locally.
   });
 
   describe('as member', () => {

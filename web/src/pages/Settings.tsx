@@ -3906,15 +3906,30 @@ export function NotificationsSection() {
           <p className="text-sm text-muted-foreground">Loading…</p>
         ) : (
           <div className="flex flex-col gap-4">
-            {/* `coarse:gap-5` on the switch rows ONLY. Switch grows its hit
-                area with a `-inset-y-2.5` pseudo-element (10px above and
-                below), so two consecutive toggle rows 16px apart have 4px of
-                overlapping target on a touch screen — the boundary tap goes to
-                whichever row paints its pseudo last, not to the one under the
-                thumb. 20px is exactly two extensions, so they meet instead.
-                The rows below hold Inputs and Selects, whose targets are their
-                own boxes, and the fine-pointer rhythm is unchanged. */}
-            <div className="flex flex-col gap-4 coarse:gap-5">
+            {/* `coarse:gap-6` on the switch rows ONLY, and the number is
+                derived rather than chosen. `Switch` grows its hit area with a
+                `coarse:before:-inset-y-3` pseudo-element; an absolute pseudo
+                resolves its insets against the PADDING box, which `border-2`
+                leaves at 20px, so the band is 20 + 2×12 = 44px and reaches
+                (44 − 24) / 2 = 10px past the border box above and below. A
+                one-line `Label` is 14px against the switch's 24px, so these
+                rows are exactly switch-height and all 10px of that reach lands
+                in the gap. The pitch therefore has to exceed 24 + 10 + 10 =
+                44px: at `gap-4` the bands overlap by 4px and a tap in the seam
+                goes to whichever row paints its pseudo last rather than the one
+                under the thumb, and at `gap-5` they merely TILE — a shared
+                boundary is not clearance, it resolves the same way. 24px leaves
+                4px of dead space between them.
+
+                Not the other lever: the band IS the 44px target, so trimming it
+                to fit a smaller gap puts the switch under the floor. The rows
+                below are left at `gap-4` because their controls carry
+                `coarse:min-h-11` on their own boxes and overhang nothing, so
+                the worst seam there is 16 − 10 = 6px and still positive. The
+                fine-pointer rhythm is untouched: no pseudo, no `coarse:` gap.
+                Derived in `Settings.notifications.test.tsx` from the rendered
+                class strings rather than restated as a constant. */}
+            <div className="flex flex-col gap-4 coarse:gap-6">
               {TYPE_ROWS.map(({ key, label }) => {
                 const id = `notif-type-${key}`;
                 return (
@@ -4099,13 +4114,24 @@ export function NotificationsSection() {
 // General tab's contents split across /budgets (Monthly Budgets +
 // Category Limits) and the Account/Currencies tabs. Bookmarks pointing
 // here surface a one-shot toast with an Open action.
-const MOVED_TABS: Record<string, { route: string; label: string }> = {
-  savings: { route: '/savings', label: 'Savings' },
-  budgets: { route: '/budgets', label: 'Budgets' },
+//
+// A `Map`, not a `Record`, because the key comes straight off the query string
+// and the two failure modes it removes are both real. A plain object literal
+// answers for every key on `Object.prototype`, so `?tab=constructor` was a
+// truthy hit that toasted "undefined has its own page now" with an Open button
+// wired to `navigate(undefined)`. And `Record<string, T>` lookups are typed as
+// always-present without `noUncheckedIndexedAccess` (this project does not set
+// it), so `moved.label` was reading through a guarantee the type system had no
+// basis for. `Map.get` returns `T | undefined` and consults no prototype, which
+// closes both — and closes them for the next lookup site too, rather than
+// requiring an `Object.hasOwn` that a future reader has to remember.
+const MOVED_TABS = new Map<string, { route: string; label: string }>([
+  ['savings', { route: '/savings', label: 'Savings' }],
+  ['budgets', { route: '/budgets', label: 'Budgets' }],
   // General split across Budgets and the remaining Settings tabs —
   // point at Budgets since that's where the monthly-budget editor lives.
-  general: { route: '/budgets', label: 'Budgets' },
-};
+  ['general', { route: '/budgets', label: 'Budgets' }],
+]);
 
 /**
  * One Settings section's body. The single place that maps a tab value to its
@@ -4200,7 +4226,7 @@ export function Settings() {
   // hover or precision; six long labels simply do not fit a narrow page. A
   // touch tablet at ~720px portrait getting the Select is correct.
   const isMobile = useIsMobileViewport();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
   const tabParam = searchParams.get('tab');
   // Role-clamped, not merely validated — see `resolveSettingsTab`. A member
@@ -4214,8 +4240,8 @@ export function Settings() {
   // only — re-toasting on subsequent in-app tab clicks would be
   // noisy.
   useEffect(() => {
-    if (tabParam && MOVED_TABS[tabParam]) {
-      const moved = MOVED_TABS[tabParam];
+    const moved = tabParam === null ? undefined : MOVED_TABS.get(tabParam);
+    if (moved) {
       toast.info(`${moved.label} has its own page now`, {
         action: {
           label: 'Open',
@@ -4240,13 +4266,81 @@ export function Settings() {
     // history listener. The guard above already prevents redundant
     // setState on equal values, so the only meaningful trigger is a
     // fresh tabParam coming in from the router.
+    //
+    // `admin` IS a dep, though the effect body is the only thing that reads it
+    // and no section is `adminOnly` today. It costs exactly nothing now — the
+    // extra run happens only when `admin` changes value, and while none is
+    // `adminOnly` both roles reach every section, so `resolved` would come back
+    // identical and the guard would refuse the setState anyway. What it buys is
+    // the day the first `adminOnly` section lands: a role that flips true →
+    // false while this page is mounted (a `refreshUser` echoing a demotion is
+    // the live path) would otherwise leave `activeTab` sitting on a section the
+    // clamp has started refusing, on the phone surface that renders whatever
+    // value it is handed. Listing it now rather than leaving a note is
+    // deliberate — a note is only read if someone happens to look here at
+    // exactly the right moment, which is how the comment this page's switch
+    // stack carried went two values out of date.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tabParam]);
+  }, [tabParam, admin]);
 
+  /**
+   * The single funnel for BOTH surfaces — the desktop strip's `onValueChange`
+   * and the phone picker's — which is what keeps them from writing different
+   * URLs for the same choice.
+   *
+   * REPLACE, NEVER PUSH, and that is the whole design decision. Pushing would
+   * give a bookmarkable URL too, but it also makes Back walk backwards through
+   * every section the user tried on the way here, and this page is a thing to
+   * browse: five sections, one page, and a Back button the user presses to
+   * LEAVE. Replacing rewrites the entry the user is standing on, so a later
+   * push (any link off this page) still leaves a Settings entry behind that
+   * carries the section — Back lands on the section they were reading, and the
+   * address bar is shareable the whole time.
+   *
+   * NOTHING IS WRITTEN ON MOUNT, deliberately: `?tab=` means "a section was
+   * chosen", so a bare `/settings` stays bare and keeps resolving to `account`
+   * exactly as before. A canonicalising mount write would also rewrite a
+   * retired `?tab=savings` bookmark out from under its own forwarding toast —
+   * the toast fires once from the URL, and replacing that URL with the resolved
+   * value means reloading the page the user just shared no longer reproduces
+   * it.
+   *
+   * It cannot fight the inbound handling either. The URL → state effect re-runs
+   * with the value this just wrote and its guard finds `resolved === activeTab`,
+   * so it no-ops rather than looping; the forwarding toast runs on mount only,
+   * so a write can never re-toast.
+   *
+   * `resolveSettingsTab` rather than `v as SettingsTab`: this is where a value
+   * enters BOTH state and the URL, and it should be the same clamp the inbound
+   * path uses, so the round trip is closed by construction — whatever is
+   * written here is a value the loader hands back unchanged. Both surfaces
+   * render from `visibleSettingsSections(admin)` and so cannot offer an invalid
+   * or role-refused value today; the clamp is here to delete an unchecked cast,
+   * not because a reachable caller violates it.
+   */
   function handleTabChange(v: string) {
-    const next = v as SettingsTab;
+    const next = resolveSettingsTab(v, admin);
+    // CHOSEN, not an oversight: re-picking the section that is already open
+    // writes nothing, so arriving on a raw or retired value (`?tab=users`,
+    // `?tab=savings` — both resolve to `account`) and then tapping Account
+    // leaves that value in the URL until a DIFFERENT section is picked. It
+    // follows from the same rule as the absent mount write: `?tab=` records a
+    // choice that changed something, and the raw value is what the forwarding
+    // toast reads on reload. It is also unreachable through either control —
+    // neither Radix Tabs nor Radix Select emits a change for a click on the
+    // value they already hold — so this is a note for a reader, not a branch.
     if (next === activeTab) return;
     setActiveTab(next);
+    setSearchParams(
+      (prev) => {
+        // Rebuilt from the live params rather than a bare `{ tab }`, so a
+        // param this page does not own survives the write.
+        const params = new URLSearchParams(prev);
+        params.set('tab', next);
+        return params;
+      },
+      { replace: true },
+    );
   }
 
   return (

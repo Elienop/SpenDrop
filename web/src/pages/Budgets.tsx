@@ -51,6 +51,7 @@ import { Badge } from '@/components/ui/badge';
 import { PLANNING_MIN_YEAR, PLANNING_MAX_YEAR, MONTH_NAMES_FULL } from '@/lib/dates';
 import { formatCurrency } from '@/lib/format';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
+import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { isAdmin } from '@/lib/roles';
 import { Skeleton } from '@/components/ui/skeleton';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
@@ -83,6 +84,50 @@ const ROUTE_LABELS: Record<string, string> = {
 // `--warning` semantic token) is one edit, not a grep-and-replace
 // across every dirty-count indicator.
 const ATTENTION_TEXT_CLASS = 'text-amber-600 dark:text-amber-500';
+
+/**
+ * What a read-only row shows for one entry of an edit buffer.
+ *
+ * The `raw &&` is load-bearing rather than defensive: `Number('')` is 0, which
+ * is finite, so without it an unbudgeted month would render "$0.00" — a claim
+ * the user never made. A non-numeric amount (a future payload bug) degrades to
+ * the same em-dash instead of "$NaN".
+ *
+ * Shared by all FOUR read-only sites — two tables and two card lists. The two
+ * presentations of one row have to agree on what "no value" looks like, and a
+ * copy per site is how one of them ends up rendering an empty cell while the
+ * other renders a dash.
+ */
+function readOnlyAmount(raw: string | undefined, currency: string): string {
+  return raw && Number.isFinite(Number(raw))
+    ? formatCurrency(Number(raw), currency)
+    : '—';
+}
+
+/**
+ * The register both card lists on this page share, written once because the
+ * two of them sit on the same screen and a divergence would read as an
+ * accident.
+ *
+ * ROW LABEL (`<Label>` for an admin, `<dt>` for a member): muted and
+ * `font-medium` at `text-sm` — the same register this page's own field labels
+ * already use (`Year`, `Month`, `Set all months`) and the same one the app's
+ * other card `<dl>`s use for a `<dt>`. The label is not the payload; the
+ * amount beside it is, and it takes the foreground.
+ *
+ * VALUE: `text-sm font-mono tabular-nums`, right-aligned, mirroring the
+ * `text-right` the table gives both Amount columns. `text-sm` has to be
+ * written out here where the table got it for free from `<table class="…
+ * text-sm">`; without it the money renders a size larger than the label
+ * beside it.
+ *
+ * WHY A `<dl>` AND NOT TWO SPANS: a card drops the column headers, so the
+ * month (or category) is the only thing left naming the figure next to it.
+ * `<dt>`/`<dd>` says that in markup, for sighted and screen-reader users at
+ * once, which an `sr-only` prefix would have done for only one of them.
+ */
+const CARD_ROW_LABEL_CLASS = 'text-sm font-medium text-muted-foreground';
+const CARD_ROW_VALUE_CLASS = 'text-sm font-mono tabular-nums';
 
 /* ---------- Shared: discard-edits confirm dialog ---------- */
 
@@ -171,6 +216,110 @@ function DiscardEditsDialog({
 // that predate the current year still have a landing spot.
 const BUDGET_YEARS_AHEAD = 5;
 
+/**
+ * One month as a card row — the below-`md` presentation of the row the monthly
+ * table renders.
+ *
+ * Two columns do not survive a 360px viewport, which is not obvious until you
+ * measure it: measured on the built container, the table wanted 556px inside a
+ * 345px box, so 211px of it sat behind a horizontal scroll — and what was out
+ * there was the Amount column, the only thing on this surface you can do
+ * anything with. The page itself does not pan, which is what makes this easy to
+ * miss: the overflow is inside the table's own `overflow-auto` wrapper.
+ *
+ * ANATOMY: the row stays horizontal — label left, value right — because a month
+ * name is a bounded one-word token (`September` is the longest at ~72px) and
+ * twelve of these are scrolled past in one gesture. `<CategoryLimitCard>` below
+ * stacks instead, and the difference is the identity: a category name is
+ * user-supplied up to 100 characters, so it cannot share a row with a field.
+ *
+ * `min-w-0` ON THE INPUT IS NOT COSMETIC. A flex item's automatic minimum is
+ * its min-content size, and for an `<input>` that is its intrinsic width from
+ * the `size` attribute (~177px at the default 20) — not zero. Without it the
+ * field refuses to shrink below that, and a narrow enough viewport gets the
+ * exact in-card pan this card list exists to remove.
+ */
+function MonthlyBudgetCard({
+  month,
+  name,
+  year,
+  baseCurrency,
+  admin,
+  saving,
+  value,
+  onChange,
+}: {
+  month: number;
+  name: string;
+  year: number;
+  baseCurrency: string;
+  admin: boolean;
+  saving: boolean;
+  value: string;
+  onChange: (month: number, next: string) => void;
+}) {
+  const fieldId = `budget-month-${year}-${month}`;
+  return (
+    <li className="flex items-center justify-between gap-3 p-4">
+      {admin ? (
+        <>
+          {/*
+            The visible label is the month alone; the year and the currency —
+            which the table carried in every row's `aria-label` and in its
+            `Amount (USD)` column header — follow it for a screen reader only.
+            Repeating "2026 in USD" twelve times on screen is noise, but a
+            forms-mode reader hears ONLY the field's own name, with no
+            surrounding card or picker for context, so dropping it there would
+            have left twelve fields called "April" through "December" and no
+            year among them. A real `<Label>` rather than an `aria-label`: an
+            `aria-label` beside visible label text overrides it and orphans
+            what is on screen.
+          */}
+          <Label htmlFor={fieldId} className={`shrink-0 ${CARD_ROW_LABEL_CLASS}`}>
+            {name}{' '}
+            <span className="sr-only">
+              budget for {year} in {baseCurrency}
+            </span>
+          </Label>
+          {/* No `max-w-[160px]`: that cap is what a two-column table row can
+              spare, and it is also what made this the column that got clipped.
+              The row gives the field everything the label does not need. The
+              44px touch floor comes from the `Input` primitive's own
+              `coarse:min-h-11` — see `lib/touch-target.ts`.
+
+              `inputMode="decimal"` alongside `type="number"` because this card
+              exists ONLY on a phone, where the two attributes answer different
+              questions: `type` is what the value is, `inputMode` is which
+              keypad opens for it. Android in particular does not reliably infer
+              a decimal keypad from `type="number"` alone, and every amount here
+              has cents. Pairs with the app's newest numeric field, the
+              large-transaction threshold in `Settings.tsx`. */}
+          <Input
+            id={fieldId}
+            type="number"
+            step="0.01"
+            min="0"
+            inputMode="decimal"
+            placeholder="0.00"
+            value={value}
+            onChange={(e) => onChange(month, e.target.value)}
+            onFocus={selectAllOnFocus}
+            disabled={saving}
+            className="min-w-0 text-right"
+          />
+        </>
+      ) : (
+        <dl className="flex flex-1 items-baseline justify-between gap-3">
+          <dt className={CARD_ROW_LABEL_CLASS}>{name}</dt>
+          <dd className={CARD_ROW_VALUE_CLASS}>
+            {readOnlyAmount(value, baseCurrency)}
+          </dd>
+        </dl>
+      )}
+    </li>
+  );
+}
+
 interface MonthlyBudgetsSectionProps {
   // Editing/saving is admin-only because the backend PUT *and* DELETE for
   // budgets reject non-admins. Non-admins still get the read view (the plan
@@ -204,6 +353,7 @@ function MonthlyBudgetsSection({
   onDirtyChange,
 }: MonthlyBudgetsSectionProps) {
   const baseCurrency = useBaseCurrency();
+  const isMobile = useIsMobileViewport();
   const initialYear = new Date().getFullYear();
   const [year, setYear] = useState(initialYear);
   // Per-month input strings, keyed by 1-12. Strings (not numbers) so a
@@ -629,8 +779,15 @@ function MonthlyBudgetsSection({
           )}
           <div className="flex flex-col gap-1 sm:ml-auto sm:items-end">
             <span className="text-sm text-muted-foreground">Annual total</span>
+            {/* `font-mono` with `tabular-nums`, not `tabular-nums` alone: the
+                pair is how every currency read-cell in this app renders (both
+                tables below, and `CARD_ROW_VALUE_CLASS` for the cards), and
+                `tabular-nums` on a proportional face only equalizes DIGIT
+                widths — the separators and the symbol still shift, which is
+                what this figure does as the user types. `font-medium` survives
+                alongside it; weight and family are different properties. */}
             <span
-              className="text-sm font-medium tabular-nums"
+              className="text-sm font-medium font-mono tabular-nums"
               aria-label="Annual total"
             >
               {formatCurrency(annualTotal, baseCurrency)}
@@ -680,57 +837,92 @@ function MonthlyBudgetsSection({
           className="flex flex-col gap-4"
           noValidate
         >
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Month</TableHead>
-                <TableHead className="text-right">
-                  Amount ({baseCurrency})
-                </TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {MONTH_NAMES_FULL.map((name, idx) => {
-                const month = idx + 1;
-                return (
-                  <TableRow key={month}>
-                    <TableCell>{name}</TableCell>
-                    <TableCell className="text-right">
-                      {admin ? (
-                        <Input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          placeholder="0.00"
-                          value={editAmounts[month] ?? ''}
-                          onChange={(e) =>
-                            setEditAmounts((prev) => ({
-                              ...prev,
-                              [month]: e.target.value,
-                            }))
-                          }
-                          onFocus={selectAllOnFocus}
-                          disabled={saving}
-                          aria-label={`Budget for ${name} ${year} in ${baseCurrency}`}
-                          className="ml-auto max-w-[160px] text-right"
-                        />
-                      ) : (
-                        <span className="font-mono tabular-nums">
-                          {editAmounts[month] &&
-                          Number.isFinite(Number(editAmounts[month]))
-                            ? formatCurrency(
-                                Number(editAmounts[month]),
-                                baseCurrency,
-                              )
-                            : '—'}
-                        </span>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+          {/*
+            --- The presentation fork ------------------------------------
+            ONE tree or the other, chosen in JS — never `md:hidden` on two.
+            Both presentations render the same twelve FIELDS, so mounting both
+            would put two controls for April in the document and submit
+            whichever the browser reached last; `display: none` drops the loser
+            from the a11y tree but never from React or from the form. See
+            `useIsMobileViewport`.
+
+            Inset inside `CardContent` rather than running to the card's edges,
+            which is the call `<CurrenciesSection>` makes for the same shape:
+            this list shares its `CardContent` with the Save button below it, so
+            reaching the edges would mean negative margins that the sibling
+            control does not want.
+          */}
+          {isMobile ? (
+            /* Tailwind's preflight strips the list-style and Safari/VoiceOver
+               drop the list role with the marker — hence the explicit `role`. */
+            <ul
+              role="list"
+              aria-label="Monthly budgets"
+              className="flex flex-col divide-y divide-border rounded-md border"
+            >
+              {MONTH_NAMES_FULL.map((name, idx) => (
+                <MonthlyBudgetCard
+                  key={idx + 1}
+                  month={idx + 1}
+                  name={name}
+                  year={year}
+                  baseCurrency={baseCurrency}
+                  admin={admin}
+                  saving={saving}
+                  value={editAmounts[idx + 1] ?? ''}
+                  onChange={(month, next) =>
+                    setEditAmounts((prev) => ({ ...prev, [month]: next }))
+                  }
+                />
+              ))}
+            </ul>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Month</TableHead>
+                  <TableHead className="text-right">
+                    Amount ({baseCurrency})
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {MONTH_NAMES_FULL.map((name, idx) => {
+                  const month = idx + 1;
+                  return (
+                    <TableRow key={month}>
+                      <TableCell>{name}</TableCell>
+                      <TableCell className="text-right">
+                        {admin ? (
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="0.00"
+                            value={editAmounts[month] ?? ''}
+                            onChange={(e) =>
+                              setEditAmounts((prev) => ({
+                                ...prev,
+                                [month]: e.target.value,
+                              }))
+                            }
+                            onFocus={selectAllOnFocus}
+                            disabled={saving}
+                            aria-label={`Budget for ${name} ${year} in ${baseCurrency}`}
+                            className="ml-auto max-w-[160px] text-right"
+                          />
+                        ) : (
+                          <span className="font-mono tabular-nums">
+                            {readOnlyAmount(editAmounts[month], baseCurrency)}
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
+              </TableBody>
+            </Table>
+          )}
           {admin && (
             <Button
               type="submit"
@@ -762,6 +954,150 @@ function MonthlyBudgetsSection({
 }
 
 /* ---------- Category Limits panel ---------- */
+
+/**
+ * The width bound for a category name on a card.
+ *
+ * A name is user-supplied and capped only by the server's
+ * `MaxCategoryNameLength` = 100 (`internal/api/limits.go`), so it is the one
+ * string on this surface that can pan a phone sideways on its own.
+ * `overflow-wrap:anywhere` is what bounds the WIDTH — Tailwind's `break-words`
+ * breaks a run for painting but leaves the element's min-content contribution
+ * at the full token width — and it needs a `min-w-0` ancestor to bind, since a
+ * flex item's automatic minimum is `min-content`. Same pair, same reasoning, as
+ * `CLAMPED_CATEGORY_NAME` on the Categories page; no `line-clamp` here because
+ * the name is the label for the field under it and a truncated one would leave
+ * the user editing a limit for a category they cannot fully read.
+ *
+ * `leading-5` IS THE THIRD MEMBER OF THAT SET, and it is a PIN rather than a
+ * fix — the distinction matters, so here is the measurement.
+ *
+ * shadcn's `Label` base is `text-sm font-medium leading-none`
+ * (`components/ui/label.tsx`). Line-height 1 is right for the one-line labels
+ * it was written for and would set a WRAPPED name solid — at 14px the lines
+ * touch and an emoji, whose ink overruns the em box, collides with the line
+ * above. It never reached the DOM here: `Label` composes through `cn()`, and
+ * tailwind-merge's conflict table has `font-size` override `leading`, so the
+ * `text-sm` this call site passes in `CARD_ROW_LABEL_CLASS` DELETES the
+ * preceding `leading-none`. Measured against the project's own `cn`:
+ *
+ *     cn('leading-none', 'text-sm')                    -> 'text-sm'
+ *     cn(<Label base>, 'text-sm … min-w-0 …')          -> no leading-* at all
+ *
+ * So both role views were already at `text-sm`'s own 1.25rem, and they agreed.
+ * What they agreed by was a dependency's conflict table plus the accident that
+ * this constant happens to lead with `text-sm` — drop that token in a future
+ * refactor and `leading-none` comes back, on the one string on this page that
+ * can wrap. `leading-5` states the intent instead of inheriting it.
+ *
+ * `leading-5` (1.25rem) rather than `leading-normal` (1.5) so the pin agrees
+ * with what is already rendering: the member's `<dt>` composes by string
+ * concatenation rather than `cn()`, so both `text-sm` and `leading-5` reach the
+ * DOM there, and because the two carry the SAME value it does not matter which
+ * one Tailwind emits last. Zero pixels change on either view. Same trick as the
+ * touch floor in `lib/touch-target.ts`: agree with the thing you are overriding
+ * on the VALUE, and stylesheet emission order stops being load-bearing.
+ */
+const WRAPPED_CATEGORY_NAME = 'min-w-0 leading-5 [overflow-wrap:anywhere]';
+
+/**
+ * One expense category as a stacked card — the below-`md` presentation of the
+ * row the Category Limits table renders.
+ *
+ * Same measured defect as `<MonthlyBudgetCard>`: a 556px table inside a 345px
+ * box, with the Limit column — the only editable thing here — 211px out past
+ * the edge of its own scroll wrapper.
+ *
+ * ANATOMY: stacked, not the horizontal row the monthly card uses, and the
+ * reason is the identity. A category name is user-supplied up to 100
+ * characters; sharing a row with a field would leave it ~139px of a ~244px
+ * card, i.e. two clamped lines of a name the user needs whole to know which
+ * limit they are typing. Stacking gives the name the full width and the field
+ * the full width under it — the shape `<CurrencyCard>` uses for the same
+ * "identity plus one editable value" row.
+ */
+function CategoryLimitCard({
+  category,
+  monthLabel,
+  year,
+  baseCurrency,
+  admin,
+  saving,
+  value,
+  onChange,
+}: {
+  category: Category;
+  monthLabel: string;
+  year: number;
+  baseCurrency: string;
+  admin: boolean;
+  saving: boolean;
+  value: string;
+  onChange: (categoryId: number, next: string) => void;
+}) {
+  const fieldId = `category-limit-${category.id}`;
+  const icon = category.icon && (
+    <span className="mr-2" aria-hidden="true">
+      {category.icon}
+    </span>
+  );
+  return (
+    <li className="flex flex-col gap-1.5 p-4">
+      {admin ? (
+        <>
+          {/* The card's identity line IS the field's label — see
+              `<MonthlyBudgetCard>` for why the month/year/currency ride along
+              `sr-only` rather than on screen. Unique per row, which a bare
+              "Limit" repeated down twenty cards would not be: a screen-reader
+              user would tab through twenty identically-named fields. The icon
+              stays `aria-hidden` exactly as the table has it, so it decorates
+              the line without entering the accessible name. */}
+          <Label
+            htmlFor={fieldId}
+            className={`${CARD_ROW_LABEL_CLASS} ${WRAPPED_CATEGORY_NAME}`}
+          >
+            {icon}
+            {category.name}{' '}
+            <span className="sr-only">
+              limit for {monthLabel} {year} in {baseCurrency}
+            </span>
+          </Label>
+          {/* Full width, unlike the table's `max-w-[160px]`: that cap is what a
+              two-column row can spare, and it is also what made this the column
+              that got clipped. A card has the whole width to give. `text-right`
+              mirrors the alignment the table's Limit column has, and
+              `inputMode` opens the decimal keypad — see `<MonthlyBudgetCard>`
+              for why `type="number"` alone does not. */}
+          <Input
+            id={fieldId}
+            type="number"
+            step="0.01"
+            min="0"
+            inputMode="decimal"
+            placeholder="No limit"
+            value={value}
+            onChange={(e) => onChange(category.id, e.target.value)}
+            onFocus={selectAllOnFocus}
+            disabled={saving}
+            className="text-right"
+          />
+        </>
+      ) : (
+        /* A member has no field, so the value fits beside the name and the card
+           collapses to the same one-line shape the monthly card has. */
+        <dl className="flex items-baseline justify-between gap-3">
+          <dt className={`${CARD_ROW_LABEL_CLASS} ${WRAPPED_CATEGORY_NAME}`}>
+            {icon}
+            {category.name}
+          </dt>
+          <dd className={`shrink-0 ${CARD_ROW_VALUE_CLASS}`}>
+            {readOnlyAmount(value, baseCurrency)}
+          </dd>
+        </dl>
+      )}
+    </li>
+  );
+}
 
 interface CategoryLimitsSectionProps {
   // Editing/saving is admin-only because the backend PUT/DELETE for
@@ -798,6 +1134,7 @@ function CategoryLimitsSection({
   onDirtyChange,
 }: CategoryLimitsSectionProps) {
   const baseCurrency = useBaseCurrency();
+  const isMobile = useIsMobileViewport();
   const now = useMemo(() => new Date(), []);
   const initialYear = now.getFullYear();
   const [year, setYear] = useState(initialYear);
@@ -1037,8 +1374,22 @@ function CategoryLimitsSection({
       <CardHeader className="flex flex-col gap-3">
         <CardTitle className="text-base">Category Limits</CardTitle>
         <CardDescription>
+          {/*
+            The currency belongs in the description because it has nowhere else
+            to be below `md`. The table states it in a column header
+            (`Limit ({baseCurrency})`) that the card list drops, and unlike the
+            Monthly section — whose header still shows `Set all months (USD)` —
+            this one leaves an admin on a phone with no visible currency at all.
+            A member is fine either way: her values render through
+            `formatCurrency` and carry the symbol. This household enters LBP and
+            USD daily, so which one a bare "400" means is a real question.
+
+            One shared line rather than a phone-only element: it costs the
+            desktop a mild redundancy against its own column header, and buys
+            the phone the datum outright.
+          */}
           Set an optional monthly spending limit per expense category.
-          Leave a field blank for no limit.
+          Leave a field blank for no limit. Amounts are in {baseCurrency}.
         </CardDescription>
         <div className="flex flex-wrap items-end gap-3">
           <div className="flex flex-col gap-1">
@@ -1128,61 +1479,84 @@ function CategoryLimitsSection({
             className="flex flex-col gap-4"
             noValidate
           >
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Category</TableHead>
-                  <TableHead className="text-right">
-                    Limit ({baseCurrency})
-                  </TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
+            {/* The same JS fork the monthly section above documents in full:
+                one tree or the other, never two hidden with `md:`. */}
+            {isMobile ? (
+              <ul
+                role="list"
+                aria-label="Category limits"
+                className="flex flex-col divide-y divide-border rounded-md border"
+              >
                 {expenseCategories.map((cat) => (
-                  <TableRow key={cat.id}>
-                    <TableCell className="font-medium">
-                      {cat.icon && (
-                        <span className="mr-2" aria-hidden="true">
-                          {cat.icon}
-                        </span>
-                      )}
-                      {cat.name}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      {admin ? (
-                        <Input
-                          type="number"
-                          step="0.01"
-                          min="0"
-                          placeholder="No limit"
-                          value={editAmounts[cat.id] ?? ''}
-                          onChange={(e) =>
-                            setEditAmounts((prev) => ({
-                              ...prev,
-                              [cat.id]: e.target.value,
-                            }))
-                          }
-                          onFocus={selectAllOnFocus}
-                          disabled={saving}
-                          aria-label={`Limit for ${cat.name} ${monthLabel} ${year} in ${baseCurrency}`}
-                          className="ml-auto max-w-[160px] text-right"
-                        />
-                      ) : (
-                        <span className="font-mono tabular-nums">
-                          {editAmounts[cat.id] &&
-                          Number.isFinite(Number(editAmounts[cat.id]))
-                            ? formatCurrency(
-                                Number(editAmounts[cat.id]),
-                                baseCurrency,
-                              )
-                            : '—'}
-                        </span>
-                      )}
-                    </TableCell>
-                  </TableRow>
+                  <CategoryLimitCard
+                    key={cat.id}
+                    category={cat}
+                    monthLabel={monthLabel}
+                    year={year}
+                    baseCurrency={baseCurrency}
+                    admin={admin}
+                    saving={saving}
+                    value={editAmounts[cat.id] ?? ''}
+                    onChange={(categoryId, next) =>
+                      setEditAmounts((prev) => ({
+                        ...prev,
+                        [categoryId]: next,
+                      }))
+                    }
+                  />
                 ))}
-              </TableBody>
-            </Table>
+              </ul>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Category</TableHead>
+                    <TableHead className="text-right">
+                      Limit ({baseCurrency})
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {expenseCategories.map((cat) => (
+                    <TableRow key={cat.id}>
+                      <TableCell className="font-medium">
+                        {cat.icon && (
+                          <span className="mr-2" aria-hidden="true">
+                            {cat.icon}
+                          </span>
+                        )}
+                        {cat.name}
+                      </TableCell>
+                      <TableCell className="text-right">
+                        {admin ? (
+                          <Input
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            placeholder="No limit"
+                            value={editAmounts[cat.id] ?? ''}
+                            onChange={(e) =>
+                              setEditAmounts((prev) => ({
+                                ...prev,
+                                [cat.id]: e.target.value,
+                              }))
+                            }
+                            onFocus={selectAllOnFocus}
+                            disabled={saving}
+                            aria-label={`Limit for ${cat.name} ${monthLabel} ${year} in ${baseCurrency}`}
+                            className="ml-auto max-w-[160px] text-right"
+                          />
+                        ) : (
+                          <span className="font-mono tabular-nums">
+                            {readOnlyAmount(editAmounts[cat.id], baseCurrency)}
+                          </span>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
             {admin && (
               <Button
                 type="submit"

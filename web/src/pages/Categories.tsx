@@ -762,7 +762,11 @@ function CategoryEditorSheet({
     >
       <SheetContent
         side="right"
-        className="sm:max-w-md"
+        // `gap-6` is the form's old `mt-6` moved onto the sheet's own flex
+        // gap, which is what separates the two children now that the header is
+        // no longer one of the form's block siblings. Same 24px, one token,
+        // and no arithmetic to reconstruct: the body's `-m-1 p-1` cancel.
+        className="gap-6 sm:max-w-md"
         onCloseAutoFocus={(e) => {
           // Radix's own restore is a no-op here: `DialogContentModal`
           // composes `preventDefault(); context.triggerRef.current?.focus()`
@@ -773,19 +777,26 @@ function CategoryEditorSheet({
           e.preventDefault();
           onCloseFocus();
         }}
+        // Outside the body scroller, not a child of it. The title is what
+        // says whether this sheet is creating a category or editing one, and
+        // the description carries the "type can't be changed" rule — on a
+        // short phone in landscape, both used to leave with the scroll.
+        header={
+          <SheetHeader>
+            <SheetTitle>
+              {state?.mode === 'edit' ? 'Edit category' : 'Add category'}
+            </SheetTitle>
+            <SheetDescription>
+              {state?.mode === 'edit'
+                ? "Update this category's name or icon. Type can't be changed after creation."
+                : 'Create a new expense or income category.'}
+            </SheetDescription>
+          </SheetHeader>
+        }
       >
-        <SheetHeader>
-          <SheetTitle>
-            {state?.mode === 'edit' ? 'Edit category' : 'Add category'}
-          </SheetTitle>
-          <SheetDescription>
-            {state?.mode === 'edit'
-              ? "Update this category's name or icon. Type can't be changed after creation."
-              : 'Create a new expense or income category.'}
-          </SheetDescription>
-        </SheetHeader>
-
-        <form onSubmit={handleSubmit} className="mt-6 flex flex-col gap-4">
+        {/* No top margin: the 24px moved onto SheetContent's `gap-6` when the
+            header left the scroller. Adding one back double-counts it. */}
+        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
           <div className="flex flex-col gap-2">
             <Label htmlFor="category-name">Name</Label>
             <Input

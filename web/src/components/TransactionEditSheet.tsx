@@ -92,7 +92,11 @@ export function TransactionEditSheet({
     >
       <SheetContent
         side="right"
-        className="w-full sm:max-w-md"
+        // `gap-6` is the header's old `mt-6` moved onto the sheet's own flex
+        // gap, which is what separates the two children now that the header is
+        // no longer one of the form's block siblings. Same 24px, one token,
+        // and no arithmetic to reconstruct: the body's `-m-1 p-1` cancel.
+        className="w-full gap-6 sm:max-w-md"
         onCloseAutoFocus={(e) => {
           // Radix's own restore is a NO-OP here, and it is worth being precise
           // about why rather than assuming it works: DialogContentModal
@@ -115,13 +119,21 @@ export function TransactionEditSheet({
           }
           onCloseFocus();
         }}
+        // Outside the body scroller, not a child of it. LATENT here and said
+        // so deliberately: measured at 360/390/720 this form does not overflow
+        // (`scrollHeight === clientHeight === 603`, `maxScroll: 0`), so the
+        // title does not scroll away today. It moves for uniformity — one
+        // arrangement across every sheet — and so that a field added later
+        // cannot reintroduce the defect silently.
+        header={
+          <SheetHeader>
+            <SheetTitle>Edit transaction</SheetTitle>
+            <SheetDescription>
+              Change this transaction, or move it to Trash.
+            </SheetDescription>
+          </SheetHeader>
+        }
       >
-        <SheetHeader>
-          <SheetTitle>Edit transaction</SheetTitle>
-          <SheetDescription>
-            Change this transaction, or move it to Trash.
-          </SheetDescription>
-        </SheetHeader>
         {rendered != null && (
           // Keyed by id so a refetch replacing the same row keeps the user's
           // in-progress edits while still feeding the fresh values to the
@@ -207,7 +219,9 @@ function TransactionEditSheetForm({
 
   return (
     <form
-      className="mt-6 flex flex-col gap-4"
+      // No top margin: the shell moved that 24px onto SheetContent's `gap-6`
+      // when the header left the scroller. Adding one back double-counts it.
+      className="flex flex-col gap-4"
       onSubmit={(e) => {
         e.preventDefault();
         void save();
@@ -316,8 +330,10 @@ function TransactionEditSheetForm({
       {/*
         The footer scrolls with the form rather than being pinned: SheetContent
         wraps its children in the scroll box, so a sticky footer here would sit
-        inside the scrolling area and pin to nothing. At six fields the buttons
-        are reachable without scrolling on a 390x844 phone.
+        inside the scrolling area and pin to nothing. Its `header` slot is the
+        only thing rendered outside that box, and a footer is not a header. At
+        six fields the buttons are reachable without scrolling on a 390x844
+        phone.
       */}
       <div className="mt-2 flex flex-col gap-3 border-t border-border pt-4">
         <div className="flex gap-2">

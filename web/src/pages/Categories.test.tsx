@@ -174,6 +174,43 @@ describe('Categories', () => {
       expect(screen.queryByLabelText(/color/i)).not.toBeInTheDocument();
     });
 
+    // B28. The title is what says whether this sheet creates or edits, and
+    // the description carries the "type can't be changed after creation"
+    // rule — both used to sit inside the body scroller and leave with it.
+    // happy-dom lays nothing out, so what is pinned is the structure that
+    // produces the fix: which side of the scroll container they are on.
+    test('the editor header stays OUT of the body scroller', async () => {
+      const user = userEvent.setup();
+      renderCategories();
+      await waitFor(() => {
+        expect(screen.getByText('Food')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByRole('button', { name: /add category/i }));
+      const dialog = screen.getByRole('dialog');
+      const scroller = dialog.querySelector('.overflow-y-auto');
+      expect(scroller).not.toBeNull();
+
+      // Through the heading role, not the text: "Add category" is also the
+      // page button that opened this sheet.
+      expect(
+        scroller!.contains(
+          within(dialog).getByRole('heading', { name: 'Add category' }),
+        ),
+      ).toBe(false);
+      expect(
+        scroller!.contains(
+          within(dialog).getByText(
+            'Create a new expense or income category.',
+          ),
+        ),
+      ).toBe(false);
+
+      // The positive control: "is outside the scroller" is equally true of a
+      // header that never rendered, and of a sheet with no scroller at all.
+      expect(scroller!.contains(screen.getByLabelText(/name/i))).toBe(true);
+    });
+
     test('submitting the Add Sheet posts to categories without a color field', async () => {
       const user = userEvent.setup();
       mockedApi.post.mockResolvedValue({});

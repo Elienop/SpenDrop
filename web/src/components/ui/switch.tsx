@@ -13,15 +13,19 @@ import { cn } from "@/lib/utils"
 // pseudo resolves its insets against the PADDING box, and `border-2` shrinks
 // that to 20px — 10px insets measured a 40px band on the built app (probed
 // 2026-08-14, elementFromPoint); 20 + 2x12 = 44. The extensions reach 10px
-// past the border box on each side, so consecutive rows at `coarse:gap-5`
-// (Settings' notification stack) tile exactly, no overlap. `w-11` is already
+// past the border box on each side, so a stack of these needs a pitch OVER
+// 44px: at `coarse:gap-5` two bands tile exactly (24 + 20 = 44) and the
+// shared boundary resolves by paint order — the B45 fix moved Settings'
+// notification stack to `coarse:gap-6` for 4px of real clearance. `w-11` is already
 // 44 so `inset-x-0` just spans the box — without it left/right stay `auto`
 // and an empty absolute pseudo collapses to zero width, a sliver that
 // catches no tap at all. The
 // pseudo is part of the root button's box, so a tap on it hits the switch —
 // the same mechanism PasswordInput's eye and `TOUCH_TARGET_CHECKBOX` already
 // use. The inset is derived from THIS control's 20px padding box; it is not
-// a shareable constant. The 44px band is browser-measured, not unit-tested.
+// a shareable constant. The rendered pixels are browser-measured; the class
+// arithmetic (band >= 44px, positive seam clearance) is pinned in
+// Settings.notifications.test.tsx.
 const Switch = React.forwardRef<
   React.ElementRef<typeof SwitchPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>

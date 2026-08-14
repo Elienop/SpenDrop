@@ -241,6 +241,40 @@ describe('Transactions page', () => {
       ).toBeInTheDocument();
     });
 
+    // B28. This panel's height is the only one of the four that grows with
+    // the household's data — a chip per category, a row per saved preset —
+    // so it is the one that will overflow first and by the most. happy-dom
+    // lays nothing out, so what is pinned is the structure that produces the
+    // fix: which side of the scroll container the header is on.
+    it('keeps the filter sheet header OUT of the body scroller', async () => {
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await user.click(screen.getByRole('button', { name: 'Filters' }));
+      const dialog = screen.getByRole('dialog');
+      const scroller = dialog.querySelector('.overflow-y-auto');
+      expect(scroller).not.toBeNull();
+
+      // Through the heading role, not the text: "Filters" is also the toolbar
+      // button that opened this sheet.
+      expect(
+        scroller!.contains(
+          within(dialog).getByRole('heading', { name: 'Filters' }),
+        ),
+      ).toBe(false);
+      expect(
+        scroller!.contains(within(dialog).getByText(/Narrow the transaction/)),
+      ).toBe(false);
+
+      // The positive control: "is outside the scroller" is equally true of a
+      // header that never rendered, and of a sheet with no scroller at all.
+      expect(
+        scroller!.contains(
+          screen.getByRole('button', { name: 'This Month' }),
+        ),
+      ).toBe(true);
+    });
+
     it('clicking + Add button toggles entry form and changes label to Cancel', async () => {
       const user = userEvent.setup();
       render(<Transactions />);

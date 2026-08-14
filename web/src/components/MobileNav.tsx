@@ -147,47 +147,79 @@ export function MobileNav() {
 
       {/*
         `gap-0` + `p-0` replace the sheet variant's own spacing so each
-        section below can own its padding and draw a full-bleed border.
-        Nothing here assumes SheetContent is a flex column or that it owns
-        the scroll container — the sections stack and size the same either
-        way, which is why the account block sits in the header rather than
-        being pinned to the bottom.
+        section below can own its padding and draw a full-bleed border. With
+        `gap-0` the header sits flush against the scroller exactly as it did
+        when it was the scroller's first child: the body's `-m-1 p-1` cancel,
+        so moving the header out of the scroller moves nothing on screen.
       */}
       <SheetContent
         side="left"
         className="w-72 gap-0 bg-card p-0 sm:max-w-none"
-      >
-        {/*
-          `space-y-0` is not redundant: SheetHeader's own base carries
-          `space-y-2`, and tailwind-merge treats space-y and gap as separate
-          groups, so `gap-3` alone would stack a 12px gap on top of an 8px
-          margin.
-        */}
-        <SheetHeader className="gap-3 space-y-0 border-b border-border p-4 text-left">
-          <SheetTitle className="flex items-center">
-            <LogoWordmark className="h-6" />
-            <span className="sr-only">SpenDrop navigation</span>
-          </SheetTitle>
-          <SheetDescription className="sr-only">
-            Jump to a section of SpenDrop, or sign out.
-          </SheetDescription>
-          <div className="flex items-center gap-3">
-            <Avatar className="size-8 text-sm font-medium">
-              <AvatarFallback>{initial}</AvatarFallback>
-            </Avatar>
-            {user && (
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">
-                  {user.display_name}
-                </p>
-                <p className="truncate text-xs text-muted-foreground">
-                  @{user.username}
-                </p>
-              </div>
-            )}
-          </div>
-        </SheetHeader>
+        // Outside the body scroller, not a child of it. The drawer's own
+        // content is ten 44px rows plus the appearance controls — a little
+        // over 600px before the header — so it scrolls on a 360x780 phone as
+        // soon as the browser's URL bar is showing, and in any landscape.
+        // Until now the bordered block naming who is signed in scrolled with
+        // it, which is the version of this defect a household member meets
+        // most often: this drawer is the only way into navigation on a phone.
+        //
+        // `space-y-0` is not redundant: SheetHeader's own base carries
+        // `space-y-2`, and tailwind-merge treats space-y and gap as separate
+        // groups, so `gap-3` alone would stack a 12px gap on top of an 8px
+        // margin.
+        header={
+          /*
+            `relative bg-card` is what stops the body painting over this
+            header's bottom edge, and both halves are load-bearing.
 
+            The overlap is real and specific to `gap-0`: the body scroller
+            carries `-m-1` (it widens its clip box so focus rings on edge
+            children survive), and with no gap to absorb it that pulls the
+            scroller's PADDING box 4px up, over this header's bottom 4px —
+            the `border-b` line included. Overflow clips at the padding box,
+            so scrolled rows can paint in that strip, and the scroller comes
+            later in the DOM, so they paint on top. The other three sheets
+            keep their `-4px` inside a `gap-4`/`gap-6` and never see it.
+
+            `relative` moves this header into the positioned-descendants
+            paint layer, above the scroller's in-flow content. `bg-card`
+            makes it opaque in the SAME surface token SheetContent sets
+            above — positioned but transparent, the strip still shows
+            through.
+
+            NO z-index, deliberately. SheetContent's own Close button is
+            `absolute right-4 top-4`, i.e. inside this header's box, and it
+            is positioned LATER in the DOM — so at equal (auto) z-index it
+            paints above this header and stays tappable. Any positive z-index
+            here would bury the drawer's X behind the header and swallow its
+            taps.
+          */
+          <SheetHeader className="relative gap-3 space-y-0 border-b border-border bg-card p-4 text-left">
+            <SheetTitle className="flex items-center">
+              <LogoWordmark className="h-6" />
+              <span className="sr-only">SpenDrop navigation</span>
+            </SheetTitle>
+            <SheetDescription className="sr-only">
+              Jump to a section of SpenDrop, or sign out.
+            </SheetDescription>
+            <div className="flex items-center gap-3">
+              <Avatar className="size-8 text-sm font-medium">
+                <AvatarFallback>{initial}</AvatarFallback>
+              </Avatar>
+              {user && (
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium">
+                    {user.display_name}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    @{user.username}
+                  </p>
+                </div>
+              )}
+            </div>
+          </SheetHeader>
+        }
+      >
         <nav aria-label="Primary" className="flex flex-col gap-2 py-2">
           <div className="flex flex-col gap-0.5 px-2">
             {menuItems.map((item) => (

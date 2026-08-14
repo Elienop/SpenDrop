@@ -183,28 +183,6 @@ Three separate defects in one surface, none of them mobile-specific:
 Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
 **Effort:** medium for (1); small for (2) and (3).
 
-### B28 — four sheets scroll their own header away
-**Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
-ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
-long body loses its title and any summary figure on scroll. Measured on the heatmap's day sheet
-before the fix: the day's total left the visible box after **60px** of scroll with 8 of 20 rows
-still on screen.
-
-Slice 3 added an optional `header` slot rendered OUTSIDE the scroller and used it for the day
-sheet. Four consumers still pass `SheetHeader` as a child: `MobileNav` (a `border-b p-4` header,
-where the border makes the scroll-away most visible), `TransactionEditSheet`, `Categories`, and
-the Transactions `Filters` sheet. `TransactionEditSheet` was MEASURED and its form never
-overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is latent; the other
-two were not measured.
-**Effort:** small per consumer — the opt-in is one prop.
-
-### B30 — the Settings section is not reflected in the URL
-**Verified: read** (2026-08-09). `location.search` stays empty when a section is chosen, on both
-the desktop tab strip and the new phone picker. A `?tab=` value is honoured *into* the page but
-never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
-not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
-**Effort:** small.
-
 ### B36 — a member can take another member's display name, and attribution follows
 **Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
 mechanism confirmed independently: `created_by` **is** the display name
@@ -254,39 +232,78 @@ close on `saving` would trap the user behind a hung request. The clean fix is an
 before the close still toasts.
 **Effort:** small.
 
-### B44 — the Budgets table still pans 211px inside its wrapper at 360
-**Verified: reproduced with real data** (2026-08-14 browser pass, built container at 360). The
-page itself does not pan — the table sits in a bounded scroll wrapper — but the table is 556px
-wide in a 345px box, so the Limit column and everything right of it needs a 211px in-card pan.
-This is the B41 residual re-measured: real data confirms it, so the fixture-inflation caveat is
-retired. Fix is the same card-list treatment every other table got. **Effort:** small-medium.
+### B46 — "six sections" is stale in eight places since `users` merged into `account`
+**Verified: read** (2026-08-14, found during B30). `VALID_TABS` has five entries and the phone
+picker renders five options, but "six sections/labels/values" survives in
+`settings-sections.ts:109`, `Settings.mobile.test.tsx:40,102` and six spots in `Settings.tsx`.
+Deliberately NOT swept on the phone-residue branch: some of those lines record browser
+measurements taken when six labels existed ("568px of scrollWidth against 313"), and a blind
+renumbering would falsify a measurement record. Wants one deliberate pass that separates
+"stale count" (fix) from "historical measurement" (keep, dated). **Effort:** small.
 
-### B45 — the five stacked notification switches' tap bands overlap by ~4px
-**Verified: measured** (2026-08-14 browser pass at 360). The activity switches (Over budget
-through Large transaction) sit 16px apart; each carries the coarse tap band that reaches 10px
-past its border box, so adjacent bands overlap by ~4px and a tap at the seam lands on the LATER
-switch in paint order. Pre-existing rhythm, untouched by the phone batch; low stakes (the wrong
-toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
-20px+, or shrink the band on stacked placements. **Effort:** small.
+### B47 — ModeToggle's moon glyph has no positioned ancestor inside its own button
+**Verified: read** (2026-08-15, found during the B28 fix wave). `ModeToggle.tsx:27` renders
+`<Moon className="absolute …">` but `ui/button.tsx` has no `relative` in its base, so the
+icon's containing block is whatever positioned ancestor the placement supplies — inside the
+mobile drawer that is `SheetContent` itself, so the glyph escapes the body scroller's clipping
+and does not scroll with its own button (dark mode, drawer scrolled). Fix wants `relative` on
+ModeToggle's trigger (scoped) rather than on the Button base (app-wide blast radius — audit
+first). Browser-probed 2026-08-15: real but sub-visible today — the drawer's max scroll is
+only ~15px at 360x640 with the current nav length, so the detached moon stays inside its
+button's box; becomes user-visible only if the drawer's body grows. **Effort:** small.
 
-### B43 — Enter on the closed category trigger in the desktop row saves the row mid-edit
-**Verified: probed** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
-the fix batch pinned the current behavior with a test rather than changing it; the deep review
-probed what is actually observable). Pressing Enter on the category Select's CLOSED trigger in
-the desktop row fires the row's Enter-saves handler — the row commits and leaves edit mode
-while the user may only have meant to open the picker. (Radix would also open the picker on
-that Enter, but the row unmounts first, so no picker is ever seen.) A comment predating B33
-frames Enter-saves-from-any-field as intentional; whether it should apply to a Select trigger
-needs the owner's call. Enter on an OPEN picker is correct since B33: it picks the option and
-does not save. **Effort:** small once decided; the B33 controlled-Select guard is the natural
-place.
+### B48 — 11 test files strip a hook's contract with `as unknown as ReturnType<…>`
+**Verified: read** (2026-08-15, found during the B30 fix wave). The double cast opts a mock out
+of the mocked hook's type contract, so a required field added to the hook later feeds
+`undefined` into those tests silently — and any "adding member X produced N compile errors"
+measurement is a floor, not a total, because these files never enter the count. One instance
+(the `useAuth` mock in Settings.urlstate.test.tsx) was fixed on the phone-residue branch; the
+same file and 10 others still carry the pattern for other hooks (`grep -rln "as unknown as
+ReturnType" web/src`). Caveat before sweeping: some casts wrap large React-Query result shapes
+where a fully typed object is genuinely impractical — the audit should separate "lazy auth/ctx
+mock" (fix) from "pragmatic partial of a huge generic" (document). **Effort:** small-medium.
+
+### B49 — `type="number"` fields ship no `inputMode="decimal"` hint outside three sites
+**Verified: read** (2026-08-15, found during the B44 fix wave). The pairing (which makes phones
+reliably raise the decimal keypad) exists on the Settings large-transaction threshold and, as
+of the phone-residue branch, both Budgets card fields — but five other files carry bare
+`type="number"`: `AmountCurrencyInput` (the primary phone entry path — fix first), `SpendingTab`,
+`PatternsTab`, `Savings`, `FilterPanel`; plus the Budgets desktop-table inputs, which the coarse
+Tab S10 FE reaches at ~1130px landscape (inputMode is inert for physical keyboards, so adding
+it there is zero-risk but changes desktop DOM — scoped out of the phone-residue batch on
+purpose). Un-verifiable in any repo test — headless Chrome raises no soft keyboard; verify on
+a real device or accept the hint on spec. **Effort:** small.
+
+### B50 — mount-time toasts are lost on cold loads: the Toaster subscribes too late
+**Verified: reproduced** (2026-08-15 browser pass, built container). A cold load of
+`/settings?tab=savings` (i.e. the bookmark case the forwarding toast exists for) shows NO
+toast — probed with a MutationObserver from t=0, nothing ever renders — while the same URL
+reached by in-app navigation toasts correctly ("Savings has its own page now · Open").
+Mechanism: the one-shot effect fires `toast.info` on Settings' mount, but `<Toaster/>` sits at
+`AppShell.tsx:114` AFTER the routed content, so on a cold mount the child's effect runs before
+sonner subscribes and the toast is dropped. Pre-existing since PR #63 (`182199b`) — this
+branch changed only the lookup expression, and the in-app probe proves the new Map lookup
+fires correctly. Any OTHER mount-time toast in the app is lost the same way (audit `toast.*`
+calls in mount effects). Fix candidates: mount `<Toaster/>` before the routed content in
+AppShell (verify sonner's fixed positioning makes DOM order irrelevant to stacking), or defer
+mount-time toasts one tick. NOTE the B30 interaction: the no-mount-write design keeps the raw
+`?tab=` exactly so this toast reproduces on reload — right design, currently moot for cold
+loads until this is fixed. **Effort:** small.
 
 ---
 
 ## Queued stages
 
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
-PR #139 and released as v0.44.0 — see Closed. Nothing is currently queued as a stage.*
+PR #139 and released as v0.44.0 — see Closed.*
+
+- ~~Phone-residue batch (B44 + B45 + B28 + B30)~~ — **built and verified 2026-08-15** on
+  `fix/phone-residue-sheets-url-budgets-switches` — see Closed. Carried the `2bea69f` stamp
+  and the B43 / native-Android / import-rate / ⌘Z decision records as riders.
+- **Back-dated import rate** (decided 2026-08-14): the import sheet gets an optional per-row
+  rate column; rows without one fall back to the import-day rate. Data-correctness stage on
+  its own branch — import parser + validation, and the interaction with the import dedupe
+  hash must be designed, not assumed. Next after the phone-residue batch.
 
 ---
 
@@ -298,17 +315,21 @@ PR #139 and released as v0.44.0 — see Closed. Nothing is currently queued as a
   **Answered 2026-08-02: yes, Dockhand watches every stack's container health.** That is what
   made B7 a two-line change to what the `HEALTHCHECK` scrapes rather than a new alerting
   channel; both pieces shipped in v0.39.0 — see B7 in Closed.
-- **Native Android app — reassess.** The pre-B9 phone experience was the standing evidence for
-  going native; with all of B9 plus #131 and #137 shipped, the PWA is the daily driver at 360px.
-  The gaps that framed this question (B26, B33, B41, B42) all closed in the 2026-08-14
-  phone/tablet batch — see Closed. What remains on the phone surface: B28 (sheet headers),
-  B30 (URL section state), and B43 (a desktop-row keyboard oddity). Owner's call whether that
-  residue keeps the question open.
-- **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
-  back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
-  has never moved); real once it does. **Unblocked 2026-08-14:** the rate column (B1 step 2)
-  shipped in PR #139, so the only thing still needed is the owner's decision about what rate a
-  back-dated import should use.
+- ~~**Native Android app — reassess.**~~ **Answered 2026-08-14: CLOSED — the PWA is the
+  answer**, and it keeps improving ("the pwa is good enough now we can keep on improving for
+  the future as well"). The residue that last framed the question is dispatched: B28 and B30
+  are in the phone-residue batch in flight, and B43 closed as intended behavior — see Closed.
+- ~~**Import + foreign currency:** what rate should a back-dated import use?~~ **Answered
+  2026-08-14: the import sheet carries its own optional per-row rate column; rows without one
+  fall back to the import-day rate** — the sheet knows its own era best, and the fallback is
+  today's behavior. Context that framed it: import accepts an `original_currency` column, so a
+  sheet of back-dated LBP rows was valued at the rate current *when you import* — harmless
+  while the rate never moved, real once it does; the booked-rate column (B1 step 2) shipped in
+  PR #139 and unblocked this. Promoted to the queued import-rate stage above.
+- **Entry-row ⌘Z leaves member-visible tombstones** — **Answered 2026-08-14: fine as-is**
+  (asked 2026-08-02, reaction was pending since). Trash purge clears them, and tombstoned rows
+  are excluded from every aggregate by the soft-delete invariant, so the only cost is Trash
+  clutter.
 
 ---
 
@@ -358,9 +379,65 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B28 + B30 + B44 + B45 — the phone-residue batch** (2026-08-15, on
+  `fix/phone-residue-sheets-url-budgets-switches`, commits `6a16776..d324b12`; squash hash
+  joins this entry at merge). Three parallel builders with disjoint file ownership. Per item:
+  **B28** — all four remaining sheet consumers (MobileNav, TransactionEditSheet, Categories
+  editor, Transactions Filters) moved their `SheetHeader` into the primitive's `header` slot,
+  so titles stay visible under body scroll; spacing preserved exactly (removed body margins
+  became the sheet's flex gap — arithmetic verified by the deep review); MobileNav's flush
+  header additionally got `relative bg-card` — deliberately WITHOUT z-index, which would bury
+  the drawer's absolutely-positioned Close button (pinned by a dedicated mutant).
+  TransactionEditSheet's migration is defensive (its form never overflows, `maxScroll: 0`).
+  Browser-verified: divider unbroken under real scroll, Close tappable, and the two
+  landscape-only sheets (66/68px overflow at 780x360) plus the unbounded 21-chip category
+  filter (367px scroll) all keep their titles.
+  **B30** — the chosen section is replace-written to `?tab=` through the one `handleTabChange`
+  both surfaces share, clamped by `resolveSettingsTab` (the same function the inbound path
+  uses — round trip closed by construction, security-reviewed). Nothing writes on mount: a
+  bare `/settings` stays bare, and a retired bookmark keeps its raw value so the forwarding
+  toast can reproduce (see B50 for why cold loads currently lose that toast anyway).
+  `MOVED_TABS` became a `Map`, closing the prototype-key lookup (`?tab=constructor` toasted
+  "undefined has its own page now") and the unchecked `Record` index in one move; the deep
+  review then found every route in that table unpinned (repointing both at `/trash` stayed
+  green) — all three destinations now have invoke-and-assert-URL cases with literal oracles.
+  **B44** — BOTH Budgets tables (not one: the page has two, and only Category Limits was
+  panning — the brief's premise, corrected by the builder) render as card lists below `md` on
+  the shared JS gate. Monthly cards horizontal (bounded token), category cards stacked
+  (100-char names wrap via `[overflow-wrap:anywhere]` with `leading-5` pinned against
+  tailwind-merge reviving Label's `leading-none` — the review's "set solid" Important was
+  REFUTED by measuring the merged output: `text-sm` deletes `leading-none` in the conflict
+  table, so the token is a pin, not a repair). Admin/member gating mirrored; em-dash-never-zero
+  through the shared `readOnlyAmount` (the cards' `?? ''` arm and the table's `undefined` arm
+  meet in one guard); `inputMode="decimal"`; the Category Limits description names the
+  currency (an admin's phone view otherwise showed none). Desktop DOM-diffed at HEAD vs base:
+  byte-identical except the caption and the Annual-total `font-mono`.
+  **B45** — the filed "~4px overlap" was wrong in mechanism and worse in fact: the five
+  activity switches' 44px tap bands TILED at exactly zero clearance (24px row + `gap-5` 20px
+  = 44px pitch), seam resolved by paint order. Stack moved to `coarse:gap-6` → +4px clearance,
+  fine-pointer rhythm untouched; the regression test derives band and pitch from rendered
+  class strings (border-2 is 2px — its own scale), the pattern that cannot go stale the way
+  the old comment did. Coarse-emulation browser pass: every seam midpoint hits no switch,
+  every switch answers its own band.
+  Process: four-reviewer battery (1 Important — refuted; all other findings fixed in three
+  waves), ~45 builder mutants watched die pre-commit, isolated deep review MERGEABLE (12/13
+  full-suite re-kills; the survivor became the route-pin test above), live browser pass at
+  360/640/780x360 + proven-coarse. Suites 2048 → 2090.
+
+- **B43 — Enter on the closed category trigger saves the row: CLOSED as intended behavior**
+  (owner decision 2026-08-14; no code change — the decision record and the test-comment update
+  ride `fix/phone-residue-sheets-url-budgets-switches`). The owner uses Enter on the closed
+  trigger as the fast keyboard save; rerouting it to open the picker would cost a Tab to reach
+  Save, and Space already opens the picker. The B33-era pin test
+  (`_ControlEnterOnTheClosedTriggerStillSaves`) stands and now documents a decided contract,
+  not an open question. Enter on an OPEN picker still picks without saving (B33). What was
+  non-obvious: the "defect" framing assumed pickers must open on Enter; the owner's actual
+  keyboard flow treats the trigger as one more field you save from, which is exactly what the
+  pre-B33 comment claimed was intentional — it was right.
+
 - **B26 + B33 + B34 + B41 + B42 — the phone/tablet batch** (2026-08-14, on
   `fix/phone-batch-recurring-settings-tablet`; five parallel builders with disjoint file
-  ownership; squash hash joins this entry at merge). Per item:
+  ownership; merged 2026-08-14 as PR #140, squash `2bea69f`, released v0.44.1). Per item:
   **B26** — the Patterns tab's recurring-expenses table (102px pan at 360) became a JS-gated
   card list below `md` (`useIsMobileViewport`, matching the app's other five card lists); the
   tab's pre-existing pointer-derived gate was renamed `heatmapIsCalendar` so the two forks

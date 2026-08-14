@@ -63,18 +63,16 @@ interface SheetContentProps
    * rows still on screen — so from row 9 on, the sheet explaining one day
    * showed neither the day nor its total.
    *
-   * FOUR CONSUMERS STILL PASS `SheetHeader` AS A CHILD, and that was assessed,
-   * not overlooked: `TransactionEditSheet`, `MobileNav`, `Categories` and the
-   * Transactions filter panel. Measured at 360/390/720, TransactionEditSheet's
-   * form does not overflow (`scrollHeight === clientHeight === 603`,
-   * `maxScroll: 0`), so its header never scrolls away — the mechanism is
-   * shared but the defect is latent there, and migrating it would have been an
-   * unverifiable change with no before/after to show. `MobileNav` sets
-   * `p-0 gap-0` and owns its own layout. The other two were not measured.
+   * EVERY consumer passes its header through this slot (B28, 2026-08-14
+   * migrated the last four: `TransactionEditSheet`, `MobileNav`, `Categories`
+   * and the Transactions filter panel). A `SheetHeader` passed as a child is
+   * the retired idiom — new sheets use the slot, and each consumer carries a
+   * structural test pinning its header outside the scroller.
    *
-   * So the repo holds a better idiom used once and an older one used four
-   * times. This note is which is which, so the next reader does not have to
-   * guess whether the single user is the exception or the direction.
+   * One migration is defensive rather than a fix: measured at 360/390/720,
+   * TransactionEditSheet's form does not overflow (`scrollHeight ===
+   * clientHeight === 603`, `maxScroll: 0`), so its header never scrolled away
+   * — the defect was latent there and the move is for uniformity only.
    */
   header?: React.ReactNode
 }

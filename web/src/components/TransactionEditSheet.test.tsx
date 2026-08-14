@@ -156,6 +156,27 @@ describe('TransactionEditSheet shell', () => {
     expect(dialog).not.toHaveClass('sm:max-w-sm');
   });
 
+  // B28. LATENT here — measured at 360/390/720 the form does not overflow
+  // (`scrollHeight === clientHeight === 603`), so nothing scrolls away today.
+  // The pin is what stops a seventh field reintroducing the defect silently:
+  // once the body does overflow, the title only survives if it is on this side
+  // of the scroll container.
+  it('keeps its title OUT of the body scroller', () => {
+    renderSheet();
+    const dialog = screen.getByRole('dialog');
+    const scroller = dialog.querySelector('.overflow-y-auto');
+    expect(scroller).not.toBeNull();
+
+    expect(scroller!.contains(screen.getByText('Edit transaction'))).toBe(false);
+    expect(
+      scroller!.contains(screen.getByText(/move it to Trash/i)),
+    ).toBe(false);
+
+    // The positive control: "is outside the scroller" is equally true of a
+    // title that never rendered, and of a sheet with no scroller at all.
+    expect(scroller!.contains(screen.getByLabelText('Date'))).toBe(true);
+  });
+
   it('names and describes itself for screen readers', () => {
     renderSheet();
     expect(
