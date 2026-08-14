@@ -37,7 +37,12 @@ import { Card } from '@/components/ui/card';
 import { TagInput } from './TagInput';
 import { CategoryBadge } from './CategoryBadge';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
+import { AmountSignToggle } from './AmountSignToggle';
 import type { Category, Transaction } from '../api/types';
+import {
+  TYPE_EXPENSE,
+  type TransactionType,
+} from '@/lib/transaction-types';
 import { formatYYYYMMDD } from '@/lib/dates';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import { MAX_DESCRIPTION_LENGTH } from '@/lib/constants';
@@ -48,7 +53,7 @@ import {
   noRateMessage,
   saveFailureMessage,
 } from '@/lib/save-failure';
-import { toCreatePayload } from '@/lib/currency';
+import { applyAmountSign, toCreatePayload } from '@/lib/currency';
 import { useCurrencies } from '@/hooks/useCurrencies';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 
@@ -106,8 +111,19 @@ function EntryLabel({ children }: { children: string }) {
 
 const entrySchema = z.object({
   date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date'),
+  // STILL POSITIVE-ONLY, deliberately, now that the ledger stores signed
+  // amounts. A refund is entered by turning the Refund toggle on beside this
+  // field, never by typing a minus — so a negative here is a typo and keeps
+  // being refused. `submit` applies the toggle's sign to this magnitude on its
+  // way to the wire (`applyAmountSign`), which is also what keeps the zero
+  // rejection intact: `AmountCurrencyInput` emits 0 for an empty or unparseable
+  // box, and `.positive()` is the only thing standing between that and a
+  // payload.
   amount: z.number().positive('> 0'),
   currency: z.string().regex(/^[A-Z]{3}$/, 'Invalid currency'),
+  /** The Refund toggle. Form state rather than a local `useState` so it resets
+   *  with the row after a save and comes back with it on Undo. */
+  refund: z.boolean(),
   // 500 CHARACTERS, matching the server (MaxDescriptionLength) and the bulk-edit
   // dialog. This field used to cap at 200, which came in with the component in
   // the design-system v3 PR and was never anything the product claimed: no
@@ -156,6 +172,7 @@ function sameEntry(a: EntryFormValues, b: EntryFormValues): boolean {
   return (
     a.date === b.date &&
     a.amount === b.amount &&
+    a.refund === b.refund &&
     a.currency === b.currency &&
     a.description === b.description &&
     a.category_id === b.category_id &&
@@ -205,6 +222,10 @@ export function TransactionEntryRow({
     defaultValues: {
       date: getLastDate(),
       amount: 0,
+      // Not sticky, unlike the date/category/currency beside it: a refund is
+      // the rare entry, and defaulting the next one to it would silently
+      // negate an ordinary expense.
+      refund: false,
       currency: getLastCurrency(baseCode),
       description: '',
       category_id: getLastCategoryId(),
@@ -335,6 +356,7 @@ export function TransactionEntryRow({
       form.reset({
         date: values.date,
         amount: 0,
+        refund: false,
         currency: values.currency,
         description: '',
         category_id: values.category_id,
@@ -375,6 +397,11 @@ export function TransactionEntryRow({
       if (sendingRef.current) return;
       const clientKey = newClientKey();
       let payload: CreateTransactionInput;
+      // `refund` is a form field, not a wire field — the server infers nothing
+      // from a flag, it just stores the sign. Destructured out rather than
+      // left to ride along, because `toCreatePayload` spreads whatever it is
+      // handed and an unknown key would go out with the request.
+      const { refund, ...entry } = values;
       try {
         // Union-to-optional widening: toCreatePayload returns a discriminated
         // union (collapsed vs. expanded shape), while CreateTransactionInput
@@ -385,8 +412,15 @@ export function TransactionEntryRow({
         // The single client_key mint site for this form: one per submit, so
         // editing the row and saving again is correctly a new intent. A retry
         // of THIS submit goes through `send` and keeps this key.
+        //
+        // The sign goes on BEFORE the conversion, so a foreign refund divides
+        // with it and both halves of the money pair land negative.
         payload = toCreatePayload(
-          { ...values, client_key: clientKey },
+          {
+            ...entry,
+            amount: applyAmountSign(entry.amount, refund),
+            client_key: clientKey,
+          },
           baseCode,
           rateFor,
         ) as CreateTransactionInput;
@@ -502,6 +536,17 @@ export function TransactionEntryRow({
   // surrounding component — `form.watch` returns a non-stable function that
   // the compiler refuses to touch (react-hooks/incompatible-library warning).
   const watchedCurrency = useWatch({ control: form.control, name: 'currency' });
+  // Which word the sign toggle wears. It follows the CATEGORY the row is being
+  // filed under, because that is what decides whether a negative amount is
+  // money coming back (a refund on an expense) or income being taken back (a
+  // reversal). Before a category is picked the row is an expense as far as the
+  // form is concerned, and "Refund" is the case v1 promotes.
+  const watchedCategoryId = useWatch({
+    control: form.control,
+    name: 'category_id',
+  });
+  const entryType: TransactionType =
+    categories.find((c) => c.id === watchedCategoryId)?.type ?? TYPE_EXPENSE;
   const hasNoRate =
     !currenciesLoading &&
     watchedCurrency !== baseCode &&
@@ -572,6 +617,28 @@ export function TransactionEntryRow({
                     }}
                   />
                 </FormControl>
+              </FormItem>
+            )}
+          />
+
+          <FormField
+            control={form.control}
+            name="refund"
+            render={({ field }) => (
+              <FormItem className="space-y-2">
+                {/* Same invisible-label + fixed-height-box trick the submit
+                    button's column uses: under `items-start` a control with no
+                    label of its own would sit a label's height above its
+                    peers. `coarse:h-11` tracks the Input primitive's touch
+                    floor for the same reason it does there. */}
+                <Label aria-hidden="true">&nbsp;</Label>
+                <div className="flex h-10 items-center coarse:h-11">
+                  <AmountSignToggle
+                    checked={field.value}
+                    onCheckedChange={field.onChange}
+                    type={entryType}
+                  />
+                </div>
               </FormItem>
             )}
           />

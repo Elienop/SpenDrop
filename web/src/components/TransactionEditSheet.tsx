@@ -2,6 +2,7 @@ import { useId, useRef, useState } from 'react';
 import { Trash2 } from 'lucide-react';
 import type { Category, Transaction } from '../api/types';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
+import { AmountSignToggle } from './AmountSignToggle';
 import { AutocompleteInput } from './AutocompleteInput';
 import { TagInput } from './TagInput';
 import { Button } from '@/components/ui/button';
@@ -181,12 +182,16 @@ function TransactionEditSheetForm({
     save,
     saving,
     amountProps,
+    signProps,
     saveDisabled,
   } = useTransactionEditForm({
     transaction,
     onUpdate,
     onError,
     onSaved: onClose,
+    // Only so the sign toggle can read the SELECTED category's type — the
+    // Select below renders from this same list.
+    categories,
   });
 
   async function handleDelete() {
@@ -286,6 +291,16 @@ function TransactionEditSheetForm({
             keep the base value the row already stores, not re-price it at
             today's rate. See useTransactionEditForm. */}
         <AmountCurrencyInput id={`${fieldId}-amount`} {...amountProps} />
+        {/* Directly under the box whose sign it owns. The hint rides along
+            here and not on the desktop row: this is the phone surface, where
+            there is vertical room and where the person using it is least
+            likely to have met the word in a spec. */}
+        <AmountSignToggle
+          id={`${fieldId}-refund`}
+          {...signProps}
+          showHint
+          className="mt-1"
+        />
       </div>
 
       {/*

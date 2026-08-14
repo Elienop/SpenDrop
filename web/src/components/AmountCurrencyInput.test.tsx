@@ -67,6 +67,16 @@ describe('AmountCurrencyInput', () => {
     expect(onCurrencyChange).toHaveBeenCalledWith('LBP');
   });
 
+  it('_KeepsMinZeroNowThatAmountsCanBeNegative: a typed minus stays invalid', () => {
+    // Not leftover strictness. The sign of a transaction comes from the Refund
+    // toggle and from nowhere else, so a minus in the digits is always a typo
+    // — and on the two EDIT surfaces a typo that got through would silently
+    // invert an existing row. Dropping this attribute is the one-character
+    // change that would make that possible, so it is pinned.
+    renderInput();
+    expect(screen.getByRole('spinbutton')).toHaveAttribute('min', '0');
+  });
+
   it('renders no preview when currency === baseCode', () => {
     renderInput({ value: 100, currency: 'USD', baseCode: 'USD' });
     expect(screen.queryByText(/≈/)).not.toBeInTheDocument();
@@ -278,6 +288,60 @@ describe('AmountCurrencyInput', () => {
       });
       expect(screen.getByText(/≈/)).toHaveTextContent(/\$16\.67/);
       expect(screen.queryByText(/as recorded/i)).not.toBeInTheDocument();
+    });
+
+    // A refund of the same money: 1,500,000 LBP came back, so the row stores
+    // -16.85 against a negative original amount. The box shows the MAGNITUDE
+    // and the Refund toggle beside it carries the sign, which is why the
+    // freeze comparison needs `negative` — without it the sign of the amount
+    // the save will send is not knowable from this component's props.
+    const storedLbpRefund = {
+      amount: -16.85,
+      original_amount: -1500000,
+      original_currency: 'LBP',
+    };
+
+    it('_RefundFreezesOnTheSignedComparison: magnitude in the box, sign on the toggle', () => {
+      renderInput({
+        value: 1500000,
+        negative: true,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbpRefund,
+      });
+      // The stored figure, in the magnitude the digits above it are written
+      // in — one sign per amount block, and it lives on the toggle.
+      expect(screen.getByText(/≈/)).toHaveTextContent('≈ $16.85 (as recorded)');
+      expect(screen.getByText(/≈/)).not.toHaveTextContent('-$16.85');
+    });
+
+    it('_TurningTheRefundOffRePrices: same digits, different money', () => {
+      // Nothing was retyped — only the toggle moved — and that IS the user
+      // changing the money: the request now carries `original_amount:
+      // +1500000` against a row holding -1,500,000, the server's predicate
+      // fails, and it re-derives from today's rate. A magnitude-only
+      // comparison would call this unchanged and promise $16.85.
+      renderInput({
+        value: 1500000,
+        negative: false,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbpRefund,
+      });
+      const preview = screen.getByText(/≈/);
+      expect(preview).toHaveTextContent(/\$16\.67/);
+      expect(preview).not.toHaveTextContent(/\$16\.85/);
+    });
+
+    it('_TurningAnOrdinaryRowIntoARefundRePrices: the mirror case', () => {
+      renderInput({
+        value: 1500000,
+        negative: true,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbp,
+      });
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$16\.67/);
     });
 
     it('_CreateSurfaceStillPreviewsTodaysRate: no storedMoney means no freeze', () => {

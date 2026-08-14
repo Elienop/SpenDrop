@@ -44,6 +44,15 @@ function escapeRegExp(s: string): string {
  * comma decimal separator (`12,50`). Returns null when the token is not a
  * clean amount. When a recognised unique symbol is attached, its currency
  * code is returned so the caller can adopt it.
+ *
+ * POSITIVE-ONLY IS THE DESIGN, not a gap left over from unsigned amounts.
+ * Transactions can be negative now — a refund is a negative expense — but the
+ * sign comes from the Refund toggle on the screen (`AmountSignToggle`) and
+ * from nothing else, so a minus in this text is never the sign channel. A
+ * token like "-5" therefore keeps failing the regex below and stays in the
+ * DESCRIPTION, where the user can see it: a freeform line is typed fast on a
+ * phone, and reading a stray keystroke as "negate this entry" would put a
+ * wrong-signed row in the ledger without anything on screen having said so.
  */
 function tryParseAmount(
   token: string,
@@ -65,6 +74,7 @@ function tryParseAmount(
     }
   }
 
+  // No optional leading `-` in this pattern, on purpose — see the doc above.
   if (!/^\d+(?:[.,]\d{1,2})?$/.test(s)) return null;
   const value = Number.parseFloat(s.replace(',', '.'));
   if (!Number.isFinite(value) || value <= 0) return null;

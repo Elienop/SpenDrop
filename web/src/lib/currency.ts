@@ -7,9 +7,35 @@ import type { Transaction } from '@/api/types';
  *  see spec §Edge Case 7 for the known limitation around JPY/BHD. */
 export const PREVIEW_DECIMALS = 2;
 
+/**
+ * `Math.round` with Go's tie-breaking rule, which is a DIFFERENT rule.
+ *
+ * JS sends a half toward +Infinity (`Math.round(-0.5)` is `-0`); Go's
+ * `math.Round` sends it away from zero (`-1`). The two agree on every positive
+ * number and disagree on every negative half, so while amounts were required
+ * to be positive the difference was unreachable — the comment that used to sit
+ * on `dollarsToCents` said exactly that, and deferred this change to the day
+ * signed amounts landed. They have: a refund is a negative amount, so the
+ * frontend now computes cents for values on the losing side of that rule.
+ *
+ * It has to be Go's rule and not merely a consistent one, because the two
+ * results are compared against each other. `foreignMoneyUnchanged` mirrors a
+ * server predicate over stored cents, and `toCreatePayload` computes the base
+ * amount the server would compute for the same division — a one-cent
+ * disagreement re-prices money the user did not touch, or promises a preview
+ * figure the save contradicts.
+ */
+function roundHalfAwayFromZero(n: number): number {
+  const rounded = Math.sign(n) * Math.round(Math.abs(n));
+  // `Math.sign(-0.4) * 0` is `-0`, which `Object.is` — and therefore
+  // `expect(...).toBe(0)` and `Map`/`Set` keying — treats as a value distinct
+  // from `0`. Nothing downstream should have to know that.
+  return rounded === 0 ? 0 : rounded;
+}
+
 function roundToPreview(n: number): number {
   const factor = 10 ** PREVIEW_DECIMALS;
-  return Math.round(n * factor) / factor;
+  return roundHalfAwayFromZero(n * factor) / factor;
 }
 
 /**
@@ -21,14 +47,29 @@ function roundToPreview(n: number): number {
  * has to compare money against a stored row — the wire carries dollars, the
  * server compares cents.
  *
- * One documented divergence, unreachable here: `Math.round` sends a negative
- * half toward +Infinity (`-0.5` -> `-0`) where Go's `math.Round` sends it away
- * from zero (`-1`). Every amount that reaches this function has been through
- * `validateMoneyAmount`, which rejects anything <= 0, so the two never see a
- * negative half. Revisit if signed amounts ever land (backlog: refunds).
+ * Negative halves round away from zero, matching Go — see
+ * `roundHalfAwayFromZero` for why the plain `Math.round` this used to be is
+ * wrong now that a refund can be worth `-0.005`.
  */
 export function dollarsToCents(dollars: number): number {
-  return Math.round(dollars * 100);
+  return roundHalfAwayFromZero(dollars * 100);
+}
+
+/**
+ * Applies an entry surface's Refund toggle to the magnitude it typed.
+ *
+ * THE TOGGLE IS THE ONLY SIGN CHANNEL. Every amount input in the app holds a
+ * positive magnitude and keeps rejecting a typed minus — that rejection is the
+ * typo guard, not an oversight — so this is the one place a transaction amount
+ * acquires its sign, and it runs BEFORE `toCreatePayload` so a foreign refund
+ * divides with its sign intact (`-150000 LBP / 90000` is a negative base
+ * amount; signing afterwards would leave `original_amount` positive and the
+ * two halves of the money pair disagreeing, which the import path skips as
+ * `sign_mismatch`).
+ */
+export function applyAmountSign(magnitude: number, negative: boolean): number {
+  if (!negative || magnitude === 0) return magnitude;
+  return -magnitude;
 }
 
 /**
@@ -39,6 +80,10 @@ export function dollarsToCents(dollars: number): number {
  * `original_amount` and `original_currency` alongside the computed
  * `amount`. Throws when the non-base currency has no rate configured —
  * callers gate the Save button on this.
+ *
+ * Sign is the caller's, applied before it gets here (`applyAmountSign`): the
+ * division preserves it because a rate is always > 0, so both halves of the
+ * money pair come out with the same sign — the agreement the server requires.
  *
  * Generic over T so `TransactionEntryRow` and the edit form can both
  * pass through their own field set (description, category_id, tags,

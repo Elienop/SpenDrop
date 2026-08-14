@@ -1317,3 +1317,167 @@ describe('QuickAdd — description suggestions strip (freeform)', () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe('QuickAdd — Refund toggle', () => {
+  test('freeform: the preview shows the inflow it will save, and the POST is negative', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await waitFor(() =>
+      expect(screen.getByTestId('quick-preview-amount')).toHaveTextContent('43'),
+    );
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+
+    // The confirm card is a promise about the row that is about to exist, so
+    // it has to flip with the toggle: a refund is stored as a negative expense
+    // and DISPLAYS as an inflow. One sign, from `displayAmount` — the '+' and
+    // the '-' both come out of the same Intl pass, so "+-$43.00" is not a
+    // shape this can produce.
+    const preview = screen.getByTestId('quick-preview-amount');
+    await waitFor(() => expect(preview).toHaveTextContent('+$43.00'));
+    expect(preview).not.toHaveTextContent('-$43.00');
+    // ...and the word that keeps a green number on a Groceries row from
+    // reading as income booked to the wrong category.
+    expect(screen.getByTestId('amount-sign-note')).toHaveTextContent('Refund');
+
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalled());
+    const [path, body] = apiPost.mock.calls[0];
+    expect(path).toBe('transactions');
+    expect(body).toMatchObject({
+      amount: -43,
+      category_id: 1,
+      description: 'groceries',
+    });
+  });
+
+  test('tap: the same toggle signs a keypad entry', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.click(screen.getByRole('tab', { name: /tap/i }));
+
+    await user.type(screen.getByRole('spinbutton'), '12');
+    await user.type(screen.getByLabelText(/description/i), 'returned ticket');
+    await user.click(screen.getByRole('button', { name: /transport/i }));
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+
+    const addBtn = screen.getByRole('button', { name: /^add$/i });
+    await waitFor(() => expect(addBtn).toBeEnabled());
+    await user.click(addBtn);
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalled());
+    const [, body] = apiPost.mock.calls[0];
+    expect(body).toMatchObject({
+      amount: -12,
+      category_id: 3,
+      description: 'returned ticket',
+    });
+  });
+
+  test('a typed minus is not the sign channel — it stays in the description', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries -43');
+
+    // The parser refuses the minus token and leaves it as text, deliberately:
+    // a freeform line is typed fast on a phone, and reading a stray keystroke
+    // as "negate this entry" would put a wrong-signed row in the ledger with
+    // nothing on screen having said so. The screen says what it needs instead.
+    await waitFor(() =>
+      expect(screen.getByText(/enter an amount/i)).toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: /^add$/i })).toBeDisabled();
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+
+  test('the label follows the kind: an income entry offers a Reversal', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+
+    expect(
+      await screen.findByRole('switch', { name: 'Reversal' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('switch', { name: 'Refund' }),
+    ).not.toBeInTheDocument();
+  });
+
+  test('switching kind clears the toggle rather than re-pointing it', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+
+    await user.click(screen.getByRole('tab', { name: /^income$/i }));
+
+    // What the toggle MEANS is scoped to the kind. Carrying it across would
+    // leave a freshly re-declared entry holding a sign the user last asserted
+    // about something else — one extra tap for the rare entry, against a
+    // wrongly-negated row for the common one.
+    expect(
+      await screen.findByRole('switch', { name: 'Reversal' }),
+    ).not.toBeChecked();
+  });
+
+  test('offline: the queue captures the signed payload verbatim', async () => {
+    // The queue is a passthrough — it stores what `toCreatePayload` built and
+    // replays it byte-identical. A refund captured on the walk home has to
+    // reach the server as the refund it was, and `refund` is form state that
+    // must not be sitting in the stored payload either.
+    Object.defineProperty(navigator, 'onLine', {
+      configurable: true,
+      value: false,
+    });
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(enqueue).toHaveBeenCalled());
+    expect(apiPost).not.toHaveBeenCalled();
+    const [, queuedPayload] = enqueue.mock.calls[0];
+    expect(queuedPayload).toMatchObject({ amount: -43, category_id: 1 });
+    expect(queuedPayload).not.toHaveProperty('refund');
+  });
+
+  test('a saved refund does not stick to the next entry', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /^add$/i })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+    await waitFor(() => expect(apiPost).toHaveBeenCalled());
+    // The date, category and currency are sticky across a save; the sign is
+    // not, or the next ordinary expense goes in negative.
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: 'Refund' })).not.toBeChecked(),
+    );
+  });
+});

@@ -1,8 +1,9 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { describe, it, expect, vi } from 'vitest';
-import { createElement, type ReactNode } from 'react';
+import { describe, it, expect, vi, type Mock } from 'vitest';
+import { createElement, useState, type ReactNode } from 'react';
+import { api } from '@/api/client';
 import { TransactionEditSheet } from './TransactionEditSheet';
 import type { Category, Transaction } from '../api/types';
 import type { UpdateTransactionInput } from '../hooks/useTransactions';
@@ -96,6 +97,9 @@ interface SheetHarness {
    *  while still supplying their own behaviour. */
   onDelete?: (id: number) => Promise<void>;
   onClose?: () => void;
+  /** Overridden only by the sign-toggle tests, which need an income category
+   *  in the picker to check the control's wording. */
+  categories?: Category[];
 }
 
 function renderSheet(overrides: SheetHarness = {}) {
@@ -121,7 +125,7 @@ function renderSheet(overrides: SheetHarness = {}) {
       transaction={
         overrides.transaction === undefined ? makeTx() : overrides.transaction
       }
-      categories={categories}
+      categories={overrides.categories ?? categories}
       onClose={onClose}
       onUpdate={onUpdate}
       onDelete={onDelete}
@@ -376,5 +380,228 @@ describe('TransactionEditSheet delete', () => {
       screen.getByRole('button', { name: /delete transaction/i }),
     );
     expect(onUpdate).not.toHaveBeenCalled();
+  });
+});
+
+// The reason the refund affordance is REQUIRED on the edit surfaces rather
+// than nice to have. The amount box shows a stored refund's MAGNITUDE — it
+// refuses a typed minus, and always did — so if nothing else carried the sign,
+// fixing a typo in the description would save the row back positive and turn
+// money returned into money spent, with no error and nothing on screen having
+// said so.
+describe('TransactionEditSheet — a stored refund round-trips', () => {
+  /** $20 that came back: a NEGATIVE amount on an expense category. */
+  function makeRefundRow(): Transaction {
+    return makeTx({ amount: -20, description: 'Returned milk' });
+  }
+
+  async function submitSheet() {
+    const save = screen.getByRole('button', { name: 'Save' });
+    await waitFor(() => expect(save).toBeEnabled());
+    expect(save).toHaveAttribute('type', 'submit');
+    const form = save.closest('form');
+    expect(form).not.toBeNull();
+    fireEvent.submit(form!);
+  }
+
+  it('_OpensWithTheToggleOnAndPositiveDigits: the sign is on the control, not in the box', async () => {
+    renderSheet({ transaction: makeRefundRow() });
+
+    expect(await screen.findByRole('spinbutton')).toHaveValue(20);
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+  });
+
+  it('_UnrelatedEditKeepsTheSign: a description fix does not un-refund the row', async () => {
+    const user = userEvent.setup();
+    const { onUpdate } = renderSheet({ transaction: makeRefundRow() });
+
+    const description = screen.getByLabelText('Description');
+    await user.clear(description);
+    await user.type(description, 'Returned oat milk');
+    await submitSheet();
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({
+      id: 7,
+      description: 'Returned oat milk',
+      amount: -20,
+    });
+  });
+
+  it('_TurningItOffFlipsTheRowPositive: the correction path works too', async () => {
+    const user = userEvent.setup();
+    const { onUpdate } = renderSheet({ transaction: makeRefundRow() });
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    await submitSheet();
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({ id: 7, amount: 20 });
+  });
+
+  it('_TurningItOnMakesARefund: an ordinary row can become one', async () => {
+    const user = userEvent.setup();
+    const { onUpdate } = renderSheet();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    await submitSheet();
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({ id: 7, amount: -25.5 });
+  });
+
+  it('_ForeignRefundKeepsBothHalvesNegative: sign then divide, on the edit path too', async () => {
+    const { onUpdate } = renderSheet({
+      transaction: makeTx({
+        amount: -16.85,
+        original_amount: -1500000,
+        original_currency: 'LBP',
+      }),
+    });
+
+    // Opens as 1,500,000 with Refund on — the magnitude in the box, the sign
+    // on the control — and an untouched save has to put both back.
+    expect(await screen.findByRole('spinbutton')).toHaveValue(1500000);
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+
+    // The preview reads the toggle too: this row was booked at 89,000 and
+    // today's rate is 90,000, so the frozen figure ($16.85) and the live one
+    // ($16.67) differ — and the comparison that picks between them is over
+    // SIGNED cents. In the magnitude the digits above it are written in.
+    const preview = await screen.findByText(/≈/);
+    expect(preview).toHaveTextContent('≈ $16.85 (as recorded)');
+
+    await submitSheet();
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    // The wire always carries the freshly divided figure — the freeze is the
+    // SERVER's, keyed on original_* arriving unchanged (see
+    // _SaveCarriesTheForeignMoneyThrough above). What this pins is that the
+    // sign went on BEFORE the division: -1,500,000 / 90,000 = -16.67, and both
+    // halves of the money pair are negative. Signing afterwards would send a
+    // positive original_amount, which is the `sign_mismatch` shape.
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({
+      id: 7,
+      original_amount: -1500000,
+      original_currency: 'LBP',
+      amount: -16.67,
+    });
+  });
+
+  it('_LabelFollowsTheCategoryKind: an income row offers a Reversal', async () => {
+    renderSheet({
+      transaction: makeTx({
+        category_id: 3,
+        category_name: 'Salary',
+        category_type: 'income',
+        amount: -100,
+      }),
+      categories: [
+        ...categories,
+        {
+          id: 3,
+          name: 'Salary',
+          type: 'income',
+          icon: null,
+          sort_order: 3,
+          is_active: true,
+          created_at: '2026-01-01',
+        },
+      ],
+    });
+
+    expect(
+      await screen.findByRole('switch', { name: 'Reversal' }),
+    ).toBeChecked();
+    expect(
+      screen.queryByRole('switch', { name: 'Refund' }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+// The one window in which the hook's rehydration effect can change anything:
+// the household's real base currency only exists once `useCurrencies`
+// resolves, and a refetch landing inside that window replaces the row under an
+// open editor. The effect re-derives the form's money from the CURRENT row —
+// magnitude and sign together, because splitting them and rehydrating only one
+// would leave the box showing one row's number under the other row's sign.
+//
+// Neither half is reachable from a steady-state test (mutation-checked: both
+// the amount branch, which predates signed amounts, and the sign branch
+// survive every other test in this file), which is why this drives the timing
+// deliberately.
+describe('TransactionEditSheet — a refetch inside the currency-loading window', () => {
+  function SwapHost({ first, second }: { first: Transaction; second: Transaction }) {
+    const [tx, setTx] = useState(first);
+    return (
+      <>
+        {/* fireEvent, not user-event, when this is clicked: the sheet is modal
+            and react-remove-scroll puts pointer-events:none on <body>, which
+            user-event refuses to click through. */}
+        <button type="button" onClick={() => setTx(second)}>
+          swap row
+        </button>
+        <TransactionEditSheet
+          transaction={tx}
+          categories={categories}
+          onClose={vi.fn()}
+          onUpdate={vi.fn<(input: UpdateTransactionInput) => Promise<void>>()}
+          onDelete={vi.fn<(id: number) => Promise<void>>()}
+          onError={vi.fn()}
+          onCloseFocus={vi.fn()}
+        />
+      </>
+    );
+  }
+
+  it('_RehydratesMagnitudeAndSignTogether: the editor follows the row it is now editing', async () => {
+    // Hold the currency fetch open so the effect has not latched yet.
+    let releaseCurrencies: (list: unknown) => void = () => {};
+    (api.get as Mock).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseCurrencies = resolve;
+        }),
+    );
+
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    render(
+      <SwapHost
+        first={makeTx({ amount: 25.5 })}
+        second={makeTx({ amount: -20, description: 'Returned milk' })}
+      />,
+      {
+        wrapper: ({ children }: { children: ReactNode }) =>
+          createElement(QueryClientProvider, { client }, children),
+      },
+    );
+
+    // The row is replaced while the fields still hold the old one's money.
+    // `hidden: true` because the open sheet is modal: Radix marks everything
+    // outside it `aria-hidden`, and the default role query skips those.
+    fireEvent.click(
+      screen.getByRole('button', { name: 'swap row', hidden: true }),
+    );
+    expect(await screen.findByRole('spinbutton')).toHaveValue(25.5);
+
+    releaseCurrencies([
+      {
+        code: 'USD',
+        name: 'US Dollar',
+        symbol: '$',
+        rate_to_base: 1,
+        is_base: true,
+        updated_at: '2026-04-01T00:00:00Z',
+      },
+    ]);
+
+    // Both halves move, or the next save writes a number that belongs to
+    // neither row.
+    await waitFor(() =>
+      expect(screen.getByRole('spinbutton')).toHaveValue(20),
+    );
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
   });
 });

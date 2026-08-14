@@ -1353,4 +1353,141 @@ describe('TransactionEntryRow', () => {
     ).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  // -----------------------------------------------------------------
+  // Phase J: the Refund toggle — the row's only sign channel
+  // -----------------------------------------------------------------
+  //
+  // The positive-payload half of this is the canonical-payload test at the top
+  // of the file, which asserts the WHOLE object: it is what would notice a
+  // `refund` flag leaking onto the wire, or a sign appearing where nobody
+  // asked for one.
+  describe('refund toggle', () => {
+    it('_RefundSendsANegativeAmount: the toggle is what signs the entry', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '12.50', description: 'Returned milk' });
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      // Asserted whole, not with toMatchObject: `refund` is form state and
+      // must not ride along to a server that would ignore it.
+      expect(onSubmit).toHaveBeenCalledWith({
+        date: expect.any(String),
+        amount: -12.5,
+        description: 'Returned milk',
+        category_id: 1,
+        tags: '',
+        client_key: expect.any(String),
+      });
+    });
+
+    it('_ForeignRefundSignsBothHalves: the sign goes on before the conversion', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '150000', description: 'Returned rug' });
+      await user.click(screen.getByRole('button', { name: /Currency: USD/ }));
+      await user.click(await screen.findByRole('option', { name: /LBP/ }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      // Signing AFTER the division would leave original_amount positive, and a
+      // money pair whose halves disagree is the shape the import path skips as
+      // `sign_mismatch`.
+      expect(onSubmit).toHaveBeenCalledWith({
+        date: expect.any(String),
+        amount: -1.67,
+        original_amount: -150000,
+        original_currency: 'LBP',
+        description: 'Returned rug',
+        category_id: 1,
+        tags: '',
+        client_key: expect.any(String),
+      });
+    });
+
+    it('_TypedMinusIsStillRefused: the digits are not a sign channel', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '-12.50', description: 'Slipped key' });
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      // The schema's `> 0` still refuses it, which is now a FEATURE: with the
+      // toggle carrying intent, a minus in the box can only be a typo, and one
+      // that saved would be indistinguishable from a deliberate refund.
+      expect(await screen.findByText('> 0')).toBeInTheDocument();
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('_ResetsAfterASave: a refund does not stick to the next entry', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '12.50', description: 'Returned milk' });
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+      // Date, category and currency are deliberately sticky across a save.
+      // The sign is not: it would silently negate the next ordinary expense,
+      // and the row's own reset is the only thing that says so.
+      await waitFor(() =>
+        expect(screen.getByRole('switch', { name: 'Refund' })).not.toBeChecked(),
+      );
+    });
+
+    it('_LabelFollowsTheSelectedCategory: an income row says Reversal', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      // Nothing picked yet: the row is an expense as far as the form knows,
+      // and "Refund" is the case v1 promotes.
+      expect(screen.getByRole('switch', { name: 'Refund' })).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /salary/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Reversal' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole('switch', { name: 'Refund' }),
+      ).not.toBeInTheDocument();
+    });
+  });
 });

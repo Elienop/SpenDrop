@@ -189,6 +189,18 @@ export function FilterPanel({
         </TabsContent>
 
         <TabsContent value="amount" className="flex flex-col gap-3 pt-4">
+          {/* NO `min="0"` on either bound, and this is the one place in the app
+              where a typed minus is the user saying what they mean rather than
+              a slipped key. Amounts are signed — a refund is a negative
+              expense — and the backend compares `amount_min`/`amount_max`
+              against the signed value, so hunting for refunds means entering a
+              negative bound. The amount ENTRY inputs keep their `min="0"`:
+              there the sign comes from the Refund toggle and a minus is always
+              a typo. Two different jobs, deliberately different markup.
+
+              Known consequence, no migration: a saved filter created before
+              this now also matches refunds, because a `max` of 50 always did
+              mean "<= 50" and -20 satisfies it. */}
           <div className="flex items-center gap-2">
             <Input
               type="number"
@@ -197,7 +209,6 @@ export function FilterPanel({
               onChange={(e) => setFilter('amountMin', e.target.value)}
               onFocus={selectAllOnFocus}
               step="0.01"
-              min="0"
               aria-label="Minimum amount"
             />
             <span className="text-xs text-muted-foreground">to</span>
@@ -208,7 +219,6 @@ export function FilterPanel({
               onChange={(e) => setFilter('amountMax', e.target.value)}
               onFocus={selectAllOnFocus}
               step="0.01"
-              min="0"
               aria-label="Maximum amount"
             />
           </div>

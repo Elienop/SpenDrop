@@ -829,3 +829,92 @@ describe('TransactionRow edit — preview after a rate change', () => {
     });
   });
 });
+
+// The desktop half of the refund round-trip. The phone Sheet has the same
+// four quadrants; both run on `useTransactionEditForm`, and the point of
+// testing both is that the shared hook is reached through two different
+// layouts — the sign toggle has to be MOUNTED in each, which is a per-surface
+// fact the hook's own contract cannot enforce.
+describe('TransactionRow — a stored refund round-trips', () => {
+  async function openEditor(description = 'Weekly groceries') {
+    const user = await openActionsMenu(description);
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    return user;
+  }
+
+  it('_OpensWithTheToggleOnAndPositiveDigits: the amount box never shows a minus', async () => {
+    renderRow(makeTx({ amount: -20 }));
+    await openEditor();
+
+    expect(await screen.findByRole('spinbutton')).toHaveValue(20);
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+  });
+
+  it('_UnrelatedEditKeepsTheSign: editing the tags does not un-refund the row', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: -20, tags: 'groceries' }), onUpdate);
+    await openEditor();
+
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: -20 }),
+    );
+  });
+
+  it('_TurningItOffFlipsTheRowPositive: and the toggle is what does it', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: -20 }), onUpdate);
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: 20 }),
+    );
+  });
+
+  it('_TurningItOnMakesARefund: an ordinary row can become one', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: 25.5 }), onUpdate);
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: -25.5 }),
+    );
+  });
+
+  it('_CancelRestoresTheStoredSign: a discarded edit leaves the toggle where the row had it', async () => {
+    // `reset()` re-seeds every field from the row, and the sign is a field
+    // now. Missing it would leave the next Edit-open showing the toggle the
+    // user flipped and abandoned — over an amount that never changed.
+    renderRow(makeTx({ amount: -20 }));
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    expect(screen.getByRole('switch', { name: 'Refund' })).not.toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    await openEditor();
+
+    expect(
+      await screen.findByRole('switch', { name: 'Refund' }),
+    ).toBeChecked();
+  });
+});
