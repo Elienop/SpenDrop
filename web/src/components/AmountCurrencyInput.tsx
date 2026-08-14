@@ -19,7 +19,7 @@ import { selectAllOnFocus } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 import {
   dollarsToCents,
-  foreignMoneyUnchanged,
+  foreignMagnitudeUnchanged,
   type StoredMoney,
 } from '@/lib/currency';
 
@@ -57,14 +57,15 @@ export interface AmountCurrencyInputProps {
    * `AmountSignToggle` and nowhere else — so this is what lets the preview
    * reconstruct the signed amount the save will actually send.
    *
-   * It changes exactly one thing, and only where `storedMoney` is also
-   * present: whether the freeze matches. `foreignMoneyUnchanged` compares
-   * SIGNED cents because the server does, so a stored -150,000 LBP refund
-   * whose toggle has been flipped off is the user changing the money and
-   * re-prices at today's rate. Without this the magnitudes would still match,
-   * the preview would promise the frozen figure, and the save would store a
-   * different one. The create surfaces omit it for the same reason they omit
-   * `storedMoney`: there is no stored value to freeze against.
+   * It is what makes the value handed to `foreignMagnitudeUnchanged` the same
+   * signed figure the save will send, so this component asks the freeze
+   * question with the server's own input. It does NOT change the answer: the
+   * predicate compares magnitudes on both sides, because a toggle flip is a
+   * classification change and the server keeps the booked figure through one.
+   * That is deliberate — a preview that dropped to today's rate on a flip would
+   * promise a number the save contradicts. The create surfaces omit it for the
+   * same reason they omit `storedMoney`: there is no stored value to freeze
+   * against.
    */
   negative?: boolean;
   /** Optional DOM id to apply to the inner amount `<input>`. When composed
@@ -155,17 +156,19 @@ export function AmountCurrencyInput({
 
   // ...and wrong for an edit that leaves the foreign money alone. Saving one
   // of those does not re-price the row: the server carries the stored base
-  // value forward untouched (database.foreignMoneyUnchanged), so once the rate
+  // magnitude forward (database.foreignMagnitudeUnchanged), so once the rate
   // has moved, the live conversion is a number the save will not produce. The
   // preview's whole job is to say what saving will store, and a confident wrong
-  // figure is worse than none, so it shows the stored value instead.
+  // figure is worse than none, so it shows the stored value instead. A pure
+  // Refund-toggle flip is inside that freeze, so it keeps showing the stored
+  // figure too — the toggle beside the box carries the direction.
   //
   // `storedMoney` reads from the live transaction rather than a snapshot taken
   // when the editor opened, so a refetch landing mid-edit moves this with the
   // row the server will actually compare against.
   const frozen =
     storedMoney != null &&
-    foreignMoneyUnchanged(
+    foreignMagnitudeUnchanged(
       storedMoney,
       { amount: signedValue, currency },
       baseCode,

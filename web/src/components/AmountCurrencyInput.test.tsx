@@ -292,16 +292,17 @@ describe('AmountCurrencyInput', () => {
 
     // A refund of the same money: 1,500,000 LBP came back, so the row stores
     // -16.85 against a negative original amount. The box shows the MAGNITUDE
-    // and the Refund toggle beside it carries the sign, which is why the
-    // freeze comparison needs `negative` — without it the sign of the amount
-    // the save will send is not knowable from this component's props.
+    // and the Refund toggle beside it carries the sign, which is why `negative`
+    // is what lets this component rebuild the signed figure the save will send.
+    // The freeze ANSWER no longer turns on it — the predicate compares
+    // magnitudes — but the value handed to it is still the save's own.
     const storedLbpRefund = {
       amount: -16.85,
       original_amount: -1500000,
       original_currency: 'LBP',
     };
 
-    it('_RefundFreezesOnTheSignedComparison: magnitude in the box, sign on the toggle', () => {
+    it('_RefundFreezes: magnitude in the box, sign on the toggle', () => {
       renderInput({
         value: 1500000,
         negative: true,
@@ -315,12 +316,15 @@ describe('AmountCurrencyInput', () => {
       expect(screen.getByText(/≈/)).not.toHaveTextContent('-$16.85');
     });
 
-    it('_TurningTheRefundOffRePrices: same digits, different money', () => {
-      // Nothing was retyped — only the toggle moved — and that IS the user
-      // changing the money: the request now carries `original_amount:
-      // +1500000` against a row holding -1,500,000, the server's predicate
-      // fails, and it re-derives from today's rate. A magnitude-only
-      // comparison would call this unchanged and promise $16.85.
+    it('_TurningTheRefundOffKeepsTheBookedFigure: a flip is not a re-price', () => {
+      // Nothing was retyped — only the toggle moved — so the same money is
+      // being reclassified, not changed. The server keeps the magnitude it
+      // booked and re-applies the direction (store.go, foreignMagnitudeUnchanged
+      // + withSignOf), so the preview must keep promising $16.85. Today's rate
+      // would say $16.67, and that is the number the save will NOT produce.
+      //
+      // This expected $16.67 while the server compared signed cents; the
+      // predicate and this test moved together.
       renderInput({
         value: 1500000,
         negative: false,
@@ -329,11 +333,14 @@ describe('AmountCurrencyInput', () => {
         storedMoney: storedLbpRefund,
       });
       const preview = screen.getByText(/≈/);
-      expect(preview).toHaveTextContent(/\$16\.67/);
-      expect(preview).not.toHaveTextContent(/\$16\.85/);
+      // The stored value negated back to a purchase is +$16.85, and the figure
+      // renders as the magnitude either way — one sign per amount block, on the
+      // toggle. The qualifier is what says the number came from the row.
+      expect(preview).toHaveTextContent('≈ $16.85 (as recorded)');
+      expect(preview).not.toHaveTextContent(/\$16\.67/);
     });
 
-    it('_TurningAnOrdinaryRowIntoARefundRePrices: the mirror case', () => {
+    it('_TurningAnOrdinaryRowIntoARefundKeepsTheBookedFigure: the mirror case', () => {
       renderInput({
         value: 1500000,
         negative: true,
@@ -341,7 +348,23 @@ describe('AmountCurrencyInput', () => {
         baseCode: 'USD',
         storedMoney: storedLbp,
       });
-      expect(screen.getByText(/≈/)).toHaveTextContent(/\$16\.67/);
+      expect(screen.getByText(/≈/)).toHaveTextContent('≈ $16.85 (as recorded)');
+    });
+
+    it('_FlippedAndCorrectedRePrices: moving both halves is still a money change', () => {
+      // The control that keeps the two tests above from reading as "the
+      // preview ignores the toggle". Correcting the figure while flipping it
+      // fails the magnitude comparison, so today's rate applies: 1,600,000 /
+      // 90,000 = $17.78, and nothing is frozen, so no qualifier.
+      renderInput({
+        value: 1600000,
+        negative: true,
+        currency: 'LBP',
+        baseCode: 'USD',
+        storedMoney: storedLbpRefund,
+      });
+      expect(screen.getByText(/≈/)).toHaveTextContent(/\$17\.78/);
+      expect(screen.queryByText(/as recorded/i)).not.toBeInTheDocument();
     });
 
     it('_CreateSurfaceStillPreviewsTodaysRate: no storedMoney means no freeze', () => {

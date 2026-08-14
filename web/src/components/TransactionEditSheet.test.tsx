@@ -236,7 +236,7 @@ describe('TransactionEditSheet save', () => {
 
 // The invariant this whole surface is riskiest for. The server carries a
 // stored base value forward VERBATIM when a save merely restates the same
-// foreign amount in the same currency (database.foreignMoneyUnchanged), so an
+// foreign amount in the same currency (database.foreignMagnitudeUnchanged), so an
 // edit sheet that re-derived the amount from today's rate would silently move
 // money the user never touched. The desktop row has carried this contract
 // since it shipped; the sheet must not be a second, weaker copy.

@@ -19,7 +19,7 @@ export const PREVIEW_DECIMALS = 2;
  * frontend now computes cents for values on the losing side of that rule.
  *
  * It has to be Go's rule and not merely a consistent one, because the two
- * results are compared against each other. `foreignMoneyUnchanged` mirrors a
+ * results are compared against each other. `foreignMagnitudeUnchanged` mirrors a
  * server predicate over stored cents, and `toCreatePayload` computes the base
  * amount the server would compute for the same division — a one-cent
  * disagreement re-prices money the user did not touch, or promises a preview
@@ -175,21 +175,31 @@ export interface StoredMoney {
 }
 
 /**
- * Mirror of `foreignMoneyUnchanged` in `internal/database/store.go`. Reports
+ * Mirror of `foreignMagnitudeUnchanged` in `internal/database/store.go`. Reports
  * whether saving this edit would merely restate the foreign money the row
- * already carries — same currency code, same original amount to the cent.
+ * already carries — same currency code, same original amount to the cent,
+ * ignoring sign.
  *
- * The server carries the row's stored base value forward VERBATIM in that
- * case instead of re-deriving it from today's rate, because saving an edit
- * must never move money the user did not touch. So anything that wants to
- * show what a save will store must not divide by the rate here — after the
- * rate moves, the live conversion is a number the save will not produce.
- * Changing the foreign amount, changing the currency, or switching to or
- * from the base currency all still re-price, because each of those IS the
- * user changing the money.
+ * The server carries the row's stored base MAGNITUDE forward in that case
+ * instead of re-deriving it from today's rate, because saving an edit must
+ * never move money the user did not touch. So anything that wants to show what
+ * a save will store must not divide by the rate here — after the rate moves,
+ * the live conversion is a number the save will not produce. Changing the
+ * foreign amount, changing the currency, or switching to or from the base
+ * currency all still re-price, because each of those IS the user changing the
+ * money.
  *
- * Three details are deliberately copied from the Go predicate, and each one
+ * Four details are deliberately copied from the Go predicate, and each one
  * would make the preview promise a number the save contradicts if it drifted:
+ *
+ *   - SIGN IS IGNORED. Flipping the Refund toggle is a classification change —
+ *     the same money went the other way — so the server keeps the booked
+ *     magnitude and re-applies the requested direction rather than re-pricing.
+ *     A sign-sensitive comparison here would drop the preview back to today's
+ *     rate for a save that is going to store the old figure. (The digits in an
+ *     amount input are a magnitude and the toggle carries the direction, so the
+ *     figure this feeds is signed only because the server compares a signed
+ *     column; both sides then take the absolute value.)
  *
  *   - `currency === baseCode` returns false. `toCreatePayload` collapses a
  *     base-currency edit to a bare `{ amount }` with no `original_*`, and the
@@ -204,7 +214,7 @@ export interface StoredMoney {
  *     `original_amount_cents`. The wire carries dollars, so a typed
  *     1500000.004 and a stored 1500000 are one and the same row to it.
  */
-export function foreignMoneyUnchanged(
+export function foreignMagnitudeUnchanged(
   stored: StoredMoney,
   edited: EditedMoney,
   baseCode: string,
@@ -214,5 +224,8 @@ export function foreignMoneyUnchanged(
     return false;
   }
   if (edited.currency !== stored.original_currency) return false;
-  return dollarsToCents(edited.amount) === dollarsToCents(stored.original_amount);
+  return (
+    Math.abs(dollarsToCents(edited.amount)) ===
+    Math.abs(dollarsToCents(stored.original_amount))
+  );
 }

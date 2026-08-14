@@ -3,7 +3,7 @@ import {
   applyAmountSign,
   toCreatePayload,
   toEditDefaults,
-  foreignMoneyUnchanged,
+  foreignMagnitudeUnchanged,
   dollarsToCents,
   PREVIEW_DECIMALS,
   type StoredMoney,
@@ -305,7 +305,7 @@ describe('dollarsToCents', () => {
     // that is where the two languages part company: JS rounds a half toward
     // +Infinity, Go's `math.Round` rounds it away from zero. These are the
     // cents the SERVER will hold for a refund of that size, so the frontend
-    // has to agree or `foreignMoneyUnchanged` claims a freeze the server does
+    // has to agree or `foreignMagnitudeUnchanged` claims a freeze the server does
     // not perform.
     expect(dollarsToCents(-0.005)).toBe(-1); // Math.round gives -0
     expect(dollarsToCents(-0.015)).toBe(-2); // Math.round gives -1
@@ -347,7 +347,7 @@ describe('applyAmountSign', () => {
   });
 });
 
-describe('foreignMoneyUnchanged', () => {
+describe('foreignMagnitudeUnchanged', () => {
   // A 1,500,000 LBP row booked at 89,000/USD. Today's rate is 90,000, so a
   // live conversion would say $16.67 — this row still holds, and will keep
   // holding, $16.85.
@@ -359,19 +359,19 @@ describe('foreignMoneyUnchanged', () => {
 
   it('_RestatedForeignMoneyIsUnchanged: same code, same amount', () => {
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: 1500000, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: 1500000, currency: 'LBP' }, 'USD'),
     ).toBe(true);
   });
 
   it('_CorrectedAmountIsAChange: the user moved the money, so it re-prices', () => {
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: 1600000, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: 1600000, currency: 'LBP' }, 'USD'),
     ).toBe(false);
   });
 
   it('_SwitchedCurrencyIsAChange: same number, different currency', () => {
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: 1500000, currency: 'EUR' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: 1500000, currency: 'EUR' }, 'USD'),
     ).toBe(false);
   });
 
@@ -387,7 +387,7 @@ describe('foreignMoneyUnchanged', () => {
       original_currency: 'USD',
     };
     expect(
-      foreignMoneyUnchanged(storedInBase, { amount: 25.5, currency: 'USD' }, 'USD'),
+      foreignMagnitudeUnchanged(storedInBase, { amount: 25.5, currency: 'USD' }, 'USD'),
     ).toBe(false);
   });
 
@@ -398,7 +398,7 @@ describe('foreignMoneyUnchanged', () => {
       original_currency: null,
     };
     expect(
-      foreignMoneyUnchanged(storedBaseRow, { amount: 1500000, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedBaseRow, { amount: 1500000, currency: 'LBP' }, 'USD'),
     ).toBe(false);
   });
 
@@ -408,14 +408,14 @@ describe('foreignMoneyUnchanged', () => {
     // not recorded as coverage. Same honesty as the Valid checks in the Go
     // predicate this mirrors.
     expect(
-      foreignMoneyUnchanged(
+      foreignMagnitudeUnchanged(
         { amount: 16.85, original_amount: 1500000, original_currency: null },
         { amount: 1500000, currency: 'LBP' },
         'USD',
       ),
     ).toBe(false);
     expect(
-      foreignMoneyUnchanged(
+      foreignMagnitudeUnchanged(
         { amount: 16.85, original_amount: null, original_currency: 'LBP' },
         { amount: 1500000, currency: 'LBP' },
         'USD',
@@ -428,13 +428,13 @@ describe('foreignMoneyUnchanged', () => {
     // foreign amount. A float `===` here would claim a re-price the server
     // does not perform.
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: 1500000.004, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: 1500000.004, currency: 'LBP' }, 'USD'),
     ).toBe(true);
   });
 
   it('_CentDifferenceIsAChange: one cent is enough to move the money', () => {
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: 1500000.01, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: 1500000.01, currency: 'LBP' }, 'USD'),
     ).toBe(false);
   });
 
@@ -450,7 +450,7 @@ describe('foreignMoneyUnchanged', () => {
 
   it('_RestatedRefundIsUnchanged: a refund reopened and saved back keeps its stored value', () => {
     expect(
-      foreignMoneyUnchanged(
+      foreignMagnitudeUnchanged(
         storedLbpRefund,
         { amount: -1500000, currency: 'LBP' },
         'USD',
@@ -458,25 +458,43 @@ describe('foreignMoneyUnchanged', () => {
     ).toBe(true);
   });
 
-  it('_FlippedSignIsAChange: turning the refund off re-prices at today s rate', () => {
-    // The magnitudes are identical and only the sign differs, which is exactly
-    // the case a magnitude-only comparison would call "unchanged". It is not:
-    // the request carries `original_amount: +1500000`, the row holds
-    // -1,500,000 LBP in cents, the server's predicate fails, and it re-derives
-    // the base value from today's rate. A preview promising the stored $16.85
-    // there would be contradicted by the save.
+  it('_FlippedSignIsStillFrozen: turning the refund off keeps the booked figure', () => {
+    // The magnitudes are identical and only the sign differs. That is a
+    // CLASSIFICATION change — the same 1,500,000 LBP went the other way — so
+    // the server keeps the magnitude it booked and re-applies the requested
+    // direction (store.go, foreignMagnitudeUnchanged + withSignOf). The preview
+    // must therefore keep promising the stored $16.85; dropping to today's rate
+    // here would contradict the save.
+    //
+    // This assertion was `false` while the server compared signed cents. Both
+    // sides moved together, deliberately: a mirror that disagrees with the
+    // predicate it mirrors is worse than no mirror.
     expect(
-      foreignMoneyUnchanged(
+      foreignMagnitudeUnchanged(
         storedLbpRefund,
         { amount: 1500000, currency: 'LBP' },
         'USD',
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  it('_TurningAnOrdinaryRowIntoARefundIsAChange: the mirror of the case above', () => {
+  it('_TurningAnOrdinaryRowIntoARefundIsStillFrozen: the mirror of the case above', () => {
     expect(
-      foreignMoneyUnchanged(storedLbp, { amount: -1500000, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(storedLbp, { amount: -1500000, currency: 'LBP' }, 'USD'),
+    ).toBe(true);
+  });
+
+  it('_FlippedSignWithACorrectedAmountIsAChange: both halves moving still re-prices', () => {
+    // The guard against reading the case above as "sign never matters". A flip
+    // that also corrects the figure is the user changing the money, so the
+    // magnitude comparison fails and the row re-prices — exactly as it would
+    // for a correction with no flip at all.
+    expect(
+      foreignMagnitudeUnchanged(
+        storedLbpRefund,
+        { amount: 1600000, currency: 'LBP' },
+        'USD',
+      ),
     ).toBe(false);
   });
 
@@ -487,7 +505,7 @@ describe('foreignMoneyUnchanged', () => {
     // would promise a freeze that never happens.
     const lowercased: StoredMoney = { ...storedLbp, original_currency: 'lbp' };
     expect(
-      foreignMoneyUnchanged(lowercased, { amount: 1500000, currency: 'LBP' }, 'USD'),
+      foreignMagnitudeUnchanged(lowercased, { amount: 1500000, currency: 'LBP' }, 'USD'),
     ).toBe(false);
   });
 });

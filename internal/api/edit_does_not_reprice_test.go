@@ -407,3 +407,156 @@ func TestHandleUpdateTransaction_TagsOnlyEdit_AfterRateChange_KeepsHashAnchored(
 		t.Fatalf("tags = %v — the edit never landed, so the assertions above prove nothing", tags)
 	}
 }
+
+// TestHandleUpdateTransaction_PureSignFlip_KeepsTheBookedMagnitudeAndRate is the
+// sign half of the freeze, and the reason the predicate compares MAGNITUDES.
+//
+// Flipping the Refund toggle on a stored foreign row is a classification change
+// — the same 1,500,000 LBP went the other way — so it must not re-price. Under a
+// sign-sensitive comparison the freeze failed here and the row came back
+// re-derived from today's rate, restating a base magnitude the user never
+// touched: the exact doctrine violation the freeze exists to prevent, reached
+// through the one input that comparison treated as money.
+//
+// The rate is MOVED between the create and the flip on purpose. With the rate
+// left alone, a re-pricing bug reproduces the same 1685 by arithmetic and the
+// test passes while proving nothing; at 100,000 the two answers are 1685 and
+// 1500, so only a genuine carry-forward can satisfy it.
+func TestHandleUpdateTransaction_PureSignFlip_KeepsTheBookedMagnitudeAndRate(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "owner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Groceries")
+
+	id := createForeignTransaction(t, h, user, catID, "2026-04-06", "Spinneys", "LBP", 1_500_000)
+	if amountCents, _, _, rate := moneyOf(t, h, id); amountCents != 1685 || !rate.Valid || rate.Float64 != 89_000 {
+		t.Fatalf("precondition: amount_cents = %d, booked_rate = %+v; want 1685 and 89000", amountCents, rate)
+	}
+
+	setCurrencyRate(t, h, "LBP", 100_000)
+
+	// What the editor sends for a toggle flip: the same magnitude in the same
+	// currency, negated, with the base amount recomputed client-side. `amount`
+	// is deliberately not the right answer — the server must produce -16.85 from
+	// the stored row, not echo the client's arithmetic — and it is negative
+	// because the wire gate refuses a pair whose halves disagree in sign.
+	rec := putTransaction(t, h, user, id, map[string]any{
+		"date":              "2026-04-06",
+		"amount":            -1.00,
+		"original_amount":   -1_500_000,
+		"original_currency": "LBP",
+		"description":       "Spinneys",
+		"category_id":       catID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+
+	amountCents, origAmtCents, origCur, rate := moneyOf(t, h, id)
+	if amountCents != -1685 {
+		t.Errorf("amount_cents = %d, want -1685 — a toggle flip keeps the magnitude the row was "+
+			"booked at and only changes its direction (-1500 means it re-priced at today's rate)", amountCents)
+	}
+	if !origAmtCents.Valid || origAmtCents.Int64 != -150_000_000 {
+		t.Errorf("original_amount_cents = %v, want -150000000 — the foreign figure takes the new sign", origAmtCents)
+	}
+	if !origCur.Valid || origCur.String != "LBP" {
+		t.Errorf("original_currency = %v, want LBP", origCur)
+	}
+	// The rate is frozen WITH the magnitude, as one fact. Letting today's
+	// 100,000 land beside a figure that 89,000 produced would leave three money
+	// columns describing two different bookings.
+	if !rate.Valid || rate.Float64 != 89_000 {
+		t.Errorf("booked_rate = %+v, want valid 89000 — a carried-forward magnitude keeps the rate "+
+			"that produced it", rate)
+	}
+	// The pair invariant survives the flip: no reader downstream has to cope
+	// with a row whose two money columns point opposite ways.
+	if (amountCents < 0) != (origAmtCents.Int64 < 0) {
+		t.Errorf("signs disagree after the flip: amount_cents=%d original_amount_cents=%d",
+			amountCents, origAmtCents.Int64)
+	}
+}
+
+// TestHandleUpdateTransaction_SignFlip_ClearsTheContentHash pins the half of the
+// flip that is NOT frozen.
+//
+// The magnitude is carried forward, but amount_cents still changes — it changes
+// sign — and amount_cents is a ComputeContentHash input. A refund and the
+// purchase it reverses are different content, so the row must lose its dedupe
+// identity here even though the freeze matched. This is the one case where
+// "frozen" and "the hash survives" come apart, and the ordering inside
+// TransactionStore.Update (freeze first, hash decided from the frozen value) is
+// what makes it come out right.
+func TestHandleUpdateTransaction_SignFlip_ClearsTheContentHash(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "owner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Groceries")
+
+	id := createForeignTransaction(t, h, user, catID, "2026-04-06", "Spinneys", "LBP", 1_500_000)
+	before := hashOf(t, h, id)
+	if !before.Valid {
+		t.Fatal("precondition failed: a manual create should anchor a content_hash")
+	}
+
+	rec := putTransaction(t, h, user, id, map[string]any{
+		"date":              "2026-04-06",
+		"amount":            -16.85,
+		"original_amount":   -1_500_000,
+		"original_currency": "LBP",
+		"description":       "Spinneys",
+		"category_id":       catID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+
+	if amountCents, _, _, _ := moneyOf(t, h, id); amountCents != -1685 {
+		t.Fatalf("precondition: amount_cents = %d, want -1685 — the flip did not land, so the hash "+
+			"assertion below proves nothing", amountCents)
+	}
+	if after := hashOf(t, h, id); after.Valid {
+		t.Errorf("content_hash = %q, want NULL — the row now describes a refund, not the purchase "+
+			"the digest was minted for", after.String)
+	}
+}
+
+// TestHandleUpdateTransaction_SignFlipWithCorrectedAmount_IsRepriced keeps the
+// freeze from swallowing the case where BOTH halves move.
+//
+// A flip that also corrects the figure (1,500,000 -> a 1,600,000 refund) is the
+// user changing the money, so today's rate applies and gets recorded. A
+// predicate that compared only currency — or one that took "the sign flipped" as
+// proof of a pure reclassification — would freeze here and store the old
+// magnitude under the new foreign amount.
+func TestHandleUpdateTransaction_SignFlipWithCorrectedAmount_IsRepriced(t *testing.T) {
+	h := setupHandler(t)
+	user := seedTestUser(t, h.queries, "owner", "member")
+	catID := seedExpenseCategory(t, h.queries, "Groceries")
+
+	id := createForeignTransaction(t, h, user, catID, "2026-04-06", "Spinneys", "LBP", 1_500_000)
+	setCurrencyRate(t, h, "LBP", 100_000)
+
+	rec := putTransaction(t, h, user, id, map[string]any{
+		"date":              "2026-04-06",
+		"amount":            -1.00,
+		"original_amount":   -1_600_000,
+		"original_currency": "LBP",
+		"description":       "Spinneys",
+		"category_id":       catID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update: status = %d; body = %s", rec.Code, rec.Body.String())
+	}
+
+	amountCents, origAmtCents, _, rate := moneyOf(t, h, id)
+	if amountCents != -1600 {
+		t.Errorf("amount_cents = %d, want -1600 (-1,600,000 / 100,000) — the magnitude moved, so the "+
+			"row re-prices at today's rate", amountCents)
+	}
+	if !origAmtCents.Valid || origAmtCents.Int64 != -160_000_000 {
+		t.Errorf("original_amount_cents = %v, want -160000000", origAmtCents)
+	}
+	if !rate.Valid || rate.Float64 != 100_000 {
+		t.Errorf("booked_rate = %+v, want valid 100000 — a re-priced row records what priced it", rate)
+	}
+}
