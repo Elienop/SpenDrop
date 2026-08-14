@@ -211,50 +211,80 @@ func toTransactionResponse(t database.Transaction, createdBy string) transaction
 	return resp
 }
 
+// resolvedMoney is everything resolveCurrency decides about one request's
+// money: the base-currency value to store, the foreign pair to record beside
+// it, and the rate that produced the base value.
+//
+// It is a struct rather than four positional returns because OriginalAmount and
+// BookedRate are both sql.NullFloat64 and land in adjacent params fields:
+// swapping them compiles silently and stores an exchange rate (89,000) as the
+// foreign amount. The compiler cannot ask that question about two same-typed
+// returns; it can about two named fields.
+type resolvedMoney struct {
+	// Amount is the base-currency value to store, in dollars.
+	Amount float64
+	// OriginalAmount and OriginalCurrency are the foreign pair, both NULL
+	// unless a conversion actually happened.
+	OriginalAmount   sql.NullFloat64
+	OriginalCurrency sql.NullString
+	// BookedRate is the currencies.rate_to_base that produced Amount — the
+	// divisor, so base = original / BookedRate. NULL means "no rate was
+	// involved", which covers the two non-division branches below. Those two
+	// (no currency selected, base currency selected) are indistinguishable in
+	// storage today and must stay so: a stored rate of 1 on the base branch
+	// would invent a distinction no reader could act on.
+	BookedRate sql.NullFloat64
+}
+
 // resolveCurrency applies currency conversion logic. If originalCurrency is
 // a non-base currency, it divides originalAmount by the rate_to_base to get
-// the converted amount. Returns (finalAmount, originalAmount as NullFloat64,
-// originalCurrency as NullString, error).
+// the converted amount, and records that rate on the result.
 // The queries parameter allows callers to pass either h.queries (normal) or
 // a transactional qtx (batch) to ensure consistent reads within a transaction.
-func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRequest) (float64, sql.NullFloat64, sql.NullString, error) {
-	origAmt := sql.NullFloat64{}
-	origCur := sql.NullString{}
-
+//
+// Sign is carried through, not enforced: a negative amount is a refund (B10),
+// and on the division branch sign(base) == sign(original) holds by arithmetic
+// because every rate_to_base is positive (currency_handlers.go rejects <= 0 on
+// both the create and update paths). What every branch DOES enforce, via
+// validateMoneyAmount, is that the value it returns is finite, non-zero and
+// within MaxTransactionAmount in either direction.
+func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRequest) (resolvedMoney, error) {
 	if req.OriginalCurrency == "" {
 		// No foreign currency — use amount directly.
-		// `<= 0` alone lets 1e308 and NaN through (NaN compares false against
-		// everything), and both convert to int64 minimum downstream — a
-		// hugely NEGATIVE stored amount from a positive-looking request.
+		// A bare sign check lets 1e308 and NaN through (NaN compares false
+		// against everything), and both convert to int64 minimum downstream —
+		// a hugely NEGATIVE stored amount from a legal-looking request.
 		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
-			return 0, origAmt, origCur, err
+			return resolvedMoney{}, err
 		}
-		return req.Amount, origAmt, origCur, nil
+		return resolvedMoney{Amount: req.Amount}, nil
 	}
 
 	currency, err := q.GetCurrency(ctx, req.OriginalCurrency)
 	if err != nil {
-		return 0, origAmt, origCur, fmt.Errorf("unknown currency %q", req.OriginalCurrency)
+		return resolvedMoney{}, fmt.Errorf("unknown currency %q", req.OriginalCurrency)
 	}
 
 	if currency.IsBase {
 		// It's the base currency — use amount directly, no conversion needed
 		if err := validateMoneyAmount(req.Amount, "amount"); err != nil {
-			return 0, origAmt, origCur, err
+			return resolvedMoney{}, err
 		}
-		return req.Amount, origAmt, origCur, nil
+		return resolvedMoney{Amount: req.Amount}, nil
 	}
 
-	// Foreign currency: must have original_amount
-	if req.OriginalAmount == nil || *req.OriginalAmount <= 0 {
-		return 0, origAmt, origCur, fmt.Errorf("original_amount is required for non-base currency")
+	// Foreign currency: must have original_amount. Required-ness only — the
+	// sign belongs to the user (a refund in LBP is a negative original_amount),
+	// and the magnitude/finiteness rules are validateMoneyAmount's job below.
+	if req.OriginalAmount == nil {
+		return resolvedMoney{}, fmt.Errorf("original_amount is required for non-base currency")
 	}
 	if err := validateMoneyAmount(*req.OriginalAmount, "original_amount"); err != nil {
-		return 0, origAmt, origCur, err
+		return resolvedMoney{}, err
 	}
 
 	if currency.RateToBase == 0 {
-		return 0, origAmt, origCur, fmt.Errorf("currency %q has zero rate", req.OriginalCurrency)
+		return resolvedMoney{}, fmt.Errorf("currency %q has zero rate", req.OriginalCurrency)
 	}
 
 	converted := *req.OriginalAmount / currency.RateToBase
@@ -267,15 +297,24 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 
 	// The division can carry an in-range original_amount out of range: a small
 	// rate_to_base multiplies it up. Bound the converted value too, or
-	// dollarsToCents launders it into int64 minimum at the storage edge.
+	// dollarsToCents launders it into int64 minimum at the storage edge. It can
+	// equally round the value INTO zero (0.001 LBP is worth no cents at all),
+	// which the same gate refuses — the table's CHECK(amount_cents != 0) would
+	// otherwise answer a legal-looking request with a 500.
 	if err := validateMoneyAmount(converted, "converted amount"); err != nil {
-		return 0, origAmt, origCur, err
+		return resolvedMoney{}, err
 	}
 
-	origAmt = sql.NullFloat64{Float64: *req.OriginalAmount, Valid: true}
-	origCur = sql.NullString{String: req.OriginalCurrency, Valid: true}
-
-	return converted, origAmt, origCur, nil
+	return resolvedMoney{
+		Amount:           converted,
+		OriginalAmount:   sql.NullFloat64{Float64: *req.OriginalAmount, Valid: true},
+		OriginalCurrency: sql.NullString{String: req.OriginalCurrency, Valid: true},
+		// The rate is captured HERE, inside the call that divided by it, so
+		// the (amount_cents, original_amount_cents, booked_rate) triple can
+		// never describe two different rates. A caller re-reading the currency
+		// row would race the admin's next rate edit.
+		BookedRate: sql.NullFloat64{Float64: currency.RateToBase, Valid: true},
+	}, nil
 }
 
 // handleListTransactions returns a filtered, paginated list of transactions.
@@ -470,29 +509,35 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 
 	date, _ := time.Parse("2006-01-02", req.Date) // already validated
 
-	amount, origAmt, origCur, err := resolveCurrency(r.Context(), h.queries, req.transactionRequest)
+	money, err := resolveCurrency(r.Context(), h.queries, req.transactionRequest)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	amountCents := dollarsToCents(amount)
+	amountCents := dollarsToCents(money.Amount)
 	// Manual entries used to store NULL here, so import dedupe could not see
-	// them and re-imported them as duplicates.
+	// them and re-imported them as duplicates. The hash is over the SIGNED
+	// cents: a refund and the purchase it reverses are different content.
 	contentHash := h.contentHashForManualEntry(
 		r.Context(), h.queries, date, amountCents, req.Description, req.CategoryID)
 	params := database.CreateTransactionParams{
 		UserID:              user.ID,
 		Date:                date,
 		AmountCents:         amountCents,
-		OriginalAmountCents: nullableDollarsToCents(origAmt),
-		OriginalCurrency:    origCur,
-		Description:         req.Description,
-		CategoryID:          req.CategoryID,
-		Tags:                nullStringFromPtr(req.Tags),
-		Notes:               nullStringFromPtr(req.Notes),
-		ContentHash:         contentHash,
-		IdempotencyKey:      clientKey,
+		OriginalAmountCents: nullableDollarsToCents(money.OriginalAmount),
+		OriginalCurrency:    money.OriginalCurrency,
+		// The rate that priced this row, recorded once at booking time.
+		// currencies.rate_to_base is overwritten in place by the admin editor
+		// with no history, so this column is the only record that survives the
+		// next correction. NULL whenever no division happened.
+		BookedRate:     money.BookedRate,
+		Description:    req.Description,
+		CategoryID:     req.CategoryID,
+		Tags:           nullStringFromPtr(req.Tags),
+		Notes:          nullStringFromPtr(req.Notes),
+		ContentHash:    contentHash,
+		IdempotencyKey: clientKey,
 	}
 	txn, err := h.txnStore.Create(r.Context(), user.ID, params)
 	// The pre-check inside contentHashForManualEntry cannot be atomic: it runs
@@ -710,25 +755,29 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 
 	date, _ := time.Parse("2006-01-02", req.Date)
 
-	amount, origAmt, origCur, err := resolveCurrency(r.Context(), h.queries, req)
+	money, err := resolveCurrency(r.Context(), h.queries, req)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	// AmountCents here is the value TODAY's rate produces. On a foreign-currency
-	// row that is not necessarily what gets stored: saving an edit must never
-	// move money the user did not touch, so TransactionStore.Update overrides it
-	// with the row's existing amount when the request merely restates the same
-	// foreign amount in the same currency. That decision is made against the
-	// store's own transaction-scoped read of the row, not against `existing`
-	// above (which is read outside any transaction and can be stale about money)
-	// — see database.foreignMoneyUnchanged for the whole argument.
+	// AmountCents and BookedRate here are what TODAY's rate produces. On a
+	// foreign-currency row that is not necessarily what gets stored: saving an
+	// edit must never move money the user did not touch, so
+	// TransactionStore.Update overrides BOTH with the row's existing values when
+	// the request merely restates the same foreign amount in the same currency —
+	// they are frozen as a unit, because a stored rate that describes a
+	// carried-forward amount is the only pair that is internally consistent.
+	// That decision is made against the store's own transaction-scoped read of
+	// the row, not against `existing` above (which is read outside any
+	// transaction and can be stale about money) — see
+	// database.foreignMoneyUnchanged for the whole argument.
 	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
 		Date:                date,
-		AmountCents:         dollarsToCents(amount),
-		OriginalAmountCents: nullableDollarsToCents(origAmt),
-		OriginalCurrency:    origCur,
+		AmountCents:         dollarsToCents(money.Amount),
+		OriginalAmountCents: nullableDollarsToCents(money.OriginalAmount),
+		OriginalCurrency:    money.OriginalCurrency,
+		BookedRate:          money.BookedRate,
 		Description:         req.Description,
 		CategoryID:          req.CategoryID,
 		// PUT is a full replace, so an absent tags or notes key must carry the
@@ -907,7 +956,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 	for i, req := range reqs {
 		date, _ := time.Parse("2006-01-02", req.Date)
 
-		amount, origAmt, origCur, err := resolveCurrency(r.Context(), qtx, req)
+		money, err := resolveCurrency(r.Context(), qtx, req)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, fmt.Sprintf("item %d: %s", i, err.Error()))
 			return
@@ -931,7 +980,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		// connection DEADLOCKS — swapping qtx for h.queries hangs the request
 		// until the client gives up.
 		contentHash := h.contentHashForManualEntry(
-			r.Context(), qtx, date, dollarsToCents(amount), req.Description, req.CategoryID,
+			r.Context(), qtx, date, dollarsToCents(money.Amount), req.Description, req.CategoryID,
 		)
 
 		// No idempotency key on this path, deliberately. A key identifies one
@@ -948,14 +997,18 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		txn, err := h.txnStore.CreateTx(r.Context(), tx, user.ID, database.CreateTransactionParams{
 			UserID:              user.ID,
 			Date:                date,
-			AmountCents:         dollarsToCents(amount),
-			OriginalAmountCents: nullableDollarsToCents(origAmt),
-			OriginalCurrency:    origCur,
-			Description:         req.Description,
-			CategoryID:          req.CategoryID,
-			Tags:                nullStringFromPtr(req.Tags),
-			Notes:               nullStringFromPtr(req.Notes),
-			ContentHash:         contentHash,
+			AmountCents:         dollarsToCents(money.Amount),
+			OriginalAmountCents: nullableDollarsToCents(money.OriginalAmount),
+			OriginalCurrency:    money.OriginalCurrency,
+			// Each item's stored rate is the one its OWN resolveCurrency call
+			// divided by — read through qtx, so every row in the batch is
+			// priced against the same transaction-scoped snapshot of the rate.
+			BookedRate:  money.BookedRate,
+			Description: req.Description,
+			CategoryID:  req.CategoryID,
+			Tags:        nullStringFromPtr(req.Tags),
+			Notes:       nullStringFromPtr(req.Notes),
+			ContentHash: contentHash,
 		})
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Sprintf("item %d: failed to create transaction", i))
@@ -1142,15 +1195,29 @@ func validateTransactionRequest(req transactionRequest, storedDate string) error
 	if _, err := validateCategoryID(req.CategoryID); err != nil {
 		return err
 	}
-	// Amount validation: if no foreign currency, amount must be positive.
-	// If foreign currency is specified, original_amount is checked in resolveCurrency.
-	if req.OriginalCurrency == "" && req.Amount <= 0 {
-		return fmt.Errorf("amount must be positive")
+	// Amount validation. An amount is SIGNED — a negative one is a refund
+	// (B10) — so what is refused here is zero and an out-of-range MAGNITUDE, in
+	// either direction. If a foreign currency is specified, the value that
+	// actually gets stored comes from original_amount and is checked in
+	// resolveCurrency instead; req.Amount is discarded on that path.
+	//
+	// This gate is independent of validateMoneyAmount and runs before any
+	// currency lookup, so the two have to agree about sign and about zero:
+	// whichever is stricter is the one a refund would 400 against, and the
+	// mismatch would present as "refunds work in USD but not in LBP".
+	//
+	// The magnitude bounds below are two-sided for the same reason
+	// safeDollarsToCents is (cents.go): -1e307 is not "small", it is a value
+	// that becomes int64 minimum at the storage edge. While the sign gate above
+	// read `<= 0` the negative half was unreachable, so the one-sided bound was
+	// invisible rather than correct.
+	if req.OriginalCurrency == "" && req.Amount == 0 {
+		return fmt.Errorf("amount must not be zero")
 	}
-	if math.IsInf(req.Amount, 0) || math.IsNaN(req.Amount) || req.Amount > MaxTransactionAmount {
+	if math.IsInf(req.Amount, 0) || math.IsNaN(req.Amount) || math.Abs(req.Amount) > MaxTransactionAmount {
 		return fmt.Errorf("amount exceeds maximum allowed value")
 	}
-	if req.OriginalAmount != nil && (math.IsInf(*req.OriginalAmount, 0) || math.IsNaN(*req.OriginalAmount) || *req.OriginalAmount > MaxTransactionAmount) {
+	if req.OriginalAmount != nil && (math.IsInf(*req.OriginalAmount, 0) || math.IsNaN(*req.OriginalAmount) || math.Abs(*req.OriginalAmount) > MaxTransactionAmount) {
 		return fmt.Errorf("original_amount exceeds maximum allowed value")
 	}
 	return nil
@@ -2538,20 +2605,33 @@ func toNullString(s string) sql.NullString {
 	return sql.NullString{String: s, Valid: true}
 }
 
-// validateMoneyAmount rejects the float values that cannot survive conversion
-// to int64 cents: NaN, +/-Inf, and anything beyond MaxTransactionAmount. A
-// bare `<= 0` check is NOT sufficient — NaN compares false against every
-// operator, and 1e308 is comfortably positive right up until int64 conversion
-// turns it into -9223372036854775808.
+// validateMoneyAmount rejects the float values a transaction amount may not
+// take: NaN, +/-Inf, anything whose MAGNITUDE exceeds MaxTransactionAmount, and
+// anything that stores as zero cents. Sign is not one of them — a negative
+// amount is a refund (B10).
+//
+// The magnitude bound is two-sided and that is load-bearing, not symmetry for
+// its own sake. While this function read `d <= 0` the negative half was
+// unreachable, so a one-sided `d > MaxTransactionAmount` looked complete; the
+// moment sign became legal, -1e307 had a clear run at int64 conversion, which
+// lands on -9223372036854775808. NaN needs its own check either way because it
+// compares false against every operator, including inside math.Abs.
+//
+// Zero is refused for the whole class, not just the literal 0: 0.004 stores as
+// zero cents, and the table's CHECK(amount_cents != 0) would turn that into a
+// 500 on a request this gate is supposed to answer with a 400. Deciding it with
+// dollarsToCents means the gate and the storage edge round identically by
+// construction rather than by agreement — its precondition (finite, in range)
+// is exactly what the two checks above have already established.
 func validateMoneyAmount(d float64, field string) error {
 	if math.IsNaN(d) || math.IsInf(d, 0) {
 		return fmt.Errorf("%s must be a finite number", field)
 	}
-	if d <= 0 {
-		return fmt.Errorf("%s must be positive", field)
-	}
-	if d > MaxTransactionAmount {
+	if math.Abs(d) > MaxTransactionAmount {
 		return fmt.Errorf("%s exceeds the maximum allowed value", field)
+	}
+	if dollarsToCents(d) == 0 {
+		return fmt.Errorf("%s must not be zero", field)
 	}
 	return nil
 }

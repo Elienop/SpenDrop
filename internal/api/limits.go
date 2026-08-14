@@ -338,10 +338,22 @@ const (
 	MaxImportCellBytes  = 256 << 10
 )
 
-// MaxTransactionAmount is the largest positive value accepted for a
-// transaction (or budget). Anything above this is almost certainly a
-// currency-entry mistake (e.g. pasting an entire account balance into
-// the amount field) and would overflow some downstream chart axes.
+// MaxTransactionAmount is the largest amount of money one row may carry.
+// Anything above it is almost certainly a currency-entry mistake (e.g. pasting
+// an entire account balance into the amount field) and would overflow some
+// downstream chart axes.
+//
+// It is read as a MAGNITUDE bound for transactions and as a POSITIVE cap for
+// budgets, and the difference is deliberate. A transaction amount is signed —
+// a negative one is a refund (B10) — so validateMoneyAmount admits
+// [-MaxTransactionAmount, MaxTransactionAmount] with zero excluded, and both
+// ends of that range are checked (a one-sided bound is an int64-laundering hole
+// the moment sign is legal). A budget or savings-goal limit has no meaningful
+// negative form, so those handlers keep their own `<= 0` rejections and
+// category_budgets keeps its CHECK(amount_cents > 0) from migration 012. Do not
+// "unify" the two readings: relaxing a budget gate to match this comment would
+// let a household set a negative limit that every over-budget comparison then
+// reports as permanently exceeded.
 const MaxTransactionAmount = 1_000_000_000
 
 // charLen reports the length of s in CHARACTERS (Unicode code points), which

@@ -136,28 +136,35 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // the cent — in which case the base-currency value stored on the row must be
 // carried forward verbatim instead of being re-derived from today's rate.
 //
-// A foreign-currency row records the foreign amount and what it was worth in
-// the base currency. Migration 019 added a booked_rate column for the rate that
-// produced that number, but the column is NOT yet populated or consulted by any
-// code path — see the TODO(b10-booked-rate) note on UpdateTransaction — so
-// every row's rate is still unrecorded and the reasoning below still holds
-// unchanged. The api layer's resolveCurrency divides by the CURRENT
-// rate on every call, and PUT /transactions/{id} is a full replace — the inline
-// row editor rebuilds original_amount / original_currency from the stored row
-// and resends them on every save (web/src/lib/currency.ts, toEditDefaults +
-// toCreatePayload). So once the rate moved, editing only the description of a
-// 1,500,000 LBP row silently re-priced it: $16.85 became $15.00 while the LBP
-// figure never changed. Saving an edit must never move money the user did not
-// touch.
+// A foreign-currency row records the foreign amount, what it was worth in the
+// base currency, and — since migration 019 plus the capture in the api layer's
+// resolveCurrency — the rate that produced that number, in booked_rate. The
+// api layer divides by the CURRENT rate on every call, and PUT
+// /transactions/{id} is a full replace — the inline row editor rebuilds
+// original_amount / original_currency from the stored row and resends them on
+// every save (web/src/lib/currency.ts, toEditDefaults + toCreatePayload). So
+// once the rate moved, editing only the description of a 1,500,000 LBP row
+// silently re-priced it: $16.85 became $15.00 while the LBP figure never
+// changed. Saving an edit must never move money the user did not touch.
+//
+// The rate is frozen WITH the amount, in one branch, because the two are one
+// fact: booked_rate's meaning is "the divisor that produced the stored
+// amount_cents". Carrying the amount forward while letting the caller's
+// freshly-resolved rate land beside it would store a row whose three money
+// columns describe two different bookings — worse than either value alone,
+// because it looks authoritative. A re-pricing save stores both new values for
+// the same reason.
 //
 // It deliberately does not freeze everything. A corrected foreign amount
 // (1,500,000 -> 1,600,000), a switch to a different foreign currency, and a
-// switch to or from the base currency all keep the caller's recomputed amount,
-// because each of those IS the user changing the money. Re-pricing a corrected
-// foreign amount at today's rate is the only option available while the rate a
-// row was booked at is recorded nowhere. Snapshotting it per row is backlog B1
-// step 2: migration 019 landed the storage for it with the refunds rebuild, and
-// filling it in is what makes any other option expressible.
+// switch to or from the base currency all keep the caller's recomputed amount
+// and rate, because each of those IS the user changing the money. Note that
+// re-pricing a corrected amount at TODAY's rate is now a choice rather than the
+// only option: the row's original rate is finally readable, so booking a
+// correction at the rate the row was first booked under has become expressible.
+// It is deliberately not implemented in v1 — which of the two a household wants
+// is an owner decision, and the deferred "re-price these rows" action
+// (BACKLOG B1) is where it belongs.
 //
 // KNOWN LIMITATION, and it is one-way. Once a foreign row exists, no re-save
 // can ever move its base value again while the foreign amount and currency code
@@ -167,7 +174,13 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // back, and save again — undiscoverable, and deliberately not surfaced as an
 // affordance here: a "re-price these rows" action is an owner decision, and
 // rebuilding it as an automatic sweep is precisely the effective-dated rate
-// table that was rejected for creating a second source of truth.
+// table that was rejected for creating a second source of truth. What booked_rate
+// changes about that is only that such an action could now be HONEST about which
+// rows it would touch — rows booked under the wrong rate are identifiable
+// instead of guessed at. Rows created before 019, and every imported row, carry
+// NULL there and stay unidentifiable; there is no backfill, because deriving a
+// rate from the stored cents pair reconstructs it only to rounding and is simply
+// wrong for any sheet whose two money columns never agreed with a rate at all.
 //
 // Why the decision lives in the store, on `before`, and not in the handler:
 // handleUpdateTransaction reads the row OUTSIDE any transaction for its
@@ -213,11 +226,12 @@ func foreignMoneyUnchanged(before GetTransactionByIDRow, after UpdateTransaction
 // concurrent writers; pulling the before row outside the tx would race with
 // other mutators.
 //
-// Two fields of p are DERIVED here rather than accepted from the caller —
-// p.ClearContentHash always, and p.AmountCents on the one path described below.
-// The store is the only place that holds both the pre-edit row and the
-// post-edit params inside one tx, so deciding either question anywhere else
-// would race its own read. See hashInputsMoved and foreignMoneyUnchanged.
+// Some of p is DERIVED here rather than accepted from the caller —
+// p.ClearContentHash always, and the p.AmountCents / p.BookedRate PAIR on the
+// one path described below. The store is the only place that holds both the
+// pre-edit row and the post-edit params inside one tx, so deciding either
+// question anywhere else would race its own read. See hashInputsMoved and
+// foreignMoneyUnchanged.
 //
 // The two derivations are ordered, and the order is load-bearing: the freeze
 // runs FIRST so the hash decision sees the amount that will actually be
@@ -232,6 +246,7 @@ func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTr
 		}
 		if foreignMoneyUnchanged(before, p) {
 			p.AmountCents = before.AmountCents
+			p.BookedRate = before.BookedRate
 		}
 		p.ClearContentHash = hashInputsMoved(before, p)
 		if err := qtx.UpdateTransaction(ctx, p); err != nil {
