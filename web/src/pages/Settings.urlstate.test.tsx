@@ -146,6 +146,7 @@ function renderAt(entries: string[], initialIndex = entries.length - 1) {
       <Routes>
         <Route path="/settings" element={<Settings />} />
         <Route path="/budgets" element={<h2>Budgets page</h2>} />
+        <Route path="/savings" element={<h2>Savings page</h2>} />
         <Route path="/dashboard" element={<h2>Dashboard page</h2>} />
       </Routes>
     </MemoryRouter>,
@@ -442,6 +443,55 @@ describe('the write does not fight the inbound forwarder', () => {
       expect(currentUrl()).toBe(`/settings?tab=${key}`);
     },
   );
+
+  /**
+   * WHERE THE OPEN BUTTON ACTUALLY GOES — every entry in the table, not a
+   * sample.
+   *
+   * The route strings had no test at all: the pre-existing case in
+   * `Settings.test.tsx` invokes the callback and asserts only that it is a
+   * function and does not throw, so both routes could be repointed at `/trash`
+   * with the whole suite green. That hole matters more now than it did, because
+   * the `Record` → `Map` conversion retyped every one of these strings.
+   *
+   * The destinations are written out here rather than read back from
+   * `MOVED_TABS`: an oracle that imports the table under test agrees with it by
+   * construction, including when it is wrong. These are the routes `AppShell`
+   * really mounts.
+   */
+  test.each([
+    ['savings', '/savings', 'Savings page'],
+    ['budgets', '/budgets', 'Budgets page'],
+    ['general', '/budgets', 'Budgets page'],
+  ])('Open on ?tab=%s goes to %s', (param, route, heading) => {
+    renderAt([`/settings?tab=${param}`]);
+
+    const options = mockedToast.info.mock.calls[0]?.[1];
+    const action: unknown = options?.action;
+    if (
+      typeof action !== 'object' ||
+      action === null ||
+      !('onClick' in action) ||
+      typeof action.onClick !== 'function'
+    ) {
+      throw new Error(
+        `no Open action on the forwarding toast: ${JSON.stringify(options)}`,
+      );
+    }
+    // Called with no argument, and asserted as such: the production handler is
+    // `() => navigate(route)`, so manufacturing a React synthetic MouseEvent to
+    // fill a parameter it never reads would be ceremony rather than safety.
+    const onClick = action.onClick as () => void;
+
+    act(() => {
+      onClick();
+    });
+
+    expect(currentUrl()).toBe(route);
+    // The destination is a page that exists, not just a string in the bar —
+    // the URL assertion alone would pass on a route nothing is mounted at.
+    expect(screen.getByText(heading)).toBeInTheDocument();
+  });
 
   test('a REAL moved tab still toasts — the control for the probe above', () => {
     // Without this half, a page that had lost the forwarding toast entirely

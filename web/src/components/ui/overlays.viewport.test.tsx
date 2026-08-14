@@ -221,9 +221,10 @@ describe('overlay viewport bounds', () => {
     });
 
     it('adds no node at all when `header` is omitted', () => {
-      // The opt-in has to be free for the four sheets that do not use it:
-      // `{undefined}` must render nothing, or every one of them silently gains
-      // a flex child and a `gap-4`.
+      // The opt-in has to be free for any sheet that does not use it (as of
+      // B28 every shipped consumer passes `header=`, so this now guards future
+      // sheets): `{undefined}` must render nothing, or such a sheet silently
+      // gains a flex child and a `gap-4`.
       const content = renderSheet('bottom');
       expect(content.firstElementChild).toBe(
         scrollerAround(screen.getByText('Filters')),
