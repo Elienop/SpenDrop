@@ -269,24 +269,60 @@ switch in paint order. Pre-existing rhythm, untouched by the phone batch; low st
 toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
 20px+, or shrink the band on stacked placements. **Effort:** small.
 
-### B43 — Enter on the closed category trigger in the desktop row saves the row mid-edit
-**Verified: probed** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
-the fix batch pinned the current behavior with a test rather than changing it; the deep review
-probed what is actually observable). Pressing Enter on the category Select's CLOSED trigger in
-the desktop row fires the row's Enter-saves handler — the row commits and leaves edit mode
-while the user may only have meant to open the picker. (Radix would also open the picker on
-that Enter, but the row unmounts first, so no picker is ever seen.) A comment predating B33
-frames Enter-saves-from-any-field as intentional; whether it should apply to a Select trigger
-needs the owner's call. Enter on an OPEN picker is correct since B33: it picks the option and
-does not save. **Effort:** small once decided; the B33 controlled-Select guard is the natural
-place.
+### B46 — "six sections" is stale in eight places since `users` merged into `account`
+**Verified: read** (2026-08-14, found during B30). `VALID_TABS` has five entries and the phone
+picker renders five options, but "six sections/labels/values" survives in
+`settings-sections.ts:109`, `Settings.mobile.test.tsx:40,102` and six spots in `Settings.tsx`.
+Deliberately NOT swept on the phone-residue branch: some of those lines record browser
+measurements taken when six labels existed ("568px of scrollWidth against 313"), and a blind
+renumbering would falsify a measurement record. Wants one deliberate pass that separates
+"stale count" (fix) from "historical measurement" (keep, dated). **Effort:** small.
+
+### B47 — ModeToggle's moon glyph has no positioned ancestor inside its own button
+**Verified: read** (2026-08-15, found during the B28 fix wave). `ModeToggle.tsx:27` renders
+`<Moon className="absolute …">` but `ui/button.tsx` has no `relative` in its base, so the
+icon's containing block is whatever positioned ancestor the placement supplies — inside the
+mobile drawer that is `SheetContent` itself, so the glyph escapes the body scroller's clipping
+and does not scroll with its own button (dark mode, drawer scrolled). Fix wants `relative` on
+ModeToggle's trigger (scoped) rather than on the Button base (app-wide blast radius — audit
+first). Confirm visually on the next browser pass. **Effort:** small.
+
+### B48 — 11 test files strip a hook's contract with `as unknown as ReturnType<…>`
+**Verified: read** (2026-08-15, found during the B30 fix wave). The double cast opts a mock out
+of the mocked hook's type contract, so a required field added to the hook later feeds
+`undefined` into those tests silently — and any "adding member X produced N compile errors"
+measurement is a floor, not a total, because these files never enter the count. One instance
+(the `useAuth` mock in Settings.urlstate.test.tsx) was fixed on the phone-residue branch; the
+same file and 10 others still carry the pattern for other hooks (`grep -rln "as unknown as
+ReturnType" web/src`). Caveat before sweeping: some casts wrap large React-Query result shapes
+where a fully typed object is genuinely impractical — the audit should separate "lazy auth/ctx
+mock" (fix) from "pragmatic partial of a huge generic" (document). **Effort:** small-medium.
+
+### B49 — `type="number"` fields ship no `inputMode="decimal"` hint outside three sites
+**Verified: read** (2026-08-15, found during the B44 fix wave). The pairing (which makes phones
+reliably raise the decimal keypad) exists on the Settings large-transaction threshold and, as
+of the phone-residue branch, both Budgets card fields — but five other files carry bare
+`type="number"`: `AmountCurrencyInput` (the primary phone entry path — fix first), `SpendingTab`,
+`PatternsTab`, `Savings`, `FilterPanel`; plus the Budgets desktop-table inputs, which the coarse
+Tab S10 FE reaches at ~1130px landscape (inputMode is inert for physical keyboards, so adding
+it there is zero-risk but changes desktop DOM — scoped out of the phone-residue batch on
+purpose). Un-verifiable in any repo test — headless Chrome raises no soft keyboard; verify on
+a real device or accept the hint on spec. **Effort:** small.
 
 ---
 
 ## Queued stages
 
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
-PR #139 and released as v0.44.0 — see Closed. Nothing is currently queued as a stage.*
+PR #139 and released as v0.44.0 — see Closed.*
+
+- **Phone-residue batch (B44 + B45 + B28 + B30) — IN FLIGHT** on
+  `fix/phone-residue-sheets-url-budgets-switches` (owner's go 2026-08-14). Docs riders on the
+  branch: the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision records.
+- **Back-dated import rate** (decided 2026-08-14): the import sheet gets an optional per-row
+  rate column; rows without one fall back to the import-day rate. Data-correctness stage on
+  its own branch — import parser + validation, and the interaction with the import dedupe
+  hash must be designed, not assumed. Next after the phone-residue batch.
 
 ---
 
@@ -298,17 +334,21 @@ PR #139 and released as v0.44.0 — see Closed. Nothing is currently queued as a
   **Answered 2026-08-02: yes, Dockhand watches every stack's container health.** That is what
   made B7 a two-line change to what the `HEALTHCHECK` scrapes rather than a new alerting
   channel; both pieces shipped in v0.39.0 — see B7 in Closed.
-- **Native Android app — reassess.** The pre-B9 phone experience was the standing evidence for
-  going native; with all of B9 plus #131 and #137 shipped, the PWA is the daily driver at 360px.
-  The gaps that framed this question (B26, B33, B41, B42) all closed in the 2026-08-14
-  phone/tablet batch — see Closed. What remains on the phone surface: B28 (sheet headers),
-  B30 (URL section state), and B43 (a desktop-row keyboard oddity). Owner's call whether that
-  residue keeps the question open.
-- **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
-  back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
-  has never moved); real once it does. **Unblocked 2026-08-14:** the rate column (B1 step 2)
-  shipped in PR #139, so the only thing still needed is the owner's decision about what rate a
-  back-dated import should use.
+- ~~**Native Android app — reassess.**~~ **Answered 2026-08-14: CLOSED — the PWA is the
+  answer**, and it keeps improving ("the pwa is good enough now we can keep on improving for
+  the future as well"). The residue that last framed the question is dispatched: B28 and B30
+  are in the phone-residue batch in flight, and B43 closed as intended behavior — see Closed.
+- ~~**Import + foreign currency:** what rate should a back-dated import use?~~ **Answered
+  2026-08-14: the import sheet carries its own optional per-row rate column; rows without one
+  fall back to the import-day rate** — the sheet knows its own era best, and the fallback is
+  today's behavior. Context that framed it: import accepts an `original_currency` column, so a
+  sheet of back-dated LBP rows was valued at the rate current *when you import* — harmless
+  while the rate never moved, real once it does; the booked-rate column (B1 step 2) shipped in
+  PR #139 and unblocked this. Promoted to the queued import-rate stage above.
+- **Entry-row ⌘Z leaves member-visible tombstones** — **Answered 2026-08-14: fine as-is**
+  (asked 2026-08-02, reaction was pending since). Trash purge clears them, and tombstoned rows
+  are excluded from every aggregate by the soft-delete invariant, so the only cost is Trash
+  clutter.
 
 ---
 
@@ -358,9 +398,20 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B43 — Enter on the closed category trigger saves the row: CLOSED as intended behavior**
+  (owner decision 2026-08-14; no code change — the decision record and the test-comment update
+  ride `fix/phone-residue-sheets-url-budgets-switches`). The owner uses Enter on the closed
+  trigger as the fast keyboard save; rerouting it to open the picker would cost a Tab to reach
+  Save, and Space already opens the picker. The B33-era pin test
+  (`_ControlEnterOnTheClosedTriggerStillSaves`) stands and now documents a decided contract,
+  not an open question. Enter on an OPEN picker still picks without saving (B33). What was
+  non-obvious: the "defect" framing assumed pickers must open on Enter; the owner's actual
+  keyboard flow treats the trigger as one more field you save from, which is exactly what the
+  pre-B33 comment claimed was intentional — it was right.
+
 - **B26 + B33 + B34 + B41 + B42 — the phone/tablet batch** (2026-08-14, on
   `fix/phone-batch-recurring-settings-tablet`; five parallel builders with disjoint file
-  ownership; squash hash joins this entry at merge). Per item:
+  ownership; merged 2026-08-14 as PR #140, squash `2bea69f`, released v0.44.1). Per item:
   **B26** — the Patterns tab's recurring-expenses table (102px pan at 360) became a JS-gated
   card list below `md` (`useIsMobileViewport`, matching the app's other five card lists); the
   tab's pre-existing pointer-derived gate was renamed `heatmapIsCalendar` so the two forks

@@ -112,7 +112,7 @@ Manage expense and income categories with color-coded badges, type labels (Expen
 
 ### Settings
 
-Tabbed settings page covering account and system configuration. Monthly Budgets, Category Limits, and Savings Goals each have their own top-level page (see [Budgets](#budgets) and [Savings](#savings) above); old `?tab=budgets` / `?tab=savings` / `?tab=general` bookmarks land on Account with a one-shot toast offering to open the new page directly.
+Tabbed settings page covering account and system configuration. The section you pick is kept in the URL (`?tab=`), so a reload, a bookmark, or navigating away and pressing Back returns you to it. Monthly Budgets, Category Limits, and Savings Goals each have their own top-level page (see [Budgets](#budgets) and [Savings](#savings) above); old `?tab=budgets` / `?tab=savings` / `?tab=general` bookmarks land on Account with a one-shot toast offering to open the new page directly.
 
 - **Account** -- Change your own password. Changing it signs you out everywhere and revokes all of your API tokens. Available to every user.
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)

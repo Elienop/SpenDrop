@@ -791,10 +791,11 @@ describe('TransactionRow — Enter inside the category Select', () => {
 
   // Control for the test above, and the behaviour the guard must not cost:
   // with the list shut, the trigger is just another field you can save from.
-  // Whether it SHOULD be is a separate, open question — filed as B43 in
-  // docs/BACKLOG.md (a user aiming to open the picker commits the row
-  // instead). This test pins the CURRENT contract; if the owner decides B43,
-  // it changes with the guard.
+  // That is DECIDED behaviour, not an open question: B43 asked whether Enter
+  // here should open the picker instead, and the owner closed it 2026-08-14
+  // as keep-as-is — Enter-on-the-closed-trigger is their fast keyboard save,
+  // and rerouting it would cost a Tab to reach Save (Space already opens the
+  // picker). See B43 in docs/BACKLOG.md Closed. This test pins that contract.
   it('_ControlEnterOnTheClosedTriggerStillSaves: the guard stands down', async () => {
     const onUpdate = vi.fn().mockResolvedValue(undefined);
     await openEditWithTwoCategories(onUpdate);
