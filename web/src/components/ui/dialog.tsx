@@ -32,7 +32,8 @@ DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 /**
  * `showCloseButton` opts a dialog out of the built-in X.
  *
- * Default `true`, so all ~20 existing call sites are byte-unchanged. It exists
+ * Default `true`, so all 11 pre-existing production call sites are
+ * byte-unchanged. It exists
  * for the one dialog that refuses every close except its own button — the
  * API-token reveal, which holds a plaintext secret the server will never
  * re-issue — where the X rendered, took focus, and did nothing. A control that

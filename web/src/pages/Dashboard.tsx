@@ -417,15 +417,19 @@ export function Dashboard() {
                 header above stays usable throughout, so picking a different
                 period is the other way out.
 
-                It hands focus to the heading FIRST, and that order is
-                load-bearing. Measured, not assumed: refetching an errored
-                query with no data puts TanStack back to `pending`, so
-                `loading` flips true and `error` clears the moment this fires
-                — this whole alert, button included, unmounts on the very next
-                commit. Focusing after `refetch()` would race that; focusing
-                before it moves focus while the button still exists, and the
-                unmount then takes nothing with it. It also covers the second
-                unmount, on success, because focus is already parked.
+                It hands focus to the heading FIRST, as the defensive order —
+                belt-and-braces, not load-bearing. The hook contract is real
+                and pinned (useDashboard.test.ts): refetching an errored query
+                with no data puts TanStack back to `pending`, so this whole
+                alert, button included, unmounts on the commit AFTER this
+                handler. But that is the point: React batches the state update
+                out of this click handler and TanStack notifies via microtask,
+                so the unmount cannot interleave between these two synchronous
+                statements — probed via `isConnected` (deep review,
+                2026-08-14), and an order-swap mutant survives the tests.
+                Focus-first is kept because it also covers the second unmount
+                (on success) and costs nothing; do not add a test pinning the
+                order as if it mattered.
 
                 Deliberately NOT `disabled={fetching}`: disabling the element
                 that currently has focus blurs it to `<body>`, which is the

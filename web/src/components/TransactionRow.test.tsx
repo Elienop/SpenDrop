@@ -791,6 +791,10 @@ describe('TransactionRow — Enter inside the category Select', () => {
 
   // Control for the test above, and the behaviour the guard must not cost:
   // with the list shut, the trigger is just another field you can save from.
+  // Whether it SHOULD be is a separate, open question — filed as B43 in
+  // docs/BACKLOG.md (a user aiming to open the picker commits the row
+  // instead). This test pins the CURRENT contract; if the owner decides B43,
+  // it changes with the guard.
   it('_ControlEnterOnTheClosedTriggerStillSaves: the guard stands down', async () => {
     const onUpdate = vi.fn().mockResolvedValue(undefined);
     await openEditWithTwoCategories(onUpdate);

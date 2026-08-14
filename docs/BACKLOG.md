@@ -269,14 +269,17 @@ switch in paint order. Pre-existing rhythm, untouched by the phone batch; low st
 toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
 20px+, or shrink the band on stacked placements. **Effort:** small.
 
-### B43 — Enter on the closed category trigger in the desktop row opens the picker AND saves
-**Verified: read** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
-the fix batch pinned the current behavior with a test rather than changing it). In the desktop
-transactions row, pressing Enter on the category Select's CLOSED trigger both opens the picker
-and fires the row's Enter-saves handler in the same keystroke — the row commits while the user
-is mid-edit. A comment predating B33 frames this as intentional; whether it actually is needs
-the owner's call. Enter on an OPEN picker is now correct (B33): it picks the option and does
-not save. **Effort:** small once decided; the B33 controlled-Select guard is the natural place.
+### B43 — Enter on the closed category trigger in the desktop row saves the row mid-edit
+**Verified: probed** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
+the fix batch pinned the current behavior with a test rather than changing it; the deep review
+probed what is actually observable). Pressing Enter on the category Select's CLOSED trigger in
+the desktop row fires the row's Enter-saves handler — the row commits and leaves edit mode
+while the user may only have meant to open the picker. (Radix would also open the picker on
+that Enter, but the row unmounts first, so no picker is ever seen.) A comment predating B33
+frames Enter-saves-from-any-field as intentional; whether it should apply to a Select trigger
+needs the owner's call. Enter on an OPEN picker is correct since B33: it picks the option and
+does not save. **Effort:** small once decided; the B33 controlled-Select guard is the natural
+place.
 
 ---
 
@@ -339,8 +342,12 @@ leads are not re-investigated.
    database: both placements return byte-identical results, because a separate condition already
    removes zero-total categories. The code's own comment admits this, and the "dashboard
    categories" example named in the rule is not that kind of join.
-2. **"Mutations go through `TransactionStore` only — never raw SQL."** Four bulk paths do use raw
-   SQL. All four are deliberate and documented in place. The rule is wrong, not the code.
+2. **"Mutations go through `TransactionStore` only — never raw SQL."** *(re-measured 2026-08-14
+   during B10:)* `batch-update` and `batch-delete` now route every row through the store; raw SQL
+   remains at exactly three `ExecContext` sites in two endpoints (`delete-by-filter`, and
+   `update-by-filter`'s no-tags fast path plus its per-row tags variant), each deliberate and
+   documented in place. The rule as stated is wrong, not the code — the invariant that actually
+   holds on every path is audit-in-same-tx + tombstone exclusion + the checkpoint hook.
 
 Neither is enforced by a test. A reviewer trusting the first could relax the real filtering
 condition *and* move the predicate, believing one was safe because the other was checked.
