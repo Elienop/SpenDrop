@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -19,7 +20,9 @@ import (
 // queues it on a background goroutine and returns, so none of these helpers
 // ever puts a push gateway between the user and their response.
 //
-// Money in bodies is DOLLARS via centsToDollars (never a raw *_cents value).
+// Money in bodies is DOLLARS via centsToDollars (never a raw *_cents value),
+// and always the MAGNITUDE with the direction carried in words — see
+// activityPhrase.
 // The category label is looked up via GetCategoryByID; a lookup miss degrades
 // to "a category" rather than failing the notification.
 
@@ -103,6 +106,48 @@ func (h *Handler) emit(ctx context.Context, notifType, title, body, url string, 
 	h.fanOutPush(ctx, notifType, b, excludeUserID, pushOpts{Tag: tag, Topic: topic, Urgency: urgency})
 }
 
+// activityPhrase renders the money half of an activity body: "added $12.34", or
+// "added a refund of $20.00" when the row is a refund (negative cents, B10).
+//
+// The MAGNITUDE is what gets formatted, always. Feeding the signed value to
+// "$%.2f" produced "added $-20.00", which reads as a typo on a phone and, worse,
+// reads as a SMALLER number than it is. The sign is carried by the wording
+// instead, so the two facts a reader needs — how much, and which direction —
+// arrive as words rather than as a character they might not notice.
+//
+// verb is the caller's ("added" / "edited" / "deleted"), so there is exactly one
+// definition of refund wording across all four bodies. Push copy is what the
+// household reads on a lock screen; keep it plain.
+func activityPhrase(verb string, cents int64) string {
+	if cents < 0 {
+		// magnitudeCents, not a bare -cents: negation is not total on int64,
+		// and this is the one place the result is shown to a human.
+		return fmt.Sprintf("%s a refund of $%.2f", verb, centsToDollars(magnitudeCents(cents)))
+	}
+	return fmt.Sprintf("%s $%.2f", verb, centsToDollars(cents))
+}
+
+// magnitudeCents is the absolute value of a signed cents amount, for the
+// threshold comparisons that ask "how big is this" rather than "which way does
+// it go".
+func magnitudeCents(cents int64) int64 {
+	// math.MinInt64 has no positive counterpart, so negating it yields itself:
+	// the largest amount int64 can hold would compare BELOW every threshold and
+	// silence the alert it most deserves, and print as a negative dollar figure
+	// in the push body. Unreachable from any write path today (validateMoneyAmount
+	// bounds a stored amount at 1e11 cents) — this keeps the function total, so a
+	// future caller reading amount_cents straight from a row cannot be surprised
+	// by a negative magnitude. Clamping loses ONE cent of an already absurd value
+	// and keeps every comparison and every rendering correctly signed.
+	if cents == math.MinInt64 {
+		return math.MaxInt64
+	}
+	if cents < 0 {
+		return -cents
+	}
+	return cents
+}
+
 // largeTxnEnabledAndThreshold reads the household large-transaction threshold
 // and whether the large_txn type is enabled. A settings read error fails closed
 // (large path off) so we fall through to the normal activity type.
@@ -117,53 +162,55 @@ func (h *Handler) largeTxnEnabledAndThreshold(ctx context.Context) (enabled bool
 // notifyTxnAdded fires after a single transaction create. LARGE-TXN PRECEDENCE:
 // when large_txn is enabled and the amount is at/over the household threshold,
 // we send ONE "large_txn" push INSTEAD OF "txn_added" — never both.
+//
+// The threshold is compared against the MAGNITUDE: a $5,000 refund is exactly
+// as worth knowing about as a $5,000 purchase, and it is the shape a mistyped
+// minus takes. Comparing the signed value made every refund, however large,
+// fall through to the quiet activity type — the household's only alert on a big
+// wrong number, silenced by the sign that made it wrong.
 func (h *Handler) notifyTxnAdded(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
-	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
+	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && magnitudeCents(txn.AmountCents) >= threshold {
 		h.emitLarge(ctx, txn, "added", actor, excludeUserID)
 		return
 	}
-	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_added",
 		"Transaction added",
-		fmt.Sprintf("%s added $%.2f in %s — %s", actor, dollars, cat, txn.Description),
+		fmt.Sprintf("%s %s in %s — %s", actor, activityPhrase("added", txn.AmountCents), cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // notifyTxnEdited fires after a single transaction update. Same large-txn
-// precedence as create.
+// precedence as create, on the same magnitude comparison.
 func (h *Handler) notifyTxnEdited(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
-	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && txn.AmountCents >= threshold {
+	if largeEnabled, threshold := h.largeTxnEnabledAndThreshold(ctx); largeEnabled && magnitudeCents(txn.AmountCents) >= threshold {
 		h.emitLarge(ctx, txn, "edited", actor, excludeUserID)
 		return
 	}
-	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_edited",
 		"Transaction edited",
-		fmt.Sprintf("%s edited $%.2f in %s — %s", actor, dollars, cat, txn.Description),
+		fmt.Sprintf("%s %s in %s — %s", actor, activityPhrase("edited", txn.AmountCents), cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // notifyTxnDeleted fires after a single transaction delete. No large-txn
 // precedence on delete — a removal is activity, not a large spend signal.
 func (h *Handler) notifyTxnDeleted(ctx context.Context, txn database.Transaction, actor string, excludeUserID int64) {
-	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "txn_deleted",
 		"Transaction deleted",
-		fmt.Sprintf("%s deleted $%.2f in %s — %s", actor, dollars, cat, txn.Description),
+		fmt.Sprintf("%s %s in %s — %s", actor, activityPhrase("deleted", txn.AmountCents), cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 
 // emitLarge sends the "large_txn" payload. verb is the originating op
 // ("added"/"edited") purely for the body wording.
 func (h *Handler) emitLarge(ctx context.Context, txn database.Transaction, verb string, actor string, excludeUserID int64) {
-	dollars := centsToDollars(txn.AmountCents)
 	cat := h.categoryLabel(ctx, txn.CategoryID)
 	h.emit(ctx, "large_txn",
 		"Large transaction",
-		fmt.Sprintf("%s %s $%.2f in %s — %s", actor, verb, dollars, cat, txn.Description),
+		fmt.Sprintf("%s %s in %s — %s", actor, activityPhrase(verb, txn.AmountCents), cat, txn.Description),
 		"/transactions", excludeUserID)
 }
 

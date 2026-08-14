@@ -146,8 +146,10 @@ func TestExports_IncludeRowAtEndOfBoundaryDay_ListFilter(t *testing.T) {
 // handleExportMonthly's Summary sheet, whose LEFT JOIN ON clause has
 // "t.date >= ? AND t.date <= ?" — lexical comparison trap, same shape.
 // Food (id=1) is an expense category, so if the boundary row is counted
-// the Summary sheet Food row shows total=777; if dropped, the Food row
-// is omitted entirely (HAVING total_cents > 0 filters it out).
+// the Summary sheet Food row shows total=777; if dropped, the Food row is
+// omitted entirely — B10 changed the gate to HAVING COUNT(t.id) > 0, which
+// still hides a category whose rows all fell outside the window, because the
+// LEFT JOIN then matches nothing and the count over the joined column is 0.
 func TestExports_IncludeRowAtEndOfBoundaryDay_MonthlySummarySheet(t *testing.T) {
 	q, db := setupTestDB(t)
 	h := NewHandler(q, db)
@@ -433,9 +435,10 @@ func TestExports_ExcludeNextDayRow_MonthlySummarySheet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get Summary sheet: %v", err)
 	}
-	// Food row should be absent entirely (HAVING total_cents > 0 filters
-	// out zero-total categories). If the next-day row leaked in, Food
-	// would show total=777.
+	// Food row should be absent entirely. B10's gate is HAVING COUNT(t.id) > 0
+	// — "has live rows in the window" — and the only Food row falls outside
+	// the window, so the LEFT JOIN matches nothing and the count is 0. If the
+	// next-day row leaked in, Food would show total=777.
 	for _, row := range summaryRows[1:] {
 		if len(row) >= 3 && row[0] == "Food" {
 			t.Fatalf("next-day row leaked into monthly Summary sheet — upper-bound exclusion broke. Food row present: %v", row)
@@ -535,8 +538,8 @@ func TestExports_ExcludeNextDayRow_YearlyCategoryTotalsSheet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get Category Totals: %v", err)
 	}
-	// Food row should be absent entirely (HAVING total_cents > 0 filters
-	// out zero-total categories). If the next-day row leaked, Food would
+	// Food row should be absent entirely — same COUNT(t.id) > 0 reasoning as
+	// the monthly Summary sheet above. If the next-day row leaked, Food would
 	// show total=777.
 	for _, row := range catRows[1:] {
 		if len(row) >= 3 && row[0] == "Food" {

@@ -131,8 +131,8 @@ suite. Pair separation is not gate-able at 20 slots; see the comment above the l
 
 ### Semantic Colors in Transaction Lists
 
-- **Income amounts:** `text-emerald-500` with `+` prefix
-- **Expense amounts:** default foreground (neutral) with `-` prefix
+- **Amounts:** sign and colour both follow the **displayed value**, never the row's type. `displayAmount(amount, type)` flips an expense's stored magnitude to negative and leaves income as-is; `formatSignedCurrency` then emits the one sign (`signDisplay: 'exceptZero'`). Displayed value `> 0` → `text-emerald-500`, otherwise default foreground. Never compose a `+`/`-` prefix onto a signing formatter — amounts are signed in storage, so a refund (negative expense) displays `+$20.00` in the inflow colour and the old `type === 'expense' ? '-' : '+'` rule renders `--$20.00`.
+- **The word beside such an amount:** a sign that disagrees with the type is labelled by `AmountSignNote` — "Refund" on a negative expense, "Reversal" on a negative income — in the metadata register (`text-xs text-muted-foreground`, `gap-1.5`, `size-3.5` icon), placed **before** the figure so it is announced first.
 - **Category dots:** `color-mix(in srgb, [category_color] 15%, transparent)` for tinted circles
 
 ---

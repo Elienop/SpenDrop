@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { Transaction } from '@/api/types';
+import type { Category, Transaction } from '@/api/types';
 import type { AmountCurrencyInputProps } from '@/components/AmountCurrencyInput';
+import type { AmountSignToggleProps } from '@/components/AmountSignToggle';
 import { useCurrencies } from '@/hooks/useCurrencies';
-import { toCreatePayload, toEditDefaults, type StoredMoney } from '@/lib/currency';
+import {
+  applyAmountSign,
+  toCreatePayload,
+  toEditDefaults,
+  type StoredMoney,
+} from '@/lib/currency';
+import type { TransactionType } from '@/lib/transaction-types';
 import type { UpdateTransactionInput } from '@/hooks/useTransactions';
 
 /**
@@ -29,12 +36,25 @@ export interface EditAmountProps
       | 'rateFor'
       | 'loading'
       | 'storedMoney'
+      | 'negative'
       | 'error'
     >,
     'storedMoney'
   > {
   storedMoney: StoredMoney;
 }
+
+/**
+ * The props this hook hands straight to `AmountSignToggle`.
+ *
+ * Same reasoning as `amountProps`: the sign is not exposed as a bare
+ * boolean + setter, so a surface cannot wire the control up while bypassing
+ * the magnitude/sign split the amount box depends on.
+ */
+export type EditSignProps = Pick<
+  AmountSignToggleProps,
+  'checked' | 'onCheckedChange' | 'type'
+>;
 
 export interface UseTransactionEditFormArgs {
   transaction: Transaction;
@@ -43,6 +63,14 @@ export interface UseTransactionEditFormArgs {
   /** Runs after a save that resolved. The two edit surfaces close differently
    *  — the table row collapses back to its read view, the sheet dismisses. */
   onSaved: () => void;
+  /**
+   * The categories the surface offers in its picker. Used for one thing:
+   * reading the type of the category currently SELECTED, so the sign toggle
+   * says "Refund" on an expense and "Reversal" on an income row even after the
+   * user re-files it. Omit it and the label follows the row's stored type,
+   * which is right until the moment they change the category.
+   */
+  categories?: Category[];
 }
 
 /**
@@ -70,6 +98,14 @@ export interface UseTransactionEditForm {
   reset: () => void;
   save: () => Promise<void>;
   amountProps: EditAmountProps;
+  /**
+   * The Refund/Reversal toggle. REQUIRED on both edit surfaces, not a nicety:
+   * the amount box shows a stored refund's magnitude, so without this control
+   * the sign has nowhere to live and an unrelated edit — fixing a typo in the
+   * description — would save the row back positive and silently turn money
+   * returned into money spent.
+   */
+  signProps: EditSignProps;
   /** Save is refused while a request is in flight, while the currency list is
    *  still loading, and for a non-base currency with no configured rate. */
   saveDisabled: boolean;
@@ -90,6 +126,7 @@ export function useTransactionEditForm({
   onUpdate,
   onError,
   onSaved,
+  categories,
 }: UseTransactionEditFormArgs): UseTransactionEditForm {
   const {
     list: currencies,
@@ -103,7 +140,16 @@ export function useTransactionEditForm({
   // base, the initial defaults capture "USD"; the didInitEditCurrency
   // effect below rehydrates once the fetch lands.
   const initialDefaults = toEditDefaults(transaction, baseCode);
-  const [editAmount, setEditAmount] = useState<number>(initialDefaults.amount);
+  // The amount splits in two on the way into the form: the box holds the
+  // MAGNITUDE and the toggle holds the direction, so a stored refund opens as
+  // "20.00" with Refund on rather than as "-20.00" in a field that refuses a
+  // minus. `save` puts them back together.
+  const [editAmount, setEditAmount] = useState<number>(
+    Math.abs(initialDefaults.amount),
+  );
+  const [isNegative, setIsNegative] = useState<boolean>(
+    initialDefaults.amount < 0,
+  );
   const [editCurrency, setEditCurrency] = useState<string>(
     initialDefaults.currency,
   );
@@ -111,6 +157,12 @@ export function useTransactionEditForm({
   const [categoryId, setCategoryId] = useState(String(transaction.category_id));
   const [tags, setTags] = useState(transaction.tags ?? '');
   const [saving, setSaving] = useState(false);
+  // A save was attempted with an empty amount box. Latched rather than checked
+  // continuously: the field starts populated and clearing it is a step ON THE
+  // WAY to typing a new figure, so complaining the moment it goes empty would
+  // scold the user mid-keystroke. The message is derived from this AND the
+  // live value below, which is what retires it as soon as a digit lands.
+  const [triedEmptySave, setTriedEmptySave] = useState(false);
 
   const didInitEditCurrency = useRef(false);
   useEffect(() => {
@@ -129,21 +181,47 @@ export function useTransactionEditForm({
     if (resolved.currency !== editCurrency) {
       setEditCurrency(resolved.currency);
     }
-    if (resolved.amount !== editAmount) {
-      setEditAmount(resolved.amount);
+    // Re-split, not re-assign: the rehydrated value is the row's SIGNED money,
+    // and the two pieces have to move together or a foreign refund would
+    // rehydrate its magnitude while the toggle kept the placeholder base
+    // currency's sign.
+    const resolvedMagnitude = Math.abs(resolved.amount);
+    if (resolvedMagnitude !== editAmount) {
+      setEditAmount(resolvedMagnitude);
     }
-    // editAmount/editCurrency intentionally excluded: this effect must run
-    // exactly once per mount, gated by didInitEditCurrency.
+    const resolvedNegative = resolved.amount < 0;
+    if (resolvedNegative !== isNegative) {
+      setIsNegative(resolvedNegative);
+    }
+    // editAmount/editCurrency/isNegative intentionally excluded: this effect
+    // must run exactly once per mount, gated by didInitEditCurrency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currenciesLoading, baseCode, transaction]);
 
   const save = useCallback(async () => {
+    // An empty amount box emits exactly 0 (`AmountCurrencyInput` maps '' and
+    // any unparseable text to it), and a zero amount is unstorable — the server
+    // answers "amount must not be zero", which is the wire's vocabulary aimed
+    // at a user who typed nothing at all. Refuse it here instead, in the field
+    // that is wrong, and send no request: a round trip cannot change the
+    // answer. Not folded into `saveDisabled` — the other two conditions there
+    // are things the user cannot act on from this form, while this one is a
+    // box they are three keystrokes from fixing, and a Save button that dims
+    // itself the moment the field is cleared reads as broken.
+    if (editAmount === 0) {
+      setTriedEmptySave(true);
+      return;
+    }
+    setTriedEmptySave(false);
     setSaving(true);
     let payload: UpdateTransactionInput;
     try {
       const wire = toCreatePayload(
         {
-          amount: editAmount,
+          // Magnitude and toggle recombined, before the conversion so a
+          // foreign refund divides with its sign and both halves of the money
+          // pair stay in agreement.
+          amount: applyAmountSign(editAmount, isNegative),
           currency: editCurrency,
           date,
           description,
@@ -173,6 +251,7 @@ export function useTransactionEditForm({
     }
   }, [
     editAmount,
+    isNegative,
     editCurrency,
     date,
     description,
@@ -188,8 +267,10 @@ export function useTransactionEditForm({
 
   const reset = useCallback(() => {
     const resolved = toEditDefaults(transaction, baseCode);
+    setTriedEmptySave(false);
     setDate(transaction.date);
-    setEditAmount(resolved.amount);
+    setEditAmount(Math.abs(resolved.amount));
+    setIsNegative(resolved.amount < 0);
     setEditCurrency(resolved.currency);
     setDescription(transaction.description);
     setCategoryId(String(transaction.category_id));
@@ -206,6 +287,10 @@ export function useTransactionEditForm({
     hideInactive: false,
     rateFor,
     loading: currenciesLoading,
+    // What the toggle beside the box is set to. The preview needs it to
+    // rebuild the signed amount the save will send, because the freeze
+    // comparison below is over signed cents — see the prop's own doc.
+    negative: isNegative,
     // The money this row already stores. Saving an edit that merely
     // restates the same foreign amount in the same currency keeps that
     // stored value instead of re-pricing at today's rate, so the `≈`
@@ -218,10 +303,30 @@ export function useTransactionEditForm({
       original_amount: transaction.original_amount,
       original_currency: transaction.original_currency,
     },
+    // The rate error outranks the empty one, and cannot in fact coexist with
+    // it: a missing rate already disables Save, so the empty-amount latch has
+    // no way to be set while one is outstanding.
     error:
       editCurrency !== baseCode && rateFor(editCurrency) == null
         ? 'No rate configured for this currency. Set one in Settings.'
-        : null,
+        : triedEmptySave && editAmount === 0
+          ? 'Enter an amount'
+          : null,
+  };
+
+  // The word the toggle wears follows the category the row is filed under
+  // RIGHT NOW, so re-filing an expense as income relabels it. Falls back to the
+  // stored type for a caller that passes no category list, and again if the
+  // selected id matches nothing — a picker whose list has not loaded yet must
+  // not silently demote an income row to "Refund".
+  const signType: TransactionType =
+    categories?.find((c) => String(c.id) === categoryId)?.type ??
+    transaction.category_type;
+
+  const signProps: EditSignProps = {
+    checked: isNegative,
+    onCheckedChange: setIsNegative,
+    type: signType,
   };
 
   return {
@@ -238,6 +343,7 @@ export function useTransactionEditForm({
     reset,
     save,
     amountProps,
+    signProps,
     saveDisabled:
       saving ||
       currenciesLoading ||

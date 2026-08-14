@@ -63,7 +63,11 @@ describe('TransactionCard anatomy', () => {
     expect(screen.getByText('Groceries')).toBeInTheDocument();
     expect(screen.getByText('food')).toBeInTheDocument();
     expect(screen.getByText('weekly')).toBeInTheDocument();
-    expect(screen.getByTestId('amount-display')).toHaveTextContent('-$25.50');
+    // Anchored: `toHaveTextContent('-$25.50')` is a substring match and
+    // accepts the "--$25.50" a double-signed render produces.
+    expect(screen.getByTestId('amount-display')).toHaveTextContent(
+      /^-\$25\.50$/,
+    );
   });
 
   // The creator line is a member's only warning that a row is her spouse's
@@ -106,10 +110,30 @@ describe('TransactionCard anatomy', () => {
         original_currency: 'LBP',
       }),
     });
-    expect(screen.getByTestId('amount-display')).toHaveTextContent('-$16.85');
+    expect(screen.getByTestId('amount-display')).toHaveTextContent(/-\$16\.85/);
+    // BOTH lines carry the row's direction now — see AmountDisplay. A row
+    // reading "-$16.85" over an unsigned original was fine while amounts could
+    // only be positive; with refunds the two lines have to agree.
     expect(screen.getByTestId('amount-display-secondary')).toHaveTextContent(
-      '1,500,000.00 LBP',
+      /^-1,500,000\.00 LBP$/,
     );
+  });
+
+  it('a refunded row reads as money back, and says so', () => {
+    // The ledger card is where the household reviews what was entered, so the
+    // quadrant that did not exist before the signed model has to be legible
+    // here first: a negative expense is an INFLOW on an expense row.
+    renderCard({
+      transaction: makeTx({
+        amount: -25.5,
+        original_amount: -2250000,
+        original_currency: 'LBP',
+      }),
+    });
+    const block = screen.getByTestId('amount-display');
+    expect(block).toHaveTextContent(/^Refund\+\$25\.50\+2,250,000\.00 LBP$/);
+    expect(block).toHaveClass('text-emerald-500');
+    expect(screen.getByTestId('amount-sign-note')).toHaveTextContent('Refund');
   });
 
   it('gives the whole row a touch-sized tap target that cannot be text-selected', () => {

@@ -16,13 +16,26 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useDayExpenses } from '@/hooks/useDayExpenses';
 import { FORMAT_DATE_FULL } from '@/lib/dates';
-import { formatAmount } from '@/lib/format';
+import {
+  displayAmount,
+  formatSignedAmount,
+  formatSignedCurrency,
+} from '@/lib/format';
+import { AmountSignNote } from '@/components/AmountSignNote';
+import { spendingSummaryPhrase } from './heatmapGrid';
 
-/** The tapped cell: its date, the total the cell itself painted, and whether
- *  that date has happened yet. */
+/** The tapped cell: its date, the total the cell itself painted, how many rows
+ *  it holds, and whether that date has happened yet. */
 export interface HeatmapDay {
   date: string;
+  /** The cell's own NET total — signed, so refunds can take it to <= 0. */
   total: number;
+  /**
+   * Live expense rows on the day. THE FETCH GATE, replacing `total > 0`: a day
+   * whose refunds netted it to zero has rows, and this sheet is the only path
+   * to them on the phone.
+   */
+  count: number;
   upcoming: boolean;
 }
 
@@ -101,14 +114,18 @@ export function HeatmapDaySheet({
                 ? ''
                 : rendered.upcoming
                   ? 'Upcoming'
-                  : rendered.total > 0
+                  : rendered.count > 0
                     ? // "Expenses only" is on screen because the LIST is
                       // filtered and nothing else says so. A member who knows
                       // she was also paid that day cannot otherwise tell
                       // whether the income is filtered out or missing from the
                       // ledger — and the cell's total is expenses-only too, so
                       // this names the scope of both numbers at once.
-                      `${format(rendered.total)} spent · Expenses only`
+                      //
+                      // The phrase itself comes from the same function the
+                      // cell's `aria-label` uses, so the header cannot say
+                      // "no spending" over a list of four transactions.
+                      `${spendingSummaryPhrase(rendered.total, rendered.count, format)} · Expenses only`
                     : 'No spending'}
             </SheetDescription>
           </SheetHeader>
@@ -119,12 +136,12 @@ export function HeatmapDaySheet({
             <p className="text-sm text-muted-foreground">
               This day has not happened yet.
             </p>
-          ) : rendered.total > 0 ? (
-            <DayExpenseList
-              date={rendered.date}
-              dateLabel={dateLabel}
-              format={format}
-            />
+          ) : /* ROWS, NOT MONEY. Gated on `total > 0` this sheet refused to
+                 fetch a day whose refunds cancelled its spending — the rows
+                 existed, the cell said "no spending", and the only phone-native
+                 path to them denied they were there. */
+            rendered.count > 0 ? (
+            <DayExpenseList date={rendered.date} dateLabel={dateLabel} />
           ) : (
             <p className="text-sm text-muted-foreground">
               No expenses were recorded on this day.
@@ -136,24 +153,22 @@ export function HeatmapDaySheet({
 }
 
 /**
- * Split out so `useDayExpenses` only ever mounts for a day that HAS spending
- * and while the sheet is actually open — see the hook's note on why that
- * placement is load-bearing and not just a saved request.
+ * Split out so `useDayExpenses` only ever mounts for a day that HAS ROWS and
+ * while the sheet is actually open — see the hook's note on why that placement
+ * is load-bearing and not just a saved request.
  */
 function DayExpenseList({
   date,
   dateLabel,
-  format,
 }: {
   date: string;
   dateLabel: string;
-  format: (amount: number) => string;
 }) {
   const { expenses, matched, loading, error, retry } = useDayExpenses(date);
-  // The sheet stays agnostic about which currency the household uses for
-  // FORMATTING (that arrives as `format`), but it does need the code itself to
-  // decide whether a row's original currency is worth showing. Reading it here
-  // rather than adding a prop keeps the heatmap component out of it entirely.
+  // The base currency, for two things: whether a row's original currency is
+  // worth showing, and the signed figure itself. The injected `format` belongs
+  // to the DAY's money in the header; a row is a ledger entry and takes the
+  // ledger's signed form — see the note at the amount below.
   const baseCode = useBaseCurrency();
 
   // M8: between opening the sheet and the rows landing, a screen-reader user
@@ -230,15 +245,22 @@ function DayExpenseList({
       <ul className="flex flex-col divide-y" aria-label={`Expenses on ${dateLabel}`}>
         {expenses.map((tx) => {
           // Mirrors AmountDisplay's rule rather than reusing the component:
-          // this list is expenses-only, so there is no income sign or colour
-          // to convey — but the original amount is orthogonal to that, and
-          // this household enters LBP daily. A row entered as 1,500,000 LBP
+          // the original amount is what makes a row recognisable in a
+          // household that enters LBP daily — a row entered as 1,500,000 LBP
           // showing only "$16.76" is not the row the user remembers.
+          //
+          // SIGNED THROUGH THE SAME HELPER as every other money render. The
+          // list being expenses-only used to mean there was no sign to
+          // convey; a refund IS an expense row, so the sign is now the only
+          // thing separating "spent 20" from "got 20 back" — and it has to
+          // point the same way here as it does in the ledger, or the sheet
+          // says the opposite of the row it is showing.
+          const value = displayAmount(tx.amount, tx.category_type);
           const original =
             tx.original_amount != null &&
             tx.original_currency != null &&
             tx.original_currency !== baseCode
-              ? `${formatAmount(tx.original_amount)} ${tx.original_currency}`
+              ? `${formatSignedAmount(displayAmount(tx.original_amount, tx.category_type))} ${tx.original_currency}`
               : null;
           return (
             <li key={tx.id} className="flex items-start gap-3 py-2">
@@ -264,10 +286,20 @@ function DayExpenseList({
                 </p>
               </div>
               <span className="flex shrink-0 flex-col items-end font-mono text-sm tabular-nums">
-                {/* The injected formatter, not `formatCurrency` directly — the
-                    heatmap deliberately never learns the currency CODE for
-                    display, only how to format with it. */}
-                <span>{format(tx.amount)}</span>
+                {/* NOT the injected formatter, and this is the one place that
+                    departs from it: `format` is the heatmap's — it renders the
+                    day's money, which is a magnitude the header calls "spent".
+                    A ROW is a ledger entry and takes the ledger's signed form,
+                    which needs `signDisplay`. `baseCode` is already read here
+                    (the original-currency decision needs it) and is the same
+                    currency the injected formatter is bound to, so the two
+                    cannot drift onto different currencies. */}
+                <AmountSignNote
+                  amount={tx.amount}
+                  type={tx.category_type}
+                  className="justify-end"
+                />
+                <span>{formatSignedCurrency(value, baseCode)}</span>
                 {original !== null && (
                   <span className="text-xs text-muted-foreground">
                     {original}

@@ -10,6 +10,7 @@ import {
   heaviestDay,
   isUpcoming,
   monthLabelColumns,
+  spendingSummaryPhrase,
   toWeekRows,
   toWeekdayRows,
 } from './heatmapGrid';
@@ -170,22 +171,54 @@ describe('chipFill', () => {
 });
 
 describe('the intensity scale', () => {
-  test('outOfPopulation: a total the scale never saw comes back DARKEST', () => {
-    // Not a curiosity — this is what a no-spend day gets. `cellProps` calls the
-    // day scale with `lookup.get(date) ?? 0`, and a day with no rows is absent
-    // from the totals the scale was built from, so it lands on the `?? n`
-    // fallback and ranks top. It is invisible today only because both consumers
-    // branch on the total rather than on the value returned here.
-    //
-    // Pinned so that the coupling is written down somewhere a reader will meet
-    // it: if this ever needs to change, it is the paint gate in `MonthCell` and
-    // the `total === 0` arm of `chipTextClass` that are holding it up.
+  // B27, closed. These four cases replace `outOfPopulation`, which pinned the
+  // OPPOSITE behaviour: a total the scale had never seen came back DARKEST,
+  // via a `rank.get(total) ?? n` fallback. That was reachable by the commonest
+  // input there is — a day with no rows, which `cellProps` looks up as 0 — and
+  // showed nothing only because every consumer gated on `total > 0` before it
+  // read the opacity. Moving those gates to has-rows, which is what a refund
+  // day requires, would have painted refunded and empty days black.
+  test('a day that spent nothing NET gets the palest stop, never the darkest', () => {
     const scale = buildIntensityScale([10, 20, 30, 40]);
-    expect(scale(0)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
-    expect(scale(999)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
-    // Control: an in-population value still ranks normally, so the assertion
-    // above is about the fallback and not about the scale being broken.
+    expect(scale(0)).toBe(OPACITY_STOPS[0]);
+    expect(scale(-50)).toBe(OPACITY_STOPS[0]);
+    // The magnitude of a refund does not make it intense: a day that gave
+    // back more than the heaviest day spent is still the pale end.
+    expect(scale(-9999)).toBe(OPACITY_STOPS[0]);
+    // Control: a real spending day still ranks normally, so the assertions
+    // above are about the <= 0 decision and not about a broken scale.
     expect(scale(10)).toBe(OPACITY_STOPS[0]);
+    expect(scale(40)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
+  });
+
+  test('a spending total outside the population lands between its neighbours', () => {
+    // The other half of removing the fallback: the scale is TOTAL now, so an
+    // unseen value is ranked by counting rather than by a lookup miss.
+    const scale = buildIntensityScale([10, 20, 30, 40]);
+    expect(scale(25)).toBe(OPACITY_STOPS[1]); // two days spent <= 25
+    expect(scale(999)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
+    expect(scale(1)).toBe(OPACITY_STOPS[0]);
+  });
+
+  test('refund days do not take up ranks and dim the real spending days', () => {
+    // The population is the SPENDING days. With the four refund days counted
+    // in, 40 would rank 4th of 8 — the second stop — and the heaviest day of
+    // the year would paint mid-grey.
+    const withRefunds = buildIntensityScale([-5, -6, -7, 0, 10, 20, 30, 40]);
+    const without = buildIntensityScale([10, 20, 30, 40]);
+    for (const total of [10, 20, 30, 40]) {
+      expect(withRefunds(total)).toBe(without(total));
+    }
+    expect(withRefunds(40)).toBe(OPACITY_STOPS[OPACITY_STOPS.length - 1]);
+  });
+
+  test('a year of nothing but refunds paints nothing dark', () => {
+    const scale = buildIntensityScale([-5, -10, 0]);
+    expect([-5, -10, 0].map(scale)).toEqual([
+      OPACITY_STOPS[0],
+      OPACITY_STOPS[0],
+      OPACITY_STOPS[0],
+    ]);
   });
 
   // The defect the old percentile arithmetic had: `pct(0.75)` indexed the LAST
@@ -229,9 +262,12 @@ describe('the intensity scale', () => {
   });
 
   test('an empty year does not divide by zero', () => {
-    expect(buildIntensityScale([])(0)).toBe(
+    // The n === 0 arm is only reachable for a POSITIVE total now — a zero
+    // takes the palest branch above it — so it is probed with one.
+    expect(buildIntensityScale([])(10)).toBe(
       OPACITY_STOPS[OPACITY_STOPS.length - 1],
     );
+    expect(buildIntensityScale([])(0)).toBe(OPACITY_STOPS[0]);
   });
 });
 
@@ -239,19 +275,41 @@ describe('the cell label', () => {
   // Exact strings, never a regex fragment: /March 4/ matches the wrong year,
   // a padding-cell regression and a half-built label alike.
   test('a day with spending names the weekday, the date and the amount', () => {
-    expect(heatmapCellLabel('2025-03-04', 42.5, usd, '2025-06-01')).toBe(
+    expect(heatmapCellLabel('2025-03-04', 42.5, 1, usd, '2025-06-01')).toBe(
       'Tuesday, March 4th, 2025: $42.50 spent',
     );
   });
 
   test('a day with no rows says so rather than reporting a zero total', () => {
-    expect(heatmapCellLabel('2025-03-04', 0, usd, '2025-06-01')).toBe(
+    expect(heatmapCellLabel('2025-03-04', 0, 0, usd, '2025-06-01')).toBe(
       'Tuesday, March 4th, 2025: no spending',
     );
   });
 
+  // The pair the whole has-rows rework exists for. Both days total zero; one
+  // of them holds four transactions, and telling the household "no spending"
+  // about it — while the sheet behind the cell refuses to fetch those rows —
+  // is the surface denying its own data.
+  test('a day REFUNDED to nothing reports its rows, not "no spending"', () => {
+    expect(heatmapCellLabel('2025-03-04', 0, 4, usd, '2025-06-01')).toBe(
+      'Tuesday, March 4th, 2025: $0.00 net across 4 transactions',
+    );
+  });
+
+  test('a day whose refunds outweigh its spending reports the net and the rows', () => {
+    expect(heatmapCellLabel('2025-03-04', -20, 2, usd, '2025-06-01')).toBe(
+      'Tuesday, March 4th, 2025: -$20.00 net across 2 transactions',
+    );
+  });
+
+  test('one row is a transaction, not "1 transactions"', () => {
+    expect(heatmapCellLabel('2025-03-04', -20, 1, usd, '2025-06-01')).toBe(
+      'Tuesday, March 4th, 2025: -$20.00 net across 1 transaction',
+    );
+  });
+
   test('today is announced as today', () => {
-    expect(heatmapCellLabel('2025-03-04', 42.5, usd, '2025-03-04')).toBe(
+    expect(heatmapCellLabel('2025-03-04', 42.5, 1, usd, '2025-03-04')).toBe(
       'Today, Tuesday, March 4th, 2025: $42.50 spent',
     );
   });
@@ -261,17 +319,17 @@ describe('the cell label', () => {
     // for anyone west of GMT. Pinned because the ISO strings come out of a
     // deliberately UTC-built grid and the label is the one place they get
     // parsed back.
-    expect(heatmapCellLabel('2026-01-01', 0, usd, '2026-06-01')).toBe(
+    expect(heatmapCellLabel('2026-01-01', 0, 0, usd, '2026-06-01')).toBe(
       'Thursday, January 1st, 2026: no spending',
     );
   });
 
   test('a date that has not happened yet is "upcoming", not "no spending"', () => {
     // A future day has no expense rows for exactly the same reason a quiet day
-    // has none, so it arrives as total 0 — and "no spending" would then be a
+    // has none, so it arrives with no rows — and "no spending" would then be a
     // claim about the future rather than a report about the past. The phone
     // opens on the CURRENT month, so this is most of the default view.
-    expect(heatmapCellLabel('2026-08-31', 0, usd, '2026-08-09')).toBe(
+    expect(heatmapCellLabel('2026-08-31', 0, 0, usd, '2026-08-09')).toBe(
       'Monday, August 31st, 2026: upcoming',
     );
   });
@@ -280,12 +338,37 @@ describe('the cell label', () => {
     // The ledger accepts any date up to MaxDataYear, so a household CAN book a
     // future expense. Blanking a day someone deliberately recorded would be
     // hiding their own data.
-    expect(heatmapCellLabel('2026-08-31', 42.5, usd, '2026-08-09')).toBe(
+    expect(heatmapCellLabel('2026-08-31', 42.5, 1, usd, '2026-08-09')).toBe(
       'Monday, August 31st, 2026: $42.50 spent',
     );
-    expect(isUpcoming('2026-08-31', '2026-08-09', 42.5)).toBe(false);
-    expect(isUpcoming('2026-08-31', '2026-08-09', 0)).toBe(true);
-    expect(isUpcoming('2026-08-09', '2026-08-09', 0)).toBe(false);
+    expect(isUpcoming('2026-08-31', '2026-08-09', true)).toBe(false);
+    expect(isUpcoming('2026-08-31', '2026-08-09', false)).toBe(true);
+    expect(isUpcoming('2026-08-09', '2026-08-09', false)).toBe(false);
+  });
+
+  test('a future day booked and then refunded is NOT blanked as upcoming', () => {
+    // Keyed on the total, this day netted zero and was blanked — the exact
+    // hole the has-rows flag closes. It is reachable: a future-dated expense
+    // and its refund are both legal entries.
+    expect(isUpcoming('2026-08-31', '2026-08-09', true)).toBe(false);
+    expect(heatmapCellLabel('2026-08-31', 0, 2, usd, '2026-08-09')).toBe(
+      'Monday, August 31st, 2026: $0.00 net across 2 transactions',
+    );
+  });
+});
+
+describe('the shared spending phrase', () => {
+  // Exported and shared because THREE surfaces say this — the day cell, the
+  // month picker and the day sheet's header. The defect it prevents is a
+  // header reading "No spending" over a list of four transactions.
+  test.each([
+    ['no rows at all', 0, 0, 'no spending'],
+    ['no rows, whatever the total claims', 12, 0, 'no spending'],
+    ['a spending day', 42.5, 3, '$42.50 spent'],
+    ['a refunded day', 0, 2, '$0.00 net across 2 transactions'],
+    ['a net-negative day', -20, 2, '-$20.00 net across 2 transactions'],
+  ] as const)('%s', (_name, total, count, expected) => {
+    expect(spendingSummaryPhrase(total, count, usd)).toBe(expected);
   });
 });
 
@@ -337,6 +420,45 @@ describe('the heaviest day', () => {
     // A zero-valued entry is not a spending day either — otherwise the caller
     // renders "Heaviest day: … $0.00".
     expect(heaviestDay(cells, new Map([['2026-03-04', 0]]))).toBeNull();
+  });
+
+  // Signed nets, deliberately: "heaviest" means the day the household SPENT
+  // the most, so the day that gave the most back is not a candidate and a
+  // month of nothing but refunds names nobody.
+  test('a refund day never wins, however large the refund', () => {
+    const lookup = new Map([
+      ['2026-03-05', -9999],
+      ['2026-03-11', 12],
+    ]);
+    expect(heaviestDay(cells, lookup)).toEqual({
+      date: '2026-03-11',
+      total: 12,
+      tiedWith: 0,
+    });
+  });
+
+  test('a month of nothing but refunds has no heaviest day', () => {
+    const lookup = new Map([
+      ['2026-03-05', -50],
+      ['2026-03-11', -10],
+      ['2026-03-22', 0],
+    ]);
+    expect(heaviestDay(cells, lookup)).toBeNull();
+  });
+
+  test('a refund day does not break the tie count of the days that did spend', () => {
+    // The negative sits BETWEEN two tied maxima in date order, so a `tiedWith`
+    // that reset on any non-winning value would come back 0.
+    const lookup = new Map([
+      ['2026-03-05', 500],
+      ['2026-03-11', -300],
+      ['2026-03-22', 500],
+    ]);
+    expect(heaviestDay(cells, lookup)).toEqual({
+      date: '2026-03-05',
+      total: 500,
+      tiedWith: 1,
+    });
   });
 
   test('padding cells are skipped, not treated as days', () => {

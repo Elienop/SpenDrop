@@ -62,7 +62,7 @@ const CURRENCIES = [
 ];
 
 import { SpendingHeatmap } from './SpendingHeatmap';
-import { OPACITY_STOPS, chipFill } from './heatmapGrid';
+import { OPACITY_STOPS, REFUNDED_CHIP, chipFill } from './heatmapGrid';
 
 // ---------------------------------------------------------------------------
 // Viewport control
@@ -123,14 +123,14 @@ const usd = (amount: number) =>
  * adjacent, because telling them apart is the whole of D2.
  */
 const DATA: HeatmapEntry[] = [
-  { date: '2026-03-02', total: 10 },
-  { date: '2026-03-04', total: 42.5 },
-  { date: '2026-03-10', total: 100 },
-  { date: '2026-03-20', total: 250 },
-  { date: '2026-07-15', total: 500 },
-  { date: '2026-07-16', total: 600 },
-  { date: '2026-07-17', total: 700 },
-  { date: '2026-07-18', total: 800 },
+  { date: '2026-03-02', total: 10, txn_count: 1 },
+  { date: '2026-03-04', total: 42.5, txn_count: 1 },
+  { date: '2026-03-10', total: 100, txn_count: 1 },
+  { date: '2026-03-20', total: 250, txn_count: 1 },
+  { date: '2026-07-15', total: 500, txn_count: 1 },
+  { date: '2026-07-16', total: 600, txn_count: 1 },
+  { date: '2026-07-17', total: 700, txn_count: 1 },
+  { date: '2026-07-18', total: 800, txn_count: 1 },
 ];
 
 function transaction(over: Partial<Transaction>): Transaction {
@@ -451,6 +451,243 @@ describe('intensity', () => {
     const alpha = (date: string) => chipAlpha(chipOf(cell(grid, date)));
     expect(alpha('2026-03-20')).toBe(OPACITY_STOPS[1]);
     expect(alpha('2026-03-04')).toBe(OPACITY_STOPS[0]);
+  });
+});
+
+/**
+ * The five states a cell can be in, and what tells them apart.
+ *
+ * Before signed amounts there were three (spent / empty / upcoming) and each
+ * was decided by a separate `total > 0` comparison at the point of use. Two
+ * more are now reachable — a day REFUNDED TO EXACTLY ZERO and a day whose
+ * refunds OUTWEIGH its spending — and under those gates both fell through
+ * every branch: no chip fill, no `bg-muted`, and an `aria-label` claiming "no
+ * spending" over a day the household has rows for.
+ *
+ * Every case here therefore asserts the label AND the paint together, because
+ * either alone was survivable: the old cell announced "no spending" while its
+ * sheet listed four transactions.
+ */
+describe('a day that spent nothing NET is not a day with nothing on it', () => {
+  /** Two rows on 03-10 that cancel out; the rest of the year is untouched. */
+  const REFUNDED: HeatmapEntry[] = [
+    { date: '2026-03-02', total: 10, txn_count: 1 },
+    { date: '2026-03-10', total: 0, txn_count: 2 },
+    { date: '2026-03-20', total: -35, txn_count: 3 },
+    { date: '2026-07-15', total: 500, txn_count: 1 },
+  ];
+
+  test('a net-zero day with rows announces its rows, not "no spending"', () => {
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    expect(cell(grid, '2026-03-10')).toHaveAttribute(
+      'aria-label',
+      'Tuesday, March 10th, 2026: $0.00 net across 2 transactions',
+    );
+    // The control: a PAST day with no rows still says "no spending", so the
+    // assertion above is about the rows and not about the phrase changing for
+    // everyone. (03-03, not 03-09: today is the 4th, and a future empty day
+    // is "upcoming" — a third state, asserted elsewhere.)
+    expect(cell(grid, '2026-03-03')).toHaveAttribute(
+      'aria-label',
+      'Tuesday, March 3rd, 2026: no spending',
+    );
+  });
+
+  test('a net-negative day announces the money that came back', () => {
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    expect(cell(grid, '2026-03-20')).toHaveAttribute(
+      'aria-label',
+      'Friday, March 20th, 2026: -$35.00 net across 3 transactions',
+    );
+  });
+
+  test('it paints an outline rather than falling through every gate', () => {
+    // The failure this replaces is INVISIBLE: a fully transparent cell with no
+    // `bg-muted` either, indistinguishable from the card behind it. The ring
+    // is the "there is something here to tap" signal, and the absence of a
+    // fill is what keeps it off the spending scale.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    for (const date of ['2026-03-10', '2026-03-20']) {
+      const chip = chipOf(cell(grid, date));
+      const tokens = chip.className.split(/\s+/);
+      expect(chip.style.backgroundColor).toBe('');
+      expect(tokens).toContain('bg-muted');
+      expect(tokens).toContain('ring-1');
+      expect(tokens).toContain('ring-inset');
+      expect(tokens).toContain('ring-primary/50');
+    }
+  });
+
+  test('the legend carries the state, in the paint the cells use', () => {
+    // The other four states are decodable from the legend or from the number:
+    // a chip on the intensity scale is self-evidently more or less, an empty
+    // day is grey, an upcoming one is blank. A grey square wearing a ring is
+    // not self-evidently anything — and the household's primary surface cannot
+    // ask, because Radix's tooltip never opens on touch. So it needs an entry,
+    // and the entry has to be painted from the same string: a legend that
+    // drifts off the cells it claims to explain is worse than no legend, since
+    // it is now confidently wrong.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const legend = screen.getByRole('group', {
+      name: 'Daily spending intensity legend',
+    });
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+
+    // The shared constant IS this paint — pinned literally, so emptying it
+    // cannot make the agreement below true by making both sides blank.
+    const shared = ['bg-muted', 'ring-1', 'ring-inset', 'ring-primary/50'];
+    expect(REFUNDED_CHIP.split(' ')).toEqual(shared);
+
+    const swatch = within(legend).getByText('Refunded').previousElementSibling;
+    expect(swatch).not.toBeNull();
+    const swatchTokens = (swatch as HTMLElement).className.split(/\s+/);
+    const chipTokens = chipOf(cell(grid, '2026-03-10')).className.split(/\s+/);
+    for (const token of shared) {
+      expect(swatchTokens).toContain(token);
+      expect(chipTokens).toContain(token);
+    }
+  });
+
+  test('a day with no rows keeps its plain grey, with no outline', () => {
+    // The other half: without this, "everything gets a ring" passes the test
+    // above and the new state stops being distinguishable again.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    const tokens = chipOf(cell(grid, '2026-03-03')).className.split(/\s+/);
+    expect(tokens).toContain('bg-muted');
+    expect(tokens).not.toContain('ring-1');
+  });
+
+  test('a spending day keeps its intensity fill, with no outline', () => {
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    const chip = chipOf(cell(grid, '2026-03-02'));
+    expect(chipAlpha(chip)).not.toBeNull();
+    expect(chip.className.split(/\s+/)).not.toContain('ring-1');
+  });
+
+  test('the refunded day’s number stays readable on its grey', () => {
+    // It sits on `bg-muted`, like an empty day, but it is not one — full
+    // foreground rather than the alpha'd token an empty cell uses.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    const refunded = chipOf(cell(grid, '2026-03-10')).className.split(/\s+/);
+    expect(refunded).toContain('text-foreground');
+    expect(refunded).not.toContain('text-foreground/60');
+    const empty = chipOf(cell(grid, '2026-03-03')).className.split(/\s+/);
+    expect(empty).toContain('text-foreground/60');
+  });
+
+  test('a refunded month is not reported as a month with no spending', () => {
+    // The month picker decided this independently of the day cells, so it
+    // needs its own case: March here nets -25 across five rows.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    expect(
+      screen.getByRole('button', {
+        name: 'March 2026: -$25.00 net across 6 transactions',
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'January 2026: no spending' }),
+    ).toBeInTheDocument();
+  });
+
+  test('a refund day does not dim the days that did spend', () => {
+    // `buildIntensityScale` ranks over SPENDING days only, so the population
+    // here is [10, 500] and 03-02 takes the second stop. Counted in, the two
+    // non-positive days make it [-35, 0, 10, 500] — three of four values are
+    // <= 10, which lifts the same quiet day to the THIRD stop. One bucket, and
+    // it is the whole difference between a scale that describes spending and
+    // one that ranks refunds against it.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    expect(chipAlpha(chipOf(cell(grid, '2026-03-02')))).toBe(OPACITY_STOPS[1]);
+  });
+
+  test('the sheet FETCHES and lists a refunded day’s rows', async () => {
+    // The worst of the old behaviour: the rows existed, the cell said "no
+    // spending", and the sheet — gated on the same predicate — refused to ask
+    // for them. On the phone this is the only path to those transactions.
+    apiGet.mockResolvedValue(
+      page([
+        transaction({
+          id: 11,
+          date: '2026-03-10',
+          description: 'Returned coat',
+          amount: -60,
+        }),
+        transaction({
+          id: 12,
+          date: '2026-03-10',
+          description: 'Coat',
+          amount: 60,
+        }),
+      ]),
+    );
+    const user = setup();
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    await user.click(cell(grid, '2026-03-10'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(
+      within(dialog).getByText(
+        '$0.00 net across 2 transactions · Expenses only',
+      ),
+    ).toBeInTheDocument();
+    expect(await within(dialog).findByText('Returned coat')).toBeInTheDocument();
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    // The refund row reads as money back, and says which row it is.
+    expect(within(dialog).getByText('+$60.00')).toBeInTheDocument();
+    expect(within(dialog).getByText('-$60.00')).toBeInTheDocument();
+    expect(within(dialog).getAllByTestId('amount-sign-note')).toHaveLength(1);
+  });
+
+  test('a day with genuinely no rows still fetches nothing', async () => {
+    // The absence control for the test above: if the gate were simply removed
+    // rather than moved, every empty cell in the grid would fire a request.
+    const user = setup();
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+    await user.click(cell(grid, '2026-03-03'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByText('No spending')).toBeInTheDocument();
+    expect(apiGet).not.toHaveBeenCalled();
   });
 });
 
@@ -1118,8 +1355,12 @@ describe('tapping a day', () => {
     const grid = renderMonthGrid();
     await user.click(cell(grid, '2026-03-04'));
     const dialog = await screen.findByRole('dialog');
-    expect(await within(dialog).findByText('$16.76')).toBeInTheDocument();
-    expect(within(dialog).getByText('1,500,000.00 LBP')).toBeInTheDocument();
+    // SIGNED, like every other ledger row in the app: the sheet lists
+    // transactions, and once an expense row can be a refund the sign is the
+    // only thing separating "spent 16.76" from "got 16.76 back". Both lines
+    // point the same way — see AmountDisplay for the rule they share.
+    expect(await within(dialog).findByText('-$16.76')).toBeInTheDocument();
+    expect(within(dialog).getByText('-1,500,000.00 LBP')).toBeInTheDocument();
   });
 
   test('a base-currency row shows no second amount', async () => {
@@ -1141,7 +1382,7 @@ describe('tapping a day', () => {
     const grid = renderMonthGrid();
     await user.click(cell(grid, '2026-03-04'));
     const dialog = await screen.findByRole('dialog');
-    await within(dialog).findByText('$12.50');
+    await within(dialog).findByText('-$12.50');
     expect(within(dialog).queryByText(/USD$/)).not.toBeInTheDocument();
   });
 
@@ -1259,9 +1500,9 @@ describe('the heaviest day is named, because the scale cannot show it', () => {
 
   test('a tie names the earliest day and says how many others tied', () => {
     const tied: HeatmapEntry[] = [
-      { date: '2026-03-05', total: 500 },
-      { date: '2026-03-11', total: 500 },
-      { date: '2026-03-22', total: 500 },
+      { date: '2026-03-05', total: 500, txn_count: 1 },
+      { date: '2026-03-11', total: 500, txn_count: 1 },
+      { date: '2026-03-22', total: 500, txn_count: 1 },
     ];
     setViewportWidth(PHONE_WIDTH);
     renderHeatmap(YEAR, tied);
@@ -1273,8 +1514,8 @@ describe('the heaviest day is named, because the scale cannot show it', () => {
   test('a single tie is singular', () => {
     setViewportWidth(PHONE_WIDTH);
     renderHeatmap(YEAR, [
-      { date: '2026-03-05', total: 500 },
-      { date: '2026-03-11', total: 500 },
+      { date: '2026-03-05', total: 500, txn_count: 1 },
+      { date: '2026-03-11', total: 500, txn_count: 1 },
     ]);
     expect(screen.getByText(/Heaviest day:/)).toHaveTextContent(
       '(tied with 1 other day)',
@@ -1355,9 +1596,9 @@ describe('a day that arrives as several groups', () => {
   // `new Map(...)` was last-write-wins, and the three surfaces then disagreed
   // with each other.
   const SPLIT: HeatmapEntry[] = [
-    { date: '2026-03-04', total: 30 },
-    { date: '2026-03-04', total: 12.5 },
-    { date: '2026-03-20', total: 1 },
+    { date: '2026-03-04', total: 30, txn_count: 1 },
+    { date: '2026-03-04', total: 12.5, txn_count: 1 },
+    { date: '2026-03-20', total: 1, txn_count: 1 },
   ];
 
   test('the cell announces the whole day, not the last group', () => {
@@ -1395,11 +1636,11 @@ describe('a day that arrives as several groups', () => {
     // fixture in this block cannot see that: it yields the same two opacities
     // either way, which is why this case exists separately.
     const groups: HeatmapEntry[] = [
-      { date: '2026-03-04', total: 5 },
-      { date: '2026-03-04', total: 5 },
-      { date: '2026-03-10', total: 20 },
-      { date: '2026-03-20', total: 30 },
-      { date: '2026-03-25', total: 40 },
+      { date: '2026-03-04', total: 5, txn_count: 1 },
+      { date: '2026-03-04', total: 5, txn_count: 1 },
+      { date: '2026-03-10', total: 20, txn_count: 1 },
+      { date: '2026-03-20', total: 30, txn_count: 1 },
+      { date: '2026-03-25', total: 40, txn_count: 1 },
     ];
     setViewportWidth(PHONE_WIDTH);
     renderHeatmap(YEAR, groups);

@@ -210,10 +210,16 @@ func checkImportRowLengths(rows []importRow) []importFieldError {
 // inserted, so counting it would make the progress meter lie.
 //
 // Rows that fail to resolve to a valid hash — unparseable date, empty
-// description, zero amount, unresolved category — are silently omitted
-// from grouping. They'll still be rejected at confirm time by
-// processImportRows; the preview's job here is to flag collisions, not
-// to re-implement the full row validator.
+// description, zero amount, mismatched money signs, unresolved category —
+// are silently omitted from grouping. They'll still be rejected at confirm
+// time by processImportRows; the preview's job here is to flag collisions,
+// not to re-implement the full row validator.
+//
+// The hash is computed over the SIGNED cents value the row would store, in
+// lockstep with processImportRows. The two constructions are independent
+// code but one identity: if only one of them signs its input, the preview
+// predicts duplicates that insert cleanly, or clears rows that then die on
+// the partial unique index and land in the opaque Errored bucket.
 //
 // Called from two places:
 //  1. handleImportUpload, once at upload time, to seed the initial
@@ -244,6 +250,12 @@ func buildCollisionGroups(
 		if row.Description == "" || row.Amount == 0 {
 			continue
 		}
+		if moneySignsDisagree(row.Amount, row.OriginalAmount) {
+			// Confirm skips this row as skipReasonSignMismatch, so it
+			// cannot collide with anything: grouping it would 409 the
+			// whole import over a row that was never going to land.
+			continue
+		}
 		date, err := parseImportDate(row.Date)
 		if err != nil {
 			continue
@@ -258,7 +270,7 @@ func buildCollisionGroups(
 		}
 		hash := database.ComputeContentHash(
 			date,
-			dollarsToCents(math.Abs(row.Amount)),
+			dollarsToCents(row.Amount),
 			row.Description,
 			canonical,
 		)
@@ -373,7 +385,7 @@ func buildCollisionGroups(
 //	      magnitude). An empty amount at PATCH time is a HARD error
 //	      (INVALID_AMOUNT) — this is the edit-mode parity case from test
 //	      #9: upload silently coerces empty → 0 so the row lands in the
-//	      preview (skipped from confirm as "negative amount"), but PATCH
+//	      preview (skipped from confirm as "zero_amount"), but PATCH
 //	      does not get to silently zero a cell the user is actively
 //	      editing. Returning 400 forces the frontend to surface an inline
 //	      error so the user knows the edit did not take effect.
@@ -430,10 +442,10 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		// Return dollars so the caller can assign directly to row.Amount
 		// (which is declared as float64 dollars, not int64 cents). The
 		// ComputeContentHash caller inside buildCollisionGroups multiplies
-		// back to cents via dollarsToCents(math.Abs(row.Amount)), so the
-		// round-trip is lossless for the values that parseImportAmount
-		// accepts (it already rejects magnitudes above MaxTransactionAmount
-		// and NaN/Inf).
+		// back to cents via dollarsToCents(row.Amount), so the round-trip is
+		// lossless — and sign-preserving in both directions — for the values
+		// that parseImportAmount accepts (it already rejects magnitudes above
+		// MaxTransactionAmount and NaN/Inf).
 		return float64(cents) / 100.0, "", ""
 
 	case "skip":
@@ -1435,6 +1447,15 @@ const (
 	skipReasonMissingCategory  importSkipReason = "missing_category"
 	skipReasonDuplicate        importSkipReason = "duplicate"
 	skipReasonFieldTooLong     importSkipReason = "field_too_long"
+	// skipReasonSignMismatch names a row whose base amount and original
+	// (foreign-currency) amount point in opposite directions — a $42.50
+	// charge against a -150,000 LBP original, or the reverse. B10 made the
+	// sign meaningful (a negative amount is a refund), so the pair now
+	// describes a contradiction: one side says money left, the other says it
+	// came back. Skipped rather than reconciled — the file is the only
+	// evidence of what the user meant, and picking a side would silently turn
+	// a refund into a purchase.
+	skipReasonSignMismatch importSkipReason = "sign_mismatch"
 )
 
 // importInserted records a row that made it into the transactions table.
@@ -1778,7 +1799,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	//      processImportRows sees them) — still appear in entry.Rows
 	//      so they count toward total but not toward inserted.
 	//   2. Processor-skipped rows (content-hash duplicate, zero
-	//      amount, negative amount, etc. — see skipReason* in
+	//      amount, mismatched money signs, etc. — see skipReason* in
 	//      processImportRows).
 	//   3. Errored rows (DB faults, bad category_ids — a tiny bucket
 	//      that the user can't distinguish from category 2 without
@@ -2201,7 +2222,6 @@ func processImportRows(
 			})
 			continue
 		}
-		amount := math.Abs(row.Amount)
 
 		categoryID := resolveCategoryID(row.Category, in.CategoryMap, in.CatNameToID, in.DefaultCategoryID)
 		if categoryID == 0 {
@@ -2232,8 +2252,24 @@ func processImportRows(
 		// editor surfaces those predictions in the upload preview so
 		// the user can resolve them by editing fields instead of
 		// appending blunt " (N)" suffixes.
+		//
+		// B10: the cents value is SIGNED, and the hash is taken over the
+		// exact value the row will store — the same input
+		// buildCollisionGroups uses, so a preview prediction and this
+		// insert can never disagree. A -42.50 refund and a +42.50 purchase
+		// on the same day, description and category are now DISTINCT
+		// identities; before B10 the second one collapsed into the first
+		// as a "duplicate".
+		//
+		// Accepted consequence, no repair possible: rows imported from
+		// negative cells BEFORE B10 were stored flipped-positive and
+		// hashed positive. Re-importing that same sheet now hashes the
+		// negative, misses the stored anchor, and re-adds those rows.
+		// Nothing in stored data distinguishes "was entered as +42.50"
+		// from "was flipped from -42.50", so no backfill can tell them
+		// apart — this is documented for the owner rather than fixed.
 		description := row.Description
-		amountCents := dollarsToCents(amount)
+		amountCents := dollarsToCents(row.Amount)
 		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
 
 		// Ordinary path: look up the hash and skip on a hit. The
@@ -2279,6 +2315,13 @@ func processImportRows(
 		// submission attempt and belong to the single-create endpoint, whose
 		// retry-double-post problem content_hash cannot solve. See migration
 		// 017 and handleCreateTransaction.
+		//
+		// B10: booked_rate stays NULL too, and for the reason stated above —
+		// import applies no conversion, so no rate was ever booked. Dividing
+		// the file's own amount/original pair would manufacture a rate the
+		// user never quoted, and a booked rate is one-way (freeze-on-edit),
+		// so a manufactured one is permanent. NULL means "no rate involved",
+		// which is the truth for every imported row.
 		params := database.CreateTransactionParams{
 			UserID:      in.UserID,
 			Date:        date,
@@ -2290,8 +2333,12 @@ func processImportRows(
 			ContentHash: sql.NullString{String: hash, Valid: true},
 		}
 		if row.OriginalAmount != 0 {
-			origAmt := math.Abs(row.OriginalAmount)
-			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(origAmt), Valid: true}
+			// Signed, in lockstep with amount_cents above: a foreign-currency
+			// refund is negative on BOTH sides, which keeps the implied rate
+			// (base/original) positive. preCategorySkipReason has already
+			// rejected the rows where the two signs disagree, so a
+			// contradictory pair cannot reach the insert.
+			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(row.OriginalAmount), Valid: true}
 		}
 		if row.OriginalCurrency != "" {
 			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
@@ -2338,9 +2385,23 @@ func processImportRows(
 //
 // Description is compared to "" not whitespace: the parsing path already runs
 // strings.TrimSpace before a row lands here, so an all-whitespace cell arrives
-// as "". Amount uses math.Abs because negative values in spreadsheets
-// (refunds, credits) are legitimate and get flipped positive at insert time —
-// the policy is "expense/income is determined by category, not amount sign".
+// as "". Amount uses math.Abs to test MAGNITUDE, not to strip a sign: the
+// comparison is against zero, so it rejects the same rows with or without the
+// Abs, and the sign itself survives untouched to the ledger. (row.Amount is
+// always on the cents grid by the time it arrives — both the upload parse and
+// validateImportField round through parseImportAmount — so "zero dollars" and
+// "zero cents" are the same rejection here.)
+//
+// The policy, since B10: sign carries meaning WITHIN a category. A category is
+// still expense or income, but a negative amount on an expense row is a refund
+// and nets against that category's spend, so a spreadsheet's "-15.00" is data,
+// not a formatting quirk to be normalized away. What a signed ledger permits
+// is zero SUMS, never zero ROWS — hence the zero gate below stays.
+//
+// The sign gate is the corollary: when a row carries both a base amount and a
+// foreign original, the two must agree in direction (a foreign refund is
+// negative on both sides). Disagreement is a contradiction, not something to
+// reconcile — see skipReasonSignMismatch.
 //
 // The length check is a floor that should never fire from the HTTP path:
 // handleImportConfirm refuses the whole batch with 409 FIELD_TOO_LONG first.
@@ -2370,6 +2431,9 @@ func preCategorySkipReason(row importRow) (time.Time, importSkipReason, bool) {
 	}
 	if math.Abs(row.Amount) == 0 {
 		return time.Time{}, skipReasonZeroAmount, true
+	}
+	if moneySignsDisagree(row.Amount, row.OriginalAmount) {
+		return time.Time{}, skipReasonSignMismatch, true
 	}
 	return date, "", false
 }
@@ -2418,10 +2482,14 @@ func stripCurrencyFormat(s string) string {
 //     a currency-entry mistake or would overflow int64 cents after the
 //     dollarsToCents multiplication
 //
-// Negative values are accepted. Expense spreadsheets frequently encode
-// expenses as negatives and the confirm-side insert path flips signs
-// based on category type via math.Abs, so rejecting negatives here
-// would break that flow.
+// Negative values are accepted, and since B10 they are also PRESERVED: the
+// returned cents keep their sign all the way to amount_cents, where a negative
+// on an expense row is a refund. (Before B10 the confirm-side insert flipped
+// every sign unconditionally with math.Abs — this doc used to describe that
+// flip as conditional on category type, which was never true.)
+//
+// The bound below is magnitude-symmetric on purpose: ±MaxTransactionAmount,
+// not "> Max" on a stripped value. FuzzParseImportAmount pins both ends.
 func parseImportAmount(s string) (int64, error) {
 	cleaned := stripCurrencyFormat(s)
 	if cleaned == "" {

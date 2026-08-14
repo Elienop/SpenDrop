@@ -268,19 +268,30 @@ export function OverviewTab() {
                 <ChartTooltip
                   content={<ChartTooltipContent labelFormatter={formatMonthLabel} />}
                 />
+                {/* Zero reference. Either series can go negative once amounts
+                    are signed — a month of refunds against a small expense
+                    total, or an income reversal — and recharts 3 EXTENDS its
+                    default [0, 'auto'] domain to include negative data rather
+                    than clipping it, so the bar draws below the axis. This
+                    chart has no YAxis, so without the line nothing on screen
+                    marks where zero was. Net Cash Flow below and SavingsTab's
+                    YoY chart are the same pattern. */}
+                <ReferenceLine y={0} stroke="hsl(var(--border))" />
+                {/* Symmetric radius: [4, 4, 0, 0] rounds the visual top only,
+                    leaving a downward bar glued to the axis. */}
                 <Bar
                   dataKey="income"
                   fill={`url(#${gradientId}-income)`}
                   stroke="var(--color-income)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
                 <Bar
                   dataKey="expenses"
                   fill={`url(#${gradientId}-expenses)`}
                   stroke="var(--color-expenses)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
               </BarChart>
             </ChartContainer>
@@ -511,19 +522,25 @@ export function OverviewTab() {
                   interval={monthAxisInterval(bvaData.length)}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
+                {/* Same zero reference as Income vs Expenses. It is the
+                    ACTUAL series that goes negative here: a month whose
+                    refunds outweighed its spending in a budgeted category
+                    draws a downward bar against a positive budget bar beside
+                    it, which is unreadable without a zero line. */}
+                <ReferenceLine y={0} stroke="hsl(var(--border))" />
                 <Bar
                   dataKey="budget"
                   fill={`url(#${gradientId}-budget)`}
                   stroke="var(--color-budget)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
                 <Bar
                   dataKey="actual"
                   fill={`url(#${gradientId}-actual)`}
                   stroke="var(--color-actual)"
                   strokeOpacity={0.3}
-                  radius={[4, 4, 0, 0]}
+                  radius={4}
                 />
               </BarChart>
             </ChartContainer>

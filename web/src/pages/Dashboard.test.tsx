@@ -110,6 +110,10 @@ let reportYearsFails = false;
 // factory is hoisted and cannot close over a per-test value. Only the
 // empty-description test moves it.
 let recentDescription = 'Groceries';
+/** Same holder idiom, for the signed-amount cases. Positive expense by
+ *  default, which is what every pre-existing test in this file assumes. */
+let recentAmount = 42.5;
+let recentType: 'expense' | 'income' = 'expense';
 
 vi.mock('../api/client', () => ({
   api: {
@@ -148,13 +152,13 @@ vi.mock('../api/client', () => ({
             id: 1,
             user_id: 1,
             date: '2026-04-01',
-            amount: 42.50,
+            amount: recentAmount,
             original_amount: null,
             original_currency: null,
             description: recentDescription,
             category_id: 1,
             category_name: 'Food',
-            category_type: 'expense',
+            category_type: recentType,
             tags: null,
             notes: null,
             created_at: '2026-04-01T00:00:00Z',
@@ -202,6 +206,8 @@ describe('Dashboard', () => {
     reportYears = [new Date().getFullYear()];
     reportYearsFails = false;
     recentDescription = 'Groceries';
+    recentAmount = 42.5;
+    recentType = 'expense';
   });
 
   test('renders welcome heading with user name', () => {
@@ -365,6 +371,73 @@ describe('Dashboard', () => {
       expect(screen.getByRole('table')).toBeInTheDocument();
       // Should have a "View All" link
       expect(screen.getByRole('link', { name: /view all/i })).toBeInTheDocument();
+    });
+  });
+
+  // The desktop table composes its own sign and colour — it does NOT go
+  // through `AmountDisplay`, which is what the phone card list beside it uses
+  // (`Dashboard.mobile.test.tsx` covers that branch). Two implementations of
+  // one rule is exactly how the two presentations of the same row drifted.
+  describe('the recent-transactions amount', () => {
+    const amountCell = (): HTMLElement => {
+      const row = screen.getByText('Groceries').closest('tr');
+      if (row === null) throw new Error('no recent-transactions row');
+      return within(row).getAllByRole('cell').slice(-1)[0];
+    };
+
+    test('a normal expense renders one minus, in the ordinary colour', async () => {
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
+      // Exact: "-$42.50" is a substring of the "--$42.50" a double-signed
+      // render produces.
+      expect(amountCell().textContent).toBe('-$42.50');
+      expect(
+        within(amountCell()).queryByTestId('amount-sign-note'),
+      ).toBeNull();
+    });
+
+    test('income renders one plus, in the inflow colour', async () => {
+      recentType = 'income';
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
+      expect(amountCell().textContent).toBe('+$42.50');
+      // Same selector as the refund case below, where the cell's first span is
+      // the sign note rather than the figure.
+      expect(amountCell().querySelector('span.tabular-nums')).toHaveClass(
+        'text-emerald-500',
+      );
+    });
+
+    test('a REFUND renders as an inflow on an expense row, and says so', async () => {
+      recentAmount = -42.5;
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
+      // The note LEADS the figure, the order `AmountDisplay` pins for the same
+      // pair — the correction has to be announced before the number it
+      // corrects. Which is also why the colour is read off the FIGURE's span
+      // by its own class and not off the cell's first one: that is the note
+      // now, and it is muted in every state.
+      expect(amountCell().textContent).toBe('Refund+$42.50');
+      expect(amountCell().querySelector('span.tabular-nums')).toHaveClass(
+        'text-emerald-500',
+      );
+      expect(
+        within(amountCell()).getByTestId('amount-sign-note'),
+      ).toHaveTextContent('Refund');
+    });
+
+    test('an income REVERSAL renders as an outflow, and says so', async () => {
+      recentType = 'income';
+      recentAmount = -42.5;
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+      await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
+      expect(amountCell().textContent).toBe('Reversal-$42.50');
+      // `span.tabular-nums`, not the cell's first span: the note leads now, and
+      // a `not.toHaveClass` assertion against it would pass for every render
+      // this test exists to reject.
+      expect(amountCell().querySelector('span.tabular-nums')).not.toHaveClass(
+        'text-emerald-500',
+      );
     });
   });
 
@@ -692,6 +765,139 @@ describe('Dashboard', () => {
       expect(screen.getByText(/122%/)).toBeInTheDocument();
       // Under-budget category still shows its percentage: 180/300 = 60%.
       expect(screen.getByText(/60%/)).toBeInTheDocument();
+    });
+  });
+
+  // ── Refunded categories ──
+  //
+  // Every assertion here is about a NEGATIVE `total`, which the wire could not
+  // produce before signed amounts and which the page's arithmetic was written
+  // without. The bar widths are read out of the inline `style` because that is
+  // where the defect lived: a negative percentage is not a small bar, it is an
+  // INVALID CSS declaration that the browser drops, leaving a block div at
+  // `width: auto` — the full track.
+  describe('a category the household got money back on', () => {
+    /** The painted fill inside a track, by the track's position on the card. */
+    const fills = (container: HTMLElement): string[] =>
+      Array.from(
+        container.querySelectorAll<HTMLElement>('.rounded-full > div'),
+      ).map((el) => el.style.width);
+
+    test('the budget bar paints EMPTY, not full', async () => {
+      // Food: 500 budgeted, netted -125 after refunds. `budgetPct` is -25,
+      // and `width: "-25%"` renders as a fully consumed budget.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: [
+          { id: 1, name: 'Food', total: -125, limit: 500, over: false },
+        ],
+      });
+      const { container } = render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(/-25%/)).toBeInTheDocument(),
+      );
+      // Both bars on the row: the category gauge and the budget bar. Neither
+      // may paint, and NEITHER may be left at `auto` — an empty string here
+      // is the failure mode, not a pass.
+      expect(fills(container)).toEqual(['0%', '0%']);
+    });
+
+    test('the percentage text keeps the real, negative figure', async () => {
+      // The bar reports consumption, which cannot go below empty; the number
+      // reports the arithmetic. Clamping BOTH would hide the refund entirely.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: [
+          { id: 1, name: 'Food', total: -125, limit: 500, over: false },
+        ],
+      });
+      render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByText(/-\$125\.00 \/ \$500\.00 · -25%/)).toBeInTheDocument(),
+      );
+    });
+
+    test('it is named as refunded rather than painted as a tiny spender', async () => {
+      // `Math.max(pct, 2)` floors every slice at a visible 2% bar, so a
+      // refunded category used to render as the smallest spender on the card
+      // — indistinguishable from a real one.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: [
+          { id: 1, name: 'Food', total: 300, limit: null, over: false },
+          { id: 2, name: 'Transport', total: -40, limit: null, over: false },
+        ],
+      });
+      const { container } = render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId('category-refunded-2')).toHaveTextContent(
+          'Net refund',
+        ),
+      );
+      // Food takes its full share of the GROSS spending (300 of 300), and
+      // Transport paints nothing at all.
+      expect(fills(container)).toEqual(['100%', '0%']);
+      expect(screen.queryByTestId('category-refunded-1')).not.toBeInTheDocument();
+    });
+
+    test('a category refunded to exactly zero is named too', async () => {
+      // Zero is the state that reads as "nothing happened" while the ledger
+      // holds two rows. It is not a spender and not an empty category.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: [
+          { id: 1, name: 'Food', total: 300, limit: null, over: false },
+          { id: 2, name: 'Transport', total: 0, limit: null, over: false },
+        ],
+      });
+      render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId('category-refunded-2')).toHaveTextContent(
+          'Refunded in full',
+        ),
+      );
+    });
+
+    test('one refund cannot inflate every other slice past 100%', async () => {
+      // The share denominator used to be the NET of all categories. With a
+      // refund in the set that net is smaller than the biggest spender —
+      // here 300 + (-200) = 100 — so Food's share came out 300%: a bar three
+      // times its own track, and every other slice wrong with it.
+      mockUseDashboard.mockReturnValue({
+        ...defaultDashboardData,
+        categories: [
+          { id: 1, name: 'Food', total: 300, limit: null, over: false },
+          { id: 2, name: 'Transport', total: -200, limit: null, over: false },
+        ],
+      });
+      const { container } = render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>,
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId('category-refunded-2')).toBeInTheDocument(),
+      );
+      expect(fills(container)).toEqual(['100%', '0%']);
+      // The header total stays NET, deliberately: the month really did cost
+      // $100 once the refund is counted.
+      expect(screen.getByText('$100.00')).toBeInTheDocument();
     });
   });
 

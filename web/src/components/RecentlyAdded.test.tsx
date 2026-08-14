@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement } from 'react';
@@ -173,17 +173,67 @@ describe('RecentlyAdded', () => {
     renderPanel([]);
     const li = (await screen.findByText('sdincome')).closest('li');
     const amount = li?.querySelector('span.font-mono');
-    expect(amount?.textContent?.startsWith('+')).toBe(true);
-    expect(amount?.textContent).toContain('5,970');
+    // WHOLE-STRING, not `startsWith('+')`: the defect this rule replaces
+    // prepends a second sign, and "+-$5,970.00" starts with '+' too.
+    expect(amount?.textContent).toBe('+$5,970.00');
     expect(amount?.className).toContain('text-emerald-500');
+    expect(within(li!).queryByTestId('amount-sign-note')).toBeNull();
   });
 
   test('renders an expense row with a minus sign and no income color', async () => {
     renderPanel([]); // default savedTxn 'sdsaved' is an expense row
     const li = (await screen.findByText('sdsaved')).closest('li');
     const amount = li?.querySelector('span.font-mono');
-    expect(amount?.textContent?.startsWith('-')).toBe(true);
+    expect(amount?.textContent).toBe('-$10.00');
     expect(amount?.className).not.toContain('text-emerald-500');
+    expect(within(li!).queryByTestId('amount-sign-note')).toBeNull();
+  });
+
+  test('a saved REFUND reads as money back, and is labelled', async () => {
+    // This panel is the confirmation surface for what was just entered, so a
+    // refund has to be recognisable here before anything else. Under the
+    // previous rule it rendered "--$10.00" in expense styling.
+    apiGet.mockResolvedValue({
+      transactions: [savedTxn({ id: 7, description: 'sdrefund', amount: -10 })],
+      total: 1,
+      page: 1,
+      per_page: 5,
+    });
+    renderPanel([]);
+    const li = (await screen.findByText('sdrefund')).closest('li');
+    const amount = li?.querySelector('span.font-mono');
+    expect(amount?.textContent).toBe('+$10.00');
+    expect(amount?.className).toContain('text-emerald-500');
+    const note = within(li!).getByTestId('amount-sign-note');
+    expect(note).toHaveTextContent('Refund');
+    // BEFORE the figure, the order `AmountDisplay` pins for the same pair: the
+    // correction has to be announced before the number it corrects. Asserted
+    // as adjacency rather than by reading the row's whole text, which also
+    // carries the description and the sync badge.
+    expect(note.nextElementSibling).toBe(amount);
+  });
+
+  test('a PENDING refund reads the same as a saved one', async () => {
+    // Offline rows render from the queue payload, not from a server response,
+    // and they take a separate path to the same span. A refund captured on the
+    // phone with no signal must not change appearance when it lands.
+    renderPanel([
+      queued({
+        payload: {
+          date: '2026-05-27',
+          amount: -10,
+          description: 'sdpendingrefund',
+          category_id: 1,
+          tags: '',
+        },
+      }),
+    ]);
+    const li = (await screen.findByText('sdpendingrefund')).closest('li');
+    const amount = li?.querySelector('span.font-mono');
+    expect(amount?.textContent).toBe('+$10.00');
+    expect(within(li!).getByTestId('amount-sign-note')).toHaveTextContent(
+      'Refund',
+    );
   });
 
   test('deleting a pending row drops it from the queue (no server call)', async () => {

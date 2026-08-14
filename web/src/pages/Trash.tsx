@@ -34,14 +34,14 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { AmountDisplay } from '@/components/AmountDisplay';
+import { AmountSignNote } from '@/components/AmountSignNote';
 import { PaginationBar } from '@/components/PaginationBar';
 import { CategoryBadge } from '@/components/CategoryBadge';
-import { formatCurrency } from '@/lib/format';
+import { displayAmount, formatSignedCurrency } from '@/lib/format';
 import { isAdmin } from '@/lib/roles';
 import { TOUCH_TARGET_CHECKBOX } from '@/lib/touch-target';
 import { transactionLabel } from '@/lib/transaction-label';
 import { cn } from '@/lib/utils';
-import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { DEFAULT_TRANSACTIONS_PER_PAGE } from '@/lib/constants';
 
 /*
@@ -1213,16 +1213,30 @@ export function Trash() {
                           </Badge>
                         ))}
                     </TableCell>
+                    {/* Sign and colour from the DISPLAYED value, matching the
+                        phone card's `AmountDisplay` for the same row — a
+                        deleted refund must not read as an expense here and as
+                        an inflow there. */}
                     <TableCell
                       className={cn(
                         'whitespace-nowrap text-right font-mono tabular-nums',
-                        row.category_type === TYPE_EXPENSE
-                          ? 'text-foreground'
-                          : 'text-emerald-500',
+                        displayAmount(row.amount, row.category_type) > 0
+                          ? 'text-emerald-500'
+                          : 'text-foreground',
                       )}
                     >
-                      {row.category_type === TYPE_EXPENSE ? '-' : '+'}
-                      {formatCurrency(row.amount, baseCurrency)}
+                      {/* ABOVE the figure, the order `AmountDisplay` pins for
+                          the same pair: the correction has to be heard before
+                          the number it corrects, not after it. */}
+                      <AmountSignNote
+                        amount={row.amount}
+                        type={row.category_type}
+                        className="justify-end"
+                      />
+                      {formatSignedCurrency(
+                        displayAmount(row.amount, row.category_type),
+                        baseCurrency,
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">

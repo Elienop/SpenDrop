@@ -192,23 +192,6 @@ tuning, which is why it was stopped here.
 Patterns tab still pans 102px at 360. Still open; the fix is still the card-list treatment.
 **Effort:** medium — it is a presentation change, not a spacing tweak.
 
-### B27 — the intensity scale returns the DARKEST stop for a zero total
-**Verified: reproduced** (executed the function during B9 slice 3, 2026-08-09).
-`buildIntensityScale`'s out-of-population fallback is `rank.get(total) ?? n`, and a zero-total day
-is genuinely out of population — the heatmap endpoint emits no row for a day with no expenses, so
-`lookup.get(date) ?? 0` hands the scale a value it was never built from. Measured: `scale(0)` → 1
-(the darkest stop), `scale(10)` → 0.3.
-
-**It is invisible only because both consumers gate on the total before reading it** — the chip
-paints under `total > 0`, and `chipTextClass` returns on `total === 0` before the opacity is
-consulted. So this is a **live coupling, not dead code**: dropping either gate paints every empty
-day black. Documented at the site and pinned by `buildIntensityScale.outOfPopulation`, which
-pins the CURRENT behaviour — so the test would not catch a gate being removed.
-
-**Fix:** return the palest stop (or a sentinel) for a value outside the population, so the guard
-does not depend on callers remembering to check first.
-**Effort:** small — production logic, deliberately not stacked onto the slice-3 branch.
-
 ### B28 — four sheets scroll their own header away
 **Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
 ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
@@ -417,8 +400,18 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B27 — the intensity scale returns the DARKEST stop for a zero total** (fixed on
+  `feat/b10-signed-amounts` in `11deaf3`, 2026-08-14, as part of B10's heatmap has-rows
+  rework; squash hash joins this entry at merge). The signed-amounts change forced the real
+  fix the entry asked for: `buildIntensityScale` was rewritten to count its population and
+  map non-positive totals to an EXPLICIT palest stop — the `?? n` darkest fallback is gone,
+  so the safety no longer depends on callers gating first. The consumer gates themselves
+  moved from `total > 0` to has-rows (`txn_count`) in the same commit, which is exactly the
+  gate-relaxation the original entry warned would paint empty days black. Mutation-tested:
+  reintroducing darkest-for-≤0 fails three heatmapGrid tests (re-executed post-commit).
+
 - **B22 — web tsconfig lacks an explicit `strict`** (`a20b7e4`, 2026-08-14, on
-  `chore/backlog-catch-up-and-strict`, PR #138). Pinned with zero new errors, exactly as the corrected
+  `chore/backlog-catch-up-and-strict`; MERGED via PR #138, squash `c58eeae`). Pinned with zero new errors, exactly as the corrected
   entry predicted — TypeScript 6.0.2 was already compiling the project under strict by default,
   so the pin's value is that a TypeScript downgrade or a CLI `--strict false` can no longer
   remove the guarantee silently. Verified by a clean-slate `tsc -b` (tsbuildinfo removed first;
@@ -427,8 +420,8 @@ condition *and* move the predicate, believing one was safe because the other was
   solution-style file (`files: []`) whose `compilerOptions` do not reach the referenced
   projects, so the named placement would have pinned nothing. The original entry's probe
   evidence (TS18047/TS7006 fire by default, clean under `--strict false`) is in this file's git
-  history. Closed on the same branch that documents it, so `a20b7e4` is a pre-squash hash —
-  the PR number and squash hash join this entry at merge, per convention.
+  history. Closed on the same branch that documented it, so `a20b7e4` was a pre-squash hash;
+  the squash `c58eeae` was stamped post-merge, per convention.
 
 - **B31 + B32 + B35 + B37 + B38 — the browser pass and its fix batch** (2026-08-10/14, on
   `fix/settings-users-manage-dialog-and-export-overflow`; MERGED via PR #137, squash `a8c484f`,

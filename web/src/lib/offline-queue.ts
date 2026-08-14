@@ -69,10 +69,13 @@ export interface QueuedTransaction {
    * Wire-Edge DTO discipline — built by `toCreatePayload` at capture time and
    * stored verbatim, so replay re-sends the identical body, `client_key`
    * included (that verbatim replay is what makes the key work). For a non-base
-   * currency this freezes the exchange rate at capture time (the dollar
-   * `amount` is already converted; `original_amount`/`original_currency` carry
-   * what the user typed); replay re-sends that captured-rate value, matching
-   * the online entry form, which also converts at entry time.
+   * currency the stored `amount` is the value this device converted at capture
+   * time, but the SERVER DOES NOT USE IT: resolveCurrency ignores the wire
+   * `amount` on the foreign branch and re-divides `original_amount` by the rate
+   * that is current when the queued row finally POSTs. A queued foreign row is
+   * therefore priced — and its booked_rate recorded — at DRAIN time, not at
+   * capture time. (This comment used to claim the opposite; it was verified
+   * false against transaction_handlers.go's foreign branch during B10.)
    */
   payload: CreateTransactionInput;
   /** Capture time (ms epoch) — drives FIFO ordering. */

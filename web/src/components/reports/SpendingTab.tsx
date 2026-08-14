@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
+  ReferenceLine,
 } from 'recharts';
 import {
   ChartContainer,
@@ -311,6 +312,22 @@ export function SpendingTab() {
                 >
                   <CartesianGrid horizontal={false} />
                   <XAxis type="number" tickLine={false} axisLine={false} hide />
+                  {/* THE ZERO REFERENCE, and the only one this chart can have:
+                      its numeric axis is `hide`, and a category whose refunds
+                      outweigh its spending nets negative and draws LEFTWARD
+                      (recharts 3 extends the default [0, 'auto'] domain to
+                      include negative data). Without the line the bar simply
+                      starts somewhere else with nothing to start from.
+
+                      The `LabelList` below stays `position="right"`, which for
+                      a leftward bar puts the figure just right of this line
+                      rather than at the bar's tip. Deliberate: each row holds
+                      one bar, so that space is empty, and the alternative —
+                      flipping the label to the outer tip — puts it against the
+                      100px category axis with no left margin to clear, where
+                      the longest negative value clips. The label carries its
+                      own minus, and this line is what it is measured from. */}
+                  <ReferenceLine x={0} stroke="hsl(var(--border))" />
                   <YAxis
                     dataKey="name"
                     type="category"

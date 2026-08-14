@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -131,29 +132,57 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 	return t, nil
 }
 
-// foreignMoneyUnchanged reports whether an update merely restates the foreign
-// money the row already carries — same currency code, same original amount to
-// the cent — in which case the base-currency value stored on the row must be
-// carried forward verbatim instead of being re-derived from today's rate.
+// foreignMagnitudeUnchanged reports whether an update merely restates the
+// foreign money the row already carries — same currency code, same original
+// amount to the cent, IGNORING SIGN — in which case the base-currency value
+// stored on the row must be carried forward instead of being re-derived from
+// today's rate. The caller re-applies the requested sign; see Update.
 //
-// A foreign-currency row records the foreign amount and what it was worth in
-// the base currency, but NOT the rate that produced that number; no migration
-// defines such a column. The api layer's resolveCurrency divides by the CURRENT
-// rate on every call, and PUT /transactions/{id} is a full replace — the inline
-// row editor rebuilds original_amount / original_currency from the stored row
-// and resends them on every save (web/src/lib/currency.ts, toEditDefaults +
-// toCreatePayload). So once the rate moved, editing only the description of a
-// 1,500,000 LBP row silently re-priced it: $16.85 became $15.00 while the LBP
-// figure never changed. Saving an edit must never move money the user did not
-// touch.
+// Sign is excluded because a Refund-toggle flip is a CLASSIFICATION change, not
+// a money change: the household is saying the same 1,500,000 LBP went the other
+// way, not that a different amount of money moved. Under the sign-SENSITIVE
+// comparison this predicate started with, flipping the toggle failed the freeze
+// and re-derived the base value from the current rate — so a row booked at
+// 89,000 came back as -$15.00 instead of -$16.85, restating a magnitude the user
+// never touched. That is the same doctrine violation the freeze exists to
+// prevent ("an edit must never move money the user did not touch"), reached
+// through the one input the original comparison treated as money.
+//
+// A foreign-currency row records the foreign amount, what it was worth in the
+// base currency, and — since migration 019 plus the capture in the api layer's
+// resolveCurrency — the rate that produced that number, in booked_rate. The
+// api layer divides by the CURRENT rate on every call, and PUT
+// /transactions/{id} is a full replace — the inline row editor rebuilds
+// original_amount / original_currency from the stored row and resends them on
+// every save (web/src/lib/currency.ts, toEditDefaults + toCreatePayload). So
+// once the rate moved, editing only the description of a 1,500,000 LBP row
+// silently re-priced it: $16.85 became $15.00 while the LBP figure never
+// changed. Saving an edit must never move money the user did not touch.
+//
+// The rate is frozen WITH the amount, in one branch, because the two are one
+// fact: booked_rate's meaning is "the divisor that produced the stored
+// amount_cents". Carrying the amount forward while letting the caller's
+// freshly-resolved rate land beside it would store a row whose three money
+// columns describe two different bookings — worse than either value alone,
+// because it looks authoritative. A re-pricing save stores both new values for
+// the same reason.
 //
 // It deliberately does not freeze everything. A corrected foreign amount
 // (1,500,000 -> 1,600,000), a switch to a different foreign currency, and a
-// switch to or from the base currency all keep the caller's recomputed amount,
-// because each of those IS the user changing the money. Re-pricing a corrected
-// foreign amount at today's rate is the only option available — the rate the
-// row was booked at is recorded nowhere. Snapshotting it per row is backlog B1
-// step 2, folded into the refunds migration; this is step 1.
+// switch to or from the base currency all keep the caller's recomputed amount
+// and rate, because each of those IS the user changing the money. A sign flip
+// is the one edit that is frozen while still CHANGING amount_cents: the
+// magnitude is carried, the requested direction is applied on top, and the
+// content hash therefore clears exactly as it does for any other amount move
+// (hashInputsMoved compares signed cents). That is correct — a refund and the
+// purchase it reverses are different content — and it is why the freeze cannot
+// be described as "the amount does not change". Note that
+// re-pricing a corrected amount at TODAY's rate is now a choice rather than the
+// only option: the row's original rate is finally readable, so booking a
+// correction at the rate the row was first booked under has become expressible.
+// It is deliberately not implemented in v1 — which of the two a household wants
+// is an owner decision, and the deferred "re-price these rows" action
+// (BACKLOG B1) is where it belongs.
 //
 // KNOWN LIMITATION, and it is one-way. Once a foreign row exists, no re-save
 // can ever move its base value again while the foreign amount and currency code
@@ -163,7 +192,13 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // back, and save again — undiscoverable, and deliberately not surfaced as an
 // affordance here: a "re-price these rows" action is an owner decision, and
 // rebuilding it as an automatic sweep is precisely the effective-dated rate
-// table that was rejected for creating a second source of truth.
+// table that was rejected for creating a second source of truth. What booked_rate
+// changes about that is only that such an action could now be HONEST about which
+// rows it would touch — rows booked under the wrong rate are identifiable
+// instead of guessed at. Rows created before 019, and every imported row, carry
+// NULL there and stay unidentifiable; there is no backfill, because deriving a
+// rate from the stored cents pair reconstructs it only to rounding and is simply
+// wrong for any sheet whose two money columns never agreed with a rate at all.
 //
 // Why the decision lives in the store, on `before`, and not in the handler:
 // handleUpdateTransaction reads the row OUTSIDE any transaction for its
@@ -190,7 +225,7 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 //     can never match, so every save of it re-prices. Normalizing here alone
 //     would not fix that — the row would still fail to match on the next
 //     import — so it belongs with a data cleanup, not here.
-func foreignMoneyUnchanged(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
+func foreignMagnitudeUnchanged(before GetTransactionByIDRow, after UpdateTransactionParams) bool {
 	if !after.OriginalCurrency.Valid || !after.OriginalAmountCents.Valid {
 		return false
 	}
@@ -200,7 +235,44 @@ func foreignMoneyUnchanged(before GetTransactionByIDRow, after UpdateTransaction
 	if after.OriginalCurrency.String != before.OriginalCurrency.String {
 		return false
 	}
-	return after.OriginalAmountCents.Int64 == before.OriginalAmountCents.Int64
+	return absCents(after.OriginalAmountCents.Int64) == absCents(before.OriginalAmountCents.Int64)
+}
+
+// absCents is the magnitude of a signed cents value.
+//
+// The math.MinInt64 arm is a totality guard, not a live case: every money column
+// is bounded far below it at the api edge (validateMoneyAmount caps a magnitude
+// at 1e11 cents). Without it, negating the minimum returns the minimum, and this
+// predicate would answer "same magnitude" for a pair that is nothing of the kind.
+func absCents(c int64) int64 {
+	if c == math.MinInt64 {
+		return math.MaxInt64
+	}
+	if c < 0 {
+		return -c
+	}
+	return c
+}
+
+// withSignOf returns value carrying the sign of ref — the carry-forward half of
+// the sign-insensitive freeze.
+//
+// ref is the REQUESTED original_amount_cents rather than the caller's own
+// recomputed AmountCents, so the stored pair agrees by construction: whatever
+// arithmetic produced the request's base value, the row that lands cannot end up
+// with sign(amount_cents) != sign(original_amount_cents). The api layer already
+// refuses a disagreeing pair on the wire (resolveCurrency), and this makes the
+// store independently incapable of writing one.
+//
+// A zero ref carries no direction, so the value keeps its own — the same reading
+// of zero the wire-edge predicate uses. It cannot occur today: migration 019
+// constrains original_amount_cents to NULL or != 0, and a NULL never reaches
+// here (the predicate above requires Valid on both sides).
+func withSignOf(value, ref int64) int64 {
+	if ref == 0 || (value < 0) == (ref < 0) {
+		return value
+	}
+	return -value
 }
 
 // Update loads the before row, applies the UPDATE, loads the after row, and
@@ -209,25 +281,33 @@ func foreignMoneyUnchanged(before GetTransactionByIDRow, after UpdateTransaction
 // concurrent writers; pulling the before row outside the tx would race with
 // other mutators.
 //
-// Two fields of p are DERIVED here rather than accepted from the caller —
-// p.ClearContentHash always, and p.AmountCents on the one path described below.
-// The store is the only place that holds both the pre-edit row and the
-// post-edit params inside one tx, so deciding either question anywhere else
-// would race its own read. See hashInputsMoved and foreignMoneyUnchanged.
+// Some of p is DERIVED here rather than accepted from the caller —
+// p.ClearContentHash always, and the p.AmountCents / p.BookedRate PAIR on the
+// one path described below. The store is the only place that holds both the
+// pre-edit row and the post-edit params inside one tx, so deciding either
+// question anywhere else would race its own read. See hashInputsMoved and
+// foreignMagnitudeUnchanged.
 //
 // The two derivations are ordered, and the order is load-bearing: the freeze
 // runs FIRST so the hash decision sees the amount that will actually be
 // stored. Reversed, a rate change alone would report "amount moved", clear
 // content_hash, and drop the row out of import dedupe — the exact failure the
-// freeze exists to prevent, reintroduced one line later.
+// freeze exists to prevent, reintroduced one line later. Note that a frozen
+// write can still report a MOVED hash input: the freeze carries the magnitude
+// but applies the requested sign, and a flipped row is different content from
+// the one the digest was minted for. Frozen does not mean "the hash survives".
 func (s *TransactionStore) Update(ctx context.Context, actorID int64, p UpdateTransactionParams) error {
 	return s.withTx(ctx, func(qtx *Queries) error {
 		before, err := qtx.GetTransactionByID(ctx, p.ID)
 		if err != nil {
 			return fmt.Errorf("load before: %w", err)
 		}
-		if foreignMoneyUnchanged(before, p) {
-			p.AmountCents = before.AmountCents
+		if foreignMagnitudeUnchanged(before, p) {
+			// Magnitude from the row, direction from the request. A pure
+			// Refund-toggle flip keeps the base figure the row was booked at
+			// and only changes which way it points.
+			p.AmountCents = withSignOf(before.AmountCents, p.OriginalAmountCents.Int64)
+			p.BookedRate = before.BookedRate
 		}
 		p.ClearContentHash = hashInputsMoved(before, p)
 		if err := qtx.UpdateTransaction(ctx, p); err != nil {
@@ -297,12 +377,15 @@ func (s *TransactionStore) UpdateTx(
 	// boundary, so a parse error here is "should never happen" but is still
 	// surfaced as a wrapped error so the caller's tx rolls back.
 	//
-	// AmountCents / OriginalAmountCents / OriginalCurrency are copied through
-	// unchanged because the v1 batch-update patch deliberately does not expose
-	// them — bulk amount edits would require currency conversion and cents
-	// recomputation that the patch shape does not carry. The legacy REAL
-	// amount / original_amount columns were dropped in migration 010 (Phase
-	// 3.1b), so only the cents columns flow through.
+	// AmountCents / OriginalAmountCents / OriginalCurrency / BookedRate are
+	// copied through unchanged because the v1 batch-update patch deliberately
+	// does not expose them — bulk amount edits would require currency
+	// conversion and cents recomputation that the patch shape does not carry.
+	// The legacy REAL amount / original_amount columns were dropped in
+	// migration 010 (Phase 3.1b), so only the cents columns flow through.
+	// BookedRate rides along for the same reason and one more: a batch patch
+	// never re-prices anything, so the rate that produced the row's stored
+	// amount is still the true one and must survive a tags-only edit.
 	//
 	// content_hash is cleared CONDITIONALLY, via the ClearContentHash flag set
 	// below once the merge is complete. A patch can move date, description or
@@ -320,6 +403,7 @@ func (s *TransactionStore) UpdateTx(
 		AmountCents:         before.AmountCents,
 		OriginalAmountCents: before.OriginalAmountCents,
 		OriginalCurrency:    before.OriginalCurrency,
+		BookedRate:          before.BookedRate,
 		Description:         before.Description,
 		CategoryID:          before.CategoryID,
 		Tags:                before.Tags,

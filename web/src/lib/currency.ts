@@ -7,9 +7,35 @@ import type { Transaction } from '@/api/types';
  *  see spec §Edge Case 7 for the known limitation around JPY/BHD. */
 export const PREVIEW_DECIMALS = 2;
 
+/**
+ * `Math.round` with Go's tie-breaking rule, which is a DIFFERENT rule.
+ *
+ * JS sends a half toward +Infinity (`Math.round(-0.5)` is `-0`); Go's
+ * `math.Round` sends it away from zero (`-1`). The two agree on every positive
+ * number and disagree on every negative half, so while amounts were required
+ * to be positive the difference was unreachable — the comment that used to sit
+ * on `dollarsToCents` said exactly that, and deferred this change to the day
+ * signed amounts landed. They have: a refund is a negative amount, so the
+ * frontend now computes cents for values on the losing side of that rule.
+ *
+ * It has to be Go's rule and not merely a consistent one, because the two
+ * results are compared against each other. `foreignMagnitudeUnchanged` mirrors a
+ * server predicate over stored cents, and `toCreatePayload` computes the base
+ * amount the server would compute for the same division — a one-cent
+ * disagreement re-prices money the user did not touch, or promises a preview
+ * figure the save contradicts.
+ */
+function roundHalfAwayFromZero(n: number): number {
+  const rounded = Math.sign(n) * Math.round(Math.abs(n));
+  // `Math.sign(-0.4) * 0` is `-0`, which `Object.is` — and therefore
+  // `expect(...).toBe(0)` and `Map`/`Set` keying — treats as a value distinct
+  // from `0`. Nothing downstream should have to know that.
+  return rounded === 0 ? 0 : rounded;
+}
+
 function roundToPreview(n: number): number {
   const factor = 10 ** PREVIEW_DECIMALS;
-  return Math.round(n * factor) / factor;
+  return roundHalfAwayFromZero(n * factor) / factor;
 }
 
 /**
@@ -21,14 +47,29 @@ function roundToPreview(n: number): number {
  * has to compare money against a stored row — the wire carries dollars, the
  * server compares cents.
  *
- * One documented divergence, unreachable here: `Math.round` sends a negative
- * half toward +Infinity (`-0.5` -> `-0`) where Go's `math.Round` sends it away
- * from zero (`-1`). Every amount that reaches this function has been through
- * `validateMoneyAmount`, which rejects anything <= 0, so the two never see a
- * negative half. Revisit if signed amounts ever land (backlog: refunds).
+ * Negative halves round away from zero, matching Go — see
+ * `roundHalfAwayFromZero` for why the plain `Math.round` this used to be is
+ * wrong now that a refund can be worth `-0.005`.
  */
 export function dollarsToCents(dollars: number): number {
-  return Math.round(dollars * 100);
+  return roundHalfAwayFromZero(dollars * 100);
+}
+
+/**
+ * Applies an entry surface's Refund toggle to the magnitude it typed.
+ *
+ * THE TOGGLE IS THE ONLY SIGN CHANNEL. Every amount input in the app holds a
+ * positive magnitude and keeps rejecting a typed minus — that rejection is the
+ * typo guard, not an oversight — so this is the one place a transaction amount
+ * acquires its sign, and it runs BEFORE `toCreatePayload` so a foreign refund
+ * divides with its sign intact (`-150000 LBP / 90000` is a negative base
+ * amount; signing afterwards would leave `original_amount` positive and the
+ * two halves of the money pair disagreeing, which the import path skips as
+ * `sign_mismatch`).
+ */
+export function applyAmountSign(magnitude: number, negative: boolean): number {
+  if (!negative || magnitude === 0) return magnitude;
+  return -magnitude;
 }
 
 /**
@@ -39,6 +80,10 @@ export function dollarsToCents(dollars: number): number {
  * `original_amount` and `original_currency` alongside the computed
  * `amount`. Throws when the non-base currency has no rate configured —
  * callers gate the Save button on this.
+ *
+ * Sign is the caller's, applied before it gets here (`applyAmountSign`): the
+ * division preserves it because a rate is always > 0, so both halves of the
+ * money pair come out with the same sign — the agreement the server requires.
  *
  * Generic over T so `TransactionEntryRow` and the edit form can both
  * pass through their own field set (description, category_id, tags,
@@ -130,21 +175,31 @@ export interface StoredMoney {
 }
 
 /**
- * Mirror of `foreignMoneyUnchanged` in `internal/database/store.go`. Reports
+ * Mirror of `foreignMagnitudeUnchanged` in `internal/database/store.go`. Reports
  * whether saving this edit would merely restate the foreign money the row
- * already carries — same currency code, same original amount to the cent.
+ * already carries — same currency code, same original amount to the cent,
+ * ignoring sign.
  *
- * The server carries the row's stored base value forward VERBATIM in that
- * case instead of re-deriving it from today's rate, because saving an edit
- * must never move money the user did not touch. So anything that wants to
- * show what a save will store must not divide by the rate here — after the
- * rate moves, the live conversion is a number the save will not produce.
- * Changing the foreign amount, changing the currency, or switching to or
- * from the base currency all still re-price, because each of those IS the
- * user changing the money.
+ * The server carries the row's stored base MAGNITUDE forward in that case
+ * instead of re-deriving it from today's rate, because saving an edit must
+ * never move money the user did not touch. So anything that wants to show what
+ * a save will store must not divide by the rate here — after the rate moves,
+ * the live conversion is a number the save will not produce. Changing the
+ * foreign amount, changing the currency, or switching to or from the base
+ * currency all still re-price, because each of those IS the user changing the
+ * money.
  *
- * Three details are deliberately copied from the Go predicate, and each one
+ * Four details are deliberately copied from the Go predicate, and each one
  * would make the preview promise a number the save contradicts if it drifted:
+ *
+ *   - SIGN IS IGNORED. Flipping the Refund toggle is a classification change —
+ *     the same money went the other way — so the server keeps the booked
+ *     magnitude and re-applies the requested direction rather than re-pricing.
+ *     A sign-sensitive comparison here would drop the preview back to today's
+ *     rate for a save that is going to store the old figure. (The digits in an
+ *     amount input are a magnitude and the toggle carries the direction, so the
+ *     figure this feeds is signed only because the server compares a signed
+ *     column; both sides then take the absolute value.)
  *
  *   - `currency === baseCode` returns false. `toCreatePayload` collapses a
  *     base-currency edit to a bare `{ amount }` with no `original_*`, and the
@@ -159,7 +214,7 @@ export interface StoredMoney {
  *     `original_amount_cents`. The wire carries dollars, so a typed
  *     1500000.004 and a stored 1500000 are one and the same row to it.
  */
-export function foreignMoneyUnchanged(
+export function foreignMagnitudeUnchanged(
   stored: StoredMoney,
   edited: EditedMoney,
   baseCode: string,
@@ -169,5 +224,8 @@ export function foreignMoneyUnchanged(
     return false;
   }
   if (edited.currency !== stored.original_currency) return false;
-  return dollarsToCents(edited.amount) === dollarsToCents(stored.original_amount);
+  return (
+    Math.abs(dollarsToCents(edited.amount)) ===
+    Math.abs(dollarsToCents(stored.original_amount))
+  );
 }

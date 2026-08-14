@@ -761,7 +761,7 @@ describe('TransactionRow edit — preview after a rate change', () => {
   // The mocked currencies list prices LBP at 90,000/USD today. This row was
   // booked at 89,000, so it stores $16.85 for its 1,500,000 LBP — and it keeps
   // storing $16.85 through any edit that does not touch the foreign money
-  // (internal/database/store.go, foreignMoneyUnchanged). A live conversion
+  // (internal/database/store.go, foreignMagnitudeUnchanged). A live conversion
   // would say $16.67, which is the figure the editor must not promise.
   function makeRepricedRow() {
     return makeTx({
@@ -827,5 +827,170 @@ describe('TransactionRow edit — preview after a rate change', () => {
       original_amount: 1500000,
       original_currency: 'LBP',
     });
+  });
+});
+
+// The desktop half of the refund round-trip. The phone Sheet has the same
+// four quadrants; both run on `useTransactionEditForm`, and the point of
+// testing both is that the shared hook is reached through two different
+// layouts — the sign toggle has to be MOUNTED in each, which is a per-surface
+// fact the hook's own contract cannot enforce.
+describe('TransactionRow — a stored refund round-trips', () => {
+  async function openEditor(description = 'Weekly groceries') {
+    const user = await openActionsMenu(description);
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    return user;
+  }
+
+  it('_OpensWithTheToggleOnAndPositiveDigits: the amount box never shows a minus', async () => {
+    renderRow(makeTx({ amount: -20 }));
+    await openEditor();
+
+    expect(await screen.findByRole('spinbutton')).toHaveValue(20);
+    expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+  });
+
+  it('_UnrelatedEditKeepsTheSign: editing the tags does not un-refund the row', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: -20, tags: 'groceries' }), onUpdate);
+    await openEditor();
+
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: -20 }),
+    );
+  });
+
+  it('_TurningItOffFlipsTheRowPositive: and the toggle is what does it', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: -20 }), onUpdate);
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: 20 }),
+    );
+  });
+
+  it('_TurningItOnMakesARefund: an ordinary row can become one', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: 25.5 }), onUpdate);
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: -25.5 }),
+    );
+  });
+
+  it('_ClearsTheAmountBoxByMoreThanTheTapBand: the two targets do not overlap', async () => {
+    // On a coarse pointer the Switch grows its hit area with a pseudo-element
+    // reaching 10px past its border box on every side (ui/switch.tsx), so the
+    // gap above it has to be MORE than 10px or the top of that band lands
+    // inside the amount input — a tap at the end of the number toggles the
+    // sign instead. This shipped at `mt-2` (8px). Neither figure is
+    // observable in happy-dom, which lays nothing out, so the class is the
+    // assertion and the derivation is the comment.
+    renderRow(makeTx({ amount: -20 }));
+    await openEditor();
+    const root = (await screen.findByRole('switch', { name: 'Refund' }))
+      .parentElement as HTMLElement;
+    const tokens = root.className.split(/\s+/);
+    expect(tokens).toContain('mt-3');
+    expect(tokens).not.toContain('mt-2');
+  });
+
+  it('_CancelRestoresTheStoredSign: a discarded edit leaves the toggle where the row had it', async () => {
+    // `reset()` re-seeds every field from the row, and the sign is a field
+    // now. Missing it would leave the next Edit-open showing the toggle the
+    // user flipped and abandoned — over an amount that never changed.
+    renderRow(makeTx({ amount: -20 }));
+    const user = await openEditor();
+
+    await user.click(screen.getByRole('switch', { name: 'Refund' }));
+    expect(screen.getByRole('switch', { name: 'Refund' })).not.toBeChecked();
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }));
+    await openEditor();
+
+    expect(
+      await screen.findByRole('switch', { name: 'Refund' }),
+    ).toBeChecked();
+  });
+});
+
+// An emptied amount box is not a zero the user meant. `AmountCurrencyInput`
+// maps '' to 0, the ledger cannot store a zero, and the server's answer —
+// "amount must not be zero" — is the wire's vocabulary arriving at somebody who
+// typed nothing at all. Both edit surfaces run the same hook, so the gate is
+// tested here and mirrored on the Sheet.
+describe('TransactionRow — an emptied amount box', () => {
+  async function openEditor(description = 'Weekly groceries') {
+    const user = await openActionsMenu(description);
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    return user;
+  }
+
+  it('_EmptyAmountIsRefusedHere: nothing is sent and the field says why', async () => {
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: 25.5 }), onUpdate);
+    const user = await openEditor();
+
+    await user.clear(await screen.findByRole('spinbutton'));
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+
+    expect(await screen.findByText('Enter an amount')).toBeInTheDocument();
+    // The point of the gate: a round trip could not have changed the answer,
+    // so it is not taken.
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  it('_TheMessageRetiresItself: a figure clears it and the same Save then lands', async () => {
+    // The message is derived from the latch AND the live value, so it goes as
+    // soon as the box is valid — no second rejected save to make it disappear.
+    // It also must not stick to the control: Save stays enabled throughout,
+    // because an empty box is three keystrokes from being right.
+    const onUpdate = vi
+      .fn<TransactionRowProps['onUpdate']>()
+      .mockResolvedValue(undefined);
+    renderRow(makeTx({ amount: 25.5 }), onUpdate);
+    const user = await openEditor();
+
+    const amount = await screen.findByRole('spinbutton');
+    await user.clear(amount);
+    const form = screen.getByRole('button', { name: /save/i }).closest('form')!;
+    fireEvent.submit(form);
+    expect(await screen.findByText('Enter an amount')).toBeInTheDocument();
+
+    await user.type(amount, '5');
+    await waitFor(() =>
+      expect(screen.queryByText('Enter an amount')).not.toBeInTheDocument(),
+    );
+
+    fireEvent.submit(form);
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    expect(onUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 1, amount: 5 }),
+    );
   });
 });

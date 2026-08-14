@@ -18,6 +18,8 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { AmountCurrencyInput } from '@/components/AmountCurrencyInput';
+import { AmountSignNote } from '@/components/AmountSignNote';
+import { AmountSignToggle } from '@/components/AmountSignToggle';
 import { AutocompleteInput } from '@/components/AutocompleteInput';
 import { TagInput } from '@/components/TagInput';
 import { CategoryChips } from '@/components/CategoryChips';
@@ -36,11 +38,17 @@ import {
   noRateMessage,
   saveFailureMessage,
 } from '@/lib/save-failure';
-import { toCreatePayload } from '@/lib/currency';
+import { applyAmountSign, toCreatePayload } from '@/lib/currency';
 import { cn } from '@/lib/utils';
-import { formatCurrency } from '@/lib/format';
+import { displayAmount, formatSignedCurrency } from '@/lib/format';
 import { formatYYYYMMDD } from '@/lib/dates';
-import { isExpense, isIncome, TYPE_INCOME } from '@/lib/transaction-types';
+import {
+  isExpense,
+  isIncome,
+  TYPE_EXPENSE,
+  TYPE_INCOME,
+  type TransactionType,
+} from '@/lib/transaction-types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category } from '@/api/types';
@@ -209,6 +217,12 @@ export function QuickAdd() {
     setTapCurrency(getLastCurrency(baseCode));
   }, [currenciesLoading, baseCode]);
 
+  // --- Shared sign ---------------------------------------------------------
+  // One toggle for both modes, because it is a fact about the entry rather
+  // than about how it was typed. Not sticky: a refund is the rare entry, and
+  // an on-by-default toggle would negate the next ordinary one.
+  const [isRefund, setIsRefund] = useState(false);
+
   // --- Shared category selection ------------------------------------------
   // A manual chip pick overrides the parser's match (Freeform) or is the
   // only source (Tap). `null` means "use parser / unset".
@@ -243,6 +257,12 @@ export function QuickAdd() {
     setKind(k);
     localStorage.setItem(STORAGE_KEYS.quickAddKind, k);
     setPickedCategoryId(null);
+    // Cleared for the same reason the category is: what this toggle MEANS is
+    // scoped to the kind — it is a refund on an expense and a reversal on an
+    // income — so carrying it across leaves a re-declared entry holding a sign
+    // the user last asserted about something else. One extra tap for the rare
+    // entry, against a wrongly-negated row for the common one.
+    setIsRefund(false);
   }, []);
 
   // Effective values per mode.
@@ -263,11 +283,27 @@ export function QuickAdd() {
           categoryId: pickedCategoryId,
         };
 
+  // `EntryKind` and `TransactionType` carry the same two strings, but they are
+  // different types on purpose (one is a UI toggle, one is the wire's category
+  // type). The preview's sign is a LEDGER rule, so it is expressed in the
+  // ledger's vocabulary rather than by widening the toggle.
+  const previewType: TransactionType =
+    kind === 'income' ? TYPE_INCOME : TYPE_EXPENSE;
+
+  // What the wire will carry. The typed amount is a magnitude in both modes —
+  // the freeform parser refuses a minus token and the tap keypad's input
+  // refuses one too — so this is the single point where the entry acquires
+  // its sign, and both the preview and the payload read it from here.
+  const signedAmount = applyAmountSign(effective.amount, isRefund);
+
   // Identity of the entry currently on screen. A retry that lands long after
   // the failure compares against this to decide whether clearing the form
   // would discard a draft the user has started in the meantime.
   const formSnapshot = JSON.stringify([
-    effective.amount,
+    // The SIGNED amount, so flipping the toggle alone counts as a different
+    // entry — otherwise a retry landing after the user turned Refund on would
+    // clear a draft it does not match.
+    signedAmount,
     effective.currency,
     effective.description,
     effective.categoryId ?? '',
@@ -311,6 +347,7 @@ export function QuickAdd() {
     setTapDescription('');
     setTapTags('');
     setPickedCategoryId(null);
+    setIsRefund(false);
     setTimeout(() => {
       if (mode === 'freeform') inputRef.current?.focus();
       else tapAmountRef.current?.focus();
@@ -422,7 +459,9 @@ export function QuickAdd() {
       payload = toCreatePayload(
         {
           date: todayIso(),
-          amount: effective.amount,
+          // Signed before the conversion, so a refund typed in LBP divides
+          // with its sign and both halves of the money pair land negative.
+          amount: signedAmount,
           currency: effective.currency,
           description: effective.description,
           category_id: effective.categoryId,
@@ -447,7 +486,7 @@ export function QuickAdd() {
     });
   }, [
     canSubmit,
-    effective.amount,
+    signedAmount,
     effective.currency,
     effective.description,
     effective.categoryId,
@@ -650,17 +689,33 @@ export function QuickAdd() {
 
             {raw.trim().length > 0 && (
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
+                {/* THE SAME RULE THE SAVED ROW WILL RENDER BY: the preview is
+                    a promise about what lands in the ledger, so it signs the
+                    parsed amount through `displayAmount` +
+                    `formatSignedCurrency` exactly as `AmountDisplay` does.
+                    It used to prepend a '+' for income only, which composes
+                    "+-$5.00" the moment a negative amount is parseable. */}
                 <div
                   data-testid="quick-preview-amount"
                   className={cn(
                     'font-mono text-3xl font-semibold tabular-nums',
-                    kind === 'income' &&
-                      parsed.amount != null &&
+                    parsed.amount != null &&
+                      displayAmount(signedAmount, previewType) > 0 &&
                       'text-emerald-500',
                   )}
                 >
+                  {/* The toggle's sign is part of what the preview promises:
+                      a refund turned on here has to read as the inflow it will
+                      be saved as, or the confirmation card confirms the wrong
+                      row. `AmountSignNote` is the same word the saved row will
+                      carry — mounted unconditionally because it renders
+                      nothing for an ordinary entry. */}
+                  <AmountSignNote amount={signedAmount} type={previewType} />
                   {parsed.amount != null ? (
-                    `${kind === 'income' ? '+' : ''}${formatCurrency(parsed.amount, effective.currency)}`
+                    formatSignedCurrency(
+                      displayAmount(signedAmount, previewType),
+                      effective.currency,
+                    )
                   ) : (
                     <span className="text-base font-normal text-muted-foreground">
                       Add an amount
@@ -730,6 +785,19 @@ export function QuickAdd() {
             </div>
           </div>
         )}
+
+        {/* Below both entry modes rather than inside either one: the sign is a
+            fact about the entry, not about how it was typed, and one control
+            in one place is also one thing to reset. The 44px touch target
+            comes from the Switch primitive's coarse-pointer hit area, so the
+            row does not need a height floor of its own. */}
+        <AmountSignToggle
+          id="quick-refund"
+          checked={isRefund}
+          onCheckedChange={setIsRefund}
+          type={previewType}
+          showHint
+        />
 
         <div className="flex flex-col gap-2">
           <Label>Category</Label>

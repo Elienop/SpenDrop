@@ -1353,4 +1353,197 @@ describe('TransactionEntryRow', () => {
     ).toBeInTheDocument();
     expect(onSubmit).not.toHaveBeenCalled();
   });
+
+  // -----------------------------------------------------------------
+  // Phase J: the Refund toggle — the row's only sign channel
+  // -----------------------------------------------------------------
+  //
+  // The positive-payload half of this is the canonical-payload test at the top
+  // of the file, which asserts the WHOLE object: it is what would notice a
+  // `refund` flag leaking onto the wire, or a sign appearing where nobody
+  // asked for one.
+  describe('refund toggle', () => {
+    it('_RefundSendsANegativeAmount: the toggle is what signs the entry', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '12.50', description: 'Returned milk' });
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      // Asserted whole, not with toMatchObject: `refund` is form state and
+      // must not ride along to a server that would ignore it.
+      expect(onSubmit).toHaveBeenCalledWith({
+        date: expect.any(String),
+        amount: -12.5,
+        description: 'Returned milk',
+        category_id: 1,
+        tags: '',
+        client_key: expect.any(String),
+      });
+    });
+
+    it('_ForeignRefundSignsBothHalves: the sign goes on before the conversion', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '150000', description: 'Returned rug' });
+      await user.click(screen.getByRole('button', { name: /Currency: USD/ }));
+      await user.click(await screen.findByRole('option', { name: /LBP/ }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+      // Signing AFTER the division would leave original_amount positive, and a
+      // money pair whose halves disagree is the shape the import path skips as
+      // `sign_mismatch`.
+      expect(onSubmit).toHaveBeenCalledWith({
+        date: expect.any(String),
+        amount: -1.67,
+        original_amount: -150000,
+        original_currency: 'LBP',
+        description: 'Returned rug',
+        category_id: 1,
+        tags: '',
+        client_key: expect.any(String),
+      });
+    });
+
+    it('_TypedMinusIsStillRefused: the digits are not a sign channel', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '-12.50', description: 'Slipped key' });
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      // The schema's `> 0` still refuses it, which is now a FEATURE: with the
+      // toggle carrying intent, a minus in the box can only be a typo, and one
+      // that saved would be indistinguishable from a deliberate refund.
+      expect(await screen.findByText('> 0')).toBeInTheDocument();
+      expect(onSubmit).not.toHaveBeenCalled();
+    });
+
+    it('_ResetsAfterASave: a refund does not stick to the next entry', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '12.50', description: 'Returned milk' });
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+      await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+      // Date, category and currency are deliberately sticky across a save.
+      // The sign is not: it would silently negate the next ordinary expense,
+      // and the row's own reset is the only thing that says so.
+      await waitFor(() =>
+        expect(screen.getByRole('switch', { name: 'Refund' })).not.toBeChecked(),
+      );
+    });
+
+    it('_LabelFollowsTheSelectedCategory: an income row says Reversal', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      // Nothing picked yet: the row is an expense as far as the form knows,
+      // and "Refund" is the case v1 promotes.
+      expect(screen.getByRole('switch', { name: 'Refund' })).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /salary/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Reversal' }),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByRole('switch', { name: 'Refund' }),
+      ).not.toBeInTheDocument();
+    });
+
+    it('_KindChangeClearsTheToggle: a refund asserted on an expense does not become a reversal', async () => {
+      // The relabel above is only half the answer. The user asserted "this is
+      // a refund" about an EXPENSE; re-filing the row as income leaves that
+      // assertion sitting under a word they never saw, and the row goes out
+      // negative as an income reversal. QuickAdd's kind toggle already clears
+      // for this reason — this is the same rule on the surface that re-derives
+      // its kind from the category instead of from a toggle.
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /groceries/i }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+
+      await user.click(screen.getByRole('button', { name: /^groceries$/i }));
+      await user.click(await screen.findByRole('option', { name: /salary/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Reversal' }),
+      ).not.toBeChecked();
+    });
+
+    it('_SameKindKeepsTheToggle: re-filing one expense as another is not a kind change', async () => {
+      // The discriminating half. "Clear whenever the category changes" also
+      // passes the test above and is wrong: correcting Groceries to Transport
+      // leaves the claim intact — it is still a refund on an expense — and
+      // silently un-refunding it there would turn money returned back into
+      // money spent, which is the defect this whole toggle exists to prevent.
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /groceries/i }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+
+      await user.click(screen.getByRole('button', { name: /^groceries$/i }));
+      await user.click(await screen.findByRole('option', { name: /transport/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Refund' }),
+      ).toBeChecked();
+    });
+  });
 });

@@ -10,6 +10,7 @@ import { MoreHorizontal, User } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
+import { AmountSignToggle } from './AmountSignToggle';
 import { AutocompleteInput } from './AutocompleteInput';
 import { CategoryBadge } from './CategoryBadge';
 import { TagInput } from './TagInput';
@@ -101,12 +102,16 @@ export function TransactionRow({
     reset: resetEditFields,
     save: handleSave,
     amountProps,
+    signProps,
     saveDisabled,
   } = useTransactionEditForm({
     transaction,
     onUpdate,
     onError,
     onSaved: stopEditing,
+    // Only so the sign toggle can read the SELECTED category's type — the
+    // picker below renders from this same list.
+    categories,
   });
 
   // Reseed edit fields from the current `transaction` prop on every
@@ -265,6 +270,19 @@ export function TransactionRow({
               QuickAdd) deliberately omit storedMoney, because a row that does
               not exist yet genuinely is priced at today's rate. */}
           <AmountCurrencyInput {...amountProps} />
+          {/* In the amount cell rather than a column of its own: the table's
+              seven columns are fixed by the header, and the sign belongs to
+              the number above it anyway. `justify-end` because this column is
+              right-aligned; `font-sans` comes from the toggle itself, which
+              has to undo the cell's `font-mono`.
+
+              `mt-3`, not the `mt-2` this shipped with: on a coarse pointer the
+              Switch grows its hit area with a pseudo-element that reaches 10px
+              past its border box on every side (ui/switch.tsx), so an 8px gap
+              puts the top of that band 2px inside the amount input above it —
+              a tap meant for the end of the number toggles the sign. 12px
+              keeps the two targets disjoint. */}
+          <AmountSignToggle {...signProps} className="mt-3 justify-end" />
         </TableCell>
         <TableCell>
           {/* `h-10` on the form matches peer TableCell input height so that

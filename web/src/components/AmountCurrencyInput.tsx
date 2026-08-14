@@ -19,7 +19,7 @@ import { selectAllOnFocus } from '@/lib/utils';
 import { formatCurrency } from '@/lib/format';
 import {
   dollarsToCents,
-  foreignMoneyUnchanged,
+  foreignMagnitudeUnchanged,
   type StoredMoney,
 } from '@/lib/currency';
 
@@ -50,6 +50,24 @@ export interface AmountCurrencyInputProps {
    * See the preview derivation below for what it changes when present.
    */
   storedMoney?: StoredMoney | null;
+  /**
+   * Whether the Refund toggle beside this control is on.
+   *
+   * The digits in this input are a MAGNITUDE — the sign lives on
+   * `AmountSignToggle` and nowhere else — so this is what lets the preview
+   * reconstruct the signed amount the save will actually send.
+   *
+   * It is what makes the value handed to `foreignMagnitudeUnchanged` the same
+   * signed figure the save will send, so this component asks the freeze
+   * question with the server's own input. It does NOT change the answer: the
+   * predicate compares magnitudes on both sides, because a toggle flip is a
+   * classification change and the server keeps the booked figure through one.
+   * That is deliberate — a preview that dropped to today's rate on a flip would
+   * promise a number the save contradicts. The create surfaces omit it for the
+   * same reason they omit `storedMoney`: there is no stored value to freeze
+   * against.
+   */
+  negative?: boolean;
   /** Optional DOM id to apply to the inner amount `<input>`. When composed
    *  inside a shadcn `FormControl`, Radix `Slot` injects `id={formItemId}`
    *  onto this component; forwarding that id to the actual input is what
@@ -83,6 +101,7 @@ export function AmountCurrencyInput({
   inputRef,
   dataEntryField,
   storedMoney = null,
+  negative = false,
   id,
 }: AmountCurrencyInputProps) {
   const [open, setOpen] = useState(false);
@@ -127,20 +146,36 @@ export function AmountCurrencyInput({
   // that does not exist yet really is priced at today's rate.
   const liveValue = showPreview && rate ? value / rate : 0;
 
+  // The signed amount the save will send, rebuilt from the two halves the user
+  // enters it in: the magnitude in the box and the Refund toggle beside it.
+  // Only the freeze predicate is asked about it — the figure below stays in
+  // the magnitude the digits above are written in, because the toggle carries
+  // the direction for the whole amount block and a preview that grew its own
+  // minus would be a second sign on the same money.
+  const signedValue = negative ? -value : value;
+
   // ...and wrong for an edit that leaves the foreign money alone. Saving one
   // of those does not re-price the row: the server carries the stored base
-  // value forward untouched (database.foreignMoneyUnchanged), so once the rate
+  // magnitude forward (database.foreignMagnitudeUnchanged), so once the rate
   // has moved, the live conversion is a number the save will not produce. The
   // preview's whole job is to say what saving will store, and a confident wrong
-  // figure is worse than none, so it shows the stored value instead.
+  // figure is worse than none, so it shows the stored value instead. A pure
+  // Refund-toggle flip is inside that freeze, so it keeps showing the stored
+  // figure too — the toggle beside the box carries the direction.
   //
   // `storedMoney` reads from the live transaction rather than a snapshot taken
   // when the editor opened, so a refetch landing mid-edit moves this with the
   // row the server will actually compare against.
   const frozen =
     storedMoney != null &&
-    foreignMoneyUnchanged(storedMoney, { amount: value, currency }, baseCode);
-  const previewValue = frozen ? storedMoney.amount : liveValue;
+    foreignMagnitudeUnchanged(
+      storedMoney,
+      { amount: signedValue, currency },
+      baseCode,
+    );
+  // `Math.abs` for the same reason `liveValue` needs none: both figures are the
+  // magnitude of the base-currency value, and a stored refund's is negative.
+  const previewValue = frozen ? Math.abs(storedMoney.amount) : liveValue;
 
   // The two figures disagree only when the rate moved since the row was
   // recorded, and that is the one case where a bare correct number reads as a
@@ -185,6 +220,15 @@ export function AmountCurrencyInput({
           id={id}
           type="number"
           step="0.01"
+          // `min="0"` STAYS now that amounts can be negative, and it is a
+          // feature rather than leftover strictness. The sign of a transaction
+          // comes from the Refund toggle (`AmountSignToggle`) and from nothing
+          // else, so a minus in the digits is always a typo — and this is what
+          // marks it `:invalid` and clamps the spinner at zero. The consuming
+          // surfaces refuse it for real: the entry row's schema is `.positive()`
+          // and QuickAdd's submit gate is `> 0`. Dropping it here would make a
+          // slipped keystroke a silent sign flip on the two edit surfaces,
+          // which are the ones where it would corrupt an existing row.
           min="0"
           value={rawInput}
           onChange={(e) => {
