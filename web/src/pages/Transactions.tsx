@@ -303,6 +303,22 @@ export function Transactions() {
         await deleteTransaction(id);
       } catch (err) {
         toast.error(err instanceof Error ? err.message : 'Delete failed');
+        // A refusal leaves the row exactly where it was, but focus has already
+        // been given up: the desktop row's menu opted out of Radix's restore
+        // on the way in (its trigger was about to unmount), and the phone
+        // sheet's close-focus hook stood down for the same reason. So the
+        // surface the delete came FROM has to be re-focused here or the
+        // keyboard user restarts at the top of the page. Whichever
+        // presentation is mounted supplies one of these two anchors; the
+        // heading covers a row that has since left the page.
+        const anchor =
+          cardRef.current?.querySelector<HTMLElement>(
+            `[data-txn-actions-id="${id}"]`,
+          ) ??
+          cardRef.current?.querySelector<HTMLElement>(
+            `[data-transaction-id="${id}"]`,
+          );
+        (anchor ?? pageHeadingRef.current)?.focus();
         return;
       }
       pageHeadingRef.current?.focus();
@@ -1012,15 +1028,15 @@ export function Transactions() {
                   if (e.key === 'Enter') handleReplaceAll();
                 }}
                 placeholder="New description..."
-                // `coarse:min-h-11` on this INSTANCE, not on the Input
-                // primitive. It is the only field in the app sitting inline
-                // between two Buttons, and Button's floor is pointer-gated: on
-                // a coarse tablet above `md` the two buttons reach 44px while
-                // `md:h-8` would leave this field at 32, a 12px step in one
-                // `items-center` row. Flooring every Input in the app to fix
-                // one row would inflate every form on the tablet, which is a
-                // separate decision and not this one.
-                className="h-11 max-w-xs text-xs coarse:min-h-11 md:h-8"
+                // No touch class here: the Input primitive carries
+                // `coarse:min-h-11` itself (the 2026-08 fix batch took the
+                // decision this comment used to defer), so on the household's
+                // coarse tablet above `md` this field keeps up with the two
+                // pointer-gated Buttons it shares an `items-center` row with
+                // instead of stepping down to 32px beside them. `h-11 md:h-8`
+                // is a different axis — fine-pointer density, matching the
+                // buttons' own explicit heights in this strip.
+                className="h-11 max-w-xs text-xs md:h-8"
                 disabled={replacing}
               />
               <Button

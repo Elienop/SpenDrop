@@ -1572,6 +1572,28 @@ describe('Transactions page', () => {
         ),
       );
     });
+
+    it('a REFUSED delete puts focus back on the row’s menu trigger, not the heading', async () => {
+      // The row's actions menu gives up Radix's focus-to-trigger restore when
+      // Delete runs, because on the success path that trigger unmounts with the
+      // row. On a refusal the row is still there — so the heading anchor, which
+      // is right for a row that is gone, would be a silent demotion here.
+      const deleteTransaction = vi.fn().mockRejectedValue(new Error('boom'));
+      mockUseTransactions.mockReturnValue(defaultHookReturn({ deleteTransaction }));
+      const user = userEvent.setup();
+      render(<Transactions />);
+
+      await deleteFirstRow(user);
+      await waitFor(() => expect(toastError).toHaveBeenCalledWith('boom'));
+
+      const trigger = screen.getByRole('button', {
+        name: 'Actions for Groceries',
+      });
+      await waitFor(() => expect(document.activeElement).toBe(trigger));
+      expect(document.activeElement).not.toBe(
+        screen.getByRole('heading', { level: 1, name: 'Transactions' }),
+      );
+    });
   });
 
   describe('entry-row delete wiring (item 1)', () => {

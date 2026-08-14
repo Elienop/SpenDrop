@@ -1,4 +1,10 @@
-import { useCallback, useState, type KeyboardEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react';
 import { format, parseISO } from 'date-fns';
 import { MoreHorizontal, User } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
@@ -59,7 +65,24 @@ export function TransactionRow({
   // one selection test covers whichever presentation is mounted.
   const label = transactionLabel(transaction);
   const [editing, setEditing] = useState(false);
-  const stopEditing = useCallback(() => setEditing(false), []);
+  // True only between a menu item running and the close it causes — the
+  // actions menu's onCloseAutoFocus reads and clears it to decide whether
+  // Radix's focus-to-trigger restore may run. A ref, not state: it must be
+  // visible to the close event of the SAME interaction, and re-rendering
+  // over a menu that is mid-close buys nothing.
+  const menuActionRanRef = useRef(false);
+  // The two ends of the edit swap. Both elements are mounted by the branch the
+  // swap is moving TO, so neither can be focused from the handler that starts
+  // it — the effect below runs after the render that puts them there.
+  const dateInputRef = useRef<HTMLInputElement>(null);
+  const actionsTriggerRef = useRef<HTMLButtonElement>(null);
+  // Distinguishes "the form closed because the user left it" from the first
+  // render of a row that was never editing, which must not steal focus.
+  const returnFocusRef = useRef(false);
+  const stopEditing = useCallback(() => {
+    returnFocusRef.current = true;
+    setEditing(false);
+  }, []);
   // Field state, the currency rehydration race, the save payload and the
   // storedMoney contract all live in the shared hook — the phone edit Sheet
   // runs on the same one, and every one of those is a place two copies would
@@ -97,8 +120,30 @@ export function TransactionRow({
 
   function handleCancel() {
     resetEditFields();
+    returnFocusRef.current = true;
     setEditing(false);
   }
+
+  // The row's half of the focus handoff the actions menu deliberately declines
+  // to make. Edit unmounts the trigger it was chosen from, so the menu opts out
+  // of Radix's focus-to-trigger restore — which leaves focus on `<body>` unless
+  // something moves it into the form that just replaced the row. Date first:
+  // it is the form's leading field, the same order a Tab from the row would
+  // take.
+  //
+  // Coming back, the trigger is a NEW element (the display row remounts), so
+  // this cannot be done by remembering what was focused before. Only the two
+  // deliberate exits arm it — a row that leaves edit mode because the page
+  // refetched it away has nothing on screen to focus.
+  useEffect(() => {
+    if (editing) {
+      dateInputRef.current?.focus();
+      return;
+    }
+    if (!returnFocusRef.current) return;
+    returnFocusRef.current = false;
+    actionsTriggerRef.current?.focus();
+  }, [editing]);
 
   function handleRowKeyDown(e: KeyboardEvent<HTMLTableRowElement>) {
     // Enter save path, collapsed: Cmd/Ctrl+Enter is force-bubbled by children,
@@ -129,8 +174,10 @@ export function TransactionRow({
               inside a 40px box matching peer Input height, so under
               the row's [&>td]:align-top the checkbox center lines up
               with the first-line center of the Date / Description /
-              Category / Tags / Amount inputs (not their top edge). */}
-          <div className="flex h-10 items-center">
+              Category / Tags / Amount inputs (not their top edge).
+              `coarse:h-11` tracks the Input primitive's pointer-gated
+              floor so the centering holds where inputs are 44px. */}
+          <div className="flex h-10 items-center coarse:h-11">
             <Checkbox
               checked={selected}
               disabled={!onSelect}
@@ -146,6 +193,7 @@ export function TransactionRow({
               to force-normalize. Users close the picker (mouse or outside-click) and
               then press Enter/Esc in any other field to save/cancel. */}
           <Input
+            ref={dateInputRef}
             type="date"
             value={date}
             onChange={(e) => setDate(e.target.value)}
@@ -241,7 +289,7 @@ export function TransactionRow({
               e.preventDefault();
               void handleSave();
             }}
-            className="flex h-10 items-center justify-end gap-1"
+            className="flex h-10 items-center justify-end gap-1 coarse:h-11"
           >
             {/* Same in-flight cue as the phone sheet. A dimmed control that
                 still reads "Save" says "you cannot do this", not "this is
@@ -340,39 +388,63 @@ export function TransactionRow({
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button
+              ref={actionsTriggerRef}
               type="button"
               variant="ghost"
               size="icon"
               className="size-8 data-[state=open]:bg-accent"
               aria-label={`Actions for ${label}`}
+              /* The page's anchor for a delete the server REFUSED: the row
+                 survives, so this trigger is still the right place to be, but
+                 the menu has already opted out of restoring to it. Queried by
+                 attribute because the page cannot reach a ref that lives in
+                 here, and because the element is a fresh one per render. */
+              data-txn-actions-id={transaction.id}
             >
               <MoreHorizontal />
               <span className="sr-only">Open menu</span>
             </Button>
           </DropdownMenuTrigger>
-          {/* This menu OPTS OUT of the restore, and it is one of the few that
-              should. Both of its items unmount the trigger they were opened
-              from: Delete removes the row, Edit replaces it with the edit form.
-              Radix restores focus to `triggerRef` AFTER the menu closes, so it
-              lands on a disappearing element and, worse, overrides the
-              deliberate move the page has already made — `onDelete` sends focus
-              to the page heading precisely because the row is gone.
+          {/* This menu opts out of Radix's focus-to-trigger restore ONLY on a
+              close caused by one of its items running. Both items unmount the
+              trigger they were opened from — Delete removes the row, Edit
+              replaces it with the edit form — so on those closes the restore
+              would aim at a disappearing element and, worse, override the
+              deliberate move the page has already made (`onDelete` sends focus
+              to the page heading precisely because the row is gone).
 
-              The primitive no longer defaults to this, because defaulting it
-              dropped focus to `<body>` at the other eleven trigger sites, whose
-              triggers survive their own action. So the exception now lives
-              where the exception is: here. */}
+              A plain dismissal — Escape, click-outside — leaves the trigger
+              mounted, and a blanket opt-out there stranded keyboard focus on
+              <body> (measured on the built app at 1130 coarse). Hence the
+              read-and-clear ref: only an item sets it, and clearing it on
+              every close means a later dismissal restores again.
+
+              The primitive itself no longer defaults the opt-out, because
+              defaulting it dropped focus to <body> at the other eleven
+              trigger sites, whose triggers survive their own action. */}
           <DropdownMenuContent
             align="end"
-            onCloseAutoFocus={(e) => e.preventDefault()}
+            onCloseAutoFocus={(e) => {
+              if (!menuActionRanRef.current) return;
+              menuActionRanRef.current = false;
+              e.preventDefault();
+            }}
           >
-            <DropdownMenuItem onSelect={startEditing}>
+            <DropdownMenuItem
+              onSelect={() => {
+                menuActionRanRef.current = true;
+                startEditing();
+              }}
+            >
               Edit
             </DropdownMenuItem>
             <DropdownMenuSeparator />
             <DropdownMenuItem
               variant="destructive"
-              onSelect={() => void onDelete(transaction.id)}
+              onSelect={() => {
+                menuActionRanRef.current = true;
+                void onDelete(transaction.id);
+              }}
             >
               Delete
             </DropdownMenuItem>
