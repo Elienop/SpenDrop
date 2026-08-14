@@ -519,6 +519,117 @@ describe('TransactionEditSheet — a stored refund round-trips', () => {
   });
 });
 
+// B33. The picker opened on Enter and moved on ArrowDown, but Enter on the
+// highlighted option did nothing at all: the list stayed up, the trigger kept
+// its old value, and the only ways through were a tap and Space. Reproduced
+// with real key events in Chrome at 360px, and traced to this call site rather
+// than the primitive — the same Select in the bulk-edit dialog takes Enter.
+describe('TransactionEditSheet — Enter picks a category', () => {
+  /**
+   * Opens the picker the way the reported interaction does and hands back the
+   * option the tests then press Enter on.
+   *
+   * `fireEvent`, not `user.keyboard('{Enter}')`: user-event's Enter never
+   * reaches an `onKeyDown` handler under happy-dom, so a test written that way
+   * passes while asserting nothing.
+   *
+   * This step is also the POSITIVE CONTROL for every Enter below. Opening the
+   * listbox is Radix's own `onKeyDown` on the trigger — nothing in this file
+   * does it — so if these synthetic Enters were not reaching React handlers,
+   * `findByRole('option')` would time out and each test would fail loudly
+   * rather than pass vacuously.
+   */
+  async function openCategoryPicker() {
+    fireEvent.keyDown(screen.getByRole('combobox', { name: 'Category' }), {
+      key: 'Enter',
+    });
+    return screen.findByRole('option', { name: 'Transport' });
+  }
+
+  /** The list is gone AND the trigger moved — either alone is satisfiable by a
+   *  Select that merely closed without committing anything. */
+  async function expectCommitted(name: string) {
+    await waitFor(() =>
+      expect(screen.queryByRole('option', { name })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('combobox', { name: 'Category' })).toHaveTextContent(
+      name,
+    );
+  }
+
+  it('_EnterCommitsTheHighlightedOption: the trigger takes the new category', async () => {
+    renderSheet();
+    const option = await openCategoryPicker();
+
+    fireEvent.keyDown(option, { key: 'Enter' });
+
+    await expectCommitted('Transport');
+  });
+
+  it('_EnterOnAnOptionDoesNotSaveOrCloseTheSheet: it picks, and only picks', async () => {
+    const { onUpdate, onClose } = renderSheet();
+    const option = await openCategoryPicker();
+
+    fireEvent.keyDown(option, { key: 'Enter' });
+
+    await expectCommitted('Transport');
+    expect(onUpdate).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('_ThePickedCategoryIsWhatGetsSaved: the commit reaches the payload', async () => {
+    const { onUpdate } = renderSheet();
+    const option = await openCategoryPicker();
+
+    fireEvent.keyDown(option, { key: 'Enter' });
+    await expectCommitted('Transport');
+
+    const save = screen.getByRole('button', { name: 'Save' });
+    await waitFor(() => expect(save).toBeEnabled());
+    fireEvent.submit(save.closest('form')!);
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+    // 2 = Transport. The fixture row is category 1, so this cannot pass on a
+    // pick that silently did nothing.
+    expect(onUpdate.mock.calls[0][0]).toMatchObject({ id: 7, category_id: 2 });
+  });
+
+  it('_EscapeInsideThePickerLeavesTheSheetAndItsEdits: only the listbox closes', async () => {
+    const user = userEvent.setup();
+    const { onClose, onUpdate } = renderSheet();
+
+    const description = screen.getByLabelText('Description');
+    await user.clear(description);
+    await user.type(description, 'Corner shop');
+
+    const option = await openCategoryPicker();
+    fireEvent.keyDown(option, { key: 'Escape' });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('option', { name: 'Transport' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(onUpdate).not.toHaveBeenCalled();
+    // The edit in progress is still there — a sheet that had been dismissed
+    // and re-rendered would be back on the row's stored description.
+    expect(screen.getByLabelText('Description')).toHaveValue('Corner shop');
+  });
+
+  // Positive control for the test above, and the behaviour it must not cost:
+  // Escape is still how you dismiss the sheet. Without this, "Escape did not
+  // close the sheet" would also be satisfied by an environment in which
+  // Escape closes nothing at all, and the assertion would be worthless.
+  it('_EscapeOutsideThePickerStillDismissesTheSheet: the control for the test above', async () => {
+    const { onClose } = renderSheet();
+
+    fireEvent.keyDown(screen.getByLabelText('Description'), { key: 'Escape' });
+
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+});
+
 // The one window in which the hook's rehydration effect can change anything:
 // the household's real base currency only exists once `useCurrencies`
 // resolves, and a refetch landing inside that window replaces the row under an

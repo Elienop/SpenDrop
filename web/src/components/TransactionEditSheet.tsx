@@ -237,38 +237,48 @@ function TransactionEditSheetForm({
       <div className="flex flex-col gap-2">
         <Label htmlFor={`${fieldId}-category`}>Category</Label>
         {/*
-          Radix react-select does NOT stopPropagation on the Escape keydown it
-          uses to close its own popover, so without this capture wrapper the
-          first Escape inside an open Select would close the Select AND dismiss
-          the whole sheet, discarding every edit. Same guard the inline table
-          row carries, detecting "is this Select open" via the trigger's own
-          aria-expanded — the trigger is in this subtree, the portalled content
-          is not.
+          Unwrapped, unlike the inline table row's copy of this picker — and
+          the absence IS the fix for B33.
+
+          A capture-phase key guard used to sit here, stopping Enter and
+          Escape whenever the trigger read `aria-expanded="true"`. React
+          dispatches synthetic events along the REACT tree, so the portalled
+          listbox is still a descendant of a wrapper around this Select: the
+          guard ran BEFORE `SelectItem`'s own `onKeyDown` and swallowed the
+          Enter that was meant to choose the option. The list stayed open and
+          the category never changed. Space kept working, which is what made
+          it look like a Radix bug — `SELECTION_KEYS` is `[' ', 'Enter']` and
+          the guard only listed Enter.
+
+          Nothing above this Select needs guarding. The only save path is the
+          Save button's `submit` event; a key pressed on an option is in the
+          portal, outside the form's DOM, so it cannot implicitly submit. And
+          Escape in the open listbox cannot dismiss the sheet either: Radix's
+          DismissableLayer lets only the TOP layer act on Escape, and the
+          Select's layer calls `preventDefault` on the key it consumes, so the
+          sheet's layer is doubly excluded. Measured, not assumed — with the
+          guard deleted, Escape closes the listbox and leaves the sheet and its
+          unsaved edits alone (`_EscapeInsideThePickerLeavesTheSheetAndItsEdits`,
+          which has its own positive control).
+
+          The table row keeps a guard because its `<tr>` genuinely does turn a
+          bare Enter into a save. If a key handler is ever added above this
+          form, copy the row's BUBBLE-phase guard — never a capture-phase one.
         */}
-        <div
-          onKeyDownCapture={(e) => {
-            if (e.key !== 'Escape' && e.key !== 'Enter') return;
-            const openTrigger = e.currentTarget.querySelector(
-              '[role="combobox"][aria-expanded="true"]',
-            );
-            if (openTrigger) e.stopPropagation();
-          }}
-        >
-          <Select value={categoryId} onValueChange={setCategoryId}>
-            <SelectTrigger id={`${fieldId}-category`}>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                {categories.map((cat) => (
-                  <SelectItem key={cat.id} value={String(cat.id)}>
-                    {cat.name}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-            </SelectContent>
-          </Select>
-        </div>
+        <Select value={categoryId} onValueChange={setCategoryId}>
+          <SelectTrigger id={`${fieldId}-category`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              {categories.map((cat) => (
+                <SelectItem key={cat.id} value={String(cat.id)}>
+                  {cat.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
       </div>
 
       <div className="flex flex-col gap-2">
