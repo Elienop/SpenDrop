@@ -285,7 +285,9 @@ icon's containing block is whatever positioned ancestor the placement supplies �
 mobile drawer that is `SheetContent` itself, so the glyph escapes the body scroller's clipping
 and does not scroll with its own button (dark mode, drawer scrolled). Fix wants `relative` on
 ModeToggle's trigger (scoped) rather than on the Button base (app-wide blast radius — audit
-first). Confirm visually on the next browser pass. **Effort:** small.
+first). Browser-probed 2026-08-15: real but sub-visible today — the drawer's max scroll is
+only ~15px at 360x640 with the current nav length, so the detached moon stays inside its
+button's box; becomes user-visible only if the drawer's body grows. **Effort:** small.
 
 ### B48 — 11 test files strip a hook's contract with `as unknown as ReturnType<…>`
 **Verified: read** (2026-08-15, found during the B30 fix wave). The double cast opts a mock out
@@ -308,6 +310,22 @@ Tab S10 FE reaches at ~1130px landscape (inputMode is inert for physical keyboar
 it there is zero-risk but changes desktop DOM — scoped out of the phone-residue batch on
 purpose). Un-verifiable in any repo test — headless Chrome raises no soft keyboard; verify on
 a real device or accept the hint on spec. **Effort:** small.
+
+### B50 — mount-time toasts are lost on cold loads: the Toaster subscribes too late
+**Verified: reproduced** (2026-08-15 browser pass, built container). A cold load of
+`/settings?tab=savings` (i.e. the bookmark case the forwarding toast exists for) shows NO
+toast — probed with a MutationObserver from t=0, nothing ever renders — while the same URL
+reached by in-app navigation toasts correctly ("Savings has its own page now · Open").
+Mechanism: the one-shot effect fires `toast.info` on Settings' mount, but `<Toaster/>` sits at
+`AppShell.tsx:114` AFTER the routed content, so on a cold mount the child's effect runs before
+sonner subscribes and the toast is dropped. Pre-existing since PR #63 (`182199b`) — this
+branch changed only the lookup expression, and the in-app probe proves the new Map lookup
+fires correctly. Any OTHER mount-time toast in the app is lost the same way (audit `toast.*`
+calls in mount effects). Fix candidates: mount `<Toaster/>` before the routed content in
+AppShell (verify sonner's fixed positioning makes DOM order irrelevant to stacking), or defer
+mount-time toasts one tick. NOTE the B30 interaction: the no-mount-write design keeps the raw
+`?tab=` exactly so this toast reproduces on reload — right design, currently moot for cold
+loads until this is fixed. **Effort:** small.
 
 ---
 
