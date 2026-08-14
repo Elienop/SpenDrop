@@ -21,8 +21,19 @@ A practical reference for building pages that match the current dashboard style.
 
 All colors use HSL space-separated format: `H S% L%`. Consumed via `hsl(var(--token))`.
 
-| Token | HSL Value | Role |
-|-------|-----------|------|
+One deliberate exception: `--logo-badge` stores `H S% L% / A` — the alpha lives INSIDE the
+token. The LogoWordmark badge needs a different tint *and* a different alpha per theme
+(`--primary / 0.4` inverts across them: a 98%-white wash in dark becomes a 40% black slab in
+light), and a consumer writing `hsl(var(--token) / N)` can only vary the alpha. Consumed bare
+as `hsl(var(--logo-badge))`; adding a second slash-alpha to it is invalid CSS and silently
+drops the declaration.
+
+Values below are the `.dark` block's; `:root` holds the light counterpart of each (they are not
+mirrored — light `--muted-foreground` is `240 3.8% 45%`, capped by its own 4.5:1 floor on
+`--muted`, not by symmetry with dark's `57%`).
+
+| Token | HSL Value (`.dark`) | Role |
+|-------|---------------------|------|
 | `--background` | `240 3.7% 7.1%` | Page background |
 | `--foreground` | `240 5% 93.3%` | Primary text |
 | `--card` | `240 4% 9%` | Card background |
@@ -82,7 +93,18 @@ chip measures ~1.1–3.2:1 against it and needs to sit in a card-colored gutter 
 
 Reserved exclusively for category-specific visualizations (spending breakdown pie chart, category trend lines). Mapped via `getCategoryColorVar()` in `lib/chart-colors.ts`.
 
-| Token | HSL | Visual |
+**Two blocks, one hue family per slot.** The values below are the `.dark` block's — the single
+`HSL` column describes dark mode only. `:root` (light) carries contrast-retuned values of the
+same hues: each slot is deepened until it reaches **>= 5.0:1 as text on white**, because
+`CategoryChips` / `CategoryBadge` paint the raw slot color as TEXT over a 12–15% self-tinted
+wash. Reusing the dark values in light mode put 16 of the 20 under the floor, `--chart-8` (Gold)
+worst at 1.53:1. Both halves of the invariant — the 5.0 floor
+and Δhue <= 12 against the dark slot, so a category's identity does not shift between themes —
+are pinned by `src/lib/chart-colors.test.ts`, which parses `globals.css` itself and runs in the
+suite. Pair separation is not gate-able at 20 slots; see the comment above the light block for
+`scripts/validate_palette.js` and what it can and cannot tell you.
+
+| Token | HSL (`.dark`) | Visual |
 |-------|-----|--------|
 | `--chart-1` | `263 55% 53%` | Purple |
 | `--chart-2` | `226 70% 56%` | Blue |
@@ -618,7 +640,9 @@ The confirm AlertDialog (all-matching scope only) uses the **default primary** p
 - Use `gap-3` between cards, `gap-6` between sections
 - Use neutral colors (`--primary`, `--muted-foreground`) for non-category charts
 - Use `getCategoryColorVar()` for category-specific colors
-- Test dark theme (default and only theme currently)
+- Test BOTH themes. Dark is the default (`ThemeProvider defaultTheme="dark"`, `<html class="dark">`),
+  but `ModeToggle` sits in the sidebar and the phone nav, so light is one tap away from every
+  screen — and the two blocks in `globals.css` no longer hold the same chart values
 
 ### Don't
 

@@ -405,6 +405,20 @@ verifying B29 and briefly mistaking it for a rendering defect in the branch.
 **Effort:** small — a catch-all route. **Note:** worth checking whether the SW precache serves the
 shell for arbitrary paths, since that is what makes the blank state look like a successful load.
 
+### B39 — the 20-slot category palette fails its own pair-separation check, in both themes
+
+**Verified: measured** (2026-08-14, `web/scripts/validate_palette.js`). Adjacent-slot separation
+is under the validator's normal-vision floor of ΔE 15 in BOTH themes — light worst pair **8.1**,
+dark worst **5.7** with a CVD worst of **0.9** — so neighbouring categories in a chart legend can
+be genuinely hard to tell apart, and were BEFORE the light retune (the dark block is the shipped
+palette, untouched; the light block's ≥5.0:1 text-contrast floor is a separate, passing check
+pinned by `src/lib/chart-colors.test.ts`). At 20 slots adjacent hues sit ~18° apart, so the floor
+is unreachable by tuning alone — the fix is structural: reorder slots so confusable hues are not
+adjacent, cut the palette to ~12 with a fold-into-"Other", or lean on the direct labels the
+charts already carry (`ChartLegendContent`, category-named axes), which is the mitigation the
+validator itself names. **Effort:** medium; a design decision, not a bug fix — do not retune
+individual slots piecemeal, the 2026-08 light retune proved best-achievable pair gains are <1 ΔE.
+
 ---
 
 ## Queued stages

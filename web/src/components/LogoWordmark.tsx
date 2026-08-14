@@ -17,9 +17,12 @@ export function LogoWordmark({ className }: LogoWordmarkProps) {
       className={cn('shrink-0', className)}
       aria-hidden="true"
     >
-      {/* "Drop" background badge — very light primary tint */}
+      {/* "Drop" background badge. Dedicated token: `--primary / 0.4` inverts
+          across themes (98%-white in dark, 10%-black in light, where the
+          "light tint" became a 40% black slab) — each theme block in
+          globals.css defines its own tint+alpha. */}
       <polyline
-        fill="hsl(var(--primary) / 0.4)"
+        fill="hsl(var(--logo-badge))"
         points="413.3 0 223.7 0 223.7 91.8 413.3 91.8 413.3 0"
       />
 
