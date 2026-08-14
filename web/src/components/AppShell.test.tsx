@@ -166,6 +166,28 @@ describe('AppShell routing', () => {
     ).not.toBeInTheDocument();
   });
 
+  test('the not-found escape hatch clears the touch floor on a coarse pointer', () => {
+    // The shell's one interactive control outside the nav column, and the only
+    // way off this panel other than the browser's back button. It is a `<Link>`
+    // in Button clothing, so `asChild` is what carries the floor here — the
+    // `h-10` assertion is what proves Slot merged the variant onto the ANCHOR
+    // rather than onto a wrapper, which is the failure mode that would leave a
+    // bare 20px text link reading as styled.
+    renderShellAt('/nonsense');
+    const back = screen.getByRole('link', { name: 'Back to Dashboard' });
+    expect(back).toHaveClass('h-10', 'coarse:min-h-11');
+    // The two specific wrong answers: ungated inflates a mouse desktop at every
+    // width, and width-gated leaves the ~1130px tablet on the 40px desktop size
+    // while a thumb is doing the tapping.
+    expect(back).not.toHaveClass('min-h-11');
+    expect(back).not.toHaveClass('md:min-h-11');
+    // Control: the token is a decision on this element, not something true of
+    // everything the panel renders.
+    expect(
+      screen.getByText('/nonsense').classList.contains('coarse:min-h-11'),
+    ).toBe(false);
+  });
+
   test('the echoed path is allowed to break mid-token', () => {
     // A URL is one long token as far as line-breaking is concerned, and this
     // paragraph is a content-sized flex item — so an unbounded span pans the
