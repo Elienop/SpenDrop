@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -119,7 +120,9 @@ func (h *Handler) emit(ctx context.Context, notifType, title, body, url string, 
 // household reads on a lock screen; keep it plain.
 func activityPhrase(verb string, cents int64) string {
 	if cents < 0 {
-		return fmt.Sprintf("%s a refund of $%.2f", verb, centsToDollars(-cents))
+		// magnitudeCents, not a bare -cents: negation is not total on int64,
+		// and this is the one place the result is shown to a human.
+		return fmt.Sprintf("%s a refund of $%.2f", verb, centsToDollars(magnitudeCents(cents)))
 	}
 	return fmt.Sprintf("%s $%.2f", verb, centsToDollars(cents))
 }
@@ -128,6 +131,17 @@ func activityPhrase(verb string, cents int64) string {
 // threshold comparisons that ask "how big is this" rather than "which way does
 // it go".
 func magnitudeCents(cents int64) int64 {
+	// math.MinInt64 has no positive counterpart, so negating it yields itself:
+	// the largest amount int64 can hold would compare BELOW every threshold and
+	// silence the alert it most deserves, and print as a negative dollar figure
+	// in the push body. Unreachable from any write path today (validateMoneyAmount
+	// bounds a stored amount at 1e11 cents) — this keeps the function total, so a
+	// future caller reading amount_cents straight from a row cannot be surprised
+	// by a negative magnitude. Clamping loses ONE cent of an already absurd value
+	// and keeps every comparison and every rendering correctly signed.
+	if cents == math.MinInt64 {
+		return math.MaxInt64
+	}
 	if cents < 0 {
 		return -cents
 	}

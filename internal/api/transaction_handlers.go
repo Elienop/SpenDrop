@@ -282,6 +282,31 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 	if err := validateMoneyAmount(*req.OriginalAmount, "original_amount"); err != nil {
 		return resolvedMoney{}, err
 	}
+	// The wire `amount` is DISCARDED on this branch — the division below
+	// recomputes it — so a request whose two halves point opposite ways used to
+	// book the original's direction and answer 201: {"amount": -5,
+	// "original_currency": "LBP", "original_amount": 900000} stored a +1011c
+	// PURCHASE from a body that said refund. Import already refuses that exact
+	// shape as sign_mismatch, and the same row must not land differently
+	// depending on which door it came through. Only the foreign branch needs the
+	// gate: the other two store no original_amount, so there is no pair left to
+	// contradict itself. Ordered after validateMoneyAmount so a sub-cent
+	// original reports THAT — 0.004 beside a negative amount is a zero, not a
+	// disagreement, and it is the one bad original validateTransactionRequest
+	// (which has already refused NaN, Inf and out-of-range) leaves for here.
+	//
+	// It REJECTS, it does not correct: the wire amount is discarded either way,
+	// so nothing about what an ACCEPTED request stores changes — original_amount
+	// and the rate decide that, not this. What changes is who gets a 400, and
+	// that is not nobody. The web app cannot build a disagreeing pair
+	// (applyAmountSign signs the magnitude before toCreatePayload divides by a
+	// strictly positive rate), but router.go mounts the whole /api group under
+	// RequireAuthOrAPIToken and api_tokens carries no read-only scope, so a
+	// household script posting a contradictory pair — previously accepted, with
+	// its base amount silently overwritten — now gets a 400 instead.
+	if moneySignsDisagree(req.Amount, *req.OriginalAmount) {
+		return resolvedMoney{}, fmt.Errorf("amount and original_amount must carry the same sign")
+	}
 
 	if currency.RateToBase == 0 {
 		return resolvedMoney{}, fmt.Errorf("currency %q has zero rate", req.OriginalCurrency)
@@ -765,13 +790,15 @@ func (h *Handler) handleUpdateTransaction(w http.ResponseWriter, r *http.Request
 	// foreign-currency row that is not necessarily what gets stored: saving an
 	// edit must never move money the user did not touch, so
 	// TransactionStore.Update overrides BOTH with the row's existing values when
-	// the request merely restates the same foreign amount in the same currency —
-	// they are frozen as a unit, because a stored rate that describes a
-	// carried-forward amount is the only pair that is internally consistent.
-	// That decision is made against the store's own transaction-scoped read of
+	// the request merely restates the same foreign MAGNITUDE in the same currency
+	// — they are frozen as a unit, because a stored rate that describes a
+	// carried-forward amount is the only pair that is internally consistent. A
+	// Refund-toggle flip is inside that freeze: the store keeps the booked figure
+	// and re-applies the requested direction, so flipping a row does not re-price
+	// it. That decision is made against the store's own transaction-scoped read of
 	// the row, not against `existing` above (which is read outside any
 	// transaction and can be stale about money) — see
-	// database.foreignMoneyUnchanged for the whole argument.
+	// database.foreignMagnitudeUnchanged for the whole argument.
 	err = h.txnStore.Update(r.Context(), user.ID, database.UpdateTransactionParams{
 		Date:                date,
 		AmountCents:         dollarsToCents(money.Amount),
@@ -2634,6 +2661,32 @@ func validateMoneyAmount(d float64, field string) error {
 		return fmt.Errorf("%s must not be zero", field)
 	}
 	return nil
+}
+
+// moneySignsDisagree reports whether a base amount and its foreign original
+// amount point in opposite directions.
+//
+// Agreement, not positivity, is the invariant. A foreign refund is negative on
+// both sides and is entirely legal; the implied rate (base/original) stays
+// positive either way. Only a MIXED pair is refused, because no single rate
+// relates a payment to a refund.
+//
+// A zero on either side is NOT a disagreement, and that matters on both paths
+// that ask. Over the API the wire `amount` is decorative once a foreign currency
+// is selected — resolveCurrency recomputes it — so clients legitimately omit it
+// and it arrives as 0. On import a zero base amount is already refused by the
+// zero gate, and a zero original means "absent", which is how the params builder
+// reads it.
+//
+// One named predicate so every caller asks the identical question: the three
+// API write paths via resolveCurrency, and import's preCategorySkipReason and
+// buildCollisionGroups — a row that cannot be imported must not be grouped as a
+// collision either.
+func moneySignsDisagree(amount, original float64) bool {
+	if amount == 0 || original == 0 {
+		return false
+	}
+	return (amount < 0) != (original < 0)
 }
 
 // contentHashForManualEntry computes the dedupe identity for a hand-entered

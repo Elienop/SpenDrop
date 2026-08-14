@@ -250,7 +250,7 @@ func buildCollisionGroups(
 		if row.Description == "" || row.Amount == 0 {
 			continue
 		}
-		if importSignsDisagree(row.Amount, row.OriginalAmount) {
+		if moneySignsDisagree(row.Amount, row.OriginalAmount) {
 			// Confirm skips this row as skipReasonSignMismatch, so it
 			// cannot collide with anything: grouping it would 409 the
 			// whole import over a row that was never going to land.
@@ -2432,31 +2432,10 @@ func preCategorySkipReason(row importRow) (time.Time, importSkipReason, bool) {
 	if math.Abs(row.Amount) == 0 {
 		return time.Time{}, skipReasonZeroAmount, true
 	}
-	if importSignsDisagree(row.Amount, row.OriginalAmount) {
+	if moneySignsDisagree(row.Amount, row.OriginalAmount) {
 		return time.Time{}, skipReasonSignMismatch, true
 	}
 	return date, "", false
-}
-
-// importSignsDisagree reports whether a row's base amount and its foreign
-// original amount point in opposite directions. Both must be present: a row
-// with no original amount has nothing to disagree with, and a zero on either
-// side is already handled by the zero gate (base) or means "absent" (original,
-// which is how the params builder reads it).
-//
-// Agreement, not positivity, is the invariant. A foreign refund is negative on
-// both sides and imports cleanly; the implied booked rate (base/original) stays
-// positive either way. Only a MIXED pair is rejected, because no single rate
-// relates a payment to a refund.
-//
-// Kept as a named predicate so buildCollisionGroups and preCategorySkipReason
-// ask the identical question — a row that cannot be imported must not be
-// grouped as a collision either.
-func importSignsDisagree(amount, original float64) bool {
-	if amount == 0 || original == 0 {
-		return false
-	}
-	return (amount < 0) != (original < 0)
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
