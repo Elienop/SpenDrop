@@ -1,5 +1,13 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import type { ChangeEvent, FormEvent } from 'react';
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
+import type { ChangeEvent, FormEvent, ReactNode, RefObject } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -593,7 +601,90 @@ const newCurrencySchema = z.object({
 });
 type NewCurrencyValues = z.infer<typeof newCurrencySchema>;
 
+/**
+ * One currency as a stacked card — the below-`md` presentation of the row the
+ * table renders.
+ *
+ * Five columns do not survive a 360px viewport. Measured on the built
+ * container: the section panned 129px sideways, and what sat out there was the
+ * `Rate to Base` input — 93% of it clipped. That column is the only editable
+ * thing on this surface, so the pan was hiding the entire point of it.
+ *
+ * ANATOMY: the identity (code, then name and symbol) reads as the heading, the
+ * `Base` badge sits opposite it because it is a property of the row rather
+ * than a fourth fact about it, and the rate gets a full-width field of its own
+ * underneath. Modelled on `<UserCard>` — inert card, one explicit control —
+ * rather than `<TransactionCard>`, for the same reason: "what does tapping a
+ * CURRENCY do" has no answer.
+ *
+ * The field's label reads "Rate for USD" rather than a bare "Rate to base",
+ * and that is deliberate on two counts. It is the SAME string the table's
+ * `aria-label` uses, so the two presentations name the same datum identically
+ * and a query written against one finds the other; and it is unique per row,
+ * where a repeated "Rate to base" would leave a screen-reader user tabbing
+ * through several identically-named fields. Written as a real `<Label>` rather
+ * than an `aria-label` so the visible text and the accessible name are one
+ * string — an `aria-label` beside visible label text overrides it and orphans
+ * what is on screen.
+ */
+function CurrencyCard({
+  currency,
+  rate,
+  onRateChange,
+}: {
+  currency: Currency;
+  rate: string;
+  onRateChange: (code: string, value: string) => void;
+}) {
+  const rateFieldId = `currency-rate-${currency.code}`;
+  return (
+    <li className="flex flex-col gap-3 p-4">
+      <div className="flex items-start justify-between gap-3">
+        {/* min-w-0 is what lets `truncate` do anything on a flex child. */}
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="truncate font-mono font-medium">{currency.code}</div>
+          <div className="truncate text-sm text-muted-foreground">
+            {currency.name} &middot; {currency.symbol}
+          </div>
+        </div>
+        {currency.is_base && (
+          <Badge variant="secondary" className="shrink-0">
+            Base
+          </Badge>
+        )}
+      </div>
+      {currency.is_base ? (
+        // The base currency has no editable rate on either presentation; the
+        // table renders the same fixed 1.0000 in its Rate column.
+        <p className="text-sm text-muted-foreground">
+          Rate to base:{' '}
+          <span className="font-mono tabular-nums">1.0000</span>
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor={rateFieldId}>
+            Rate for <span className="font-mono">{currency.code}</span>
+          </Label>
+          {/* Full width, unlike the table's `max-w-[160px]`: that cap is what
+              a five-column row can spare, and it is also what made this the
+              column that got clipped. A card has the whole width to give. */}
+          <Input
+            id={rateFieldId}
+            type="number"
+            step="0.0001"
+            min="0"
+            value={rate}
+            onChange={(e) => onRateChange(currency.code, e.target.value)}
+            onFocus={selectAllOnFocus}
+          />
+        </div>
+      )}
+    </li>
+  );
+}
+
 function CurrenciesSection() {
+  const isMobile = useIsMobileViewport();
   const [currencies, setCurrencies] = useState<Currency[]>([]);
   const [editRates, setEditRates] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -684,53 +775,92 @@ function CurrenciesSection() {
           className="flex flex-col gap-4"
           noValidate
         >
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Code</TableHead>
-                <TableHead>Name</TableHead>
-                <TableHead>Symbol</TableHead>
-                <TableHead>Rate to Base</TableHead>
-                <TableHead>Status</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
+          {/* ONE tree or the other, chosen in JS — never `md:hidden` on two.
+              Both presentations render the same rate FIELDS, so mounting both
+              would put two controls named "Rate for USD" in the document and
+              submit whichever the browser reached last; `display: none` drops
+              the loser from the a11y tree but never from React or from the
+              form. See `useIsMobileViewport`. */}
+          {isMobile ? (
+            /* Tailwind's preflight strips the list-style and Safari drops the
+               list role with it — hence the explicit `role`. Inset rather than
+               edge-to-edge (the treatment `<UserCard>`'s list gets): this list
+               shares a `CardContent` with the Add Currency form below it, so
+               reaching the card's edges would mean negative margins that the
+               sibling form does not want. */
+            <ul
+              role="list"
+              aria-label="Currencies"
+              className="flex flex-col divide-y divide-border rounded-md border"
+            >
               {currencies.map((c) => (
-                <TableRow key={c.code}>
-                  <TableCell className="font-mono">{c.code}</TableCell>
-                  <TableCell>{c.name}</TableCell>
-                  <TableCell>{c.symbol}</TableCell>
-                  <TableCell>
-                    {c.is_base ? (
-                      <span className="text-muted-foreground font-mono tabular-nums">
-                        1.0000
-                      </span>
-                    ) : (
-                      <Input
-                        type="number"
-                        step="0.0001"
-                        min="0"
-                        value={editRates[c.code] ?? ''}
-                        onChange={(e) =>
-                          setEditRates((prev) => ({
-                            ...prev,
-                            [c.code]: e.target.value,
-                          }))
-                        }
-                        onFocus={selectAllOnFocus}
-                        aria-label={`Rate for ${c.code}`}
-                        className="max-w-[160px]"
-                      />
-                    )}
-                  </TableCell>
-                  <TableCell>
-                    {c.is_base && <Badge variant="secondary">Base</Badge>}
-                  </TableCell>
-                </TableRow>
+                <CurrencyCard
+                  key={c.code}
+                  currency={c}
+                  rate={editRates[c.code] ?? ''}
+                  onRateChange={(code, value) =>
+                    setEditRates((prev) => ({ ...prev, [code]: value }))
+                  }
+                />
               ))}
-            </TableBody>
-          </Table>
-          <Button type="submit" className="w-fit" disabled={saving}>
+            </ul>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Code</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Symbol</TableHead>
+                  <TableHead>Rate to Base</TableHead>
+                  <TableHead>Status</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {currencies.map((c) => (
+                  <TableRow key={c.code}>
+                    <TableCell className="font-mono">{c.code}</TableCell>
+                    <TableCell>{c.name}</TableCell>
+                    <TableCell>{c.symbol}</TableCell>
+                    <TableCell>
+                      {c.is_base ? (
+                        <span className="text-muted-foreground font-mono tabular-nums">
+                          1.0000
+                        </span>
+                      ) : (
+                        <Input
+                          type="number"
+                          step="0.0001"
+                          min="0"
+                          value={editRates[c.code] ?? ''}
+                          onChange={(e) =>
+                            setEditRates((prev) => ({
+                              ...prev,
+                              [c.code]: e.target.value,
+                            }))
+                          }
+                          onFocus={selectAllOnFocus}
+                          aria-label={`Rate for ${c.code}`}
+                          className="max-w-[160px]"
+                        />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {c.is_base && <Badge variant="secondary">Base</Badge>}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          )}
+          {/* Full width on a phone, hugging its label once there is room. The
+              submit is the one control that commits every rate on the card
+              list above it, and a `w-fit` button under a column of full-width
+              fields reads as belonging to the last one. */}
+          <Button
+            type="submit"
+            className="w-full md:w-fit"
+            disabled={saving}
+          >
             {saving ? 'Saving...' : 'Save Rates'}
           </Button>
         </form>
@@ -1487,7 +1617,27 @@ function HouseholdUsersCard() {
                   </Select>
                 </TableCell>
                 <TableCell className="text-right">
-                  <div className="flex items-center justify-end gap-2">
+                  {/* `flex-wrap` is a WIDTH fix, not a cosmetic one. A
+                      non-wrapping row of three `whitespace-nowrap` buttons
+                      contributes the SUM of their widths to this cell's
+                      min-content, and this is the last column, so the table's
+                      min-content lands past the right edge of its scroll box:
+                      measured at 1130px with the sidebar expanded (240px of
+                      `md:pl-60`, 80px of page gutter, 48px of card padding),
+                      the trailing Actions cell was reachable only by panning.
+                      Allowing the row to wrap drops that contribution to the
+                      WIDEST single button, which is roughly 200px less, and
+                      the whole table fits again. `justify-end` keeps the
+                      buttons hugging the right edge on both one and two lines.
+
+                      NOT the `min-w-0` shape of this repo's grid min-content
+                      latch: no grid or SVG is involved, and the ancestors here
+                      (`main` > centred block > flex COLUMN) already bound this
+                      card's width — a column flex item takes its cross size
+                      from the container, so nothing upstream is inflating. The
+                      overflow is generated inside the cell and has to be
+                      solved inside it. */}
+                  <div className="flex flex-wrap items-center justify-end gap-2">
                     {/* Offered on EVERY row, own included: the case this
                         exists for is an admin shortening their own name now
                         that it labels every transaction they enter. */}
@@ -1890,19 +2040,74 @@ function HouseholdUsersCard() {
 
 /* ---------- API tokens tab ---------- */
 
+/**
+ * The Alert body inside the reveal, referenced by the dialog's
+ * `aria-describedby`.
+ *
+ * The reveal deliberately renders no `DialogDescription`: the amber Alert
+ * already carries the one-time warning under a visible title, and a
+ * DialogDescription would restate it verbatim to a screen reader. Pointing
+ * `aria-describedby` at the Alert body is what gives the dialog a real
+ * accessible description AND silences Radix's missing-description warning.
+ *
+ * (The comment that used to sit on `ShowOnceReveal` claimed this wiring was
+ * already in place. It was not — `aria-describedby` appeared nowhere in this
+ * file, and the id it named did not exist.)
+ */
+const NEW_TOKEN_REVEAL_DESCRIPTION_ID = 'new-token-reveal-description';
+
+/**
+ * Marks the button the reveal returns focus to on close. An attribute rather
+ * than a ref because the reveal lives above the layout swap and the button
+ * below it — see `NewTokenRevealProvider`.
+ */
+const CREATE_TOKEN_TRIGGER_ATTR = 'data-create-token-trigger';
+
+/**
+ * Marks a per-token Revoke button, so a closing confirm can find its way back
+ * to the control that opened it.
+ *
+ * On the BUTTON rather than the row, and on both presentations, because the
+ * card list and the table render different elements for the same token — one
+ * query has to find whichever is mounted.
+ */
+const REVOKE_TOKEN_ID_ATTR = 'data-revoke-token-id';
+
+/** The same, for the one Revoke all button. */
+const REVOKE_ALL_TRIGGER_ATTR = 'data-revoke-all-trigger';
+
 function ShowOnceReveal({
   token,
   onClose,
 }: {
-  token: CreateTokenResponse;
+  /** Live state — null from the moment the user dismisses. See `shown`. */
+  token: CreateTokenResponse | null;
   onClose: () => void;
 }) {
-  // The amber Alert below already carries the "one-time" warning with a
-  // visible title. DialogDescription would restate the same message
-  // verbatim to screen readers, so we only render DialogTitle here and
-  // let the Alert be the description surface. Radix's a11y warning for a
-  // missing DialogDescription is silenced via `aria-describedby` on the
-  // AlertTitle element below.
+  const revealRef = useRef<HTMLTextAreaElement>(null);
+
+  // THE EXIT LATCH. Radix keeps this mounted through its ~200ms exit
+  // animation, but `token` is already null on the commit that starts it — so
+  // rendering straight from the prop faded out an empty bordered box instead
+  // of the dialog the user just dismissed.
+  //
+  // The latch lives HERE, in the component the dialog unmounts, rather than in
+  // the provider that outlives it. That is the whole point: the copy dies with
+  // the dialog automatically, so the plaintext's lifetime is exactly the
+  // dialog's, with no cleanup line to write, to forget, or to leave untested.
+  // A ref in the provider was the first shape and is not available anyway —
+  // reading one during render is what `react-hooks/refs` forbids.
+  const [shown, setShown] = useState(token);
+  // React's sanctioned adjust-state-during-render, not an effect: it covers
+  // the create → dismiss → create-again-within-200ms case, where this instance
+  // is re-shown without ever unmounting and a mount-time capture would display
+  // the PREVIOUS token.
+  if (token !== null && token !== shown) setShown(token);
+
+  // Unreachable in practice — Radix does not mount this until `open` is true,
+  // which requires a token — and present so the type narrows without a cast.
+  if (shown === null) return null;
+
   return (
     <>
       <DialogHeader>
@@ -1912,7 +2117,7 @@ function ShowOnceReveal({
         <Alert variant="warning">
           <AlertTriangle className="h-4 w-4" />
           <AlertTitle>Copy it now</AlertTitle>
-          <AlertDescription>
+          <AlertDescription id={NEW_TOKEN_REVEAL_DESCRIPTION_ID}>
             This is the only time your token will be shown. We hash
             tokens at rest — if you lose it, revoke and create a new
             one.
@@ -1920,49 +2125,95 @@ function ShowOnceReveal({
         </Alert>
         <div className="grid gap-2">
           <Label htmlFor="api-token-reveal">Your new API token</Label>
-          <div className="flex items-center gap-2">
-            <Input
-              id="api-token-reveal"
-              value={token.token}
-              readOnly
-              className="font-mono"
-              onFocus={selectAllOnFocus}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(token.token);
-                  toast.success('Copied to clipboard');
-                } catch {
-                  // navigator.clipboard.writeText rejects on insecure
-                  // contexts (common for self-hosted SpenDrop served
-                  // over HTTP on a LAN IP — localhost is treated as
-                  // secure, but `http://192.168.x.x` is not) and on
-                  // explicit permission denial. Either way the user
-                  // cannot rely on the button alone. Focus + select
-                  // the reveal <Input> so one Ctrl/Cmd+C still copies,
-                  // and tell them so via a toast. The dialog stays
-                  // open and the plaintext stays on screen — the user
-                  // does not have to re-trigger the Create flow.
-                  const revealInput = document.getElementById(
-                    'api-token-reveal',
-                  ) as HTMLInputElement | null;
-                  if (revealInput) {
-                    revealInput.focus();
-                    revealInput.select();
-                  }
-                  toast.info(
-                    'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
-                  );
-                }
-              }}
-            >
-              <Copy className="mr-2 h-4 w-4" aria-hidden="true" />
-              Copy
-            </Button>
-          </div>
+          {/*
+            A WRAPPING field, and stacked above its Copy button rather than
+            sharing a row with it. Both halves are the same defect: a token is
+            `spdr_` + 26 + `_` + 6 = 38 unbreakable characters, an `<input>`
+            cannot wrap, and on a 360px phone the field was a window onto the
+            middle of the string with 188px of it scrolled out of sight — the
+            Copy button beside it having taken another ~90px off that window.
+
+            This matters more here than clipping usually would. SpenDrop is
+            self-hosted, and `navigator.clipboard` rejects outright on
+            `http://192.168.x.x`, so on the household's own LAN the Copy button
+            is the path that DOESN'T work and reading the token off the screen
+            is the path that does. A token that cannot be read has to be
+            revoked and re-minted.
+
+            `<textarea readOnly>` rather than a styled `<div>`: it stays a
+            labelable form control, so `<Label htmlFor>` still names it and
+            every existing query for it still resolves, and `.focus()` +
+            `.select()` keep working verbatim for the clipboard-blocked path
+            below. `rows={2}` holds all 38 characters at 360px; a longer future
+            token would scroll VERTICALLY, which is still reachable.
+
+            CLASS FIDELITY, stated exactly rather than as "tracks input.tsx":
+            it carries that primitive's border, radius, background, padding,
+            ring and `md:text-sm` type ramp, plus its `coarse:min-h-11` touch
+            floor — this is a field a thumb selects text in. It deliberately
+            does NOT carry `h-10` (an auto-height box must not be pinned to one
+            row) and does not carry the `placeholder:`, `file:` or `disabled:`
+            variants, none of which a read-only, always-populated field can
+            ever reach.
+
+            The credential attributes are the same class of fix as the display
+            name field's `autoComplete="off"` above, but they matter MORE here,
+            and for a reason specific to the element: a textarea's value is DOM
+            TEXT CONTENT, not a value attribute, so page translators, spell
+            checkers and scrapers walk it the way they walk any prose. The
+            plaintext must not be sent to a translation service, offered to a
+            password manager, or "corrected".
+          */}
+          <textarea
+            id="api-token-reveal"
+            ref={revealRef}
+            value={shown.token}
+            readOnly
+            rows={2}
+            spellCheck={false}
+            autoComplete="off"
+            autoCorrect="off"
+            autoCapitalize="off"
+            translate="no"
+            data-1p-ignore
+            data-lpignore="true"
+            onFocus={(e) => e.currentTarget.select()}
+            className="flex w-full resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-base ring-offset-background coarse:min-h-11 [overflow-wrap:anywhere] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 md:text-sm"
+          />
+          <Button
+            type="button"
+            variant="outline"
+            className="w-full sm:w-fit sm:justify-self-start"
+            onClick={async () => {
+              try {
+                await navigator.clipboard.writeText(shown.token);
+                toast.success('Copied to clipboard');
+              } catch {
+                // navigator.clipboard.writeText rejects on insecure
+                // contexts (common for self-hosted SpenDrop served
+                // over HTTP on a LAN IP — localhost is treated as
+                // secure, but `http://192.168.x.x` is not) and on
+                // explicit permission denial. Either way the user
+                // cannot rely on the button alone. Focus + select
+                // the reveal field so one Ctrl/Cmd+C still copies,
+                // and tell them so via a toast. The dialog stays
+                // open and the plaintext stays on screen — the user
+                // does not have to re-trigger the Create flow.
+                revealRef.current?.focus();
+                revealRef.current?.select();
+                toast.info(
+                  'Press Ctrl/Cmd+C to copy \u2014 clipboard blocked in this context.',
+                );
+              }
+            }}
+          >
+            {/* No icon margin: `Button`'s base already lays its children
+                out with `gap-2`, so `mr-2` here would add a second gap.
+                This was the only icon-and-text Button in the app that
+                carried one. */}
+            <Copy className="h-4 w-4" aria-hidden="true" />
+            Copy
+          </Button>
         </div>
       </div>
       <DialogFooter>
@@ -1974,11 +2225,251 @@ function ShowOnceReveal({
   );
 }
 
+interface NewTokenReveal {
+  /** Put a freshly minted plaintext token on screen. */
+  show: (token: CreateTokenResponse) => void;
+}
+
+const NewTokenRevealContext = createContext<NewTokenReveal | null>(null);
+
+function useNewTokenReveal(): NewTokenReveal {
+  const reveal = useContext(NewTokenRevealContext);
+  if (reveal === null) {
+    // Not defensive padding. The whole point of this context is that the
+    // reveal outlives `<ApiTokensSection>`, so a section rendered outside the
+    // provider would compile, run, mint a token and then drop it on the floor
+    // with no visible symptom. Fail at first render instead.
+    throw new Error(
+      'useNewTokenReveal must be used inside <NewTokenRevealProvider>',
+    );
+  }
+  return reveal;
+}
+
+/**
+ * Holds the one-time plaintext token, and renders the dialog that shows it.
+ *
+ * WHY IT LIVES ABOVE THE PAGE'S LAYOUT FORK. `<Settings>` mounts either
+ * `<SettingsSectionPicker>` or `<Tabs>`, never both, and crossing `md` swaps
+ * one for the other. Those are different component types in the same position,
+ * so React unmounts the whole subtree and every section's state with it. For
+ * five of the six sections that costs a scroll position or a half-typed form.
+ * For this one it costs a secret the server hashed at rest and will never hand
+ * out again: rotating a phone while the token was on screen left the user
+ * holding a token they now have to revoke and re-mint, and nothing said so.
+ *
+ * So the state is lifted to the one place above the swap — and the DIALOG is
+ * lifted with it, rather than left in the section to be re-opened from
+ * surviving state. That second half is what makes the guarantee structural
+ * instead of a recovery: the reveal's DOM never unmounts, so a rotation in
+ * either direction is a no-op for it — no flicker, no re-entry animation, no
+ * dropped focus. It also closes the window between POST and response, where a
+ * rotation would otherwise unmount the component holding the setState that
+ * receives the token.
+ *
+ * Chosen over threading the token through `renderSettingsSection`: that
+ * function is deliberately a pure (tab, role) → component map, so that "the
+ * two surfaces cannot render different things for the same value", and a third
+ * parameter only one section reads would put an API-token concern into every
+ * section's signature. Chosen over `sessionStorage` or a module-scope variable
+ * for the obvious reason — neither is a home for a plaintext credential.
+ */
+function NewTokenRevealProvider({
+  children,
+  fallbackFocusRef,
+}: {
+  children: ReactNode;
+  /**
+   * Where focus goes on close when the button that opened the flow is no
+   * longer in the document. Owned by the page rather than looked up here,
+   * because it has to be something that outlives every section — see the
+   * close handler below for why `<body>` is not an acceptable answer.
+   */
+  fallbackFocusRef: RefObject<HTMLElement | null>;
+}) {
+  const [token, setToken] = useState<CreateTokenResponse | null>(null);
+
+  // Referentially stable, which is load-bearing rather than an optimisation:
+  // an in-flight create whose section unmounts mid-request still calls this
+  // from a stale closure, and it has to reach the live provider.
+  const value = useMemo<NewTokenReveal>(() => ({ show: setToken }), []);
+
+  return (
+    <NewTokenRevealContext.Provider value={value}>
+      {children}
+      <Dialog
+        open={token !== null}
+        onOpenChange={(open) => {
+          // Close requests are ignored on purpose, carried over verbatim from
+          // the dialog this replaces: once the plaintext is on screen, Escape
+          // and a backdrop tap must not silently destroy it. The only exit is
+          // "I've saved my token".
+          if (!open) return;
+        }}
+      >
+        <DialogContent
+          aria-describedby={NEW_TOKEN_REVEAL_DESCRIPTION_ID}
+          // The built-in X would call the `onOpenChange` above, which refuses
+          // — so it rendered, took a tab stop, and did nothing. A control that
+          // looks operable and is not is worse than no control, and on the one
+          // surface holding an unrecoverable secret it is worse still: the
+          // user taps the affordance every other dialog on this page honours
+          // and concludes the token is saved. Removed rather than made to
+          // work, because "the only exit is the explicit button" is the
+          // deliberate design here.
+          showCloseButton={false}
+          onCloseAutoFocus={(e) => {
+            // No DialogTrigger sits above this content — it opens
+            // programmatically from the create flow — so Radix's own restore
+            // would run `triggerRef.current?.focus()` against null and drop
+            // focus on `<body>`. Same shape, and same reason, as the four
+            // handoffs in `<HouseholdUsersCard>`.
+            //
+            // Queried at close time rather than held as a ref because the
+            // button it returns to lives BELOW the layout swap: a rotation
+            // while the reveal was open replaced that button with a new one.
+            const anchor = document.querySelector<HTMLElement>(
+              `[${CREATE_TOKEN_TRIGGER_ATTR}]`,
+            );
+            // The fallback is a real target, not Radix's default. Radix's
+            // default here IS focus-to-body — the restore runs against a null
+            // triggerRef — which strands a keyboard or screen-reader user at
+            // the top of the document with no announcement. The page heading
+            // is the honest place to land: it always exists (the provider and
+            // the heading are siblings) and it says where you now are.
+            //
+            // This arm is believed unreachable today: `activeTab` survives a
+            // rotation and both layouts render `<ApiTokensSection>`, so the
+            // Create token button is always in the document while the reveal
+            // is up. It is written for the reachable version of tomorrow.
+            e.preventDefault();
+            (anchor ?? fallbackFocusRef.current)?.focus();
+          }}
+        >
+          {/* Handed the LIVE state, null and all. The component latches its
+              own copy for the exit animation — see `ShowOnceReveal` — so the
+              plaintext's lifetime is bounded by this dialog's mount rather
+              than by a cleanup line here that could be forgotten. */}
+          <ShowOnceReveal token={token} onClose={() => setToken(null)} />
+        </DialogContent>
+      </Dialog>
+    </NewTokenRevealContext.Provider>
+  );
+}
+
+/**
+ * One API token as a stacked card — the below-`md` presentation of the row the
+ * table renders.
+ *
+ * Six columns do not survive a 360px viewport: measured on the built
+ * container, this section panned 308px, and the column that ends up furthest
+ * out is Actions — the Revoke button, which is the only thing you can DO to a
+ * token from this surface.
+ *
+ * ANATOMY: identity on top (name, then the prefix that identifies the token in
+ * a log line), the three table columns that are facts rather than actions as a
+ * definition list beneath it, and Revoke as one full-width button. The `<dl>`
+ * is not decoration — a table's values are named by column headers, and a card
+ * that drops the headers leaves "Never" sitting on its own with nothing saying
+ * which of the three dates it is. Names and values as `<dt>`/`<dd>` pairs put
+ * that back for sighted and screen-reader users with one piece of markup,
+ * which an `sr-only` prefix would have done for only one of them.
+ *
+ * Register follows the page's other `<dl>` (the account card's): the name is
+ * muted and unweighted, the value takes the foreground. Naming the value with
+ * a bolder term than the value itself inverts the emphasis — the fact is what
+ * you came to read. Left-aligned rather than justified, which is the one place
+ * this diverges: it mirrors the column alignment of the table it replaces.
+ */
+function ApiTokenCard({
+  token,
+  lastUsed,
+  expires,
+  created,
+  createdAbsolute,
+  onRevoke,
+}: {
+  token: ApiToken;
+  lastUsed: string;
+  expires: string;
+  created: string;
+  createdAbsolute: string;
+  onRevoke: (token: ApiToken) => void;
+}) {
+  return (
+    <li className="flex flex-col gap-3 p-4">
+      <div className="flex min-w-0 flex-col gap-1">
+        {/* A token name is user-supplied and can be one long unbroken word
+            ("HomepageDashboardIntegration"). `overflow-wrap:anywhere` rather
+            than `truncate`: this is the string the Revoke confirmation quotes
+            back, so it has to be readable in full before you tap Revoke. */}
+        <div className="font-medium [overflow-wrap:anywhere]">
+          {token.name}
+        </div>
+        <div className="font-mono text-sm text-muted-foreground [overflow-wrap:anywhere]">
+          {token.token_prefix}
+        </div>
+      </div>
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+        <dt className="text-muted-foreground">Last used</dt>
+        <dd className="[overflow-wrap:anywhere]">{lastUsed}</dd>
+        <dt className="text-muted-foreground">Expires</dt>
+        <dd>{expires}</dd>
+        <dt className="text-muted-foreground">Created</dt>
+        {/* The absolute date as TEXT, not a `title`. The table can afford a
+            hover tooltip; this card renders only below `md`, where there is no
+            hover and a `title` is simply unreachable — the exact date would
+            have been visible on the one presentation that has a mouse and
+            invisible on the one that does not. The relative phrase stays
+            first because it is what you scan for; the date follows it, muted,
+            for when "2 months ago" is not precise enough. */}
+        <dd>
+          {created}{' '}
+          <span className="text-muted-foreground">({createdAbsolute})</span>
+        </dd>
+      </dl>
+      {/* `min-h-11` even though `Button` floors itself on a coarse pointer:
+          this card renders only below `md`, where 44px is right for a mouse
+          too. Same deliberate redundancy as `<UserCard>`'s action row, and
+          emphatically NOT paired with a `md:min-h-0` — that is emitted after
+          the pointer variant and would defeat the primitive's floor on the
+          tablet. */}
+      <Button
+        type="button"
+        variant="destructive"
+        className="min-h-11 w-full"
+        {...{ [REVOKE_TOKEN_ID_ATTR]: token.id }}
+        aria-label={`Revoke ${token.name}`}
+        onClick={() => onRevoke(token)}
+      >
+        Revoke
+      </Button>
+    </li>
+  );
+}
+
 function ApiTokensSection() {
+  const isMobile = useIsMobileViewport();
+  // The plaintext is NOT held here. This component is unmounted by the page's
+  // md layout swap; the reveal is not. See `NewTokenRevealProvider`.
+  const reveal = useNewTokenReveal();
   const [tokens, setTokens] = useState<ApiToken[]>([]);
   const [createOpen, setCreateOpen] = useState(false);
-  const [createdToken, setCreatedToken] = useState<CreateTokenResponse | null>(null);
   const [creating, setCreating] = useState(false);
+  // Set for exactly the one close that hands off to the reveal. The create
+  // dialog HAS a trigger, so Radix restores focus to that button when it
+  // closes — and Radix's `Presence` does not unmount the content until the
+  // 200ms exit animation finishes, so that restore lands AFTER the reveal has
+  // mounted and focused itself, yanking focus out of the dialog the user now
+  // has to read. Same shape, and the same failure, as `confirmHandoffRef` in
+  // `<HouseholdUsersCard>`.
+  //
+  // DISCLOSED AS UNPROVEN: this line cannot be mutation-killed here. happy-dom
+  // runs no exit animation, so the create dialog unmounts synchronously and
+  // its restore fires BEFORE the reveal mounts — measured both ways, focus
+  // ends on the reveal field either way. The suppression is kept for the
+  // browser's ordering, not the test environment's.
+  const revealHandoffRef = useRef(false);
   const [revokingToken, setRevokingToken] = useState<ApiToken | null>(null);
   // Sticky display-name for the revoke-one dialog title, captured when the
   // user clicks a Revoke button. Kept as state (not derived from
@@ -1987,6 +2478,20 @@ function ApiTokensSection() {
   const [revokingTokenName, setRevokingTokenName] = useState('');
   const [revokeAllOpen, setRevokeAllOpen] = useState(false);
   const [revoking, setRevoking] = useState(false);
+
+  // Which control opened the confirm that is currently up, so its close can
+  // send focus back there. A ref rather than state for the same reason
+  // `<HouseholdUsersCard>` uses one: the confirm's target is already null by
+  // the time `onCloseAutoFocus` runs.
+  //
+  // `{ kind: 'one' }` carries the token id rather than an element, because the
+  // anchor is re-queried at close time — the two presentations render
+  // different Revoke buttons for the same token, and a rotation while the
+  // confirm is open swaps one for the other. Both carry
+  // `data-revoke-token-id`, so one query serves both.
+  const revokeOpenerRef = useRef<
+    { kind: 'one'; id: number } | { kind: 'all' } | null
+  >(null);
 
   const createForm = useForm<CreateTokenValues>({
     resolver: zodResolver(createTokenSchema),
@@ -2016,6 +2521,41 @@ function ApiTokensSection() {
     });
   }, [fetchTokens]);
 
+  /**
+   * Where focus goes when either revoke confirm closes.
+   *
+   * Neither confirm has an `AlertDialogTrigger` — none exists anywhere in this
+   * app — so Radix's own restore runs `triggerRef.current?.focus()` against
+   * null and every close, cancel and confirm alike, dropped focus on `<body>`.
+   * Same defect and same remedy as `focusAfterConfirmClose` in
+   * `<HouseholdUsersCard>`.
+   *
+   * The opener is re-queried here rather than captured as an element: a
+   * refetch, a revoke or a rotation across `md` can all have replaced the row
+   * since the confirm opened. A missing anchor is the normal case after a
+   * SUCCESSFUL revoke — that token's button is gone with it — so the fallback
+   * is not an error path; it is where a confirmed revoke always lands. The
+   * Create token button is the right destination for it: it is the one control
+   * on this card that survives every list state, including the empty one that
+   * a revoke-all produces.
+   */
+  function focusAfterRevokeClose() {
+    const opener = revokeOpenerRef.current;
+    revokeOpenerRef.current = null;
+    const anchor =
+      opener === null
+        ? null
+        : document.querySelector<HTMLElement>(
+            opener.kind === 'one'
+              ? `[${REVOKE_TOKEN_ID_ATTR}="${opener.id}"]`
+              : `[${REVOKE_ALL_TRIGGER_ATTR}]`,
+          );
+    (
+      anchor ??
+      document.querySelector<HTMLElement>(`[${CREATE_TOKEN_TRIGGER_ATTR}]`)
+    )?.focus();
+  }
+
   function formatLastUsed(t: ApiToken): string {
     if (!t.last_used_at) return 'Never used';
     const relative = formatDistanceToNowStrict(new Date(t.last_used_at), {
@@ -2041,7 +2581,14 @@ function ApiTokensSection() {
           expires_at: computeExpiresAt(values.expires),
         },
       );
-      setCreatedToken(body);
+      // Hand the plaintext to the provider ABOVE the layout swap, then close
+      // this dialog. Sequential, single-layer — never nested; the same
+      // handoff shape `confirmFromManage` uses, and for the same reasons
+      // (stacked scrims, and Radix's `hideOthers()` making the outer dialog
+      // unreachable to assistive tech).
+      revealHandoffRef.current = true;
+      reveal.show(body);
+      setCreateOpen(false);
       createForm.reset();
       // Optimistic update: the new row (sans full plaintext) slides
       // into the list behind the reveal dialog, so when the user closes
@@ -2063,6 +2610,19 @@ function ApiTokensSection() {
       toast.error(
         err instanceof Error ? err.message : 'Failed to create token',
       );
+      // The server WRITES the token before it responds, so a timeout, a
+      // dropped connection or a 5xx on the way back can leave a live token
+      // the user never saw and cannot revoke — it is absent from this list
+      // until something else remounts the section. Re-read the list so an
+      // orphan shows up immediately, next to its own Revoke button.
+      //
+      // Swallowed separately from the toast above: the user has already been
+      // told the create failed, and a second error toast about the refresh
+      // would describe a request they did not make.
+      void fetchTokens().catch(() => {
+        /* Nothing further to offer — the list is already stale, and the
+           create failure has been reported. */
+      });
     } finally {
       setCreating(false);
     }
@@ -2114,7 +2674,13 @@ function ApiTokensSection() {
   return (
     <>
       <Card>
-      <CardHeader className="flex flex-row items-start justify-between gap-4">
+      {/* Stacked below `md`, side by side above it. The description and the
+          two nowrap buttons are each about half of a 360px viewport, so as one
+          row their min-content ran past the card and the header panned along
+          with the table beneath it. This is layout only — no duplicated
+          controls, no second a11y tree — so it is a CSS gate rather than the
+          JS one the row lists use. */}
+      <CardHeader className="flex flex-col items-start gap-4 md:flex-row md:justify-between">
         <div className="grid gap-1.5">
           <CardTitle className="text-base">API tokens</CardTitle>
           <CardDescription>
@@ -2123,136 +2689,137 @@ function ApiTokensSection() {
             your account.
           </CardDescription>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Dialog
             open={createOpen}
             onOpenChange={(open) => {
               // Guard close-while-submitting: if the POST is in flight and we
-              // let the user close the dialog here, setCreatedToken(body) in
-              // onCreate resolves into a closed dialog and the next "Create
-              // token" click jumps straight to the reveal of a token the user
-              // thought they'd cancelled. Mirror the revoke-dialog busy guard.
+              // let the user close the dialog here, the create form is torn
+              // down under a request that is still going to succeed — the user
+              // gets a token they never saw asked for. Mirror the
+              // revoke-dialog busy guard.
+              //
+              // There is no longer a close-while-revealed guard here, because
+              // the reveal is no longer inside this dialog: the plaintext is
+              // shown by `NewTokenRevealProvider`, which is above the page's
+              // layout swap and refuses its own close for exactly that reason.
               if (creating) return;
-              // Guard close-while-revealed: once the plaintext is on
-              // screen, Escape/backdrop must not silently destroy it.
-              // The only way out of the reveal is the "I've saved my
-              // token" button, which calls `onClose` and clears both
-              // states. Mirrors GitHub's one-time-secret UX.
-              if (createdToken !== null && !open) return;
               if (open) {
                 setCreateOpen(true);
                 return;
               }
               setCreateOpen(false);
-              setCreatedToken(null);
               createForm.reset();
             }}
           >
             <DialogTrigger asChild>
-              <Button size="sm">Create token</Button>
+              <Button size="sm" {...{ [CREATE_TOKEN_TRIGGER_ATTR]: '' }}>
+                Create token
+              </Button>
             </DialogTrigger>
-            <DialogContent>
-              {createdToken === null ? (
-                <>
-                  <DialogHeader>
-                    <DialogTitle>Create API token</DialogTitle>
-                    <DialogDescription>
-                      Name it after the script or service you'll use it
-                      from so you can revoke it individually later.
-                    </DialogDescription>
-                  </DialogHeader>
-                  <Form {...createForm}>
-                    <form
-                      onSubmit={(e) => void createForm.handleSubmit(onCreate)(e)}
-                      className="grid gap-4"
-                      noValidate
-                    >
-                      <FormField
-                        control={createForm.control}
-                        name="name"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Name</FormLabel>
-                            <FormControl>
-                              <Input
-                                {...field}
-                                placeholder="e.g. Homepage dashboard, backup script"
-                              />
-                            </FormControl>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <FormField
-                        control={createForm.control}
-                        name="expires"
-                        render={({ field }) => (
-                          <FormItem>
-                            <FormLabel>Expires</FormLabel>
-                            <Select
-                              value={field.value}
-                              onValueChange={(v) => {
-                                if (!(v in EXPIRY_OPTIONS)) return;
-                                field.onChange(v as ExpiryChoice);
-                              }}
-                            >
-                              <FormControl>
-                                <SelectTrigger aria-label="Expires">
-                                  <SelectValue />
-                                </SelectTrigger>
-                              </FormControl>
-                              <SelectContent>
-                                <SelectGroup>
-                                  <SelectItem value="never">Never</SelectItem>
-                                  <SelectItem value="7d">7 days</SelectItem>
-                                  <SelectItem value="30d">30 days</SelectItem>
-                                  <SelectItem value="90d">90 days</SelectItem>
-                                  <SelectItem value="1y">1 year</SelectItem>
-                                </SelectGroup>
-                              </SelectContent>
-                            </Select>
-                            <FormMessage />
-                          </FormItem>
-                        )}
-                      />
-                      <DialogFooter>
-                        <Button type="submit" disabled={creating}>
-                          {creating ? 'Creating\u2026' : 'Create token'}
-                        </Button>
-                      </DialogFooter>
-                    </form>
-                  </Form>
-                </>
-              ) : (
-                <ShowOnceReveal
-                  token={createdToken}
-                  onClose={() => {
-                    // Clicking "I've saved my token" closes the whole
-                    // dialog. Radix's `onOpenChange` does NOT re-fire
-                    // when `open` is controlled and we set it to false
-                    // ourselves, so clear the plaintext here as well to
-                    // ensure the reveal cannot be re-summoned.
-                    setCreateOpen(false);
-                    setCreatedToken(null);
-                    createForm.reset();
-                  }}
-                />
-              )}
+            <DialogContent
+              onCloseAutoFocus={(e) => {
+                // Only on the handoff close. Every other close (Escape,
+                // backdrop, the X) should restore focus to this dialog's
+                // trigger exactly as Radix intends.
+                if (!revealHandoffRef.current) return;
+                revealHandoffRef.current = false;
+                e.preventDefault();
+              }}
+            >
+              <DialogHeader>
+                <DialogTitle>Create API token</DialogTitle>
+                <DialogDescription>
+                  Name it after the script or service you'll use it
+                  from so you can revoke it individually later.
+                </DialogDescription>
+              </DialogHeader>
+              <Form {...createForm}>
+                <form
+                  onSubmit={(e) => void createForm.handleSubmit(onCreate)(e)}
+                  className="grid gap-4"
+                  noValidate
+                >
+                  <FormField
+                    control={createForm.control}
+                    name="name"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Name</FormLabel>
+                        <FormControl>
+                          <Input
+                            {...field}
+                            placeholder="e.g. Homepage dashboard, backup script"
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <FormField
+                    control={createForm.control}
+                    name="expires"
+                    render={({ field }) => (
+                      <FormItem>
+                        <FormLabel>Expires</FormLabel>
+                        <Select
+                          value={field.value}
+                          onValueChange={(v) => {
+                            if (!(v in EXPIRY_OPTIONS)) return;
+                            field.onChange(v as ExpiryChoice);
+                          }}
+                        >
+                          <FormControl>
+                            <SelectTrigger aria-label="Expires">
+                              <SelectValue />
+                            </SelectTrigger>
+                          </FormControl>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="never">Never</SelectItem>
+                              <SelectItem value="7d">7 days</SelectItem>
+                              <SelectItem value="30d">30 days</SelectItem>
+                              <SelectItem value="90d">90 days</SelectItem>
+                              <SelectItem value="1y">1 year</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
+                  <DialogFooter>
+                    <Button type="submit" disabled={creating}>
+                      {creating ? 'Creating\u2026' : 'Create token'}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              </Form>
             </DialogContent>
           </Dialog>
           {tokens.length > 0 && (
             <Button
               size="sm"
               variant="destructive"
-              onClick={() => setRevokeAllOpen(true)}
+              {...{ [REVOKE_ALL_TRIGGER_ATTR]: '' }}
+              onClick={() => {
+                revokeOpenerRef.current = { kind: 'all' };
+                setRevokeAllOpen(true);
+              }}
             >
               Revoke all ({tokens.length})
             </Button>
           )}
         </div>
       </CardHeader>
-      <CardContent>
-        {tokens.length === 0 ? (
+      {/* The empty state is shared and already width-agnostic, so the fork
+          sits INSIDE it: one presentation or the other, chosen in JS, never
+          `md:hidden` on two. Two trees would put a second "Revoke <name>"
+          button in the document for every token — and on a surface whose only
+          action destroys credentials, an ambiguous Revoke is not a cosmetic
+          problem. See `useIsMobileViewport`. */}
+      {tokens.length === 0 ? (
+        <CardContent>
           <div className="flex flex-col items-center gap-3 py-8 text-center">
             <KeyRound
               className="h-8 w-8 text-muted-foreground/60"
@@ -2266,7 +2833,43 @@ function ApiTokensSection() {
               </p>
             </div>
           </div>
-        ) : (
+        </CardContent>
+      ) : isMobile ? (
+        <CardContent className="px-0 pb-2">
+          {/* Tailwind's preflight strips the list-style and Safari drops the
+              list role with it — hence the explicit `role`. Edge to edge, as
+              `<UserCard>`'s list is: `CardContent`'s `p-6` would spend 48px of
+              a 360px viewport on gutters these rows do not need, and each card
+              restores a 16px one of its own. */}
+          <ul
+            role="list"
+            aria-label="API tokens"
+            className="flex flex-col divide-y divide-border border-t"
+          >
+            {tokens.map((t) => (
+              <ApiTokenCard
+                key={t.id}
+                token={t}
+                lastUsed={formatLastUsed(t)}
+                expires={formatExpires(t)}
+                created={formatDistanceToNowStrict(new Date(t.created_at), {
+                  addSuffix: true,
+                })}
+                createdAbsolute={new Date(t.created_at).toLocaleDateString()}
+                onRevoke={(target) => {
+                  // Capture the name at click time — the AlertDialog title
+                  // reads revokingTokenName, which stays set through the
+                  // close-exit animation after revokingToken flips to null.
+                  revokeOpenerRef.current = { kind: 'one', id: target.id };
+                  setRevokingTokenName(target.name);
+                  setRevokingToken(target);
+                }}
+              />
+            ))}
+          </ul>
+        </CardContent>
+      ) : (
+        <CardContent>
           <Table>
             <TableHeader>
               <TableRow>
@@ -2297,11 +2900,13 @@ function ApiTokensSection() {
                       type="button"
                       variant="destructive"
                       size="sm"
+                      {...{ [REVOKE_TOKEN_ID_ATTR]: t.id }}
                       onClick={() => {
                         // Capture the name at click time — the AlertDialog
                         // title reads revokingTokenName, which stays set
                         // through the close-exit animation after
                         // revokingToken flips back to null.
+                        revokeOpenerRef.current = { kind: 'one', id: t.id };
                         setRevokingTokenName(t.name);
                         setRevokingToken(t);
                       }}
@@ -2314,8 +2919,8 @@ function ApiTokensSection() {
               ))}
             </TableBody>
           </Table>
-        )}
-      </CardContent>
+        </CardContent>
+      )}
     </Card>
       <AlertDialog
         open={revokingToken !== null}
@@ -2324,7 +2929,12 @@ function ApiTokensSection() {
           if (!open) setRevokingToken(null);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            focusAfterRevokeClose();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>
               Revoke{' '}
@@ -2369,7 +2979,12 @@ function ApiTokensSection() {
           if (!open) setRevokeAllOpen(false);
         }}
       >
-        <AlertDialogContent>
+        <AlertDialogContent
+          onCloseAutoFocus={(e) => {
+            e.preventDefault();
+            focusAfterRevokeClose();
+          }}
+        >
           <AlertDialogHeader>
             <AlertDialogTitle>Revoke all tokens?</AlertDialogTitle>
             <AlertDialogDescription>
@@ -3579,6 +4194,7 @@ function SettingsSectionPicker({
 export function Settings() {
   const { user } = useAuth();
   const admin = isAdmin(user);
+  const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   // WIDTH, not pointer capability — unlike the heatmap's year grid, which
   // needs a pointer that can hit a sub-24px target. Nothing here depends on
   // hover or precision; six long labels simply do not fit a narrow page. A
@@ -3634,8 +4250,25 @@ export function Settings() {
   }
 
   return (
+    // ABOVE the fork below, deliberately. Everything inside the `isMobile`
+    // ternary is torn down and rebuilt when the viewport crosses `md`; the
+    // one-time token reveal is the one piece of state on this page whose loss
+    // cannot be undone, so it is held out here instead.
+    //
+    // The heading doubles as the reveal's last-resort focus target, which is
+    // why the ref is created here and handed down: it is the only element on
+    // this page guaranteed to be mounted whenever the provider is.
+    <NewTokenRevealProvider fallbackFocusRef={pageHeadingRef}>
     <div className="flex flex-col gap-6">
-      <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
+      {/* `tabIndex={-1}` makes this a focus anchor, not a tab stop — the same
+          role `<HouseholdUsersCard>`'s CardTitle plays for its own dialogs. */}
+      <h1
+        ref={pageHeadingRef}
+        tabIndex={-1}
+        className="text-2xl font-semibold tracking-tight"
+      >
+        Settings
+      </h1>
       {isMobile ? (
         <SettingsSectionPicker
           admin={admin}
@@ -3679,5 +4312,6 @@ export function Settings() {
           navigated rather than hiding on five of the six panels. */}
       <AppVersion className="pt-2" />
     </div>
+    </NewTokenRevealProvider>
   );
 }
