@@ -1,5 +1,6 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
+  act,
   render as rtlRender,
   screen,
   waitFor,
@@ -85,13 +86,50 @@ const defaultDashboardData: UseDashboardResult = {
   loading: false,
   fetching: false,
   error: '',
+  refetch: () => {},
 };
 
 const mockUseDashboard = vi.fn<() => UseDashboardResult>(() => defaultDashboardData);
 
-vi.mock('../hooks/useDashboard', () => ({
-  useDashboard: (...args: unknown[]) => mockUseDashboard(...(args as [])),
-}));
+/**
+ * When true, `<Dashboard>` drives the REAL `useDashboard` — its real TanStack
+ * query key, its real `loading` derivation — against the mocked api client
+ * below. Every other test in this file wants the canned-result mock, which
+ * cannot express the thing the focus tests are about: the query key carries
+ * (year, month), so a period change mints a key with no cached data and flips
+ * `isLoading`. Simulating that flip by hand would be asserting the premise.
+ *
+ * Same mutable-holder idiom as `reportYears`: `vi.mock`'s factory is hoisted,
+ * so it may only CLOSE OVER this binding, never read it at factory time.
+ * Reset to false in the outer `beforeEach`.
+ */
+let useRealDashboard = false;
+
+vi.mock('../hooks/useDashboard', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../hooks/useDashboard')>();
+  return {
+    useDashboard: (...args: unknown[]) =>
+      useRealDashboard
+        ? actual.useDashboard(...(args as [number?, number?]))
+        : mockUseDashboard(...(args as [])),
+  };
+});
+
+/**
+ * Periods (`"year-month"`) whose `dashboard/*` trio must stay in flight, for
+ * tests running the real hook. A real request is never instantaneous;
+ * resolving the new period synchronously would let the microtask queue drain
+ * the refetch before the macrotask that Radix restores focus from, and race
+ * the window under test out of existence.
+ */
+const heldDashboardPeriods = new Set<string>();
+
+/**
+ * Periods whose `dashboard/*` trio must REJECT. Mutable mid-test on purpose:
+ * a Retry is only meaningful if the endpoint can be healed between the failure
+ * and the retry, which is exactly what a real transient outage does.
+ */
+const failingDashboardPeriods = new Set<string>();
 
 /**
  * Years the mocked `reports/years` endpoint reports, per test. Kept mutable so
@@ -133,6 +171,30 @@ vi.mock('../api/client', () => ({
           has_transactions: true,
           out_of_range_years: [],
         });
+      }
+      if (path.startsWith('dashboard/')) {
+        // Only reached when `useRealDashboard` is on; the canned mock never
+        // issues these.
+        const params = new URLSearchParams(path.split('?')[1] ?? '');
+        const year = Number(params.get('year'));
+        const month = Number(params.get('month'));
+        if (failingDashboardPeriods.has(`${year}-${month}`)) {
+          return Promise.reject(new Error('Network error'));
+        }
+        if (heldDashboardPeriods.has(`${year}-${month}`)) {
+          return new Promise(() => {});
+        }
+        if (path.startsWith('dashboard/summary')) {
+          return Promise.resolve({
+            ...defaultDashboardData.summary,
+            year,
+            month,
+          });
+        }
+        if (path.startsWith('dashboard/trend')) {
+          return Promise.resolve({ trend: defaultDashboardData.trend });
+        }
+        return Promise.resolve({ categories: defaultDashboardData.categories });
       }
       if (path === 'currencies') {
         return Promise.resolve([
@@ -203,6 +265,9 @@ describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockUseDashboard.mockReturnValue(defaultDashboardData);
+    useRealDashboard = false;
+    heldDashboardPeriods.clear();
+    failingDashboardPeriods.clear();
     reportYears = [new Date().getFullYear()];
     reportYearsFails = false;
     recentDescription = 'Groceries';
@@ -1088,6 +1153,235 @@ describe('Dashboard', () => {
       render(<MemoryRouter><Dashboard /></MemoryRouter>);
 
       expect(await offeredYears(user)).toEqual([new Date().getFullYear()]);
+    });
+  });
+
+  // The error state used to replace the entire page — period controls included
+  // — with a bare `<h1>Dashboard</h1>` and the alert. Rendering it under the
+  // real header is the single-header rule that B34 below turns on, and it is
+  // also the better degrade: a period whose request failed is now recoverable
+  // by picking another one, instead of only by the full-page reload Retry does.
+  test('an error still leaves the period controls usable', () => {
+    mockUseDashboard.mockReturnValue({
+      ...defaultDashboardData,
+      summary: null,
+      trend: [],
+      categories: [],
+      error: 'Network error',
+    });
+    render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+    expect(screen.getByText('Network error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Month' })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: 'Year' })).toBeInTheDocument();
+    // Proves this really is the error branch and not a fully-rendered page.
+    expect(screen.queryByText('Total Balance')).not.toBeInTheDocument();
+  });
+
+  // B34. Changing the period must not drop keyboard focus to `<body>`.
+  //
+  // Radix restores focus from a `setTimeout(0)` inside FocusScope's unmount
+  // cleanup (`context.trigger?.focus({ preventScroll: true })`) — a whole
+  // macrotask AFTER the commit that closed the menu. So anything that unmounts
+  // the trigger in that same commit hands Radix a DETACHED node, and focusing
+  // a detached node is a no-op. Radix then `preventDefault()`s the event, which
+  // also suppresses FocusScope's own `previouslyFocusedElement ?? body`
+  // fallback, and the user is left on `<body>` at the top of the document.
+  //
+  // happy-dom models all three halves of that faithfully (probed directly):
+  // focusing a never-attached element leaves `activeElement` at `<body>`;
+  // removing the focused element resets `activeElement` to `<body>`; and
+  // re-focusing an element after detaching it is a no-op. See the positive
+  // control below for the harness-level proof.
+  //
+  // These are the only tests in the file that run the REAL `useDashboard`, and
+  // they have to: the defect IS the hook's query key.
+  describe('changing the period keeps keyboard focus', () => {
+    function setup() {
+      // Same reason as the year-picker block above: an open Radix Select puts
+      // `pointer-events: none` on <body> and happy-dom has no layout engine.
+      return userEvent.setup({ pointerEventsCheck: 0 });
+    }
+
+    beforeEach(() => {
+      localStorage.clear();
+      useRealDashboard = true;
+      localStorage.setItem(STORAGE_KEYS.dashboardYear, '2026');
+      localStorage.setItem(STORAGE_KEYS.dashboardMonth, '4');
+      reportYears = [2026, 2025];
+    });
+
+    /**
+     * Open `label`'s Select, click the option named `option`, and let Radix's
+     * deferred focus restore run. The `act`-wrapped macrotask is not optional:
+     * `waitFor` and `user.click` both settle on the commit, which is one turn
+     * EARLIER than the `setTimeout(0)` the restore lives in — assert straight
+     * after the click and you are reading focus before the code under test
+     * has run at all.
+     */
+    async function pick(
+      user: ReturnType<typeof userEvent.setup>,
+      label: string,
+      option: string,
+    ): Promise<void> {
+      const trigger = await screen.findByRole('combobox', { name: label });
+      trigger.focus();
+      expect(document.activeElement).toBe(trigger);
+
+      await user.click(trigger);
+      const listbox = await screen.findByRole('listbox');
+      await user.click(within(listbox).getByRole('option', { name: option }));
+
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+    }
+
+    /** Asserts the invariant: focus sits on the period trigger, not `<body>`. */
+    function expectFocusOn(label: string): void {
+      expect(document.activeElement).not.toBe(document.body);
+      expect(document.activeElement).toHaveAttribute('aria-label', label);
+    }
+
+    // POSITIVE CONTROL, and the reason the two failing cases below mean
+    // anything. Picking the month that is ALREADY selected runs the identical
+    // path — same Select, same Radix close, same deferred restore, same
+    // happy-dom — and differs in exactly one way: `setSelectedMonth(4)` with
+    // the value already 4 is a React bail-out, so the query key never changes,
+    // the trigger is never unmounted, and Radix's restore lands on a node that
+    // is still in the document. If this test ever fails, the harness cannot
+    // observe focus restore at all and the two below prove nothing.
+    test('re-picking the selected month restores focus to the trigger', async () => {
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      await pick(user, 'Month', 'April');
+
+      expectFocusOn('Month');
+    });
+
+    test('picking a different month keeps focus on the trigger', async () => {
+      // May's trio is held open, so the page is in the post-change,
+      // pre-response window for the whole assertion — the window a real
+      // network round-trip always has and a resolved-promise mock does not.
+      heldDashboardPeriods.add('2026-5');
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      await pick(user, 'Month', 'May');
+
+      expectFocusOn('Month');
+    });
+
+    test('picking a different year keeps focus on the trigger', async () => {
+      heldDashboardPeriods.add('2025-4');
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      await pick(user, 'Year', '2025');
+
+      expectFocusOn('Year');
+    });
+
+    // The STRUCTURAL half of the same invariant, and the one that outlives a
+    // change in Radix's focus semantics: whatever the library does on close,
+    // the control the user just operated has to still be on screen. The
+    // `queryByText` line is the load-bearing part of the setup — it proves the
+    // page really is mid-load, so the three positive assertions are not just
+    // reading a fully-rendered dashboard.
+    test('keeps the period controls mounted while the new period loads', async () => {
+      heldDashboardPeriods.add('2026-5');
+      const user = setup();
+      render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+      await pick(user, 'Month', 'May');
+
+      expect(screen.queryByText('Total Balance')).not.toBeInTheDocument();
+      expect(screen.getByRole('combobox', { name: 'Month' })).toHaveTextContent(
+        'May',
+      );
+      expect(screen.getByRole('combobox', { name: 'Year' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Today' })).toBeInTheDocument();
+    });
+
+    // Retry used to be `window.location.reload()` — a whole-client teardown
+    // for one failed query, which also loses the period the user had chosen
+    // and every other cached query on the way past.
+    //
+    // `window.location.reload` is writable and configurable under happy-dom
+    // (probed), so a plain function swap is enough; no jsdom-style
+    // `defineProperty(window, 'location', …)` dance.
+    describe('Retry', () => {
+      const originalReload = window.location.reload;
+      const reload = vi.fn();
+
+      beforeEach(() => {
+        reload.mockClear();
+        window.location.reload = reload;
+      });
+      afterEach(() => {
+        window.location.reload = originalReload;
+      });
+
+      test('refetches the period in place instead of reloading', async () => {
+        failingDashboardPeriods.add('2026-4');
+        const user = setup();
+        render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+        const retry = await screen.findByRole('button', { name: 'Retry' });
+        expect(screen.getByText('Network error')).toBeInTheDocument();
+        // Proves this is the error branch and not a rendered page, so the
+        // recovery below has something to actually recover from.
+        expect(screen.queryByText('Total Balance')).not.toBeInTheDocument();
+
+        // Heal the endpoint the way a transient outage does, then recover.
+        failingDashboardPeriods.delete('2026-4');
+        await user.click(retry);
+
+        expect(await screen.findByText('Total Balance')).toBeInTheDocument();
+        expect(screen.queryByText('Network error')).not.toBeInTheDocument();
+        expect(reload).not.toHaveBeenCalled();
+      });
+
+      // Retry is the one control on this page that unmounts itself by working,
+      // so it is the one that has to hand focus somewhere first. It unmounts
+      // TWICE over a successful recovery — immediately (the refetch returns
+      // the query to `pending`, so the skeleton replaces the alert) and again
+      // at the end (content replaces the skeleton). Both are covered: focus is
+      // parked on the heading before either happens.
+      test('parks focus on the heading rather than dropping it to <body>', async () => {
+        failingDashboardPeriods.add('2026-4');
+        const user = setup();
+        render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+        const retry = await screen.findByRole('button', { name: 'Retry' });
+
+        // Heal to a HELD promise so the in-flight window stays observable
+        // instead of being raced past by an immediately-resolved mock.
+        failingDashboardPeriods.delete('2026-4');
+        heldDashboardPeriods.add('2026-4');
+        await user.click(retry);
+
+        const heading = screen.getByRole('heading', { level: 1 });
+        expect(document.activeElement).not.toBe(document.body);
+        expect(document.activeElement).toBe(heading);
+        // The alert really did go — so this is the post-unmount state, not a
+        // page where the button happens to still be sitting there.
+        expect(retry).not.toBeInTheDocument();
+      });
+
+      // The anchor is only an anchor if it is NOT in the tab order: a heading
+      // that became a tab stop would put a dead stop in front of every
+      // keyboard user on every visit, not just after a failure.
+      test('the heading anchor is programmatic-only, not a tab stop', () => {
+        render(<MemoryRouter><Dashboard /></MemoryRouter>);
+
+        expect(screen.getByRole('heading', { level: 1 })).toHaveAttribute(
+          'tabindex',
+          '-1',
+        );
+      });
     });
   });
 });

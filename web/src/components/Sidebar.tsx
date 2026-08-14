@@ -129,11 +129,26 @@ export function Sidebar() {
           )}
         </div>
 
-        {/* Content — matches SidebarContent: gap-2, overflow-hidden when collapsed */}
+        {/* Content — matches SidebarContent: gap-2, x-clipped when collapsed */}
         <nav
           className={cn(
             'flex min-h-0 flex-1 flex-col gap-2',
-            expanded ? 'overflow-auto' : 'overflow-hidden',
+            // Collapsed, the y-axis SCROLLS and only the x-axis clips. Both
+            // axes used to be `hidden`, which cost nothing while the rail's
+            // rows were 32px — the column could not outgrow a landscape
+            // viewport. At the 44px coarse floor the nine rows and the footer
+            // add ~120px (arithmetic, not measured — the browser pass has the
+            // real number), which is enough to overflow the household tablet
+            // once a URL bar is taking its share, and `hidden` does not scroll:
+            // it would cut Settings and Log out off the bottom with no way to
+            // reach either.
+            //
+            // Clipping X is still wanted — the aside animates its width, so a
+            // row is briefly wider than the rail containing it. `overflow-y-*`
+            // on its own would not keep that: CSS promotes the other axis from
+            // `visible` to `auto`, which is the horizontal scrollbar this
+            // avoids. Both axes have to be named.
+            expanded ? 'overflow-auto' : 'overflow-x-hidden overflow-y-auto',
           )}
           aria-label="Primary"
         >
@@ -294,9 +309,29 @@ function SidebarLink({
     : pathname === item.path || pathname.startsWith(item.path + '/');
   const linkClassName = cn(
     // `relative` anchors the absolute-positioned collapsed-mode dot.
-    'relative flex items-center overflow-hidden rounded-md text-sm text-muted-foreground hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
+    //
+    // `coarse:min-h-11` sits on the base rather than in either branch, mirroring
+    // where `Button` keeps its own height floor. A NavLink is a raw anchor, so
+    // no primitive supplies one and this is the only place it can come from —
+    // and a branch added later inherits it instead of having to remember.
+    // `coarse:` and not `md:`: this column only renders from `md` up, which is
+    // precisely why the tablet was the surface still missing the floor (~1130px
+    // in landscape takes the desktop side of every width gate while a finger is
+    // still doing the tapping). A mouse keeps the 36px expanded row and the
+    // 32px collapsed square at every width. See `@/lib/touch-target`.
+    'relative flex items-center overflow-hidden rounded-md text-sm text-muted-foreground coarse:min-h-11 hover:bg-muted hover:text-foreground [&>svg]:size-4 [&>svg]:shrink-0',
     isActive && 'bg-muted text-foreground',
-    expanded ? 'w-full gap-2 px-3 py-2' : '!size-8 p-2 justify-center',
+    expanded
+      ? // Full-width row, so the base height floor is the whole story here and
+        // a width floor would be inert.
+        'w-full gap-2 px-3 py-2'
+      : // Collapsed the row is a square, so it needs the width half too — a
+        // height-only floor leaves a 44x32 target that is taller and still a
+        // miss for a thumb. `min-width` clamps the used width up even against
+        // the `!important` on `!size-8`: min/max clamping is applied after the
+        // cascade and the two are separate properties. 44px still fits inside
+        // the 48px `w-12` rail, so nothing needs to move to make room.
+        cn('!size-8 p-2 justify-center', TOUCH_TARGET_SQUARE),
   );
   const link = (
     <NavLink

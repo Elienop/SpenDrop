@@ -650,6 +650,161 @@ describe('TransactionRow — keyboard shortcuts', () => {
   });
 });
 
+// B33. The phone sheet shipped the same wrapper around its copy of this
+// picker, in the CAPTURE phase — where it ran before `SelectItem`'s own
+// `onKeyDown` and swallowed the Enter that chooses an option. This row's
+// guard is load-bearing (the `<tr>` turns a bare Enter into a save), so it
+// moved to the bubble phase instead of being deleted. Both halves of that
+// split are pinned here: Radix acts first, the `<tr>` never sees the key.
+describe('TransactionRow — Enter inside the category Select', () => {
+  const transport: Category = {
+    id: 2,
+    name: 'Transport',
+    type: 'expense',
+    icon: null,
+    sort_order: 2,
+    is_active: true,
+    created_at: '2026-01-01',
+  };
+
+  /** A second category, so "the pick landed" cannot be satisfied by the value
+   *  the row already had. */
+  async function openEditWithTwoCategories(onUpdate: Mock) {
+    renderRow(makeTx(), onUpdate, undefined, {
+      categories: [...mockCategories, transport],
+    });
+    const user = await openActionsMenu('Weekly groceries');
+    await user.click(screen.getByRole('menuitem', { name: /edit/i }));
+    await screen.findByRole('button', { name: /save/i });
+    return user;
+  }
+
+  /** The Radix Select trigger: the only `<button role=combobox>` in the row —
+   *  TagInput and AutocompleteInput are comboboxes too, on `<input>`s. Re-read
+   *  each time, because a category change remounts it.
+   *
+   *  `hidden: true` because an open Select marks everything outside its
+   *  popover `aria-hidden`, including the trigger it was opened from; the
+   *  default role query drops those, so the tests that press a key ON the
+   *  trigger while the list is up could not find it otherwise. */
+  function categoryTrigger() {
+    const trigger = screen
+      .getAllByRole('combobox', { hidden: true })
+      .find((el) => el.tagName === 'BUTTON');
+    if (!trigger) throw new Error('Category SelectTrigger not found');
+    return trigger;
+  }
+
+  async function openTheList(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(categoryTrigger());
+    return screen.findByRole('option', { name: 'Transport' });
+  }
+
+  // POSITIVE CONTROL for every `fireEvent.keyDown(..., { key: 'Enter' })`
+  // below. A synthetic Enter that reached nothing would make each negative
+  // assertion in this block pass for the wrong reason, and user-event's
+  // '{Enter}' has been silently dead in happy-dom before now.
+  it('_ControlDispatchedEnterReachesTheRow: it still saves from a text field', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    await openEditWithTwoCategories(onUpdate);
+
+    fireEvent.keyDown(screen.getByLabelText('Description'), { key: 'Enter' });
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+  });
+
+  it('_EnterOnAnOptionPicksIt: the list closes and the trigger moves', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const user = await openEditWithTwoCategories(onUpdate);
+    const option = await openTheList(user);
+
+    fireEvent.keyDown(option, { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('option', { name: 'Transport' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(categoryTrigger()).toHaveTextContent('Transport');
+  });
+
+  it('_EnterOnAnOptionDoesNotSaveTheRow: picking is not committing', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const user = await openEditWithTwoCategories(onUpdate);
+    const option = await openTheList(user);
+
+    fireEvent.keyDown(option, { key: 'Enter' });
+
+    await waitFor(() => expect(categoryTrigger()).toHaveTextContent('Transport'));
+    expect(onUpdate).not.toHaveBeenCalled();
+    // Still in edit mode: a save would have swapped the form back for the row.
+    expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument();
+
+    // …and the pick is what a later save carries, so the two assertions above
+    // cannot both hold on a Select that closed without committing anything.
+    fireEvent.keyDown(screen.getByLabelText('Description'), { key: 'Enter' });
+    await waitFor(() =>
+      expect(onUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({ category_id: 2 }),
+      ),
+    );
+  });
+
+  it('_EscapeOnAnOptionClosesOnlyTheList: the row keeps its edits', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const user = await openEditWithTwoCategories(onUpdate);
+    const option = await openTheList(user);
+
+    fireEvent.keyDown(option, { key: 'Escape' });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('option', { name: 'Transport' }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: /save/i })).toBeInTheDocument();
+    expect(onUpdate).not.toHaveBeenCalled();
+  });
+
+  // The other way a key reaches the guard: from the trigger itself, in the
+  // window after the list opens and before Radix moves focus into it — where a
+  // held Enter repeats. Nothing about the event says it belongs to the picker
+  // (its target is the trigger, inside the wrapper), so the guard's open flag
+  // is the only thing between an impatient Enter and a saved row.
+  it('_EnterOnTheTriggerWhileTheListIsOpenDoesNotSave: the focus-transfer window', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    const user = await openEditWithTwoCategories(onUpdate);
+    await openTheList(user);
+
+    fireEvent.keyDown(categoryTrigger(), { key: 'Enter' });
+
+    await waitFor(() =>
+      expect(categoryTrigger()).toHaveAttribute('aria-expanded', 'true'),
+    );
+    expect(onUpdate).not.toHaveBeenCalled();
+    // `hidden: true` for the same reason as `categoryTrigger`: the open
+    // popover has the rest of the row marked `aria-hidden`.
+    expect(
+      screen.getByRole('button', { name: /save/i, hidden: true }),
+    ).toBeInTheDocument();
+  });
+
+  // Control for the test above, and the behaviour the guard must not cost:
+  // with the list shut, the trigger is just another field you can save from.
+  // Whether it SHOULD be is a separate, open question — filed as B43 in
+  // docs/BACKLOG.md (a user aiming to open the picker commits the row
+  // instead). This test pins the CURRENT contract; if the owner decides B43,
+  // it changes with the guard.
+  it('_ControlEnterOnTheClosedTriggerStillSaves: the guard stands down', async () => {
+    const onUpdate = vi.fn().mockResolvedValue(undefined);
+    await openEditWithTwoCategories(onUpdate);
+
+    fireEvent.keyDown(categoryTrigger(), { key: 'Enter' });
+
+    await waitFor(() => expect(onUpdate).toHaveBeenCalledTimes(1));
+  });
+});
+
 describe('TransactionRow edit — focus handoff', () => {
   // The actions menu suppresses Radix's focus-to-trigger restore when Edit runs
   // (the trigger unmounts with the display row), so the row itself owns both

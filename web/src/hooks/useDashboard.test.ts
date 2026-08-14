@@ -233,6 +233,53 @@ describe('useDashboard', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  // MEASURED, and the Dashboard's Retry button depends on it: refetching an
+  // errored query with NO data does not keep `error` set while it re-runs.
+  // TanStack returns the query to `pending`, so `loading` flips back to true
+  // and `error` clears on the same tick the retry starts. The consequence for
+  // the page is that the error alert — and the Retry button inside it —
+  // unmounts the instant it is pressed, which is why that button moves focus
+  // to the heading BEFORE calling this. If this contract ever changes, the
+  // ordering there can be simplified; until then it must not be.
+  test('a retry after an error re-enters loading and clears the error', async () => {
+    let release: (() => void) | null = null;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    let failing = true;
+    mockedApi.get.mockImplementation((path: string) => {
+      if (failing) return Promise.reject(new Error('Network error'));
+      const resolveTrio = () => {
+        if (path.includes('dashboard/summary')) return mockSummary;
+        if (path.includes('dashboard/trend')) return { trend: mockTrend };
+        return { categories: mockCategories };
+      };
+      return gate.then(resolveTrio);
+    });
+
+    const { result } = renderHook(() => useDashboard(2026, 4), {
+      wrapper: makeWrapper(),
+    });
+    await waitFor(() => expect(result.current.error).toBe('Network error'));
+    expect(result.current.loading).toBe(false);
+
+    failing = false;
+    act(() => {
+      result.current.refetch();
+    });
+
+    await waitFor(() => expect(result.current.fetching).toBe(true));
+    expect(result.current.loading).toBe(true);
+    expect(result.current.error).toBe('');
+
+    act(() => {
+      release!();
+    });
+    await waitFor(() => expect(result.current.fetching).toBe(false));
+    expect(result.current.summary).toEqual(mockSummary);
+    expect(result.current.error).toBe('');
+  });
+
   test('a stale error does not surface after a fresh success', async () => {
     // The stale (2026,4) trio rejects late; the fresh (2026,5) trio succeeds
     // first. The late rejection must not flip `error`.

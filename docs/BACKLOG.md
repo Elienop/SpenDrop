@@ -183,15 +183,6 @@ Three separate defects in one surface, none of them mobile-specific:
 Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
 **Effort:** medium for (1); small for (2) and (3).
 
-### B26 — Recurring Expenses still pans 113px on a phone
-**Verified: reproduced** (2026-08-09, after the D4/D12 fixes). 375.9px of table in a 263px box at
-360. The remainder is five columns of header words plus cell padding, **not** the description —
-that is now bounded. Reaching zero needs the slice-2 card-list treatment rather than more padding
-tuning, which is why it was stopped here.
-**Re-measured 2026-08-14** during the browser pass, on the built container after #130/#131: the
-Patterns tab still pans 102px at 360. Still open; the fix is still the card-list treatment.
-**Effort:** medium — it is a presentation change, not a spacing tweak.
-
 ### B28 — four sheets scroll their own header away
 **Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
 ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
@@ -213,36 +204,6 @@ the desktop tab strip and the new phone picker. A `?tab=` value is honoured *int
 never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
 not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
 **Effort:** small.
-
-### B33 — Enter cannot pick a category in the phone edit sheet
-**Verified: reproduced by me** (Chrome, 360px, real key events, 2026-08-09). In
-`TransactionEditSheet` the category Select opens on Enter and moves on ArrowDown, but Enter to
-choose does **nothing**: 21 options stay mounted, the trigger's value stays `FoodS`, focus stays on
-an option, and the sheet stays open. Mouse and Space both work. The same Select inside
-`BulkEditDialog` handles Enter correctly, so it is the call site, not the primitive.
-
-Cause (reported by the build agent, code site confirmed): the `onKeyDownCapture` guard at
-`TransactionEditSheet.tsx:244`. React synthetic events propagate along the REACT tree, so a
-portalled `SelectContent` is still a React descendant of that div, and `stopPropagation()` in the
-CAPTURE phase kills Radix's own key handler before it runs. An identical guard sits in
-`TransactionRow.tsx` (at `:232` since #137's edits; both guards verified still present,
-grepped 2026-08-14).
-
-Proposed one-word fix — `onKeyDownCapture` → `onKeyDown` — is the agent's, **not verified by me**;
-the guard exists to keep Enter from submitting the form, so the bubble-phase version needs its own
-test proving both halves (Select commits, form does not submit). **NOT FIXED:** a distinct defect
-with a subtle fix, on a branch that had already grown twice. **Effort:** small, plus a real test.
-
-### B34 — Dashboard's Month/Year still drop focus to `<body>`
-**Verified: reported by the build agent, NOT independently reproduced by me.** Both widths,
-keyboard and mouse, and unaffected by the B29 central fix because the trigger's DOM node is
-*replaced* during the value change — `useDashboard` keys on `['dashboard', year, month]`, so a
-period change flips `isLoading` and `Dashboard.tsx:282` returns the whole-page skeleton, leaving
-Radix to focus a detached element. Agent's proposed `placeholderData: keepPreviousData` would also
-activate the already-written `refetching && 'opacity-60'` at `Dashboard.tsx:328`, currently dead
-for period changes. **NOT FIXED** — it changes data-fetching semantics, and this repo has a
-recorded incident where `keepPreviousData` staled a count. Treat the diagnosis as unverified until
-someone reproduces it.
 
 ### B36 — a member can take another member's display name, and attribution follows
 **Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
@@ -293,50 +254,39 @@ close on `saving` would trap the user behind a hung request. The clean fix is an
 before the close still toasts.
 **Effort:** small.
 
-### B41 — Settings still pans at 360: Currencies and API tokens
+### B44 — the Budgets table still pans 211px inside its wrapper at 360
+**Verified: reproduced with real data** (2026-08-14 browser pass, built container at 360). The
+page itself does not pan — the table sits in a bounded scroll wrapper — but the table is 556px
+wide in a 345px box, so the Limit column and everything right of it needs a 211px in-card pan.
+This is the B41 residual re-measured: real data confirms it, so the fixture-inflation caveat is
+retired. Fix is the same card-list treatment every other table got. **Effort:** small-medium.
 
-**Verified: reproduced** (2026-08-14 browser pass, built container at 360; deliberately out of
-the #137 scope, which took Users and Categories only). Currencies pans **129px** with the rate
-input 93% clipped; API tokens pans **308px**; and the one-time token reveal hides **188px** of
-the token off-screen AND is destroyed by an md-cross rotation (the reveal state does not survive
-the layout swap) — so a phone user can fail to ever see the full token they cannot retrieve
-again. The budgets Limit column also sat past a pan at 360, but fixture data inflated it —
-re-measure with real data before counting it. Same treatment as Users got in #137.
-**Effort:** small-medium — two card lists plus a reveal that survives (or re-arms across) a
-layout swap.
+### B45 — the five stacked notification switches' tap bands overlap by ~4px
+**Verified: measured** (2026-08-14 browser pass at 360). The activity switches (Over budget
+through Large transaction) sit 16px apart; each carries the coarse tap band that reaches 10px
+past its border box, so adjacent bands overlap by ~4px and a tap at the seam lands on the LATER
+switch in paint order. Pre-existing rhythm, untouched by the phone batch; low stakes (the wrong
+toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
+20px+, or shrink the band on stacked placements. **Effort:** small.
 
-### B42 — the tablet-landscape shell misses the touch floor
-
-**Verified: reproduced** (2026-08-14 browser pass at 1130px coarse — the Tab S10 FE in
-landscape, which renders the DESKTOP tree on a touch screen). Sidebar nav links are **32px**
-(the shell predates the `coarse:` floor B37 gave page content), and with the sidebar expanded
-the Settings users table's trailing actions sit past the viewport, reachable only by panning.
-Measured on the #137 branch tip before its fix batch; the batch did not touch either.
-**Effort:** small.
+### B43 — Enter on the closed category trigger in the desktop row saves the row mid-edit
+**Verified: probed** (2026-08-14, found during the B33 fix; deliberately preserved, not fixed —
+the fix batch pinned the current behavior with a test rather than changing it; the deep review
+probed what is actually observable). Pressing Enter on the category Select's CLOSED trigger in
+the desktop row fires the row's Enter-saves handler — the row commits and leaves edit mode
+while the user may only have meant to open the picker. (Radix would also open the picker on
+that Enter, but the row unmounts first, so no picker is ever seen.) A comment predating B33
+frames Enter-saves-from-any-field as intentional; whether it should apply to a Select trigger
+needs the owner's call. Enter on an OPEN picker is correct since B33: it picks the option and
+does not save. **Effort:** small once decided; the B33 controlled-Select guard is the natural
+place.
 
 ---
 
 ## Queued stages
 
-### B10 — Refunds cannot offset a category
-**Verified: reproduced** (schema dumped from all 17 migrations applied to a scratch database).
-`CHECK(amount_cents > 0)` physically refuses a negative amount. Spend $50 on groceries, get $20
-back, and there is no way to make Groceries read $30. Logging the refund as income hides it from
-every expense calculation.
-
-**What you'd see:** dashboard spending and remaining budget overstated by the refund; every
-category budget overstated; every report tab and the Excel export overstated; the over-budget
-push alert fires early in any month containing a refund — a wrong notification on both phones.
-Savings figures come out right, because they subtract income from expense.
-
-**Decided:** signed `amount_cents`, not a linked offset row. Do not relitigate.
-
-**Blast radius:** one migration rebuilding the transactions table, two Go validation layers,
-three places in import that strip the sign, eleven report queries gaining a zero-or-negative
-case, six frontend sites. Expect one immediate visible break: a negative expense renders as
-`--$50.00`, because the display component adds a minus sign on top of the formatter's.
-
-**Fold B1 step 2 into this migration** — same table, same rebuild, one risk instead of two.
+*B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
+PR #139 and released as v0.44.0 — see Closed. Nothing is currently queued as a stage.*
 
 ---
 
@@ -350,11 +300,15 @@ case, six frontend sites. Expect one immediate visible break: a negative expense
   channel; both pieces shipped in v0.39.0 — see B7 in Closed.
 - **Native Android app — reassess.** The pre-B9 phone experience was the standing evidence for
   going native; with all of B9 plus #131 and #137 shipped, the PWA is the daily driver at 360px.
-  Decide whether the remaining gaps (B26, B33, B41, B42) close the question or reopen it.
+  The gaps that framed this question (B26, B33, B41, B42) all closed in the 2026-08-14
+  phone/tablet batch — see Closed. What remains on the phone surface: B28 (sheet headers),
+  B30 (URL section state), and B43 (a desktop-row keyboard oddity). Owner's call whether that
+  residue keeps the question open.
 - **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
   back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
-  has never moved); real once it does. Fixing it properly needs the rate column from B1 step 2
-  first, and then a decision about what rate a back-dated import should use.
+  has never moved); real once it does. **Unblocked 2026-08-14:** the rate column (B1 step 2)
+  shipped in PR #139, so the only thing still needed is the owner's decision about what rate a
+  back-dated import should use.
 
 ---
 
@@ -388,8 +342,12 @@ leads are not re-investigated.
    database: both placements return byte-identical results, because a separate condition already
    removes zero-total categories. The code's own comment admits this, and the "dashboard
    categories" example named in the rule is not that kind of join.
-2. **"Mutations go through `TransactionStore` only — never raw SQL."** Four bulk paths do use raw
-   SQL. All four are deliberate and documented in place. The rule is wrong, not the code.
+2. **"Mutations go through `TransactionStore` only — never raw SQL."** *(re-measured 2026-08-14
+   during B10:)* `batch-update` and `batch-delete` now route every row through the store; raw SQL
+   remains at exactly three `ExecContext` sites in two endpoints (`delete-by-filter`, and
+   `update-by-filter`'s no-tags fast path plus its per-row tags variant), each deliberate and
+   documented in place. The rule as stated is wrong, not the code — the invariant that actually
+   holds on every path is audit-in-same-tx + tombstone exclusion + the checkpoint hook.
 
 Neither is enforced by a test. A reviewer trusting the first could relax the real filtering
 condition *and* move the predicate, believing one was safe because the other was checked.
@@ -400,9 +358,68 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B26 + B33 + B34 + B41 + B42 — the phone/tablet batch** (2026-08-14, on
+  `fix/phone-batch-recurring-settings-tablet`; five parallel builders with disjoint file
+  ownership; squash hash joins this entry at merge). Per item:
+  **B26** — the Patterns tab's recurring-expenses table (102px pan at 360) became a JS-gated
+  card list below `md` (`useIsMobileViewport`, matching the app's other five card lists); the
+  tab's pre-existing pointer-derived gate was renamed `heatmapIsCalendar` so the two forks
+  can't be confused; one lifted dismiss handler feeds both presentations, and dismiss buttons
+  are named per entry on both.
+  **B33** — the capture-phase key guard that ate Enter in the edit sheet's category Select was
+  DELETED (measured: it protected nothing — Radix's layer gating already keeps Escape from
+  dismissing the sheet, and its justifying comment was false); the twin guard in
+  `TransactionRow` had the same defect but IS load-bearing (the row's Enter-saves handler) and
+  was rebuilt as a controlled Select (`categoryPickerOpen` state) with a bubble-phase,
+  timing-independent guard. Enter now picks an option in both; the closed-trigger open+save
+  oddity was deliberately preserved, pinned, and filed as B43.
+  **B34** — reproduced this time (happy-dom models detached-element focus faithfully; a
+  same-value re-pick served as the positive control), and the diagnosis deepened: Radix
+  restores focus from a `setTimeout(0)` after the commit AND `preventDefault()`s the event,
+  cancelling its own body-fallback — so the skeleton's unmount dropped keyboard users to
+  `<body>`. Fixed structurally: one return, the header (welcome + Month/Year/Today) rendered
+  by every state, only the content below swaps. `keepPreviousData` was REJECTED against the
+  recorded B4 stale-count incident; data-fetching semantics unchanged. The error state now
+  renders under the functional header (a failed period is recoverable by picking another).
+  **B41** — Currencies (129px pan) and API tokens (308px pan) got the #137 card-list
+  treatment; the one-time token reveal became a read-only textarea that wraps all 38
+  characters, and the reveal dialog + its state moved into a `NewTokenRevealProvider` hoisted
+  ABOVE the md layout fork, so a rotation is a structural no-op — this also closed a real
+  window where a rotation between the create POST and its response orphaned a never-displayed
+  full-access token (pinned by test). Residual to re-measure with real data in a browser: the
+  Budgets Limit column pan claim (fixture-inflated when first seen).
+  **B42** — the shell's nav rows gained the `coarse:` 44px floor (base height + the square's
+  width half when collapsed; fine-pointer sizing byte-identical), and the collapsed nav's
+  `overflow-hidden` became x-clip + y-scroll so the taller column cannot cut Settings/Log out
+  off a short viewport. The users-table half needed no shell change: the overflow was the SUM
+  of three nowrap action buttons in the last column's min-content; `flex-wrap` on that cell
+  drops it to the widest single button.
+  Verified pre-commit by a four-reviewer battery (code, UI/UX, design-system, security on the
+  token reveal): zero Critical; all findings fixed in-branch (fix-wave commits on this same
+  entry's branch). Every builder shipped byte-copy mutation proofs for its new tests.
+
+- **B10 — refunds cannot offset a category** (2026-08-14, on `feat/b10-signed-amounts`;
+  MERGED via PR #139, squash `e25dee6`, released as **v0.44.0**, branch deleted; 11 commits,
+  73 files). Refunds are negative `amount_cents` on the same category — the July "signed
+  amounts, not a linked offset row" decision became code. Migration 019 rebuilds the
+  transactions table (`CHECK(amount_cents != 0)`; zero stays illegal) and folds in **B1
+  step 2**: a `booked_rate REAL NULL` column, populated only when a foreign amount is
+  actually converted — no backfill, never a hash input. Entry is via an explicit Refund
+  toggle (owner's choice, 2026-08-14) — the toggle is the ONLY sign channel; typed minuses
+  stay rejected as the typo guard. Everything nets: dashboard, budgets, all 13 aggregates,
+  exports (summary rows key on has-live-rows, `HAVING COUNT(t.id) > 0`), over-budget alerts
+  (a refund clears a latch), heatmap (has-rows via `txn_count`, refunded-day state + legend
+  chip). Two in-stage semantics decisions, both from standing doctrine and disclosed in the
+  PR body: a pure sign flip on a foreign row KEEPS the booked magnitude and rate
+  (browser-verified under a deliberately moved rate), and a sign-disagreeing amount/original
+  wire pair is refused with 400 instead of half-discarded. Verified by a 5-reviewer battery,
+  an isolated deep review (one blocker — a SCHEMA.md regen owed by a migration comment edit —
+  fixed; 22/23 mutants watched die, the survivor proven equivalent), ~90 mutants killed
+  total, suites 1834 → 1960, and a live browser pass at 360/1440.
+
 - **B27 — the intensity scale returns the DARKEST stop for a zero total** (fixed on
   `feat/b10-signed-amounts` in `11deaf3`, 2026-08-14, as part of B10's heatmap has-rows
-  rework; squash hash joins this entry at merge). The signed-amounts change forced the real
+  rework; MERGED via PR #139, squash `e25dee6`). The signed-amounts change forced the real
   fix the entry asked for: `buildIntensityScale` was rewritten to count its population and
   map non-positive totals to an EXPLICIT palest stop — the `?? n` darkest fallback is gone,
   so the safety no longer depends on callers gating first. The consumer gates themselves
@@ -880,7 +897,8 @@ The measurements are in the header of `web/src/components/reports/chartAxis.seam
   editing one row, one edit overwritten) is *pre-existing* on this full-replace endpoint and is
   NOT fixed by this commit — verified at HEAD. What the guard could have introduced, and does
   not, is a stored base value matching neither the request nor the row the tx just read.
-  **Step 2 (snapshot the rate per row) is still open**, folded into B10.
+  **Step 2 (snapshot the rate per row): CLOSED 2026-08-14** — the `booked_rate` column
+  shipped inside B10's migration 019 (PR #139, squash `e25dee6`); see B10 in Closed.
   **Decision 1 — a "re-price at the current rate" action: DEFERRED to step 2, 2026-08-02.** With
   no per-row rate recorded, such an action could only mean "recalculate everything at today's
   number" and could not show which rows it would touch or what they were booked at — which is the

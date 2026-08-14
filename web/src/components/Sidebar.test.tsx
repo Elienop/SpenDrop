@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
@@ -471,6 +471,203 @@ describe('Sidebar', () => {
       expect(screen.queryByText(/^Menu$/)).not.toBeInTheDocument();
       expect(screen.queryByText(/^Admin$/)).not.toBeInTheDocument();
       expect(screen.queryByText(/^General$/)).not.toBeInTheDocument();
+    });
+  });
+
+  /**
+   * WHAT THESE CAN AND CANNOT PROVE. Nothing below measures a pixel: happy-dom
+   * runs no layout, and the Tailwind stylesheet is never loaded in tests
+   * (`globals.css` is imported only by `main.tsx`, which no test renders). A
+   * `coarse:`-prefixed token is in the DOM on a mouse and on a finger alike, so
+   * these pin the wiring and the 44px belongs to the browser check — at 1130px
+   * with a coarse pointer, which is the household tablet in landscape and the
+   * one surface that renders THIS column with a thumb driving it.
+   *
+   * The wiring is worth more here than it is on a Button. Every `<Button>` in
+   * the app inherits `coarse:min-h-11` from the primitive, which makes "this
+   * control has a floor" a claim that passes even where nobody floored
+   * anything. A sidebar row is a raw `NavLink` anchor — no primitive touches it
+   * — so the token is present only if this call site put it there, and deleting
+   * that call site is what the mutation run confirms these catch.
+   */
+  describe('touch floor on a coarse pointer', () => {
+    /** The nav rows, in DOM order. */
+    function navRows(): HTMLElement[] {
+      return within(screen.getByRole('navigation')).getAllByRole('link');
+    }
+
+    /**
+     * `classList.contains` rather than a substring test on `className`: the
+     * substring form matches `md:coarse:min-h-11` (the width-gated variant this
+     * whole idiom exists to avoid) and would report it as a pass.
+     *
+     * Returns the hrefs that are MISSING the token, so a failure names the rows
+     * rather than just the first one.
+     */
+    function rowsMissing(token: string): (string | null)[] {
+      return navRows()
+        .filter((row) => !row.classList.contains(token))
+        .map((row) => row.getAttribute('href'));
+    }
+
+    test('every nav row carries the height floor when collapsed', () => {
+      renderSidebar();
+      // Length assertion first: without it a query that silently matched two
+      // rows would satisfy "none are missing the token" just as well.
+      expect(navRows()).toHaveLength(9);
+      expect(rowsMissing('coarse:min-h-11')).toEqual([]);
+    });
+
+    test('every nav row carries the height floor when expanded', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+
+      expect(navRows()).toHaveLength(9);
+      expect(rowsMissing('coarse:min-h-11')).toEqual([]);
+    });
+
+    test('the collapsed rows floor the width too, and the expanded rows do not need to', async () => {
+      // Collapsed the row is a 32px square, and a height-only floor would leave
+      // a 44x32 target — taller, still a miss for a thumb. Expanded it is a
+      // full-width row, where a width floor is inert; asserting `w-full` there
+      // is what makes "no width token" a deliberate answer rather than an
+      // omission.
+      const user = userEvent.setup();
+      renderSidebar();
+      expect(rowsMissing('coarse:min-w-11')).toEqual([]);
+
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      expect(rowsMissing('w-full')).toEqual([]);
+    });
+
+    test('a mouse keeps the existing density at every width', async () => {
+      // The floor is additive. Nothing here may become unconditional, and
+      // nothing may hang off a width gate: `md:`-prefixed is the exact bug —
+      // the tablet takes the desktop side of it and stays at 32px.
+      const user = userEvent.setup();
+      renderSidebar();
+      for (const row of navRows()) {
+        expect(row).toHaveClass('!size-8');
+        expect(row).not.toHaveClass('min-h-11');
+        expect(row).not.toHaveClass('min-w-11');
+        expect(
+          Array.from(row.classList).filter((t) => t.startsWith('md:')),
+        ).toEqual([]);
+      }
+
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      for (const row of navRows()) {
+        expect(row).toHaveClass('px-3', 'py-2');
+        expect(row).not.toHaveClass('min-h-11');
+        expect(
+          Array.from(row.classList).filter((t) => t.startsWith('md:')),
+        ).toEqual([]);
+      }
+    });
+
+    test('positive control: the probe discriminates, and is not true of the whole tree', () => {
+      renderSidebar();
+      const row = screen.getByRole('link', { name: /dashboard/i });
+
+      // Half one — the probe is exact-token. A near-miss and the width-gated
+      // variant both report absent on the very element that passes above, so
+      // the passes are not a substring matching anything floor-shaped.
+      expect(row.classList.contains('coarse:min-h-11')).toBe(true);
+      expect(row.classList.contains('coarse:min-h-1')).toBe(false);
+      expect(row.classList.contains('md:coarse:min-h-11')).toBe(false);
+
+      // Half two — the token is not simply everywhere. The avatar is the
+      // shell's one non-interactive `size-8` box, so it is what "floored" would
+      // look like if an ungated floor had been sprayed across the column: this
+      // is the assertion that fails if the floor stops being a decision.
+      const avatar = screen.getByText('A');
+      expect(avatar.closest('span')?.classList.contains('coarse:min-h-11')).toBe(
+        false,
+      );
+    });
+
+    test('the collapse toggle is floored on both axes and keeps its 32px mouse box', () => {
+      // This one comes from `Button` (base = height, `size="icon"` = width), so
+      // the positive half is weak on its own — it is true of every Button in
+      // the app. The load-bearing halves are the negatives: `size-8` survived
+      // (so the floor really is `min-*` in a separate tailwind-merge group and
+      // did not replace the density), and no width gate crept back in.
+      renderSidebar();
+      const toggle = screen.getByLabelText('Toggle sidebar');
+      expect(toggle).toHaveClass('coarse:min-h-11', 'coarse:min-w-11', 'size-8');
+      expect(toggle).not.toHaveClass('h-10', 'w-10');
+      expect(
+        Array.from(toggle.classList).filter((t) => t.startsWith('md:')),
+      ).toEqual([]);
+    });
+
+    test('Log out is floored in both states', async () => {
+      const user = userEvent.setup();
+      renderSidebar();
+      const collapsed = screen.getByRole('button', { name: /log\s*out/i });
+      // Collapsed it is square by className, not by `size="icon"` — the
+      // primitive cannot see that shape, so the width half is the call site's
+      // own `TOUCH_TARGET_SQUARE`.
+      expect(collapsed).toHaveClass('coarse:min-h-11', 'coarse:min-w-11');
+
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      const expanded = screen.getByRole('button', { name: /log\s*out/i });
+      expect(expanded).toHaveClass('coarse:min-h-11');
+    });
+
+    test('the collapsed rail scrolls past its rows instead of clipping them', async () => {
+      // The floor's own side effect. Nine 44px rows plus the footer can make
+      // the collapsed column taller than a landscape tablet's viewport, and the
+      // nav used to be `overflow-hidden` on both axes — which would put
+      // Settings and Log out below the cut with nothing to scroll. X still
+      // clips, because the aside animates its width and a row is briefly wider
+      // than the rail. Naming both axes is load-bearing: `overflow-y-auto`
+      // alone leaves X `visible`, which CSS then promotes to `auto`.
+      const user = userEvent.setup();
+      renderSidebar();
+      const nav = screen.getByRole('navigation');
+      expect(nav).toHaveClass('overflow-x-hidden', 'overflow-y-auto');
+      expect(nav).not.toHaveClass('overflow-hidden');
+
+      // Expanded is a 240px column that has always scrolled; unchanged here,
+      // asserted so a future edit cannot collapse the two branches into one
+      // without noticing they are different answers.
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      expect(screen.getByRole('navigation')).toHaveClass('overflow-auto');
+    });
+
+    test('every interactive control in the column clears the height floor', async () => {
+      // The invariant as one sweep, so a control added to the shell later
+      // cannot land under the floor just because no test named it. Covers both
+      // states because the expanded column mounts one control the collapsed one
+      // does not (the colour-theme Select).
+      function unflooredControls(): string[] {
+        const aside = screen.getByRole('complementary');
+        return Array.from(aside.querySelectorAll('a, button'))
+          .filter((el) => !el.classList.contains('coarse:min-h-11'))
+          .map(
+            (el) =>
+              el.getAttribute('aria-label') ??
+              el.textContent?.trim() ??
+              el.tagName,
+          );
+      }
+
+      const user = userEvent.setup();
+      renderSidebar();
+      // 9 rows + toggle + Log out + the theme mode toggle.
+      expect(
+        screen.getByRole('complementary').querySelectorAll('a, button'),
+      ).toHaveLength(12);
+      expect(unflooredControls()).toEqual([]);
+
+      await user.click(screen.getByLabelText('Toggle sidebar'));
+      // ...plus the colour-theme Select trigger, which only renders expanded.
+      expect(
+        screen.getByRole('complementary').querySelectorAll('a, button'),
+      ).toHaveLength(13);
+      expect(unflooredControls()).toEqual([]);
     });
   });
 });

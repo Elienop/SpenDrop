@@ -66,6 +66,10 @@ export function TransactionRow({
   // one selection test covers whichever presentation is mounted.
   const label = transactionLabel(transaction);
   const [editing, setEditing] = useState(false);
+  // Owned here rather than left to Radix so the key guard around the category
+  // picker can read it — see the comment on that wrapper for why the trigger's
+  // `aria-expanded` is not a safe substitute.
+  const [categoryPickerOpen, setCategoryPickerOpen] = useState(false);
   // True only between a menu item running and the close it causes — the
   // actions menu's onCloseAutoFocus reads and clears it to decide whether
   // Radix's focus-to-trigger restore may run. A ref, not state: it must be
@@ -214,35 +218,53 @@ export function TransactionRow({
           />
         </TableCell>
         <TableCell>
-          {/* Radix react-select ^2.2.6 does NOT `stopPropagation` on the
-              Escape/Enter keydown it uses to close its own popover content,
-              so without this capture wrapper the first Escape in an open
-              Select would both close the Select AND cancel the row, and a
-              first Enter on a highlighted option would both select the
-              option AND save the row. We detect "is this Select open" via
-              the trigger's own `aria-expanded` attribute — the trigger
-              lives in this `<div>`'s subtree (the SelectContent portal
-              does not), so querying `e.currentTarget` keeps the guard
-              scoped to this wrapper's subtree and cannot be tricked by
-              an unrelated open listbox elsewhere (another row, the
-              touch autocomplete Command, etc.). Today that subtree
-              holds exactly one combobox (the category Select); if a
-              maintainer later nests another combobox here the guard
-              will correctly suppress for it too. When the trigger is
-              closed,
-              `aria-expanded` flips to false, the query returns null, and
-              Enter/Escape bubble normally so the user can save/cancel
-              from the trigger with the keyboard. */}
+          {/* Radix react-select does NOT `stopPropagation` on the Escape or
+              Enter it consumes, so both keep travelling to the `<tr>` above,
+              where `handleRowKeyDown` turns Enter into a save and Escape into
+              a cancel. Unguarded, the first Escape in an open Select would
+              close the Select AND cancel the row, and Enter on a highlighted
+              option would pick it AND save.
+
+              BUBBLE phase, never capture (B33). React dispatches synthetic
+              events along the REACT tree, so the portalled listbox is still a
+              descendant of this `<div>` — a capture-phase `stopPropagation`
+              runs BEFORE `SelectItem`'s own `onKeyDown` and swallows the Enter
+              that was supposed to choose the option, leaving the list open and
+              the category unchanged. That was the shipped bug on the phone
+              sheet's copy of this picker, and Space went on working the whole
+              time, which is what disguised it as a Radix fault:
+              `SELECTION_KEYS` is `[' ', 'Enter']` and the guard never listed
+              Space. In the bubble phase Radix has already acted by the time
+              the key is stopped, which is the split this guard wants.
+
+              The open flag is this Select's own state rather than a DOM read
+              of the trigger's `aria-expanded`, because by the bubble phase the
+              key that closes the popover has already been handled: Radix has
+              called `onOpenChange(false)` and the attribute's value then
+              depends on whether React has flushed that update yet. React
+              snapshots event listeners before invoking any of them, so the
+              closure below still reads the state of the render the key was
+              pressed in — true — no matter when the re-render lands. It also
+              cannot be confused by an open listbox belonging to something else
+              (another row, the touch autocomplete Command).
+
+              Both ways in are covered by the one flag: a key pressed inside
+              the portalled listbox, and one pressed on the trigger during the
+              window before Radix moves focus into the content (a held Enter
+              repeats into it). With the Select closed the key bubbles on, and
+              the user can still save or cancel from the trigger. */}
           <div
-            onKeyDownCapture={(e) => {
+            onKeyDown={(e) => {
               if (e.key !== 'Escape' && e.key !== 'Enter') return;
-              const openTrigger = e.currentTarget.querySelector(
-                '[role="combobox"][aria-expanded="true"]',
-              );
-              if (openTrigger) e.stopPropagation();
+              if (categoryPickerOpen) e.stopPropagation();
             }}
           >
-            <Select value={categoryId} onValueChange={setCategoryId}>
+            <Select
+              open={categoryPickerOpen}
+              onOpenChange={setCategoryPickerOpen}
+              value={categoryId}
+              onValueChange={setCategoryId}
+            >
               <SelectTrigger>
                 <SelectValue />
               </SelectTrigger>

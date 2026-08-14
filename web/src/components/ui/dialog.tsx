@@ -29,10 +29,32 @@ const DialogOverlay = React.forwardRef<
 ))
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName
 
+/**
+ * `showCloseButton` opts a dialog out of the built-in X.
+ *
+ * Default `true`, so all 11 pre-existing production call sites are
+ * byte-unchanged. It exists
+ * for the one dialog that refuses every close except its own button — the
+ * API-token reveal, which holds a plaintext secret the server will never
+ * re-issue — where the X rendered, took focus, and did nothing. A control that
+ * looks operable and is not is worse than no control.
+ *
+ * Named after the prop upstream shadcn added for the same purpose in its
+ * newer registry style, rather than an inverted `hideClose`, so that whenever
+ * this project moves off the `default`/Tailwind-v3 style the two converge
+ * instead of conflicting.
+ *
+ * A CSS-only hide was the alternative and was rejected on testability: no
+ * stylesheet is loaded under happy-dom, so a `hidden` utility would leave the
+ * button in the accessibility tree in every test while appearing to work in
+ * the browser — unverifiable in exactly the environment that has to prove it.
+ */
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content> & {
+    showCloseButton?: boolean
+  }
+>(({ className, children, showCloseButton = true, ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     {/* `grid-rows-[minmax(0,1fr)]` is what lets the scroll wrapper below
@@ -66,10 +88,12 @@ const DialogContent = React.forwardRef<
           moving it: the negative margin pulls the border box back out by the
           same 14px the padding adds, so the icon still sits 16px from the top
           and right. The two tokens must stay equal or the icon shifts. */}
-      <DialogPrimitive.Close className="absolute right-4 top-4 -m-3.5 rounded-sm p-3.5 opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
-        <X className="h-4 w-4" />
-        <span className="sr-only">Close</span>
-      </DialogPrimitive.Close>
+      {showCloseButton && (
+        <DialogPrimitive.Close className="absolute right-4 top-4 -m-3.5 rounded-sm p-3.5 opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none data-[state=open]:bg-accent data-[state=open]:text-muted-foreground">
+          <X className="h-4 w-4" />
+          <span className="sr-only">Close</span>
+        </DialogPrimitive.Close>
+      )}
     </DialogPrimitive.Content>
   </DialogPortal>
 ))
