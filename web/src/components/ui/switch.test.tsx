@@ -44,7 +44,9 @@ describe('Switch touch target', () => {
     // collapses to zero width, a sliver that catches no tap.
     expect(control).toHaveClass('coarse:before:absolute');
     expect(control).toHaveClass('coarse:before:inset-x-0');
-    expect(control).toHaveClass('coarse:before:-inset-y-2.5');
+    // -inset-y-3, not -2.5: insets resolve against the PADDING box and
+    // border-2 shrinks it to 20px, so 12px insets are what reach 44.
+    expect(control).toHaveClass('coarse:before:-inset-y-3');
     expect(control).toHaveClass("coarse:before:content-['']");
   });
 
