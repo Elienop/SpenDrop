@@ -32,8 +32,9 @@ top items. Production figures in this file come from the owner's live database o
 2026-08-08 on `fix/b7-healthcheck-data`, merged via PR #124 and released as v0.39.0 — see
 Closed. B8 shipped 2026-08-08 on `fix/b8-backup-verified-marker`, merged via PR #125 and
 released as v0.39.1 — see Closed. The B9 batch shipped across #126, #128, #130 and #131
-(v0.40.0–v0.42.1) and the 2026-08-14 phone-polish batch as #137 (v0.43.0) — B22, B24, B29,
-B31, B32, B35, B37 and B38 moved to Closed with them.*
+(v0.40.0–v0.42.1) and the 2026-08-14 phone-polish batch as #137 (v0.43.0) — B24, B29, B31,
+B32, B35, B37 and B38 moved to Closed with them; B22 closed separately on the branch that
+recorded all of this.*
 
 ### B12 — Bulk counts promise a member more than their write can touch
 **Verified: read** (found 2026-08-07 while designing the B4 fix; owner asked for the line).
@@ -426,7 +427,8 @@ condition *and* move the predicate, believing one was safe because the other was
   solution-style file (`files: []`) whose `compilerOptions` do not reach the referenced
   projects, so the named placement would have pinned nothing. The original entry's probe
   evidence (TS18047/TS7006 fire by default, clean under `--strict false`) is in this file's git
-  history.
+  history. Closed on the same branch that documents it, so `a20b7e4` is a pre-squash hash —
+  the PR number and squash hash join this entry at merge, per convention.
 
 - **B31 + B32 + B35 + B37 + B38 — the browser pass and its fix batch** (2026-08-10/14, on
   `fix/settings-users-manage-dialog-and-export-overflow`; MERGED via PR #137, squash `a8c484f`,
@@ -481,7 +483,7 @@ condition *and* move the predicate, believing one was safe because the other was
   cancelling Radix's own restore — a "bare" Select had isolated nothing because the bare
   component still rendered through our wrapper.
 
-### B9 — Mobile shell, all three slices — SHIPPED
+**B9 — Mobile shell, all three slices — SHIPPED**
 *(#126 squash `661ad46` **v0.40.0** · #128 `f308c8f` **v0.41.0** · #130 `cbaa4d0` **v0.42.0**
 · follow-up #131 `09d1836` **v0.42.1**. Kept at full length because this was the project's
 largest stage; the D-numbered defect list below is the closure evidence.)*
