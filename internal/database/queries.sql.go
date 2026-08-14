@@ -327,23 +327,24 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) er
 
 const createTransaction = `-- name: CreateTransaction :one
 
-INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash, idempotency_key)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-RETURNING id, user_id, date, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, content_hash, idempotency_key
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, booked_rate, description, category_id, tags, notes, content_hash, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+RETURNING id, user_id, date, original_currency, description, category_id, tags, notes, created_at, updated_at, deleted_at, amount_cents, original_amount_cents, booked_rate, content_hash, idempotency_key
 `
 
 type CreateTransactionParams struct {
-	UserID              int64          `json:"user_id"`
-	Date                time.Time      `json:"date"`
-	AmountCents         int64          `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
-	OriginalCurrency    sql.NullString `json:"original_currency"`
-	Description         string         `json:"description"`
-	CategoryID          int64          `json:"category_id"`
-	Tags                sql.NullString `json:"tags"`
-	Notes               sql.NullString `json:"notes"`
-	ContentHash         sql.NullString `json:"content_hash"`
-	IdempotencyKey      sql.NullString `json:"idempotency_key"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	BookedRate          sql.NullFloat64 `json:"booked_rate"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	ContentHash         sql.NullString  `json:"content_hash"`
+	IdempotencyKey      sql.NullString  `json:"idempotency_key"`
 }
 
 // Transactions
@@ -377,6 +378,12 @@ type CreateTransactionParams struct {
 // indexes can fire on the same INSERT, so the caller must be able to tell
 // them apart — see IsContentHashUniqueViolation and
 // IsIdempotencyKeyUniqueViolation, which each match one index by name.
+//
+// B10: booked_rate is nullable and NULL is the common case. It carries the
+// rate that divided the foreign amount into base cents, and only the
+// conversion path can supply it — a row with no currency, a row priced in the
+// base currency, and an imported row (import applies no conversion at all)
+// all store NULL. It is not a content_hash input and never becomes one.
 func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionParams) (Transaction, error) {
 	row := q.db.QueryRowContext(ctx, createTransaction,
 		arg.UserID,
@@ -384,6 +391,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		arg.AmountCents,
 		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
+		arg.BookedRate,
 		arg.Description,
 		arg.CategoryID,
 		arg.Tags,
@@ -406,6 +414,7 @@ func (q *Queries) CreateTransaction(ctx context.Context, arg CreateTransactionPa
 		&i.DeletedAt,
 		&i.AmountCents,
 		&i.OriginalAmountCents,
+		&i.BookedRate,
 		&i.ContentHash,
 		&i.IdempotencyKey,
 	)
@@ -700,27 +709,28 @@ func (q *Queries) GetTransactionByContentHash(ctx context.Context, contentHash s
 }
 
 const getTransactionByID = `-- name: GetTransactionByID :one
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.type AS category_type
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, t.booked_rate, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 WHERE t.id = ?
 `
 
 type GetTransactionByIDRow struct {
-	ID                  int64          `json:"id"`
-	UserID              int64          `json:"user_id"`
-	Date                time.Time      `json:"date"`
-	OriginalCurrency    sql.NullString `json:"original_currency"`
-	Description         string         `json:"description"`
-	CategoryID          int64          `json:"category_id"`
-	Tags                sql.NullString `json:"tags"`
-	Notes               sql.NullString `json:"notes"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	DeletedAt           sql.NullTime   `json:"deleted_at"`
-	AmountCents         int64          `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
-	CategoryType        string         `json:"category_type"`
+	ID                  int64           `json:"id"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	DeletedAt           sql.NullTime    `json:"deleted_at"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	BookedRate          sql.NullFloat64 `json:"booked_rate"`
+	CategoryType        string          `json:"category_type"`
 }
 
 // Mutation-only caller: used by TransactionStore.Update/Delete to emit the
@@ -728,6 +738,11 @@ type GetTransactionByIDRow struct {
 // load the live row before marking it deleted_at; the handlers that serve
 // user-facing reads go through ListTransactions / sqlc aggregation queries
 // which all filter deleted_at IS NULL.
+//
+// This projection is narrower than t.* (it omits content_hash and
+// idempotency_key) but it DOES carry booked_rate, because it is the `before`
+// row TransactionStore reads inside the update transaction: the store cannot
+// carry a rate forward across a full-replace UPDATE it cannot see.
 func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransactionByIDRow, error) {
 	row := q.db.QueryRowContext(ctx, getTransactionByID, id)
 	var i GetTransactionByIDRow
@@ -745,13 +760,14 @@ func (q *Queries) GetTransactionByID(ctx context.Context, id int64) (GetTransact
 		&i.DeletedAt,
 		&i.AmountCents,
 		&i.OriginalAmountCents,
+		&i.BookedRate,
 		&i.CategoryType,
 	)
 	return i, err
 }
 
 const getTransactionByIdempotencyKey = `-- name: GetTransactionByIdempotencyKey :one
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, t.content_hash, t.idempotency_key FROM transactions t
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, t.booked_rate, t.content_hash, t.idempotency_key FROM transactions t
 WHERE t.user_id = ? AND t.idempotency_key = ?
 `
 
@@ -803,6 +819,7 @@ func (q *Queries) GetTransactionByIdempotencyKey(ctx context.Context, arg GetTra
 		&i.DeletedAt,
 		&i.AmountCents,
 		&i.OriginalAmountCents,
+		&i.BookedRate,
 		&i.ContentHash,
 		&i.IdempotencyKey,
 	)
@@ -2353,19 +2370,20 @@ func (q *Queries) UpdateSavedFilter(ctx context.Context, arg UpdateSavedFilterPa
 
 const updateTransaction = `-- name: UpdateTransaction :exec
 UPDATE transactions
-SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, booked_rate = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?
 `
 
 type UpdateTransactionParams struct {
-	Date                time.Time      `json:"date"`
-	AmountCents         int64          `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
-	OriginalCurrency    sql.NullString `json:"original_currency"`
-	Description         string         `json:"description"`
-	CategoryID          int64          `json:"category_id"`
-	Tags                sql.NullString `json:"tags"`
-	Notes               sql.NullString `json:"notes"`
+	Date                time.Time       `json:"date"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	BookedRate          sql.NullFloat64 `json:"booked_rate"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
 	// ClearContentHash is DERIVED, not caller-supplied: TransactionStore sets
 	// it from hashInputsMoved(before, params) against the row it loads inside
 	// the same tx. Anything a caller puts here is overwritten. It exists as a
@@ -2427,12 +2445,29 @@ type UpdateTransactionParams struct {
 //
 // Pinned by TestCreateTransaction_KeySurvivesAnEdit, which fails with
 // "the retry duplicated the row after an edit" if the column is added here.
+//
+// booked_rate IS in the SET list, unconditionally, because this statement is a
+// FULL REPLACE: the value passed must always describe the amount_cents passed
+// alongside it, and a caller that omits it stores NULL over whatever the row
+// held. TransactionStore.UpdateTx seeds it from `before` like every other
+// column the batch patch cannot touch, so a tags/date/category patch carries
+// the stored rate through untouched.
+//
+// TODO(b10-booked-rate): TransactionStore.Update (the PUT full-replace path)
+// does not yet derive this value — its callers pass the zero value, so an edit
+// writes NULL. That is unobservable today because nothing populates the column
+// yet: the rate capture in resolveCurrency and the freeze carry-forward beside
+// `p.AmountCents = before.AmountCents` land in the same branch, and the
+// invariant they must establish is that the stored rate always describes the
+// stored amount_cents — a frozen save carries both forward from `before`, a
+// repricing save stores the rate the handler just resolved.
 func (q *Queries) UpdateTransaction(ctx context.Context, arg UpdateTransactionParams) error {
 	_, err := q.db.ExecContext(ctx, updateTransaction,
 		arg.Date,
 		arg.AmountCents,
 		arg.OriginalAmountCents,
 		arg.OriginalCurrency,
+		arg.BookedRate,
 		arg.Description,
 		arg.CategoryID,
 		arg.Tags,

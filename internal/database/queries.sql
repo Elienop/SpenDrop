@@ -243,8 +243,14 @@ ON CONFLICT(code) DO UPDATE SET
 -- indexes can fire on the same INSERT, so the caller must be able to tell
 -- them apart — see IsContentHashUniqueViolation and
 -- IsIdempotencyKeyUniqueViolation, which each match one index by name.
-INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, description, category_id, tags, notes, content_hash, idempotency_key)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+--
+-- B10: booked_rate is nullable and NULL is the common case. It carries the
+-- rate that divided the foreign amount into base cents, and only the
+-- conversion path can supply it — a row with no currency, a row priced in the
+-- base currency, and an imported row (import applies no conversion at all)
+-- all store NULL. It is not a content_hash input and never becomes one.
+INSERT INTO transactions (user_id, date, amount_cents, original_amount_cents, original_currency, booked_rate, description, category_id, tags, notes, content_hash, idempotency_key)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 RETURNING *;
 
 -- name: CountTransactionsSince :one
@@ -259,6 +265,13 @@ SELECT COUNT(*) FROM transactions t WHERE t.created_at > ? AND t.deleted_at IS N
 -- load the live row before marking it deleted_at; the handlers that serve
 -- user-facing reads go through ListTransactions / sqlc aggregation queries
 -- which all filter deleted_at IS NULL.
+--
+-- Written with t.*, but that is NOT what runs (same caveat as the trash
+-- queries below): queries.sql.go is hand-maintained and executes a 14-column
+-- projection that omits content_hash and idempotency_key. booked_rate IS in
+-- it, deliberately — this is the `before` row TransactionStore reads inside
+-- the update transaction, and a column absent from it cannot be carried
+-- across the full-replace UPDATE.
 SELECT t.*, c.type AS category_type
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
@@ -317,8 +330,24 @@ WHERE t.id = ?;
 --
 -- Pinned by TestCreateTransaction_KeySurvivesAnEdit, which fails with
 -- "the retry duplicated the row after an edit" if the column is added here.
+--
+-- booked_rate IS in the SET list, unconditionally, because this statement is a
+-- FULL REPLACE: the value passed must always describe the amount_cents passed
+-- alongside it, and a caller that omits it stores NULL over whatever the row
+-- held. TransactionStore.UpdateTx seeds it from `before` like every other
+-- column the batch patch cannot touch, so a tags/date/category patch carries
+-- the stored rate through untouched.
+--
+-- TODO(b10-booked-rate): TransactionStore.Update (the PUT full-replace path)
+-- does not yet derive this value — its callers pass the zero value, so an edit
+-- writes NULL. That is unobservable today because nothing populates the column
+-- yet: the rate capture in resolveCurrency and the freeze carry-forward beside
+-- `p.AmountCents = before.AmountCents` land in the same branch, and the
+-- invariant they must establish is that the stored rate always describes the
+-- stored amount_cents — a frozen save carries both forward from `before`, a
+-- repricing save stores the rate the handler just resolved.
 UPDATE transactions
-SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
+SET date = ?, amount_cents = ?, original_amount_cents = ?, original_currency = ?, booked_rate = ?, description = ?, category_id = ?, tags = ?, notes = ?, content_hash = CASE WHEN ? THEN NULL ELSE content_hash END, updated_at = CURRENT_TIMESTAMP
 WHERE id = ?;
 
 -- name: SoftDeleteTransaction :exec
@@ -348,13 +377,13 @@ DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 -- The two trash list queries below are written here with t.*, but that is
 -- NOT what runs. sqlc codegen is broken in this repo, so queries.sql.go is
 -- hand-maintained (despite its DO-NOT-EDIT header) and both queries execute
--- an explicit 13-column projection of transactions that OMITS content_hash
--- and idempotency_key, plus the two category columns and the creator's
--- display name — 16 fields, matching ListDeletedTransactionsRow and the two
--- Scan calls in queries.sql.go.
+-- an explicit 13-column projection of transactions that OMITS content_hash,
+-- idempotency_key and booked_rate, plus the two category columns and the
+-- creator's display name — 16 fields, matching ListDeletedTransactionsRow and
+-- the two Scan calls in queries.sql.go.
 -- If codegen is ever repaired and regenerated literally from this file,
--- t.* expands to 15 transaction columns and both Scan blocks break on a
--- field-count mismatch (and the two extra columns would start reaching the
+-- t.* expands to 16 transaction columns and both Scan blocks break on a
+-- field-count mismatch (and the three extra columns would start reaching the
 -- trash handler). Narrow these to the explicit column list at the same time
 -- as regenerating, or expect trash_handlers.go to need updating with it.
 --

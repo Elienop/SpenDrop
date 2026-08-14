@@ -150,21 +150,22 @@ type Session struct {
 }
 
 type Transaction struct {
-	ID                  int64          `json:"id"`
-	UserID              int64          `json:"user_id"`
-	Date                time.Time      `json:"date"`
-	OriginalCurrency    sql.NullString `json:"original_currency"`
-	Description         string         `json:"description"`
-	CategoryID          int64          `json:"category_id"`
-	Tags                sql.NullString `json:"tags"`
-	Notes               sql.NullString `json:"notes"`
-	CreatedAt           time.Time      `json:"created_at"`
-	UpdatedAt           time.Time      `json:"updated_at"`
-	DeletedAt           sql.NullTime   `json:"deleted_at"`
-	AmountCents         int64          `json:"amount_cents"`
-	OriginalAmountCents sql.NullInt64  `json:"original_amount_cents"`
-	ContentHash         sql.NullString `json:"content_hash"`
-	IdempotencyKey      sql.NullString `json:"idempotency_key"`
+	ID                  int64           `json:"id"`
+	UserID              int64           `json:"user_id"`
+	Date                time.Time       `json:"date"`
+	OriginalCurrency    sql.NullString  `json:"original_currency"`
+	Description         string          `json:"description"`
+	CategoryID          int64           `json:"category_id"`
+	Tags                sql.NullString  `json:"tags"`
+	Notes               sql.NullString  `json:"notes"`
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
+	DeletedAt           sql.NullTime    `json:"deleted_at"`
+	AmountCents         int64           `json:"amount_cents"`
+	OriginalAmountCents sql.NullInt64   `json:"original_amount_cents"`
+	BookedRate          sql.NullFloat64 `json:"booked_rate"`
+	ContentHash         sql.NullString  `json:"content_hash"`
+	IdempotencyKey      sql.NullString  `json:"idempotency_key"`
 }
 
 type TransactionAudit struct {

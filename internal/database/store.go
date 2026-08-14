@@ -137,8 +137,11 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // carried forward verbatim instead of being re-derived from today's rate.
 //
 // A foreign-currency row records the foreign amount and what it was worth in
-// the base currency, but NOT the rate that produced that number; no migration
-// defines such a column. The api layer's resolveCurrency divides by the CURRENT
+// the base currency. Migration 019 added a booked_rate column for the rate that
+// produced that number, but the column is NOT yet populated or consulted by any
+// code path — see the TODO(b10-booked-rate) note on UpdateTransaction — so
+// every row's rate is still unrecorded and the reasoning below still holds
+// unchanged. The api layer's resolveCurrency divides by the CURRENT
 // rate on every call, and PUT /transactions/{id} is a full replace — the inline
 // row editor rebuilds original_amount / original_currency from the stored row
 // and resends them on every save (web/src/lib/currency.ts, toEditDefaults +
@@ -151,9 +154,10 @@ func (s *TransactionStore) CreateTx(ctx context.Context, tx *sql.Tx, actorID int
 // (1,500,000 -> 1,600,000), a switch to a different foreign currency, and a
 // switch to or from the base currency all keep the caller's recomputed amount,
 // because each of those IS the user changing the money. Re-pricing a corrected
-// foreign amount at today's rate is the only option available — the rate the
+// foreign amount at today's rate is the only option available while the rate a
 // row was booked at is recorded nowhere. Snapshotting it per row is backlog B1
-// step 2, folded into the refunds migration; this is step 1.
+// step 2: migration 019 landed the storage for it with the refunds rebuild, and
+// filling it in is what makes any other option expressible.
 //
 // KNOWN LIMITATION, and it is one-way. Once a foreign row exists, no re-save
 // can ever move its base value again while the foreign amount and currency code
@@ -297,12 +301,15 @@ func (s *TransactionStore) UpdateTx(
 	// boundary, so a parse error here is "should never happen" but is still
 	// surfaced as a wrapped error so the caller's tx rolls back.
 	//
-	// AmountCents / OriginalAmountCents / OriginalCurrency are copied through
-	// unchanged because the v1 batch-update patch deliberately does not expose
-	// them — bulk amount edits would require currency conversion and cents
-	// recomputation that the patch shape does not carry. The legacy REAL
-	// amount / original_amount columns were dropped in migration 010 (Phase
-	// 3.1b), so only the cents columns flow through.
+	// AmountCents / OriginalAmountCents / OriginalCurrency / BookedRate are
+	// copied through unchanged because the v1 batch-update patch deliberately
+	// does not expose them — bulk amount edits would require currency
+	// conversion and cents recomputation that the patch shape does not carry.
+	// The legacy REAL amount / original_amount columns were dropped in
+	// migration 010 (Phase 3.1b), so only the cents columns flow through.
+	// BookedRate rides along for the same reason and one more: a batch patch
+	// never re-prices anything, so the rate that produced the row's stored
+	// amount is still the true one and must survive a tags-only edit.
 	//
 	// content_hash is cleared CONDITIONALLY, via the ClearContentHash flag set
 	// below once the merge is complete. A patch can move date, description or
@@ -320,6 +327,7 @@ func (s *TransactionStore) UpdateTx(
 		AmountCents:         before.AmountCents,
 		OriginalAmountCents: before.OriginalAmountCents,
 		OriginalCurrency:    before.OriginalCurrency,
+		BookedRate:          before.BookedRate,
 		Description:         before.Description,
 		CategoryID:          before.CategoryID,
 		Tags:                before.Tags,
