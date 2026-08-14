@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { api } from '../api/client';
 import type {
@@ -15,6 +16,13 @@ export interface UseDashboardResult {
   /** True during any fetch (including refetches). */
   fetching: boolean;
   error: string;
+  /**
+   * Re-runs the current period's trio. This is the error state's recovery
+   * verb, and it is deliberately a REFETCH and not `window.location.reload()`:
+   * one failed query does not justify tearing down the client, and a reload
+   * loses every unsaved control state on the page (and the focus with it).
+   */
+  refetch: () => void;
 }
 
 interface DashboardData {
@@ -56,6 +64,13 @@ export function useDashboard(
     },
   });
 
+  // Fire-and-forget, matching `useTransactions`'s `refetch`. The rejection is
+  // not dropped on the floor — a failed refetch lands back in `query.error`
+  // and re-renders the same alert the user just retried from.
+  const refetch = useCallback(() => {
+    void query.refetch();
+  }, [query]);
+
   return {
     summary: query.data?.summary ?? null,
     trend: query.data?.trend ?? [],
@@ -67,5 +82,6 @@ export function useDashboard(
         ? query.error.message
         : 'Failed to load dashboard'
       : '',
+    refetch,
   };
 }

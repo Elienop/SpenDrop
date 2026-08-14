@@ -199,6 +199,7 @@ vi.mock('../hooks/useDashboard', () => ({
     loading: false,
     fetching: false,
     error: '',
+    refetch: () => {},
   }),
 }));
 
