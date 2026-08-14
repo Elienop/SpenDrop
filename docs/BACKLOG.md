@@ -183,28 +183,6 @@ Three separate defects in one surface, none of them mobile-specific:
 Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
 **Effort:** medium for (1); small for (2) and (3).
 
-### B28 — four sheets scroll their own header away
-**Verified: reproduced for one, read for three** (B9 slice 3, 2026-08-09). `ui/sheet.tsx` wraps
-ALL children — `SheetHeader` included — in its `overflow-y-auto` body scroller, so a sheet with a
-long body loses its title and any summary figure on scroll. Measured on the heatmap's day sheet
-before the fix: the day's total left the visible box after **60px** of scroll with 8 of 20 rows
-still on screen.
-
-Slice 3 added an optional `header` slot rendered OUTSIDE the scroller and used it for the day
-sheet. Four consumers still pass `SheetHeader` as a child: `MobileNav` (a `border-b p-4` header,
-where the border makes the scroll-away most visible), `TransactionEditSheet`, `Categories`, and
-the Transactions `Filters` sheet. `TransactionEditSheet` was MEASURED and its form never
-overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is latent; the other
-two were not measured.
-**Effort:** small per consumer — the opt-in is one prop.
-
-### B30 — the Settings section is not reflected in the URL
-**Verified: read** (2026-08-09). `location.search` stays empty when a section is chosen, on both
-the desktop tab strip and the new phone picker. A `?tab=` value is honoured *into* the page but
-never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
-not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
-**Effort:** small.
-
 ### B36 — a member can take another member's display name, and attribution follows
 **Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
 mechanism confirmed independently: `created_by` **is** the display name
@@ -253,21 +231,6 @@ close on `saving` would trap the user behind a hung request. The clean fix is an
 (closing aborts the request) plus a test for both halves: close aborts, and a save that completed
 before the close still toasts.
 **Effort:** small.
-
-### B44 — the Budgets table still pans 211px inside its wrapper at 360
-**Verified: reproduced with real data** (2026-08-14 browser pass, built container at 360). The
-page itself does not pan — the table sits in a bounded scroll wrapper — but the table is 556px
-wide in a 345px box, so the Limit column and everything right of it needs a 211px in-card pan.
-This is the B41 residual re-measured: real data confirms it, so the fixture-inflation caveat is
-retired. Fix is the same card-list treatment every other table got. **Effort:** small-medium.
-
-### B45 — the five stacked notification switches' tap bands overlap by ~4px
-**Verified: measured** (2026-08-14 browser pass at 360). The activity switches (Over budget
-through Large transaction) sit 16px apart; each carries the coarse tap band that reaches 10px
-past its border box, so adjacent bands overlap by ~4px and a tap at the seam lands on the LATER
-switch in paint order. Pre-existing rhythm, untouched by the phone batch; low stakes (the wrong
-toggle flips visibly and is one tap to undo). Fix once decided: stretch the stack's row gap to
-20px+, or shrink the band on stacked placements. **Effort:** small.
 
 ### B46 — "six sections" is stale in eight places since `users` merged into `account`
 **Verified: read** (2026-08-14, found during B30). `VALID_TABS` has five entries and the phone
@@ -334,9 +297,9 @@ loads until this is fixed. **Effort:** small.
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
 PR #139 and released as v0.44.0 — see Closed.*
 
-- **Phone-residue batch (B44 + B45 + B28 + B30) — IN FLIGHT** on
-  `fix/phone-residue-sheets-url-budgets-switches` (owner's go 2026-08-14). Docs riders on the
-  branch: the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision records.
+- ~~Phone-residue batch (B44 + B45 + B28 + B30)~~ — **built and verified 2026-08-15** on
+  `fix/phone-residue-sheets-url-budgets-switches` — see Closed. Carried the `2bea69f` stamp
+  and the B43 / native-Android / import-rate / ⌘Z decision records as riders.
 - **Back-dated import rate** (decided 2026-08-14): the import sheet gets an optional per-row
   rate column; rows without one fall back to the import-day rate. Data-correctness stage on
   its own branch — import parser + validation, and the interaction with the import dedupe
@@ -415,6 +378,51 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B28 + B30 + B44 + B45 — the phone-residue batch** (2026-08-15, on
+  `fix/phone-residue-sheets-url-budgets-switches`, commits `6a16776..d324b12`; squash hash
+  joins this entry at merge). Three parallel builders with disjoint file ownership. Per item:
+  **B28** — all four remaining sheet consumers (MobileNav, TransactionEditSheet, Categories
+  editor, Transactions Filters) moved their `SheetHeader` into the primitive's `header` slot,
+  so titles stay visible under body scroll; spacing preserved exactly (removed body margins
+  became the sheet's flex gap — arithmetic verified by the deep review); MobileNav's flush
+  header additionally got `relative bg-card` — deliberately WITHOUT z-index, which would bury
+  the drawer's absolutely-positioned Close button (pinned by a dedicated mutant).
+  TransactionEditSheet's migration is defensive (its form never overflows, `maxScroll: 0`).
+  Browser-verified: divider unbroken under real scroll, Close tappable, and the two
+  landscape-only sheets (66/68px overflow at 780x360) plus the unbounded 21-chip category
+  filter (367px scroll) all keep their titles.
+  **B30** — the chosen section is replace-written to `?tab=` through the one `handleTabChange`
+  both surfaces share, clamped by `resolveSettingsTab` (the same function the inbound path
+  uses — round trip closed by construction, security-reviewed). Nothing writes on mount: a
+  bare `/settings` stays bare, and a retired bookmark keeps its raw value so the forwarding
+  toast can reproduce (see B50 for why cold loads currently lose that toast anyway).
+  `MOVED_TABS` became a `Map`, closing the prototype-key lookup (`?tab=constructor` toasted
+  "undefined has its own page now") and the unchecked `Record` index in one move; the deep
+  review then found every route in that table unpinned (repointing both at `/trash` stayed
+  green) — all three destinations now have invoke-and-assert-URL cases with literal oracles.
+  **B44** — BOTH Budgets tables (not one: the page has two, and only Category Limits was
+  panning — the brief's premise, corrected by the builder) render as card lists below `md` on
+  the shared JS gate. Monthly cards horizontal (bounded token), category cards stacked
+  (100-char names wrap via `[overflow-wrap:anywhere]` with `leading-5` pinned against
+  tailwind-merge reviving Label's `leading-none` — the review's "set solid" Important was
+  REFUTED by measuring the merged output: `text-sm` deletes `leading-none` in the conflict
+  table, so the token is a pin, not a repair). Admin/member gating mirrored; em-dash-never-zero
+  through the shared `readOnlyAmount` (the cards' `?? ''` arm and the table's `undefined` arm
+  meet in one guard); `inputMode="decimal"`; the Category Limits description names the
+  currency (an admin's phone view otherwise showed none). Desktop DOM-diffed at HEAD vs base:
+  byte-identical except the caption and the Annual-total `font-mono`.
+  **B45** — the filed "~4px overlap" was wrong in mechanism and worse in fact: the five
+  activity switches' 44px tap bands TILED at exactly zero clearance (24px row + `gap-5` 20px
+  = 44px pitch), seam resolved by paint order. Stack moved to `coarse:gap-6` → +4px clearance,
+  fine-pointer rhythm untouched; the regression test derives band and pitch from rendered
+  class strings (border-2 is 2px — its own scale), the pattern that cannot go stale the way
+  the old comment did. Coarse-emulation browser pass: every seam midpoint hits no switch,
+  every switch answers its own band.
+  Process: four-reviewer battery (1 Important — refuted; all other findings fixed in three
+  waves), ~45 builder mutants watched die pre-commit, isolated deep review MERGEABLE (12/13
+  full-suite re-kills; the survivor became the route-pin test above), live browser pass at
+  360/640/780x360 + proven-coarse. Suites 2048 → 2090.
 
 - **B43 — Enter on the closed category trigger saves the row: CLOSED as intended behavior**
   (owner decision 2026-08-14; no code change — the decision record and the test-comment update
