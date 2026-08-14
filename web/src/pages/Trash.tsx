@@ -1225,15 +1225,18 @@ export function Trash() {
                           : 'text-foreground',
                       )}
                     >
-                      {formatSignedCurrency(
-                        displayAmount(row.amount, row.category_type),
-                        baseCurrency,
-                      )}
+                      {/* ABOVE the figure, the order `AmountDisplay` pins for
+                          the same pair: the correction has to be heard before
+                          the number it corrects, not after it. */}
                       <AmountSignNote
                         amount={row.amount}
                         type={row.category_type}
                         className="justify-end"
                       />
+                      {formatSignedCurrency(
+                        displayAmount(row.amount, row.category_type),
+                        baseCurrency,
+                      )}
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="flex items-center justify-end gap-1">

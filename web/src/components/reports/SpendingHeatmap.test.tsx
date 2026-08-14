@@ -62,7 +62,7 @@ const CURRENCIES = [
 ];
 
 import { SpendingHeatmap } from './SpendingHeatmap';
-import { OPACITY_STOPS, chipFill } from './heatmapGrid';
+import { OPACITY_STOPS, REFUNDED_CHIP, chipFill } from './heatmapGrid';
 
 // ---------------------------------------------------------------------------
 // Viewport control
@@ -527,6 +527,39 @@ describe('a day that spent nothing NET is not a day with nothing on it', () => {
       expect(tokens).toContain('ring-1');
       expect(tokens).toContain('ring-inset');
       expect(tokens).toContain('ring-primary/50');
+    }
+  });
+
+  test('the legend carries the state, in the paint the cells use', () => {
+    // The other four states are decodable from the legend or from the number:
+    // a chip on the intensity scale is self-evidently more or less, an empty
+    // day is grey, an upcoming one is blank. A grey square wearing a ring is
+    // not self-evidently anything — and the household's primary surface cannot
+    // ask, because Radix's tooltip never opens on touch. So it needs an entry,
+    // and the entry has to be painted from the same string: a legend that
+    // drifts off the cells it claims to explain is worse than no legend, since
+    // it is now confidently wrong.
+    setViewportWidth(PHONE_WIDTH);
+    renderHeatmap(YEAR, REFUNDED);
+    const legend = screen.getByRole('group', {
+      name: 'Daily spending intensity legend',
+    });
+    const grid = screen.getByRole('grid', {
+      name: 'Spending heatmap for March 2026',
+    });
+
+    // The shared constant IS this paint — pinned literally, so emptying it
+    // cannot make the agreement below true by making both sides blank.
+    const shared = ['bg-muted', 'ring-1', 'ring-inset', 'ring-primary/50'];
+    expect(REFUNDED_CHIP.split(' ')).toEqual(shared);
+
+    const swatch = within(legend).getByText('Refunded').previousElementSibling;
+    expect(swatch).not.toBeNull();
+    const swatchTokens = (swatch as HTMLElement).className.split(/\s+/);
+    const chipTokens = chipOf(cell(grid, '2026-03-10')).className.split(/\s+/);
+    for (const token of shared) {
+      expect(swatchTokens).toContain(token);
+      expect(chipTokens).toContain(token);
     }
   });
 

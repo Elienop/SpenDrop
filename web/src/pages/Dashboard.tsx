@@ -618,9 +618,9 @@ export function Dashboard() {
                           {refunded && (
                             <span
                               data-testid={`category-refunded-${slice.id}`}
-                              className="flex items-center gap-1 text-xs text-muted-foreground"
+                              className="flex items-center gap-1.5 text-xs text-muted-foreground"
                             >
-                              <Undo2 className="size-3 shrink-0" aria-hidden="true" />
+                              <Undo2 className="size-3.5 shrink-0" aria-hidden="true" />
                               {slice.value < 0
                                 ? 'Net refund'
                                 : 'Refunded in full'}
@@ -842,6 +842,14 @@ export function Dashboard() {
                               cell and the phone card list above (which render
                               the same rows through `AmountDisplay`) cannot
                               disagree about a refund. */}
+                          {/* ABOVE the figure, the order `AmountDisplay` pins
+                              for the same pair: the correction has to be heard
+                              before the number it corrects, not after it. */}
+                          <AmountSignNote
+                            amount={tx.amount}
+                            type={tx.category_type}
+                            className="justify-end"
+                          />
                           <span
                             className={cn(
                               'text-sm font-semibold tabular-nums',
@@ -853,11 +861,6 @@ export function Dashboard() {
                               displayAmount(tx.amount, tx.category_type),
                             )}
                           </span>
-                          <AmountSignNote
-                            amount={tx.amount}
-                            type={tx.category_type}
-                            className="justify-end"
-                          />
                         </TableCell>
                       </TableRow>
                     );

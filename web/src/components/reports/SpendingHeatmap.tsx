@@ -25,6 +25,7 @@ import { cn } from '@/lib/utils';
 import { HeatmapDaySheet, type HeatmapDay } from './HeatmapDaySheet';
 import {
   OPACITY_STOPS,
+  REFUNDED_CHIP,
   buildIntensityScale,
   chipFill,
   generateMonthDates,
@@ -184,7 +185,7 @@ function chipPaint(
   if (upcoming) return { className: '' };
   if (count === 0) return { className: 'bg-muted' };
   if (total > 0) return { className: '', style: { backgroundColor: chipFill(opacity) } };
-  return { className: 'bg-muted ring-1 ring-inset ring-primary/50' };
+  return { className: REFUNDED_CHIP };
 }
 
 /** Which month the phone opens on: the current one, or January for a past year. */
@@ -934,6 +935,20 @@ function HeatmapLegend() {
       <div className="flex items-center gap-1.5">
         <div className="h-3 w-3 rounded-sm bg-muted" aria-hidden="true" />
         <span>No spend</span>
+      </div>
+      {/* The one state a reader cannot decode from the paint. A cell on the
+          intensity scale is self-evidently more or less; a grey square wearing
+          a ring is not self-evidently anything, and the household's primary
+          platform cannot open the tooltip that would otherwise explain it —
+          Radix's never opens on touch. Painted from the SAME constant the
+          cells use, so the entry cannot end up describing a chip the grid
+          stopped drawing. */}
+      <div className="flex items-center gap-1.5">
+        <div
+          className={cn('h-3 w-3 rounded-sm', REFUNDED_CHIP)}
+          aria-hidden="true"
+        />
+        <span>Refunded</span>
       </div>
       <div className="flex items-center gap-1.5">
         <span>Less</span>

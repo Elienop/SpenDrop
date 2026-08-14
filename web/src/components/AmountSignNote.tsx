@@ -46,11 +46,11 @@ export function AmountSignNote({ amount, type, className }: AmountSignNoteProps)
     <span
       data-testid="amount-sign-note"
       className={cn(
-        'flex items-center gap-1 font-sans text-xs font-normal text-muted-foreground',
+        'flex items-center gap-1.5 font-sans text-xs font-normal text-muted-foreground',
         className,
       )}
     >
-      <Undo2 className="size-3 shrink-0" aria-hidden="true" />
+      <Undo2 className="size-3.5 shrink-0" aria-hidden="true" />
       {COPY[kind]}
     </span>
   );

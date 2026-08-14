@@ -81,6 +81,45 @@ describe('AmountSignToggle', () => {
     expect(screen.getByRole('switch', { name: 'Refund' })).toBeInTheDocument();
   });
 
+  it('_HintDescribesTheSwitch: the explanation reaches a screen reader too', () => {
+    // The `aria-label` that keeps the NAME to one word also cuts the hint out
+    // of the accessible tree entirely — the label element is no longer the
+    // name source, and nothing else pointed at the sentence. So a sighted user
+    // got the definition of "Refund" and a screen-reader user got the word on
+    // its own, on the one control whose whole job is to say which way the
+    // money went. Description, not name: the sentence follows the word instead
+    // of replacing it.
+    //
+    // Both directions in ONE test, on purpose. An "it is absent without
+    // showHint" test on its own passes just as happily when the wiring was
+    // never added at all.
+    const { rerender } = render(
+      <AmountSignToggle
+        checked={false}
+        onCheckedChange={vi.fn()}
+        type="expense"
+        showHint
+      />,
+    );
+    const withHint = screen.getByRole('switch');
+    expect(withHint).toHaveAccessibleName('Refund');
+    expect(withHint).toHaveAccessibleDescription('Money that came back to you.');
+    // The id is generated, so this pins the WIRING rather than a value: the
+    // attribute has to resolve to the element holding the hint.
+    const described = document.getElementById(
+      withHint.getAttribute('aria-describedby') ?? '',
+    );
+    expect(described).toBe(screen.getByText(/came back to you/i));
+
+    rerender(
+      <AmountSignToggle checked={false} onCheckedChange={vi.fn()} type="expense" />,
+    );
+    // No hint rendered, so no dangling reference to one: an aria-describedby
+    // pointing at a missing id is announced as nothing at all in some screen
+    // readers and as the whole document in others.
+    expect(screen.getByRole('switch')).not.toHaveAttribute('aria-describedby');
+  });
+
   it('_UndoesAMonoAncestor: the words render in the text face, not tabular figures', () => {
     // Two of the four mounts sit inside a `font-mono` amount block (the inline
     // edit row's amount cell, and the amount column of the entry row). Same
@@ -93,6 +132,33 @@ describe('AmountSignToggle', () => {
     const root = screen.getByRole('switch').parentElement as HTMLElement;
     expect(root.className.split(/\s+/)).toContain('font-sans');
     expect(root.className.split(/\s+/)).toContain('font-normal');
+  });
+
+  it('_LabelKeepsTheRegisterItCites: the word is a label, not a hint', () => {
+    // This is the `Label` + `Switch` + two-line register Settings' notification
+    // toggles established, and the main line there carries Label's default
+    // `font-medium` with only the hint demoted to `font-normal`. Demoting the
+    // whole Label — which this shipped with, and which no other Label in
+    // web/src does — flattens the two lines into one weight and leaves the
+    // control's own name reading as secondary to the sentence explaining it.
+    //
+    // The root's `font-normal` is a DIFFERENT thing and must survive: it undoes
+    // a `font-mono` ancestor on two of the four mounts (see the test above).
+    render(
+      <AmountSignToggle
+        checked={false}
+        onCheckedChange={vi.fn()}
+        type="expense"
+        showHint
+      />,
+    );
+    const label = screen.getByText('Refund').closest('label') as HTMLElement;
+    const tokens = label.className.split(/\s+/);
+    expect(tokens).toContain('font-medium');
+    expect(tokens).not.toContain('font-normal');
+    // `gap-1`, the register's own spacing — `gap-0.5` was a third value for a
+    // two-line label stack that already had one.
+    expect(tokens).toContain('gap-1');
   });
 
   it('_SharesItsVocabularyWithTheSavedRow: toggle and note use one word per kind', () => {

@@ -625,7 +625,7 @@ export function TransactionEntryRow({
             control={form.control}
             name="refund"
             render={({ field }) => (
-              <FormItem className="space-y-2">
+              <FormItem>
                 {/* Same invisible-label + fixed-height-box trick the submit
                     button's column uses: under `items-start` a control with no
                     label of its own would sit a label's height above its
@@ -688,6 +688,25 @@ export function TransactionEntryRow({
                             key={cat.id}
                             value={cat.name}
                             onSelect={() => {
+                              // A kind change retires the sign, exactly as it
+                              // does on QuickAdd's income/expense toggle: what
+                              // the control MEANS is scoped to the kind — a
+                              // refund on an expense, a reversal on an income
+                              // — so carrying a checked toggle across leaves
+                              // the row asserting something about the other
+                              // kind under a word the user never saw. This is
+                              // a CREATE surface, so there is no stored sign
+                              // to preserve; the edit surfaces keep theirs and
+                              // relabel instead (useTransactionEditForm).
+                              // Compared against `entryType`, the word the
+                              // toggle is CURRENTLY wearing, not against the
+                              // previously selected category — with no
+                              // category picked yet the row already reads as
+                              // an expense, so picking an income one is a
+                              // visible change of kind.
+                              if (cat.type !== entryType) {
+                                form.setValue('refund', false);
+                              }
                               field.onChange(cat.id);
                               setCatOpen(false);
                               focusFieldByName('tags');

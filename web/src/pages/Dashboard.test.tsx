@@ -401,15 +401,26 @@ describe('Dashboard', () => {
       render(<MemoryRouter><Dashboard /></MemoryRouter>);
       await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
       expect(amountCell().textContent).toBe('+$42.50');
-      expect(amountCell().querySelector('span')).toHaveClass('text-emerald-500');
+      // Same selector as the refund case below, where the cell's first span is
+      // the sign note rather than the figure.
+      expect(amountCell().querySelector('span.tabular-nums')).toHaveClass(
+        'text-emerald-500',
+      );
     });
 
     test('a REFUND renders as an inflow on an expense row, and says so', async () => {
       recentAmount = -42.5;
       render(<MemoryRouter><Dashboard /></MemoryRouter>);
       await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
-      expect(amountCell().textContent).toBe('+$42.50Refund');
-      expect(amountCell().querySelector('span')).toHaveClass('text-emerald-500');
+      // The note LEADS the figure, the order `AmountDisplay` pins for the same
+      // pair — the correction has to be announced before the number it
+      // corrects. Which is also why the colour is read off the FIGURE's span
+      // by its own class and not off the cell's first one: that is the note
+      // now, and it is muted in every state.
+      expect(amountCell().textContent).toBe('Refund+$42.50');
+      expect(amountCell().querySelector('span.tabular-nums')).toHaveClass(
+        'text-emerald-500',
+      );
       expect(
         within(amountCell()).getByTestId('amount-sign-note'),
       ).toHaveTextContent('Refund');
@@ -420,8 +431,11 @@ describe('Dashboard', () => {
       recentAmount = -42.5;
       render(<MemoryRouter><Dashboard /></MemoryRouter>);
       await waitFor(() => expect(screen.getByText('Groceries')).toBeInTheDocument());
-      expect(amountCell().textContent).toBe('-$42.50Reversal');
-      expect(amountCell().querySelector('span')).not.toHaveClass(
+      expect(amountCell().textContent).toBe('Reversal-$42.50');
+      // `span.tabular-nums`, not the cell's first span: the note leads now, and
+      // a `not.toHaveClass` assertion against it would pass for every render
+      // this test exists to reject.
+      expect(amountCell().querySelector('span.tabular-nums')).not.toHaveClass(
         'text-emerald-500',
       );
     });

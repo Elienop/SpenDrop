@@ -216,6 +216,14 @@ export function RecentlyAdded({
                       type — see `displayAmount`. This panel lists pending
                       offline rows as well as saved ones, and a queued refund
                       has to read the same here as it will once it lands. */}
+                  {/* BEFORE the figure, the order `AmountDisplay` pins for the
+                      same pair: the correction has to be heard before the
+                      number it corrects, not after it. */}
+                  <AmountSignNote
+                    amount={row.amount}
+                    type={row.type}
+                    className="shrink-0"
+                  />
                   <span
                     className={cn(
                       'shrink-0 font-mono text-sm font-medium tabular-nums',
@@ -228,11 +236,6 @@ export function RecentlyAdded({
                       row.currency,
                     )}
                   </span>
-                  <AmountSignNote
-                    amount={row.amount}
-                    type={row.type}
-                    className="shrink-0"
-                  />
                   <span className="truncate text-sm">
                     {row.description || '—'}
                   </span>

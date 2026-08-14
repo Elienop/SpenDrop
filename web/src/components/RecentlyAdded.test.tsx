@@ -204,9 +204,13 @@ describe('RecentlyAdded', () => {
     const amount = li?.querySelector('span.font-mono');
     expect(amount?.textContent).toBe('+$10.00');
     expect(amount?.className).toContain('text-emerald-500');
-    expect(within(li!).getByTestId('amount-sign-note')).toHaveTextContent(
-      'Refund',
-    );
+    const note = within(li!).getByTestId('amount-sign-note');
+    expect(note).toHaveTextContent('Refund');
+    // BEFORE the figure, the order `AmountDisplay` pins for the same pair: the
+    // correction has to be announced before the number it corrects. Asserted
+    // as adjacency rather than by reading the row's whole text, which also
+    // carries the description and the sync badge.
+    expect(note.nextElementSibling).toBe(amount);
   });
 
   test('a PENDING refund reads the same as a saved one', async () => {

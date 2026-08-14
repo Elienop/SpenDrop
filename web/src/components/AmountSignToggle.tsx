@@ -64,6 +64,7 @@ export function AmountSignToggle({
 }: AmountSignToggleProps) {
   const generatedId = useId();
   const controlId = id ?? `${generatedId}-sign`;
+  const hintId = `${controlId}-hint`;
   const kind: AmountSignKind = type === TYPE_EXPENSE ? 'refund' : 'reversal';
   const copy = COPY[kind];
 
@@ -84,11 +85,19 @@ export function AmountSignToggle({
         // Money that came back to you." is not what anyone would say out loud.
         // Same arrangement as Settings' notification switches.
         aria-label={copy.label}
+        // The hint is the DEFINITION of the word in the name — "Refund" alone
+        // does not say which direction the money went — so it has to reach a
+        // screen reader too. As a description rather than part of the name:
+        // the name stays the one word, and the sentence follows it.
+        aria-describedby={showHint ? hintId : undefined}
       />
-      <Label htmlFor={controlId} className="flex flex-col gap-0.5 font-normal">
+      <Label htmlFor={controlId} className="flex flex-col gap-1">
         <span>{copy.label}</span>
         {showHint && (
-          <span className="text-xs font-normal text-muted-foreground">
+          <span
+            id={hintId}
+            className="text-xs font-normal text-muted-foreground"
+          >
             {copy.hint}
           </span>
         )}

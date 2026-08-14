@@ -110,7 +110,19 @@ describe('AmountDisplay', () => {
     // sits with it.
     expect(root).toHaveTextContent(/^Refund\+\$20\.00$/);
     expect(root).toHaveClass('text-emerald-500');
-    expect(screen.getByTestId('amount-sign-note')).toHaveTextContent('Refund');
+    const note = screen.getByTestId('amount-sign-note');
+    expect(note).toHaveTextContent('Refund');
+    // THE METADATA REGISTER, and it is one register with one geometry: the
+    // creator line and the version line already use `gap-1.5` + `size-3.5`
+    // (TransactionCard, RecentlyAdded, AppVersion, each with its own pin).
+    // `gap-1` + `size-3` here was a third size tier for the same kind of line,
+    // sitting inches from the second one on the same card.
+    expect(note.className.split(/\s+/)).toContain('gap-1.5');
+    const icon = note.querySelector('svg');
+    expect(icon).not.toBeNull();
+    expect(icon!.getAttribute('class')?.split(/\s+/)).toEqual(
+      expect.arrayContaining(['size-3.5', 'shrink-0']),
+    );
   });
 
   it('an income REVERSAL renders as an outflow and says it is a reversal', () => {

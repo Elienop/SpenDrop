@@ -157,6 +157,12 @@ export function useTransactionEditForm({
   const [categoryId, setCategoryId] = useState(String(transaction.category_id));
   const [tags, setTags] = useState(transaction.tags ?? '');
   const [saving, setSaving] = useState(false);
+  // A save was attempted with an empty amount box. Latched rather than checked
+  // continuously: the field starts populated and clearing it is a step ON THE
+  // WAY to typing a new figure, so complaining the moment it goes empty would
+  // scold the user mid-keystroke. The message is derived from this AND the
+  // live value below, which is what retires it as soon as a digit lands.
+  const [triedEmptySave, setTriedEmptySave] = useState(false);
 
   const didInitEditCurrency = useRef(false);
   useEffect(() => {
@@ -193,6 +199,20 @@ export function useTransactionEditForm({
   }, [currenciesLoading, baseCode, transaction]);
 
   const save = useCallback(async () => {
+    // An empty amount box emits exactly 0 (`AmountCurrencyInput` maps '' and
+    // any unparseable text to it), and a zero amount is unstorable — the server
+    // answers "amount must not be zero", which is the wire's vocabulary aimed
+    // at a user who typed nothing at all. Refuse it here instead, in the field
+    // that is wrong, and send no request: a round trip cannot change the
+    // answer. Not folded into `saveDisabled` — the other two conditions there
+    // are things the user cannot act on from this form, while this one is a
+    // box they are three keystrokes from fixing, and a Save button that dims
+    // itself the moment the field is cleared reads as broken.
+    if (editAmount === 0) {
+      setTriedEmptySave(true);
+      return;
+    }
+    setTriedEmptySave(false);
     setSaving(true);
     let payload: UpdateTransactionInput;
     try {
@@ -247,6 +267,7 @@ export function useTransactionEditForm({
 
   const reset = useCallback(() => {
     const resolved = toEditDefaults(transaction, baseCode);
+    setTriedEmptySave(false);
     setDate(transaction.date);
     setEditAmount(Math.abs(resolved.amount));
     setIsNegative(resolved.amount < 0);
@@ -282,10 +303,15 @@ export function useTransactionEditForm({
       original_amount: transaction.original_amount,
       original_currency: transaction.original_currency,
     },
+    // The rate error outranks the empty one, and cannot in fact coexist with
+    // it: a missing rate already disables Save, so the empty-amount latch has
+    // no way to be set while one is outstanding.
     error:
       editCurrency !== baseCode && rateFor(editCurrency) == null
         ? 'No rate configured for this currency. Set one in Settings.'
-        : null,
+        : triedEmptySave && editAmount === 0
+          ? 'Enter an amount'
+          : null,
   };
 
   // The word the toggle wears follows the category the row is filed under

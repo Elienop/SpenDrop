@@ -1489,5 +1489,61 @@ describe('TransactionEntryRow', () => {
         screen.queryByRole('switch', { name: 'Refund' }),
       ).not.toBeInTheDocument();
     });
+
+    it('_KindChangeClearsTheToggle: a refund asserted on an expense does not become a reversal', async () => {
+      // The relabel above is only half the answer. The user asserted "this is
+      // a refund" about an EXPENSE; re-filing the row as income leaves that
+      // assertion sitting under a word they never saw, and the row goes out
+      // negative as an income reversal. QuickAdd's kind toggle already clears
+      // for this reason — this is the same rule on the surface that re-derives
+      // its kind from the category instead of from a toggle.
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /groceries/i }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+      expect(screen.getByRole('switch', { name: 'Refund' })).toBeChecked();
+
+      await user.click(screen.getByRole('button', { name: /^groceries$/i }));
+      await user.click(await screen.findByRole('option', { name: /salary/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Reversal' }),
+      ).not.toBeChecked();
+    });
+
+    it('_SameKindKeepsTheToggle: re-filing one expense as another is not a kind change', async () => {
+      // The discriminating half. "Clear whenever the category changes" also
+      // passes the test above and is wrong: correcting Groceries to Transport
+      // leaves the claim intact — it is still a refund on an expense — and
+      // silently un-refunding it there would turn money returned back into
+      // money spent, which is the defect this whole toggle exists to prevent.
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await user.click(screen.getByRole('button', { name: /select category/i }));
+      await user.click(await screen.findByRole('option', { name: /groceries/i }));
+      await user.click(screen.getByRole('switch', { name: 'Refund' }));
+
+      await user.click(screen.getByRole('button', { name: /^groceries$/i }));
+      await user.click(await screen.findByRole('option', { name: /transport/i }));
+
+      expect(
+        await screen.findByRole('switch', { name: 'Refund' }),
+      ).toBeChecked();
+    });
   });
 });

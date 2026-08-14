@@ -51,6 +51,20 @@ export function chipFill(opacity: number): string {
 }
 
 /**
+ * The chip a day with rows but no net spend wears — a day the refunds
+ * cancelled out.
+ *
+ * Here rather than inline in `chipPaint` for the same reason `chipFill` is
+ * here: the legend has to paint this state with the SAME string, and this is
+ * the one state whose meaning cannot be guessed from the colour. A day painted
+ * on the intensity scale is obviously "more" or "less"; a grey square with a
+ * ring is not obviously anything, and on a phone there is no tooltip to ask —
+ * Radix's cannot open on touch. Two copies of the string is how the legend
+ * ends up explaining a paint the grid no longer uses.
+ */
+export const REFUNDED_CHIP = 'bg-muted ring-1 ring-inset ring-primary/50';
+
+/**
  * Chronological cells for a whole year, Monday-first, padded at both ends so
  * the array length is always a multiple of 7.
  *

@@ -1616,8 +1616,10 @@ describe('Trash', () => {
         expect(cell.tagName).toBe('TD');
         expect(classes(cell)).toContain('text-emerald-500');
         // Exact, including the note: a second sign character anywhere in the
-        // cell fails this.
-        expect(cell.textContent).toBe('+$25.50Refund');
+        // cell fails this. The note LEADS the figure, the order the card's
+        // `AmountDisplay` pins for the same pair — the correction has to be
+        // announced before the number it corrects.
+        expect(cell.textContent).toBe('Refund+$25.50');
       });
 
       test('a foreign-currency card shows what the row was booked in', async () => {
