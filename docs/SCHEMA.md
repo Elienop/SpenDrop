@@ -1122,6 +1122,15 @@ CREATE TABLE health_write_probe (
 -- identities, break the earliest-id-wins anchors future imports dedupe
 -- against, and can collide with a live row mid-migration.
 --
+-- INHERITED, ACCEPTED: DROP TABLE deletes the table's sqlite_sequence row, so
+-- the rebuilt table's AUTOINCREMENT high-water mark restarts at max(copied id).
+-- Ids hard-purged from the trash before this upgrade become reissuable, and
+-- transaction_audit keeps a purged row's history with no FK (009 header), so a
+-- re-minted id would inherit an unrelated audit trail. Same property as the
+-- 010 rebuild it copies; purge is a rare manual action at household scale, so
+-- this is accepted with this note rather than a sqlite_sequence carry-forward
+-- (which has its own empty-table and fully-purged edge cases).
+--
 -- booked_rate is NULL for every copied row and there is NO backfill. A legacy
 -- row's rate is only lossily derivable from original_amount_cents/amount_cents
 -- (cent-rounded, and simply wrong for imported rows, which were never priced
