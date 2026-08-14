@@ -1112,26 +1112,39 @@ export function Transactions() {
       )}
 
       <Sheet open={showFilters} onOpenChange={setShowFilters}>
-        <SheetContent side="right" className="w-full sm:max-w-md">
-          <SheetHeader>
-            <SheetTitle>Filters</SheetTitle>
-            <SheetDescription>
-              Narrow the transaction list by date, category, amount, or a saved
-              preset.
-            </SheetDescription>
-          </SheetHeader>
-          <div className="mt-4">
-            <FilterPanel
-              filters={filters}
-              setFilter={setFilter}
-              clearPanelFilters={clearPanelFilters}
-              categories={categories}
-              savedFilters={savedFilters}
-              onSaveFilter={handleSaveFilter}
-              onLoadFilter={handleLoadFilter}
-              onDeleteFilter={handleDeleteFilter}
-            />
-          </div>
+        <SheetContent
+          side="right"
+          className="w-full sm:max-w-md"
+          // Outside the body scroller, not a child of it. This is the one of
+          // the four sheets whose body has no upper bound: the Category tab
+          // renders a chip per category and the Saved tab a row per preset,
+          // so its height grows with the household's own data rather than
+          // with a fixed field count. Not measured in a browser — the two
+          // short tabs (Date, Amount) fit a 360x780 portrait viewport.
+          //
+          // The wrapper this replaced carried `mt-4`, which the sheet's own
+          // `gap-4` now supplies (the body's `-m-1 p-1` cancel), so the
+          // header-to-panel distance is unchanged at 16px.
+          header={
+            <SheetHeader>
+              <SheetTitle>Filters</SheetTitle>
+              <SheetDescription>
+                Narrow the transaction list by date, category, amount, or a
+                saved preset.
+              </SheetDescription>
+            </SheetHeader>
+          }
+        >
+          <FilterPanel
+            filters={filters}
+            setFilter={setFilter}
+            clearPanelFilters={clearPanelFilters}
+            categories={categories}
+            savedFilters={savedFilters}
+            onSaveFilter={handleSaveFilter}
+            onLoadFilter={handleLoadFilter}
+            onDeleteFilter={handleDeleteFilter}
+          />
         </SheetContent>
       </Sheet>
 

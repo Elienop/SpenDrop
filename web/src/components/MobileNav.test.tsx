@@ -127,6 +127,22 @@ function classes(el: Element): string[] {
   return el.className.split(/\s+/).filter(Boolean);
 }
 
+/**
+ * The one `bg-*` token an element paints on. Derived rather than compared to a
+ * literal, so "the header is opaque in the drawer's own surface" survives the
+ * drawer being re-tokened — and throws rather than guessing if tailwind-merge
+ * ever leaves two.
+ */
+function surfaceToken(el: Element): string {
+  const found = classes(el).filter((c) => /^bg-/.test(c));
+  if (found.length !== 1) {
+    throw new Error(
+      `expected exactly one bg-* token, got: ${found.join(', ') || '(none)'}`,
+    );
+  }
+  return found[0];
+}
+
 /** Opens the drawer and returns its dialog element. */
 async function openDrawer(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: 'Open navigation menu' }));
@@ -216,6 +232,68 @@ describe('MobileNav', () => {
     const dialog = await openDrawer(user);
     expect(within(dialog).getByText('Alice')).toBeInTheDocument();
     expect(within(dialog).getByText('@alice')).toBeInTheDocument();
+  });
+
+  // B28. The bordered block carrying the wordmark and who is signed in used
+  // to be the scroller's first child, so on any phone short enough to scroll
+  // the list it scrolled away with it. happy-dom lays nothing out, so what is
+  // pinned is the structure that produces the fix: which side of the scroll
+  // container the header is on.
+  test('the drawer header stays OUT of the body scroller', async () => {
+    const user = userEvent.setup();
+    renderMobileNav();
+    const dialog = await openDrawer(user);
+
+    const scroller = dialog.querySelector('.overflow-y-auto');
+    expect(scroller).not.toBeNull();
+
+    // Reached from the accessible name outwards, so the border treatment is
+    // asserted on the same element the title actually sits in — the header
+    // does not count as pinned if it left its border behind.
+    const header = within(dialog)
+      .getByText('SpenDrop navigation')
+      .closest('.border-b');
+    expect(header).not.toBeNull();
+    expect(header).toContainElement(within(dialog).getByText('Alice'));
+    expect(scroller!.contains(header!)).toBe(false);
+
+    // The positive control, and it earns its keep: "is outside the scroller"
+    // is equally true of a header that never rendered, and of a sheet that
+    // lost its scroller entirely.
+    expect(
+      scroller!.contains(
+        within(dialog).getByRole('navigation', { name: 'Primary' }),
+      ),
+    ).toBe(true);
+  });
+
+  // The other half of pinning the header: it sits over a 4px strip of the
+  // body scroller (this drawer's `gap-0` leaves nothing to absorb the
+  // scroller's `-m-1`), and the scroller paints later, so scrolled rows would
+  // bleed over the divider unless the header is positioned AND opaque.
+  // happy-dom paints nothing, so what is pinned is the pair of classes that
+  // produce it — and the z-index that must NOT be there.
+  test('the pinned header paints over the strip the scroller overlaps', async () => {
+    const user = userEvent.setup();
+    renderMobileNav();
+    const dialog = await openDrawer(user);
+    const header = within(dialog)
+      .getByText('SpenDrop navigation')
+      .closest('.border-b');
+    expect(header).not.toBeNull();
+
+    // Positioned, so the scroller's in-flow content paints beneath it.
+    expect(classes(header!)).toContain('relative');
+
+    // Opaque, in the drawer's OWN surface token rather than a literal:
+    // re-token the drawer and this fails until the header follows it.
+    expect(classes(header!)).toContain(surfaceToken(dialog));
+
+    // And NOT lifted. SheetContent's Close button is `absolute right-4 top-4`
+    // — inside this header's box, and later in the DOM, so it paints above
+    // the header only while the header's z-index stays auto. A z-* here would
+    // bury the drawer's only X and swallow its taps.
+    expect(classes(header!).filter((c) => /^z-/.test(c))).toEqual([]);
   });
 
   // Invariant 5: the drawer consumes the same nav-items arrays as the
