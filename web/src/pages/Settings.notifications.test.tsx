@@ -308,23 +308,97 @@ describe('NotificationsSection — digest + quiet hours', () => {
   });
 });
 
+/**
+ * happy-dom lays nothing out, so the pixels below are ARITHMETIC over the class
+ * strings the components actually rendered — not a constant restated from the
+ * source. That distinction is the point: a test that pinned `coarse:gap-5`
+ * would have gone on passing while `Switch` grew its band from `-inset-y-2.5`
+ * to `-inset-y-3` underneath it, which is exactly what happened. Here the
+ * switch's own classes supply the band and the container supplies the pitch, so
+ * a change to either side that closes the clearance fails this file.
+ *
+ * The geometry, once: an absolutely-positioned pseudo resolves its insets
+ * against the PADDING box, so `border-2` on a `h-6` switch leaves 20px for
+ * `-inset-y-3` to grow from — a 44px band that reaches (44 − 24) / 2 = 10px
+ * past the border box top and bottom. Browser-measured at 44px on the built app
+ * (elementFromPoint, 2026-08-14); what this file adds is that the two numbers
+ * stay consistent with the gap between the rows.
+ */
 describe('NotificationsSection — adjacent switch targets do not overlap', () => {
-  test('the toggle rows sit in their own container with a coarse gap', () => {
+  /** The capture from the first class matching `pattern`, or a loud failure. */
+  function capture(el: Element, pattern: RegExp, what: string): string {
+    for (const token of el.className.split(/\s+/)) {
+      const hit = pattern.exec(token);
+      if (hit) return hit[1];
+    }
+    throw new Error(
+      `no ${what} class on <${el.tagName.toLowerCase()} class="${el.className}">`,
+    );
+  }
+
+  /** Tailwind's SPACING scale in px, refusing anything it does not recognise. */
+  function spacingPx(el: Element, pattern: RegExp, what: string): number {
+    const raw = capture(el, pattern, what);
+    const arbitrary = /^\[(\d+(?:\.\d+)?)px\]$/.exec(raw);
+    if (arbitrary) return Number(arbitrary[1]);
+    if (raw === 'px') return 1;
+    const steps = Number(raw);
+    // Loud rather than NaN: a silently-unparsed token would make every
+    // comparison below false-y and the whole file vacuous.
+    if (!Number.isFinite(steps)) {
+      throw new Error(`unrecognised Tailwind spacing length: "${raw}"`);
+    }
+    return steps * 4;
+  }
+
+  /** The coarse-pointer tap band of one Switch, derived from its own classes. */
+  function bandOf(sw: Element) {
+    const box = spacingPx(sw, /^h-(.+)$/, 'height');
+    // Border widths are their OWN scale — `border-2` is 2px, not the 8px the
+    // ×4 spacing scale would give. Read the wrong way round this put the band
+    // at 32px, which is how the distinction earned a comment.
+    const border = Number(capture(sw, /^border-(\d+)$/, 'border width'));
+    const inset = spacingPx(sw, /^coarse:before:-inset-y-(.+)$/, 'coarse band');
+    const height = box - 2 * border + 2 * inset;
+    return { height, overhang: (height - box) / 2 };
+  }
+
+  test('every switch in the section still carries a 44px coarse band', () => {
     render(<NotificationsSection />);
-    // Two Switches one above the other, each with a `-inset-y-2.5` (10px)
-    // pseudo target: at `gap-4` their expanded areas overlap by 4px on a touch
-    // screen. `coarse:gap-5` is exactly two extensions. Token assertion because
-    // happy-dom lays nothing out — and scoped to the container the switch rows
-    // share, so widening the whole section instead would not satisfy it.
+    const switches = screen.getAllByRole('switch');
+    // The per-device toggle, five household types, and the quiet-hours
+    // over-budget allowance. A count pin so a section that lost a row cannot
+    // make the loop below pass by iterating over fewer targets.
+    expect(switches).toHaveLength(7);
+    for (const sw of switches) {
+      expect(bandOf(sw).height).toBeGreaterThanOrEqual(44);
+    }
+  });
+
+  test('the stacked toggle rows leave positive clearance on a touch screen', () => {
+    render(<NotificationsSection />);
     const row = screen.getByLabelText('Over budget').closest('div');
     const container = row?.parentElement;
-    const tokens = container?.className.split(/\s+/) ?? [];
-    expect(tokens).toContain('coarse:gap-5');
-    expect(tokens).toContain('gap-4');
+    if (!container) throw new Error('switch-row container not found');
+
+    // These rows are exactly switch-height — a one-line Label is 14px against
+    // the switch's 24px — so the whole overhang lands in the gap between them.
+    const { overhang } = bandOf(screen.getByLabelText('Over budget'));
+    const coarseGap = spacingPx(container, /^coarse:gap-(.+)$/, 'coarse gap');
+    const clearance = coarseGap - 2 * overhang;
+    // STRICTLY positive. `gap-5` made the two bands tile edge to edge, and a
+    // shared boundary is not clearance: the tap resolves to whichever row
+    // painted its pseudo last, which is the later switch — the reported bug.
+    expect(clearance).toBeGreaterThan(0);
+
+    // Fine pointers keep the original rhythm: no band exists there, so the
+    // wider gap must stay behind the `coarse:` gate rather than replacing it.
+    expect(spacingPx(container, /^gap-(.+)$/, 'base gap')).toBe(16);
+
     // The container holds the switch rows and nothing else: a threshold or
     // digest row swept in here would get the coarse gap for no reason.
-    expect(container?.querySelectorAll('input,button[role="switch"]').length).toBe(
-      container?.querySelectorAll('button[role="switch"]').length,
+    expect(container.querySelectorAll('input,button[role="switch"]').length).toBe(
+      container.querySelectorAll('button[role="switch"]').length,
     );
   });
 });
