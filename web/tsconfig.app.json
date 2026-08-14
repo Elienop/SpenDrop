@@ -6,6 +6,9 @@
     "module": "esnext",
     "types": ["vite/client"],
     "skipLibCheck": true,
+    /* Explicit, though TS 6 defaults it on: a TypeScript downgrade or a CLI
+       override must not silently drop strict checking. */
+    "strict": true,
     "paths": {
       "@/*": ["./src/*"]
     },

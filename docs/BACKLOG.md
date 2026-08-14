@@ -31,7 +31,10 @@ top items. Production figures in this file come from the owner's live database o
 *B6 (the cheap batch) shipped 2026-08-07 on `fix/b6-cheap-batch` — see Closed. B7 shipped
 2026-08-08 on `fix/b7-healthcheck-data`, merged via PR #124 and released as v0.39.0 — see
 Closed. B8 shipped 2026-08-08 on `fix/b8-backup-verified-marker`, merged via PR #125 and
-released as v0.39.1 — see Closed.*
+released as v0.39.1 — see Closed. The B9 batch shipped across #126, #128, #130 and #131
+(v0.40.0–v0.42.1) and the 2026-08-14 phone-polish batch as #137 (v0.43.0) — B24, B29, B31,
+B32, B35, B37 and B38 moved to Closed with them; B22 closed separately on the branch that
+recorded all of this.*
 
 ### B12 — Bulk counts promise a member more than their write can touch
 **Verified: read** (found 2026-08-07 while designing the B4 fix; owner asked for the line).
@@ -157,34 +160,6 @@ notification lines. Fix in ONE pass: sanitize at both write sites; consider the 
 builder too.
 **Effort:** small.
 
-### B22 — web tsconfig lacks an explicit `strict`
-**Verified: reproduced** (B9 deep review 2026-08-08; **materially corrected 2026-08-08** during
-the recharts bump). `strict` is absent from `web/tsconfig.json` and `web/tsconfig.app.json`.
-
-**The correction, because the original entry would have caused someone to budget a pass that
-does not exist.** It read *"Enabling it is its own pass with an unknown error count — do not
-fold into another branch. Effort: unknown until tried; likely medium."* That was written from
-the absence of the flag, without checking what the flag defaults to. **TypeScript 6.0 defaults
-`strict` to true, and `web/package.json` pins `typescript 6.0.2`** — so the project has been
-compiling under strict all along. Verified with a standalone probe using the repo's own
-compiler:
-
-```
-$ tsc --version                          → Version 6.0.2
-$ tsc --noEmit probe.ts                  → TS18047 'x' is possibly 'null'
-                                           TS7006 Parameter 'y' implicitly has an 'any' type   (exit 2)
-$ tsc --noEmit --strict false probe.ts                                                          (exit 0)
-```
-
-Corroborated independently by the recharts 2→3 migration: four of its fourteen type errors were
-`TS7006` implicit-any, a strict-family diagnostic that cannot fire under a non-strict compiler.
-
-**Revised scope: add `"strict": true` to the two tsconfigs for documentation value, with zero
-expected errors.** The instruction not to fold it into another branch no longer applies — it was
-a consequence of the unknown error count, and the count is known to be zero.
-**Effort:** trivial. Worth doing because the guarantee currently rests on a compiler default
-that a future TypeScript downgrade or a `--strict false` in CI would silently remove.
-
 ### B23 — offline-capture hold filing on identity change is untested
 **Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
 files the queued-capture hold when the session identity changes. The race tests assert it is
@@ -192,18 +167,6 @@ NOT called with the new user's id under a stale failure, but nothing pins the po
 semantics — "the hold is filed against the DEPARTED id, if at all." A queue-semantics
 question, distinct from the auth race that exposed it.
 **Effort:** small.
-
-### B24 — /quick overflows the page horizontally on a 360px phone
-**Verified: reproduced** (found 2026-08-09 during B9 slice 3, on the rebuilt container at a
-360px viewport). `document.scrollWidth` is **506px against a clientWidth of 345** — the page
-itself pans sideways. The cause is a single `CategoryChips` button rendering a long category
-name at **489.5px**, unbounded. Same class as the D4 table cells: user-supplied text whose only
-ceiling is a server constant (`MaxCategoryNameLength = 100`, `internal/api/limits.go:401`).
-
-**This is the owner's daily capture surface** and the most-used screen on the primary platform,
-which is why it outranks its size. Pre-existing — not introduced by slice 3 — and left unfixed
-only because `CategoryChips.tsx` was outside the branch's scope.
-**Effort:** small — the same bounding idiom the three tables now use.
 
 ### B25 — the Reports page has one heading, and its Card labels are no-ops
 **Verified: read** (B9 slice-3 accessibility recon, 2026-08-09; PRE-EXISTING and page-wide).
@@ -225,6 +188,8 @@ Fixing (1) touches every card on all four tabs, which is why it was NOT folded i
 360. The remainder is five columns of header words plus cell padding, **not** the description —
 that is now bounded. Reaching zero needs the slice-2 card-list treatment rather than more padding
 tuning, which is why it was stopped here.
+**Re-measured 2026-08-14** during the browser pass, on the built container after #130/#131: the
+Patterns tab still pans 102px at 360. Still open; the fix is still the card-list treatment.
 **Effort:** medium — it is a presentation change, not a spacing tweak.
 
 ### B27 — the intensity scale returns the DARKEST stop for a zero total
@@ -259,60 +224,12 @@ overflows (`scrollHeight === clientHeight`, `maxScroll: 0`), so its defect is la
 two were not measured.
 **Effort:** small per consumer — the opt-in is one prop.
 
-### B29 — every Select in the app has 32px options
-**Verified: reproduced** (measured at a 360px viewport, 2026-08-09, while building the Settings
-phone picker). `SelectItem`'s stock `py-1.5` around `text-sm` gives a **32px** option row. The
-TRIGGER meets the 44px floor everywhere; the option that is actually tapped to choose does not —
-the wrong half to get right.
-
-Fixed at the Settings call site only. It is app-wide: **13 non-test consumers** import
-`SelectItem`. Changing `ui/select.tsx` moves every menu in the app at once, which is why it was
-not folded into a branch that had already been reviewed.
-
-**Correction (2026-08-09).** This entry originally said "QuickAdd's category picker is the one to
-check first, since it is on the daily capture surface". **That is false** — `QuickAdd.tsx` imports
-`CategoryChips`, not `Select`, and is not among the 13 consumers. B29 does **not** touch the daily
-capture surface; **B24 alone does**. The claim was written from memory rather than from a grep and
-was caught only when it was about to be handed to an agent as a premise. The consumers that do sit
-on a frequently-used path are `TransactionRow`, `TransactionEditSheet`, `Dashboard` and
-`PaginationBar`.
-
-Related and worth doing in the same pass: **Radix Select drops focus to `<body>` on selection** —
-verified three ways (user-event, a 2s `waitFor` to rule out late arrival, and real Chrome key
-events), and reproduced on a bare Select with nothing to swap, so it is the primitive rather than
-any consumer. Settings' picker now restores focus explicitly via `onCloseAutoFocus`; **every other
-Select in the app still drops it.** Same shape as the recorded Sheet-without-a-Trigger finding.
-**Effort:** small — one component, but verify every consumer at 360 and 1440.
-
 ### B30 — the Settings section is not reflected in the URL
 **Verified: read** (2026-08-09). `location.search` stays empty when a section is chosen, on both
 the desktop tab strip and the new phone picker. A `?tab=` value is honoured *into* the page but
 never written *out* of it, so a section cannot be bookmarked or shared and a back-navigation does
 not restore it. Pre-existing and shared by both branches, not introduced by the phone picker.
 **Effort:** small.
-
-### B31 — Select TRIGGERS are 32–40px, app-wide
-**Verified: measured** (Chrome, 2026-08-09, true device metrics at 360px and 1440px, after B29's
-option fix landed). B29's own filing claimed "the TRIGGER meets the 44px floor everywhere" and used
-that to argue only the option was wrong. **That claim was false.** `SelectTrigger`'s stock class is
-`h-10` = 40px, and several call sites shrink it further:
-
-| Trigger | Height | Where |
-|---|---|---|
-| ColorThemePicker | **32px** | desktop Sidebar footer only (`Sidebar.tsx:224`, `hidden md:flex`, and only when expanded) — NOT the app header, and NOT every page. Its other mount, `MobileNav.tsx:248`, already passes `h-11`. Corrected 2026-08-09; the original "app header, every page" was wrong. |
-| PaginationBar "Rows per page" | **32px** at 1440, 44px at 360 | Transactions |
-| Reports "Time Period" / "Budget Year" | **36px** | all four Reports tabs |
-| Dashboard "Month" / "Year" | **36px** | `/` |
-| Budgets year/month | **40px** | Budgets |
-| Categories type, BulkEdit category, TransactionRow inline, TransactionEditSheet | **40px** | various |
-| Settings section picker | 44px | the only one that meets the floor (`h-11`, set in B9 slice 3) |
-
-So the touch-floor gap was *both* halves, not just the option. Deliberately NOT folded into the
-B29 branch: `SelectTrigger` carries `h-10` as a fixed height that call sites override with their
-own `h-9`/`h-11`, so moving it to a floor changes chrome density on nine surfaces at two widths
-and needs its own verification pass — the same reasoning that kept the option fix off the slice-3
-branch. **Effort:** medium. Do not fix by adding `min-h-11` blindly; several of these sit in tight
-toolbars where a taller control reflows the row.
 
 ### B33 — Enter cannot pick a category in the phone edit sheet
 **Verified: reproduced by me** (Chrome, 360px, real key events, 2026-08-09). In
@@ -324,8 +241,9 @@ an option, and the sheet stays open. Mouse and Space both work. The same Select 
 Cause (reported by the build agent, code site confirmed): the `onKeyDownCapture` guard at
 `TransactionEditSheet.tsx:244`. React synthetic events propagate along the REACT tree, so a
 portalled `SelectContent` is still a React descendant of that div, and `stopPropagation()` in the
-CAPTURE phase kills Radix's own key handler before it runs. An identical guard sits at
-`TransactionRow.tsx:184`.
+CAPTURE phase kills Radix's own key handler before it runs. An identical guard sits in
+`TransactionRow.tsx` (at `:232` since #137's edits; both guards verified still present,
+grepped 2026-08-14).
 
 Proposed one-word fix — `onKeyDownCapture` → `onKeyDown` — is the agent's, **not verified by me**;
 the guard exists to keep Enter from submitting the form, so the bubble-phase version needs its own
@@ -342,11 +260,6 @@ activate the already-written `refetching && 'opacity-60'` at `Dashboard.tsx:328`
 for period changes. **NOT FIXED** — it changes data-fetching semantics, and this repo has a
 recorded incident where `keepPreviousData` staled a count. Treat the diagnosis as unverified until
 someone reproduces it.
-
-### B35 — Settings → Import / Export overflows 36px at 360
-**Verified: reported by the build agent, NOT independently reproduced by me.** A
-`whitespace-nowrap` Button with its right edge at 396 against a 360 viewport. Pre-existing and
-unrelated to the Select work. **Effort:** small.
 
 ### B36 — a member can take another member's display name, and attribution follows
 **Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
@@ -369,41 +282,8 @@ reimbursement.
 **Fix is frontend-only and NOT a server-side uniqueness check** — a uniqueness error leaks the set
 of existing display names to a member. `user_id` is already on the wire in `transactionResponse`, so
 render `@username` (or mark the current user's own rows) wherever `created_by` appears.
-**Effort:** small. **Owner has not yet decided whether to take it.**
-
-### B37 — `Button` has no touch floor; most tap targets miss 44px on a tablet in landscape
-**Verified: measured** (Chrome, true device metrics, `(pointer: coarse)` confirmed `true` in-page,
-2026-08-09), at 1130px — the Galaxy Tab S10 FE in landscape, which is above `md` and therefore
-renders the DESKTOP tree while still being a touch screen.
-
-| Page | buttons under 44px |
-|---|---|
-| `/transactions` | **115 of 132** |
-| `/categories` | 25 of 26 |
-| `/` (Dashboard) | 9 of 12 — incl. "Today" at 36px beside a now-44px Select, tops misaligned 4px |
-| `/budgets` | 7 of 11 |
-
-At 360 the phone tree is largely fine (**1 of 65** on `/transactions`), so this is specifically the
-tablet-landscape gap. The B31 Select floor made it visible rather than causing it: a floored Select
-beside an unfloored Button is where the raggedness shows.
-**Owner approved taking it on the B36/B37 branch, 2026-08-09.** Mechanism is the same `coarse:`
-variant B31 registered; the hard part is `Button`'s several size variants and the icon buttons,
-which need BOTH axes.
-
-### B38 — the Categories page never got the B9 phone treatment
-**Verified: measured** at 360 (2026-08-09). **22 of 23 buttons under 44px**, row actions at
-**32px**, and its table hides **394px** behind a sideways scroll (`Name`, `Type`, `Actions`) —
-worse than the Users table that prompted this work. B9 slice 2 converted the main app's tables to
-phone card lists and Settings was the known gap; Categories was missed by both.
-**Owner approved taking it on this branch, 2026-08-09** — same card-list treatment as Users.
-
-### B32 — an unknown route renders a blank shell, not a 404
-**Verified: reproduced** (2026-08-09). The dashboard lives at `/`; navigating to `/dashboard` — a
-plausible URL a user would type or bookmark — renders the full app chrome with an **empty** main
-container: no content, no 404, no redirect, and no console error. Found by walking into it while
-verifying B29 and briefly mistaking it for a rendering defect in the branch.
-**Effort:** small — a catch-all route. **Note:** worth checking whether the SW precache serves the
-shell for arbitrary paths, since that is what makes the blank state look like a successful load.
+**Effort:** small. **Owner has not yet decided whether to take it** (still undecided as of
+2026-08-14; no attribution change has shipped — grepped).
 
 ### B39 — the 20-slot category palette fails its own pair-separation check, in both themes
 
@@ -419,148 +299,41 @@ charts already carry (`ChartLegendContent`, category-named axes), which is the m
 validator itself names. **Effort:** medium; a design decision, not a bug fix — do not retune
 individual slots piecemeal, the 2026-08 light retune proved best-achievable pair gains are <1 ΔE.
 
+### B40 — the Categories editor sheet closes on Escape mid-save
+
+**Verified: read** (found during the #137 fix batch, 2026-08-14; scoped out of it deliberately).
+The sheet's Escape/overlay close is not gated on `saving`, so closing abandons an in-flight save:
+the request itself continues and may commit, but the surface that reports its outcome is gone and
+the form state is lost. The scoping-out was itself a decision, not an oversight — hard-blocking
+close on `saving` would trap the user behind a hung request. The clean fix is an AbortController
+(closing aborts the request) plus a test for both halves: close aborts, and a save that completed
+before the close still toasts.
+**Effort:** small.
+
+### B41 — Settings still pans at 360: Currencies and API tokens
+
+**Verified: reproduced** (2026-08-14 browser pass, built container at 360; deliberately out of
+the #137 scope, which took Users and Categories only). Currencies pans **129px** with the rate
+input 93% clipped; API tokens pans **308px**; and the one-time token reveal hides **188px** of
+the token off-screen AND is destroyed by an md-cross rotation (the reveal state does not survive
+the layout swap) — so a phone user can fail to ever see the full token they cannot retrieve
+again. The budgets Limit column also sat past a pan at 360, but fixture data inflated it —
+re-measure with real data before counting it. Same treatment as Users got in #137.
+**Effort:** small-medium — two card lists plus a reveal that survives (or re-arms across) a
+layout swap.
+
+### B42 — the tablet-landscape shell misses the touch floor
+
+**Verified: reproduced** (2026-08-14 browser pass at 1130px coarse — the Tab S10 FE in
+landscape, which renders the DESKTOP tree on a touch screen). Sidebar nav links are **32px**
+(the shell predates the `coarse:` floor B37 gave page content), and with the sidebar expanded
+the Settings users table's trailing actions sit past the viewport, reachable only by panning.
+Measured on the #137 branch tip before its fix batch; the batch did not touch either.
+**Effort:** small.
+
 ---
 
 ## Queued stages
-
-### B9 — Mobile shell (all three slices built; slice 3 awaiting merge)
-
-**Slice 1 SHIPPED 2026-08-08** — `feat/b9-mobile-shell-slice1`, PR #126, squash `661ad46`,
-**v0.40.0**. Carried the B13 / B18-ask-1 / B19 riders (owner: *"fit issues together"*).
-Browser-verified at 390×844 on the rebuilt container.
-
-**Slice 2 SHIPPED 2026-08-08** — PR #128, squash `f308c8f`, **v0.41.0**. The phone's panning
-tables became card lists, including the dashboard. **There are no panning tables left on the
-phone.** The slice-2 re-measure had said it "may prove unnecessary"; measuring said otherwise.
-
-**Slice 3 BUILT 2026-08-09** on `feat/reports-mobile-heatmap`, eight commits, awaiting the owner's
-push/PR go. All thirteen defects below shipped, plus the heatmap rebuild. Moves to Closed with
-the squash hash at merge. The recharts 2.15.4→3.10.1 bump landed FIRST and separately (PR #129,
-squash `222caba`, **v0.41.1**), deliberately unbundled: the bump's only real evidence is a
-before/after browser comparison of eleven charts, and that baseline is unreadable if the same
-branch is simultaneously redesigning those charts.
-
-**What slice 3 actually became, stated plainly**, because it is far more than the entry above
-described: the heatmap rebuild (D1/D5) plus twelve other display defects, a **44px touch floor on
-every tab strip in the app** — they were all 32px, `h-10` minus `p-1`, including both of
-QuickAdd's on the daily capture surface — and a **six-site timezone defect** in unrelated files,
-where every transaction date rendered a day early west of GMT behind six tests that recomputed
-their expectation with the same wrong expression. Three reviews ran (design, UX, and an isolated
-adversarial pass that mutation-tested ~65 mutants and returned NOT MERGEABLE on documentation
-grounds while confirming every functional claim). Verification targets moved from 390px to
-**360px** once the owner supplied the household's real devices — see B24's note; a Galaxy S24 is
-the narrowest and a Tab S10 FE at ~720px portrait takes the PHONE layout.
-
-**The finding worth carrying out of this stage:** three separate defects were protected by
-comments explaining why they were fine — a dark-mode contrast claim ("both directions hold
-because the tokens swap together"), six comment blocks describing a design the same branch had
-deleted, and date tests whose comment called the self-referential oracle deliberate. Each read as
-considered design and each stopped someone looking.
-
-**Verified: reproduced** in a browser at 390×844 against the running container.
-The shell has zero responsive breakpoints: a permanent sidebar plus page padding leaves ~262px of
-content on a 390px phone, dropping to ~70px if the sidebar toggle is hit — effectively bricked,
-and it persists across launches. Tooltips do not work on touch, so nine unlabelled sidebar icons
-convey nothing. Reports and Settings overflow by ~290px. Dialogs have no height limit (bites in
-landscape or with the keyboard up, not in portrait today).
-
-**Also:** the phone is capture-only. Quick-add always dates to today and cannot edit; the
-recently-added list only offers delete, capped at six rows. Correcting yesterday's wrong amount
-requires a laptop.
-
-**Done in slices, re-measured after each:**
-- *Slice 1:* the shell and four shared components — sidebar to a slide-out below tablet width
-  with visible labels, reduced mobile padding, dialog height limit, scrollable tab strips.
-  Fixed the Reports/Settings overflow and the 70px state. **Shipped.**
-- *Slice 2:* the table pages. Seven columns cannot fit 262px; these needed stacked cards, not
-  narrower tables. **Shipped.** (The original entry guessed this slice "may prove unnecessary";
-  the measurement contradicted the guess. Recorded because the guess was the confident one.)
-- *Slice 3:* Reports charts. **In flight.**
-
-**Slice 3 was re-measured before being built, and the original framing was partly stale.**
-Slice 1's shell fix and its `min-w-0` grid fix had already removed the page-level overflow: at
-390px all four Reports tabs measure `scrollWidth == clientWidth == 390`, chart surfaces are
-308px and contained, and Net Cash Flow renders correctly. What actually remains:
-
-- **D1 — the spending heatmap has never been operable by anything but a mouse.** *Reproduced.*
-  53 columns × 371 cells at **3×3 CSS px** on a phone. The cell is a bare `<div>` inside a Radix
-  `TooltipTrigger asChild`: `tabIndex: -1`, no `role`, no `aria-label`, and a synthesized touch
-  tap produces no tooltip. There are no month or weekday labels **at any width** — at 1440px the
-  card's entire text content is `"Spending Heatmap 2026 No spend Less More"`. So this is not a
-  mobile sizing bug with an a11y side-effect; it is a component that is mouse-only-fine on
-  desktop and inoperable everywhere else. Enlarging the cell without giving it an interaction
-  model would ship a target you can hit and still learn nothing from.
-- **D2 — Budget vs Actual thins its month labels non-uniformly, and how badly depends on the
-  width.** *Reproduced.* **Corrected 2026-08-09** — this entry first said "7 of 12, unevenly",
-  then a single measurement at 390px suggested "6 of 12, evenly". A width sweep showed both
-  readings are real and neither describes the defect: **12 of 12 at 1440, NINE at 420
-  (`Jan Feb Mar Apr Jun Jul Sep Oct Dec` — May, Aug and Nov gone), six at 390.** recharts'
-  `preserveEnd` walks the axis dropping individual labels, so the stride changes mid-axis and
-  counting bars off a label lands on the wrong month. **The uneven stride is the damage; the
-  count is not.** Root cause: the `XAxis` carried no `interval` while its two siblings did — a
-  **wiring-seam** defect, since the helper and its unit test were already correct and simply
-  never connected.
-- **D3 — four charts paint a tick label outside the SVG.** *Reproduced.* Not a mobile defect and
-  not one chart: `Sep'25` sat at **−18.3px at 390 and −6.1px at 1440** on Income vs Expenses,
-  Category Trends clipped at −9.8px **despite already carrying the `padding` treatment its
-  siblings use**, the Dashboard's Cash Flow chart had the same shape, and Net Cash Flow overhung
-  the RIGHT edge. A −30° end-anchored label hangs off its tick leftward by ~35px; only a chart
-  rendering a wide `YAxis` had a gutter to absorb it.
-- **D4 — three tables render unbounded user text.** *Reproduced.* One 500-char description drove
-  Top Merchants to **3,464px inside a 293px** container. Data-dependent and **not
-  mobile-specific** — desktop is identically exposed. Same exposure in Recurring Expenses and in
-  the Dashboard's surviving desktop table (the phone card path got the fix in slice 2; the table
-  did not). A later measurement found the description was not even the binding column — the
-  **category name** on the same cell's second line is also user-supplied, also capped at 100
-  chars server-side, and was completely unbounded.
-- **D5 — the hardcoded `repeat(53, 1fr)` template can receive 54 columns.** *Reproduced by
-  mirroring the function over 1900–2100:* leap years starting on a Sunday (1928, 1956, 1984,
-  2012, 2040, 2068, 2096) emit 378 cells. Reachable today only by importing rows dated in one of
-  those years — and `web/src/lib/dates.ts:161-169` documents a non-contiguous ledger with 1984
-  rows as a supported case — otherwise it goes live in 2040. Latent, not burning; fixed because
-  the file is open.
-- **D6 — the Savings year-over-year chart has D2's defect too.** *Reproduced.* Labels 6 of 12,
-  evenly, so it reads as less broken than Budget vs Actual's uneven 7. Same root cause.
-- **D7 — gradient-filled series render a colourless legend swatch.** *Read.* A `url(#…)` fill
-  carries no solid colour in the legend payload, `ChartLegendContent` sets
-  `backgroundColor: item.color`, React omits an undefined style, and the swatch renders
-  transparent. Tracks FILL TYPE, not recharts version — solid-stroked series render correctly in
-  both versions.
-- **D8 — `ChartLegendContent` keys legend items by `item.value`.** *Read.* Two entries sharing a
-  value would collide on the React key. Latent; current configs have distinct labels.
-- **D9 — the legend overflows the card on both sides once there are ~10 series.** *Reproduced —
-  reported by the owner from his live app, and structurally invisible in dev (2 categories
-  against his 9).* recharts fixes the legend wrapper's width; `ChartLegendContent` rendered
-  `flex … justify-center` with `flex-wrap: nowrap`, so the excess was pushed out of **both**
-  edges symmetrically and the first and last chips were cut in half.
-- **D11 — Category Breakdown's labels overlap at a realistic category count.** *Reproduced.*
-  Fixed height against a data-driven row count. The repo already had the idiom — Tag Analysis
-  derives its height from its row count — and this chart never got it. Height alone was not
-  enough: **recharts wraps an over-wide `YAxis type="category"` label and the extra lines grow
-  into the next row**, so a 100-char name rendered five lines tall.
-- **D12 — the Reports tables waste horizontal space on cell padding.** *Owner-reported.* The
-  shared `TableCell p-4` is the residual pan on a phone once the description is bounded.
-- **D13 — Savings Goal Progress is squeezed at phone width.** *Owner-reported.* The percentage
-  ring and the Goal/Saved/Remaining figures sat side by side, leaving the figures ~90px.
-
-**D2, D3, D4, D6, D7, D8, D9, D11, D12, D13 SHIPPED** on this branch in `2d220fc` and `2950a55`
-— along with a defect none of them named: **every tab strip in the app rendered 32px triggers,
-not the 44px this project adopted for touch** (`h-10` minus `p-1`), including QuickAdd's two
-strips on the daily capture surface. Slice 1's "44px floor" never covered tab strips. D1 and D5
-(the heatmap itself) are in progress.
-
-**The generalisable finding**, worth more than any individual fix: for ROTATED tick labels,
-collision is governed by the line's **height**, not its width — adjacent labels clear only when
-`spacing × sin(angle) ≥ ink height` — so shortening a label does nothing, and the tick font is
-the strongest lever because it appears in both that term and the rotational overhang. Fixing the
-clipping with padding *narrows the plot*, which *worsens* collision, so the two invariants must
-be asserted together or the second regression ships looking like a fix. Also: **a viewport-keyed
-tick cap cannot work here** — this grid is `md:grid-cols-2`, so every chart halves at 768px and
-measures worse clearance there than on a phone. Chart width is not monotonic in viewport width.
-The measurements are in the header of `web/src/components/reports/chartAxis.seam.test.ts`.
-
-Reassess the native-Android question now that the phone experience is no longer evidence of a
-web-app limit.
 
 ### B10 — Refunds cannot offset a category
 **Verified: reproduced** (schema dumped from all 17 migrations applied to a scratch database).
@@ -592,6 +365,9 @@ case, six frontend sites. Expect one immediate visible break: a negative expense
   **Answered 2026-08-02: yes, Dockhand watches every stack's container health.** That is what
   made B7 a two-line change to what the `HEALTHCHECK` scrapes rather than a new alerting
   channel; both pieces shipped in v0.39.0 — see B7 in Closed.
+- **Native Android app — reassess.** The pre-B9 phone experience was the standing evidence for
+  going native; with all of B9 plus #131 and #137 shipped, the PWA is the daily driver at 360px.
+  Decide whether the remaining gaps (B26, B33, B41, B42) close the question or reopen it.
 - **Import + foreign currency:** import accepts an `original_currency` column, so a sheet of
   back-dated LBP rows is valued at the rate current *when you import*. Harmless today (the rate
   has never moved); real once it does. Fixing it properly needs the rate column from B1 step 2
@@ -640,6 +416,210 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B22 — web tsconfig lacks an explicit `strict`** (`a20b7e4`, 2026-08-14, on
+  `chore/backlog-catch-up-and-strict`, PR #138). Pinned with zero new errors, exactly as the corrected
+  entry predicted — TypeScript 6.0.2 was already compiling the project under strict by default,
+  so the pin's value is that a TypeScript downgrade or a CLI `--strict false` can no longer
+  remove the guarantee silently. Verified by a clean-slate `tsc -b` (tsbuildinfo removed first;
+  exit 0). One placement correction: the flag went into `tsconfig.app.json` and
+  `tsconfig.node.json`, not the root `tsconfig.json` the entry originally named — the root is a
+  solution-style file (`files: []`) whose `compilerOptions` do not reach the referenced
+  projects, so the named placement would have pinned nothing. The original entry's probe
+  evidence (TS18047/TS7006 fire by default, clean under `--strict false`) is in this file's git
+  history. Closed on the same branch that documents it, so `a20b7e4` is a pre-squash hash —
+  the PR number and squash hash join this entry at merge, per convention.
+
+- **B31 + B32 + B35 + B37 + B38 — the browser pass and its fix batch** (2026-08-10/14, on
+  `fix/settings-users-manage-dialog-and-export-overflow`; MERGED via PR #137, squash `a8c484f`,
+  released as **v0.43.0**, branch deleted). A 15-area browser pass against the built container
+  at the household's real device states (360 phone, ~720 portrait tablet, 1130 coarse tablet
+  landscape, 1440 fine desktop), then a six-agent fix batch, a three-reviewer battery
+  (14 findings — 11 fixed, 1 closed against the `touch-target.ts` doctrine, 2 duplicates), four
+  post-commit mutants killed, and a full in-browser re-verification of every fix on the exact
+  merge tip. Owner-reported bugs confirmed fixed: the Import/Export overflow (**B35** — 360=360,
+  zero pan) and the Users table's 321px hidden actions column (card list + Manage dialog, member
+  gating correct including API 403s).
+  - **B37 / B31** — `Button` and `SelectTrigger` carry `coarse:min-h-11`: a POINTER-gated floor,
+    proven in both directions on the same element (44px at 1130 coarse, 32px at 1440 fine).
+    `Input` took the same floor (~41 sites were 40px), and `SelectItem`'s #131 floor was REGATED
+    from unconditional to `coarse:` (owner decision 2026-08-14, matching DropdownMenuItem; the
+    "ungated" rationale comment rewritten to record the reversal, tests flipped). `Switch` keeps
+    its 24px pill and carries the target on a coarse-gated pseudo-element — fixed TWICE:
+    absolute pseudo insets resolve against the PADDING box, so `border-2` shrinks it to 20px and
+    `-inset-y-3` (not `-2.5`) lands 44 exact; the first fix shipped on a wrong z-index diagnosis
+    and was amended away after re-probing.
+  - **B38** — Categories got the B9 card list, a delete CONFIRM where there was none (two taps
+    to permanent deletion — proven empirically when a census agent tapped Delete "to measure it"
+    and killed a real category; the FK guard limits the blast to transaction-free categories),
+    the 409 sentence surfaced as a toast, save failures moved off a banner that sat behind the
+    sheet overlay, and editor-sheet focus restore.
+  - **B32** — `<Route path="*">` → a real Page-not-found inside the shell, echoed path bounded
+    with `[overflow-wrap:anywhere]`.
+  - **Beyond the numbered items:** the Manage dialog's dead scroll (a CSS grid auto row keeps
+    its natural height under a max-height clamp, so the inner `overflow-y-auto` wrapper existed
+    but never engaged — `grid-rows-[minmax(0,1fr)]` on Dialog/AlertDialog Content); every
+    trigger-less confirm's focus drop to `<body>` on Cancel/Escape (explicit `onCloseAutoFocus`
+    restores, anchors re-queried by data-id at close time because stored elements go stale
+    across refetches); TransactionRow's unconditional menu-close opt-out (plain Escape now
+    returns to the trigger; only a menu ACTION opts out); light mode (the 20-slot chart palette
+    retuned to ≥5.0:1 as text on white — the worst chip was 1.45:1 — and the wordmark badge
+    moved off `--primary / 0.4`, which inverted across themes, onto a per-theme `--logo-badge`
+    token; the palette validator vendored to `web/scripts/validate_palette.js`); and the 18px
+    login/register cross-links brought to 44.
+  - **Filed out of the same pass, not fixed:** B39 (palette pair-separation, structural), B40
+    (Escape mid-save), B41 (Currencies/API-tokens pans), B42 (tablet-landscape shell gaps), and
+    B26's re-measure. Suite grew 1736 → 1834; `tsc -b` and eslint clean. Residual, disclosed:
+    the dark badge text sits at 4.33:1 — a logo, WCAG-exempt, polish only.
+
+- **B24 + B29 — /quick's 360px overflow, and the 32px Select options** (PR #131, squash
+  `09d1836`, 2026-08-09, released as **v0.42.1**). CategoryChips labels are bounded
+  (`min-h-11 max-w-full` + `[overflow-wrap:anywhere]` — wrapping, never truncating), which fixed
+  the /quick pan (scrollWidth 506 against a 345 clientWidth, one 489.5px chip) and the home
+  screen's version of the same defect; Select menus are capped to Radix's available width with
+  option text wrapping; the option row took the 44px touch floor (B29's headline — later regated
+  `coarse:` in #137, see that entry); and choosing an option returns focus to the trigger
+  instead of `<body>`. The focus half's real cause was OUR fork's `preventDefault` default
+  cancelling Radix's own restore — a "bare" Select had isolated nothing because the bare
+  component still rendered through our wrapper.
+
+**B9 — Mobile shell, all three slices — SHIPPED**
+*(#126 squash `661ad46` **v0.40.0** · #128 `f308c8f` **v0.41.0** · #130 `cbaa4d0` **v0.42.0**
+· follow-up #131 `09d1836` **v0.42.1**. Kept at full length because this was the project's
+largest stage; the D-numbered defect list below is the closure evidence.)*
+
+**Slice 1 SHIPPED 2026-08-08** — `feat/b9-mobile-shell-slice1`, PR #126, squash `661ad46`,
+**v0.40.0**. Carried the B13 / B18-ask-1 / B19 riders (owner: *"fit issues together"*).
+Browser-verified at 390×844 on the rebuilt container.
+
+**Slice 2 SHIPPED 2026-08-08** — PR #128, squash `f308c8f`, **v0.41.0**. The phone's panning
+tables became card lists, including the dashboard. The slice-2 re-measure had said it "may prove
+unnecessary"; measuring said otherwise. **Correction (2026-08-10):** this entry then claimed
+"there are no panning tables left on the phone" — FALSE. Slice 2 covered the MAIN APP's tables;
+Settings (Users 321px, Currencies 129px) and Categories still panned at 360, which became #137
+and B41.
+
+**Slice 3 SHIPPED 2026-08-09** on `feat/reports-mobile-heatmap` — PR #130, squash `cbaa4d0`,
+**v0.42.0**. All thirteen defects below plus the heatmap rebuild. The recharts 2.15.4→3.10.1
+bump landed FIRST and separately (PR #129, squash `222caba`, **v0.41.1**), deliberately
+unbundled: the bump's only real evidence is a before/after browser comparison of eleven charts,
+and that baseline is unreadable if the same branch is simultaneously redesigning those charts.
+
+**What slice 3 actually became, stated plainly**, because it is far more than the entry above
+described: the heatmap rebuild (D1/D5) plus twelve other display defects, a **44px touch floor on
+every tab strip in the app** — they were all 32px, `h-10` minus `p-1`, including both of
+QuickAdd's on the daily capture surface — and a **six-site timezone defect** in unrelated files,
+where every transaction date rendered a day early west of GMT behind six tests that recomputed
+their expectation with the same wrong expression. Three reviews ran (design, UX, and an isolated
+adversarial pass that mutation-tested ~65 mutants and returned NOT MERGEABLE on documentation
+grounds while confirming every functional claim). Verification targets moved from 390px to
+**360px** once the owner supplied the household's real devices — a Galaxy S24 is the narrowest
+and a Tab S10 FE at ~720px portrait takes the PHONE layout.
+
+**The finding worth carrying out of this stage:** three separate defects were protected by
+comments explaining why they were fine — a dark-mode contrast claim ("both directions hold
+because the tokens swap together"), six comment blocks describing a design the same branch had
+deleted, and date tests whose comment called the self-referential oracle deliberate. Each read as
+considered design and each stopped someone looking.
+
+**The original finding (verified: reproduced** in a browser at 390×844 against the running
+container**):** the shell had zero responsive breakpoints — a permanent sidebar plus page
+padding left ~262px of content on a 390px phone, dropping to ~70px if the sidebar toggle was hit
+(effectively bricked, persisting across launches); tooltips do not work on touch, so nine
+unlabelled sidebar icons conveyed nothing; Reports and Settings overflowed by ~290px; dialogs
+had no height limit. The phone was also capture-only — quick-add always dated to today and could
+not edit, so correcting yesterday's wrong amount required a laptop (resolved by slice 2's card
+lists plus the shared edit sheet).
+
+**Done in slices, re-measured after each:**
+- *Slice 1:* the shell and four shared components — sidebar to a slide-out below tablet width
+  with visible labels, reduced mobile padding, dialog height limit, scrollable tab strips.
+  Fixed the Reports/Settings overflow and the 70px state.
+- *Slice 2:* the table pages. Seven columns cannot fit 262px; these needed stacked cards, not
+  narrower tables. (The original entry guessed this slice "may prove unnecessary"; the
+  measurement contradicted the guess. Recorded because the guess was the confident one.)
+- *Slice 3:* Reports charts, re-measured before being built — slice 1's shell fix and its
+  `min-w-0` grid fix had already removed the page-level overflow, and what actually remained
+  was the following:
+
+- **D1 — the spending heatmap has never been operable by anything but a mouse.** *Reproduced.*
+  53 columns × 371 cells at **3×3 CSS px** on a phone. The cell is a bare `<div>` inside a Radix
+  `TooltipTrigger asChild`: `tabIndex: -1`, no `role`, no `aria-label`, and a synthesized touch
+  tap produces no tooltip. There are no month or weekday labels **at any width** — at 1440px the
+  card's entire text content is `"Spending Heatmap 2026 No spend Less More"`. So this is not a
+  mobile sizing bug with an a11y side-effect; it is a component that is mouse-only-fine on
+  desktop and inoperable everywhere else. Enlarging the cell without giving it an interaction
+  model would ship a target you can hit and still learn nothing from. **Shipped in #130** as the
+  owner-chosen rebuild: phone = month grid + year strip + tap-a-day sheet (7 columns is the only
+  day-level layout that clears 44px at 360); desktop keeps the year grid.
+- **D2 — Budget vs Actual thins its month labels non-uniformly, and how badly depends on the
+  width.** *Reproduced.* **Corrected 2026-08-09** — this entry first said "7 of 12, unevenly",
+  then a single measurement at 390px suggested "6 of 12, evenly". A width sweep showed both
+  readings are real and neither describes the defect: **12 of 12 at 1440, NINE at 420
+  (`Jan Feb Mar Apr Jun Jul Sep Oct Dec` — May, Aug and Nov gone), six at 390.** recharts'
+  `preserveEnd` walks the axis dropping individual labels, so the stride changes mid-axis and
+  counting bars off a label lands on the wrong month. **The uneven stride is the damage; the
+  count is not.** Root cause: the `XAxis` carried no `interval` while its two siblings did — a
+  **wiring-seam** defect, since the helper and its unit test were already correct and simply
+  never connected.
+- **D3 — four charts paint a tick label outside the SVG.** *Reproduced.* Not a mobile defect and
+  not one chart: `Sep'25` sat at **−18.3px at 390 and −6.1px at 1440** on Income vs Expenses,
+  Category Trends clipped at −9.8px **despite already carrying the `padding` treatment its
+  siblings use**, the Dashboard's Cash Flow chart had the same shape, and Net Cash Flow overhung
+  the RIGHT edge. A −30° end-anchored label hangs off its tick leftward by ~35px; only a chart
+  rendering a wide `YAxis` had a gutter to absorb it.
+- **D4 — three tables render unbounded user text.** *Reproduced.* One 500-char description drove
+  Top Merchants to **3,464px inside a 293px** container. Data-dependent and **not
+  mobile-specific** — desktop is identically exposed. Same exposure in Recurring Expenses and in
+  the Dashboard's surviving desktop table (the phone card path got the fix in slice 2; the table
+  did not). A later measurement found the description was not even the binding column — the
+  **category name** on the same cell's second line is also user-supplied, also capped at 100
+  chars server-side, and was completely unbounded.
+- **D5 — the hardcoded `repeat(53, 1fr)` template can receive 54 columns.** *Reproduced by
+  mirroring the function over 1900–2100:* leap years starting on a Sunday (1928, 1956, 1984,
+  2012, 2040, 2068, 2096) emit 378 cells. Reachable today only by importing rows dated in one of
+  those years — and `web/src/lib/dates.ts:161-169` documents a non-contiguous ledger with 1984
+  rows as a supported case — otherwise it goes live in 2040. Latent, not burning; fixed with the
+  D1 rebuild.
+- **D6 — the Savings year-over-year chart has D2's defect too.** *Reproduced.* Labels 6 of 12,
+  evenly, so it reads as less broken than Budget vs Actual's uneven 7. Same root cause.
+- **D7 — gradient-filled series render a colourless legend swatch.** *Read.* A `url(#…)` fill
+  carries no solid colour in the legend payload, `ChartLegendContent` sets
+  `backgroundColor: item.color`, React omits an undefined style, and the swatch renders
+  transparent. Tracks FILL TYPE, not recharts version — solid-stroked series render correctly in
+  both versions.
+- **D8 — `ChartLegendContent` keys legend items by `item.value`.** *Read.* Two entries sharing a
+  value would collide on the React key. Latent; current configs have distinct labels.
+- **D9 — the legend overflows the card on both sides once there are ~10 series.** *Reproduced —
+  reported by the owner from his live app, and structurally invisible in dev (2 categories
+  against his 9).* recharts fixes the legend wrapper's width; `ChartLegendContent` rendered
+  `flex … justify-center` with `flex-wrap: nowrap`, so the excess was pushed out of **both**
+  edges symmetrically and the first and last chips were cut in half.
+- **D11 — Category Breakdown's labels overlap at a realistic category count.** *Reproduced.*
+  Fixed height against a data-driven row count. The repo already had the idiom — Tag Analysis
+  derives its height from its row count — and this chart never got it. Height alone was not
+  enough: **recharts wraps an over-wide `YAxis type="category"` label and the extra lines grow
+  into the next row**, so a 100-char name rendered five lines tall.
+- **D12 — the Reports tables waste horizontal space on cell padding.** *Owner-reported.* The
+  shared `TableCell p-4` is the residual pan on a phone once the description is bounded.
+- **D13 — Savings Goal Progress is squeezed at phone width.** *Owner-reported.* The percentage
+  ring and the Goal/Saved/Remaining figures sat side by side, leaving the figures ~90px.
+
+**D2, D3, D4, D6, D7, D8, D9, D11, D12, D13 shipped** on the slice-3 branch in `2d220fc` and
+`2950a55`; **D1 and D5 shipped** with the heatmap rebuild in the same PR — along with a defect
+none of them named: **every tab strip in the app rendered 32px triggers, not the 44px this
+project adopted for touch** (`h-10` minus `p-1`), including QuickAdd's two strips on the daily
+capture surface. Slice 1's "44px floor" never covered tab strips.
+
+**The generalisable finding**, worth more than any individual fix: for ROTATED tick labels,
+collision is governed by the line's **height**, not its width — adjacent labels clear only when
+`spacing × sin(angle) ≥ ink height` — so shortening a label does nothing, and the tick font is
+the strongest lever because it appears in both that term and the rotational overhang. Fixing the
+clipping with padding *narrows the plot*, which *worsens* collision, so the two invariants must
+be asserted together or the second regression ships looking like a fix. Also: **a viewport-keyed
+tick cap cannot work here** — this grid is `md:grid-cols-2`, so every chart halves at 768px and
+measures worse clearance there than on a phone. Chart width is not monotonic in viewport width.
+The measurements are in the header of `web/src/components/reports/chartAxis.seam.test.ts`.
 
 - **B13 — Trash list shows no creator attribution** (built on `feat/b9-mobile-shell-slice1`;
   MERGED via PR #126, squash `661ad46`, released as **v0.40.0**, branch deleted). The finding:
