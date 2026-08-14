@@ -127,9 +127,13 @@ export function Register() {
               </Button>
               <p className="text-center text-sm text-muted-foreground">
                 Already have an account?{' '}
+                {/* Same recipe as Login's Register link, and the rationale
+                    lives there: inline-flex + items-center so the coarse-only
+                    `min-h-11` centers the text in a 44px box, with the fine-
+                    pointer sentence rendered identically to a plain inline. */}
                 <Link
                   to="/login"
-                  className="font-medium text-foreground underline-offset-4 hover:underline"
+                  className="inline-flex items-center font-medium text-foreground underline-offset-4 coarse:min-h-11 hover:underline"
                 >
                   Log in
                 </Link>

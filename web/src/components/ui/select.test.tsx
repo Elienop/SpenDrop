@@ -18,8 +18,11 @@ import tailwindConfigSource from '../../../tailwind.config.ts?raw';
  * `min-h-11`; both are gone now that this file provides them).
  *
  * 1. The option — the element you actually tap to CHOOSE — carries the 44px
- *    touch floor. Measured 32px in Chrome at 360px before this: stock
- *    `py-1.5` around 20px of `text-sm`.
+ *    touch floor, pointer-gated like the trigger's and like DropdownMenuItem's
+ *    (owner decision 2026-08-14: the mouse desktop keeps its dense rows, and
+ *    two sibling menu primitives must not disagree on the gate). Measured
+ *    32px in Chrome at 360px before the floor existed: stock `py-1.5` around
+ *    20px of `text-sm`.
  * 2. Closing the menu puts focus back on the trigger. The wrapper used to
  *    default `onCloseAutoFocus` to `e.preventDefault()`; Radix composes that
  *    with its own restore via `composeEventHandlers`, which stops on
@@ -43,10 +46,10 @@ function Basic({ onValueChange = vi.fn() }: { onValueChange?: (v: string) => voi
 }
 
 describe('SelectItem touch floor', () => {
-  it('gives every option the 44px floor', async () => {
+  it('gives every option the pointer-gated 44px floor, not either rejected variant', async () => {
     // `classList.contains`, not `toContain` on the className string: the
-    // substring form matches `md:min-h-11` and would pass on an option that
-    // is 32px at the width that matters.
+    // substring form matches `coarse:min-h-11` when probing for the bare
+    // token and would pass on the exact regression being pinned.
     const user = userEvent.setup();
     render(<Basic />);
     await user.click(screen.getByRole('combobox', { name: 'Fruit' }));
@@ -54,7 +57,15 @@ describe('SelectItem touch floor', () => {
     const options = screen.getAllByRole('option');
     expect(options).toHaveLength(2);
     for (const option of options) {
-      expect(option.classList.contains('min-h-11')).toBe(true);
+      expect(option.classList.contains('coarse:min-h-11')).toBe(true);
+      // The UNGATED floor is what this file shipped first and what the owner
+      // then reversed (2026-08-14): the mouse desktop keeps its dense rows,
+      // same as DropdownMenuItem. Reappearing here is a regression, not a
+      // safety margin.
+      expect(option.classList.contains('min-h-11')).toBe(false);
+      // Width-gated is the other rejected variant: a ~1130px touch tablet in
+      // landscape is above `md` and would keep the 32px rows.
+      expect(option.classList.contains('md:min-h-11')).toBe(false);
     }
   });
 
@@ -65,12 +76,15 @@ describe('SelectItem touch floor', () => {
 
     const tokens = Array.from(screen.getAllByRole('option')[0].classList);
     expect(tokens).not.toContain('h-11');
+    expect(tokens).not.toContain('coarse:h-11');
     expect(tokens.some((t) => /^max-h-/.test(t))).toBe(false);
   });
 
-  it('still lets a call site override the floor', async () => {
-    // `cn()` is tailwind-merge, so a caller's own min-height must win rather
-    // than fight the base class. Without this the primitive would be a wall.
+  it('lets a call site replace the floor, and only the same-modifier token does it', async () => {
+    // `cn()` is tailwind-merge, which keys on group AND modifier: a caller's
+    // `coarse:min-h-14` replaces the primitive's floor, while a bare
+    // `min-h-14` merely stands beside it (different modifier, no conflict)
+    // and stylesheet order would pick the winner on a coarse pointer.
     const user = userEvent.setup();
     render(
       <Select>
@@ -78,17 +92,24 @@ describe('SelectItem touch floor', () => {
           <SelectValue placeholder="Pick one" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="apple" className="min-h-14">
+          <SelectItem value="apple" className="coarse:min-h-14">
             Apple
+          </SelectItem>
+          <SelectItem value="pear" className="min-h-14">
+            Pear
           </SelectItem>
         </SelectContent>
       </Select>,
     );
     await user.click(screen.getByRole('combobox', { name: 'Fruit' }));
 
-    const option = screen.getByRole('option', { name: 'Apple' });
-    expect(option.classList.contains('min-h-14')).toBe(true);
-    expect(option.classList.contains('min-h-11')).toBe(false);
+    const replaced = screen.getByRole('option', { name: 'Apple' });
+    expect(replaced.classList.contains('coarse:min-h-14')).toBe(true);
+    expect(replaced.classList.contains('coarse:min-h-11')).toBe(false);
+
+    const bare = screen.getByRole('option', { name: 'Pear' });
+    expect(bare.classList.contains('min-h-14')).toBe(true);
+    expect(bare.classList.contains('coarse:min-h-11')).toBe(true);
   });
 });
 

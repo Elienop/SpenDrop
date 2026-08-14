@@ -88,13 +88,12 @@ export function TransactionToolbar({
           onChange={(e) => onSearchChange(e.target.value)}
           placeholder="Search transactions..."
           aria-label="Search transactions"
-          // `coarse:min-h-11` on this INSTANCE, not on the Input primitive.
-          // Every Button in this row is floored at 44px by a POINTER gate, so
-          // on the household's ~1130px tablet a bare `h-9` would leave the
-          // field 8px shorter than the controls it shares an `items-center` row
-          // with. Flooring Input itself would inflate every form in the app on
-          // that tablet — a separate decision, deliberately not taken here.
-          className="h-9 pl-8 coarse:min-h-11"
+          // No touch class here: the Input primitive itself carries
+          // `coarse:min-h-11` (the separate decision the old comment deferred
+          // was taken in the 2026-08 fix batch), so this field already matches
+          // the floored Buttons it shares an `items-center` row with. `h-9` is
+          // the fine-pointer height only.
+          className="h-9 pl-8"
         />
       </div>
 

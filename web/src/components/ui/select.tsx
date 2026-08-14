@@ -174,19 +174,22 @@ const SelectItem = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof SelectPrimitive.Item>
 >(({ className, children, ...props }, ref) => (
-  // `min-h-11` (44px) is the touch floor, and it lives here rather than at the
-  // call sites: the option is the element the user actually taps to CHOOSE,
-  // and stock `py-1.5` around `text-sm` measured 32px in Chrome at 360px. A
-  // floor on the trigger you open and not on the row you then hit is no floor
-  // at all. Deliberately NOT gated behind `md:`: a touch tablet held in
-  // landscape is above `md` and would keep the 32px rows. A floor, not a
-  // height — a two-line option still grows past 44px.
+  // `coarse:min-h-11` is the 44px touch floor, and it lives here rather than
+  // at the call sites: the option is the element the user actually taps to
+  // CHOOSE, and stock `py-1.5` around `text-sm` measured 32px in Chrome at
+  // 360px. A floor on the trigger you open and not on the row you then hit is
+  // no floor at all. Pointer-gated, never `md:`: a touch tablet held in
+  // landscape is above `md` and would keep the 32px rows.
   //
-  // Ungated rather than `coarse:`-gated, unlike the trigger above. An option
-  // row has no desktop density worth defending — nothing sits beside it to
-  // stay aligned with, and 44px rows in a dropdown read as comfortable rather
-  // than oversized. The trigger needs the gate because it shares a toolbar row
-  // with buttons and inputs that the owner asked to leave alone.
+  // Gated like the trigger above and like `DropdownMenuItem` — an owner
+  // decision (2026-08-14) that reversed this file's earlier ungated floor.
+  // The argument that an option row "has no desktop density worth defending"
+  // lost: the owner chose to leave the mouse desktop's dense rows exactly as
+  // they are, and two sibling menu primitives disagreeing on when the floor
+  // applies is a drift magnet — the same tap on a Select option and a
+  // dropdown action must obey the same gate. On coarse pointers nothing
+  // changes: the floor still holds, and the wrap/floor interplay below
+  // ([overflow-wrap:anywhere] + grows-past-44) still applies there.
   <SelectPrimitive.Item
     ref={ref}
     className={cn(
@@ -195,8 +198,8 @@ const SelectItem = React.forwardRef<
       // `overflow-x-hidden` would CLIP a long name instead of showing it.
       // `anywhere` (not `break-words`) because it also shrinks the intrinsic
       // min-content size, which is what the flex automatic minimum floors the
-      // text at — the same reason the category chips use it. `min-h-11` is a
-      // floor, so a wrapped option grows instead of clipping.
+      // text at — the same reason the category chips use it. The floor is a
+      // floor, not a height, so a wrapped option grows instead of clipping.
       //
       // NO `line-clamp-*` here, and that is a deliberate deviation from the
       // table-cell recipe (which pairs the wrap with a clamp, enforced by the
@@ -206,7 +209,7 @@ const SelectItem = React.forwardRef<
       // indistinguishable the moment the tail is clamped away. The vertical
       // growth is contained anyway — the viewport scrolls and the content has a
       // max-height — so the trade the clamp exists to make does not apply.
-      "relative flex min-h-11 w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none [overflow-wrap:anywhere] focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex w-full cursor-default select-none items-center rounded-sm py-1.5 pl-8 pr-2 text-sm outline-none coarse:min-h-11 [overflow-wrap:anywhere] focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
       className
     )}
     {...props}

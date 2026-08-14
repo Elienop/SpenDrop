@@ -26,8 +26,11 @@
  *
  *     WHERE THE FLOOR ALREADY IS, so nothing below reaches for it twice:
  *     `Button` (base = height, `size="icon"` = width too), `SelectTrigger`,
- *     and `SelectItem` (ungated there — an option list is a menu you tap).
- *     A shadcn `Button` therefore needs NO touch class at any call site.
+ *     `SelectItem`, `DropdownMenuItem` (and its checkbox/radio/sub-trigger
+ *     variants), and `Input` — every one of them `coarse:`-gated. SelectItem
+ *     was briefly ungated; the 2026-08-14 owner decision regated it so the two
+ *     menu primitives agree and a mouse desktop keeps dense rows. A shadcn
+ *     `Button` or `Input` therefore needs NO touch class at any call site.
  *
  *     `min-h-11 md:min-h-0` ON A BUTTON IS NOW A BUG, not just clutter. Both
  *     halves set `min-height` at the same specificity — a media query adds none

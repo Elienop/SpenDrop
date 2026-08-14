@@ -364,7 +364,11 @@ describe('the control is thumb-sized', () => {
     const options = screen.getAllByRole('option');
     expect(options).toHaveLength(5);
     for (const option of options) {
-      expect(option.className.split(/\s+/)).toContain('min-h-11');
+      // `coarse:`-gated since the 2026-08-14 owner decision (consistency with
+      // DropdownMenuItem; a mouse desktop keeps dense rows) — the bare token
+      // would be the regression now. Full argument in ui/select.tsx.
+      expect(option.className.split(/\s+/)).toContain('coarse:min-h-11');
+      expect(option.className.split(/\s+/)).not.toContain('min-h-11');
     }
   });
 });
