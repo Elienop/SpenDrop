@@ -298,11 +298,13 @@ describe('Dashboard recent transactions at phone width', () => {
     const [first] = within(list).getAllByRole('listitem');
 
     expect(within(first).getByTestId('amount-display')).toHaveTextContent(
-      '-$16.85',
+      /-\$16\.85/,
     );
+    // Both lines carry the row's direction — see AmountDisplay. Anchored, so
+    // a second sign character on either fails.
     expect(
       within(first).getByTestId('amount-display-secondary'),
-    ).toHaveTextContent('1,500,000.00 LBP');
+    ).toHaveTextContent(/^-1,500,000\.00 LBP$/);
   });
 
   it('keeps the amount from being squeezed by a long description', async () => {

@@ -1,5 +1,13 @@
 import { useState } from 'react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Cell } from 'recharts';
+import {
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Cell,
+  ReferenceLine,
+} from 'recharts';
 import {
   ChartContainer,
   ChartTooltip,
@@ -329,7 +337,17 @@ export function PatternsTab() {
                   width={120}
                 />
                 <ChartTooltip content={<ChartTooltipContent />} />
-                <Bar dataKey="total" radius={[0, 4, 4, 0]}>
+                {/* A tag whose refunds outweigh its spending nets negative and
+                    draws LEFTWARD — recharts 3 extends the default
+                    [0, 'auto'] domain to include negative data rather than
+                    clipping it. The axis above is visible, but its zero tick
+                    is one label among several; the line is what makes the
+                    direction of a bar readable at a glance. */}
+                <ReferenceLine x={0} stroke="hsl(var(--border))" />
+                {/* Symmetric radius, not [0, 4, 4, 0]: the array form rounds
+                    the RIGHT end only, so a leftward bar came out rounded at
+                    the zero line and square at its own tip. */}
+                <Bar dataKey="total" radius={4}>
                   {tags.data.map((_, i) => (
                     <Cell
                       key={i}

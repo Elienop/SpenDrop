@@ -1,4 +1,11 @@
-import { useCallback, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from 'react';
 import { format as formatDate, parseISO } from 'date-fns';
 import type { HeatmapEntry } from '@/api/types';
 import {
@@ -26,6 +33,7 @@ import {
   heaviestDay,
   isUpcoming,
   monthLabelColumns,
+  spendingSummaryPhrase,
   toWeekRows,
   toWeekdayRows,
 } from './heatmapGrid';
@@ -120,6 +128,7 @@ const FOCUS_RING =
  */
 function chipTextClass(
   total: number,
+  count: number,
   opacity: number,
   upcoming = false,
 ): string {
@@ -128,11 +137,54 @@ function chipTextClass(
   // dark figure — a transcription slip; 5.49 is what both measurement passes
   // produced, and the table now agrees.)
   if (upcoming) return 'text-muted-foreground';
-  if (total === 0) return 'text-foreground/60';
+  if (count === 0) return 'text-foreground/60';
+  // A day with rows that netted <= 0 sits on `bg-muted` like an empty day, so
+  // its number is the same colour problem — but it is NOT an empty day, and
+  // the full-strength foreground is what separates the two at a glance
+  // (the ring below is the deliberate signal; this reinforces it). Strictly
+  // more contrast than the 5.13 / 5.72 the alpha'd version measures.
+  if (total <= 0) return 'text-foreground';
   if (opacity >= OPACITY_STOPS[2]) return 'text-primary-foreground';
   if (opacity >= OPACITY_STOPS[1])
     return 'text-foreground dark:text-primary-foreground';
   return 'text-foreground';
+}
+
+/** One day's accumulated money and rows — see the note where it is built. */
+interface DayEntry {
+  total: number;
+  count: number;
+}
+
+/**
+ * The chip's fill, for EVERY state a cell can be in. One function because the
+ * states are the point: there are five of them, three surfaces paint them
+ * (year cell, month cell, month picker), and the defect this closes was
+ * exactly a value falling between two gates.
+ *
+ *   upcoming              nothing at all — it cannot be read as a real zero
+ *   no rows               `bg-muted`, the "nothing happened" grey
+ *   spent                 the ranked intensity chip
+ *   net <= 0 with rows    `bg-muted` PLUS a primary ring
+ *
+ * The last one is the new state and the ring is why it is not simply painted
+ * pale: a refunded day spent nothing NET, so a fill on the spending scale
+ * would rank it against days that did — but it is not an empty day either,
+ * and the household has to be able to see that there is something to tap. An
+ * outline says "there is data here" without claiming an intensity. It is a
+ * ring on the CHIP, which is free: the today marker and the selected month
+ * both spend theirs on the BUTTON.
+ */
+function chipPaint(
+  total: number,
+  count: number,
+  opacity: number,
+  upcoming: boolean,
+): { className: string; style?: CSSProperties } {
+  if (upcoming) return { className: '' };
+  if (count === 0) return { className: 'bg-muted' };
+  if (total > 0) return { className: '', style: { backgroundColor: chipFill(opacity) } };
+  return { className: 'bg-muted ring-1 ring-inset ring-primary/50' };
 }
 
 /** Which month the phone opens on: the current one, or January for a past year. */
@@ -215,7 +267,11 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
   }
   const month = monthFor.month;
 
-  const { lookup, dayScale } = useMemo(() => {
+  const { lookup, dayTotals, dayScale } = useMemo<{
+    lookup: Map<string, DayEntry>;
+    dayTotals: Map<string, number>;
+    dayScale: (total: number) => number;
+  }>(() => {
     // ACCUMULATE PER DAY, never overwrite. `SumExpensesByDay` groups by
     // `t.date` — the raw timestamp column, not `date(t.date)` — so a day
     // holding rows with different times of day arrives as SEVERAL entries, and
@@ -233,9 +289,18 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
     // off `time.Time`, and this repo's sqlc codegen is hand-maintained, so it
     // is a lockstep hand-edit that belongs in its own PR. Accumulating here is
     // correct either way, and stays correct after that lands.
-    const byDay = new Map<string, number>();
+    //
+    // THE COUNT ACCUMULATES WITH THE MONEY, for the same reason and by the
+    // same rule: the wire's `txn_count` is per group, so a day arriving as
+    // several groups holds its rows across all of them. Everything downstream
+    // asks "does this day have rows" rather than "is its total positive".
+    const byDay = new Map<string, DayEntry>();
     for (const entry of data) {
-      byDay.set(entry.date, (byDay.get(entry.date) ?? 0) + entry.total);
+      const prev = byDay.get(entry.date);
+      byDay.set(entry.date, {
+        total: (prev?.total ?? 0) + entry.total,
+        count: (prev?.count ?? 0) + entry.txn_count,
+      });
     }
     // PERCENTILES ARE COMPUTED OVER THE WHOLE YEAR, never over the month the
     // phone happens to be showing. Two reasons, and the second is the one
@@ -246,25 +311,38 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
     // Ranked over the ACCUMULATED day totals, so `n` and every rank describe
     // days — over `data` directly they would describe per-timestamp groups,
     // which is a different population with a different size.
+    const totals = new Map<string, number>();
+    for (const [date, entry] of byDay) totals.set(date, entry.total);
     return {
       lookup: byDay,
-      dayScale: buildIntensityScale([...byDay.values()]),
+      // `heaviestDay` asks only about money, so it gets only the money —
+      // derived here rather than inside it so the two cannot disagree about
+      // which days were accumulated.
+      dayTotals: totals,
+      dayScale: buildIntensityScale([...totals.values()]),
     };
   }, [data]);
 
-  const monthTotals = useMemo(() => {
+  const months = useMemo(() => {
     const totals = new Array<number>(12).fill(0);
+    const counts = new Array<number>(12).fill(0);
     for (const entry of data) {
       if (!entry.date.startsWith(`${year}-`)) continue;
       const m = Number(entry.date.slice(5, 7)) - 1;
-      if (m >= 0 && m < 12) totals[m] += entry.total;
+      if (m >= 0 && m < 12) {
+        totals[m] += entry.total;
+        counts[m] += entry.txn_count;
+      }
     }
-    return totals;
+    return { totals, counts };
   }, [data, year]);
 
+  // No `.filter(t => t > 0)` here any more: `buildIntensityScale` owns the
+  // population rule now, so the picker and the day grid cannot end up ranking
+  // over differently-filtered sets.
   const monthScale = useMemo(
-    () => buildIntensityScale(monthTotals.filter((t) => t > 0)),
-    [monthTotals],
+    () => buildIntensityScale(months.totals),
+    [months],
   );
 
   const cells = useMemo(
@@ -281,7 +359,10 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
   // at", which is the only reading that stays true when the month picker
   // moves — a year-wide figure under a March grid would name a day that is
   // not on it.
-  const heaviest = useMemo(() => heaviestDay(cells, lookup), [cells, lookup]);
+  const heaviest = useMemo(
+    () => heaviestDay(cells, dayTotals),
+    [cells, dayTotals],
+  );
 
   const monthLabels = useMemo(
     () => (isMobile ? [] : monthLabelColumns(year, cells)),
@@ -361,29 +442,32 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
   const openedFromRef = useRef<string | null>(null);
 
   const openDaySheet = useCallback(
-    (date: string, total: number, upcoming: boolean) => {
+    (date: string, total: number, count: number, upcoming: boolean) => {
       openedFromRef.current = date;
-      setOpenDay({ date, total, upcoming });
+      setOpenDay({ date, total, count, upcoming });
     },
     [],
   );
 
   const cellProps = (dateStr: string, row: number, col: number) => {
-    const total = lookup.get(dateStr) ?? 0;
+    const entry = lookup.get(dateStr);
+    const total = entry?.total ?? 0;
+    const count = entry?.count ?? 0;
     const opacity = dayScale(total);
-    const upcoming = isUpcoming(dateStr, todayIso, total);
+    const upcoming = isUpcoming(dateStr, todayIso, count > 0);
     return {
       dateStr,
       total,
+      count,
       opacity,
-      label: heatmapCellLabel(dateStr, total, format, todayIso),
+      label: heatmapCellLabel(dateStr, total, count, format, todayIso),
       isToday: dateStr === todayIso,
       isUpcoming: upcoming,
       isActive: dateStr === activeDate,
       onFocus: () => setFocusedDate(dateStr),
       onKeyDown: (e: KeyboardEvent<HTMLButtonElement>) =>
         handleKeyDown(e, row, col),
-      onActivate: () => openDaySheet(dateStr, total, upcoming),
+      onActivate: () => openDaySheet(dateStr, total, count, upcoming),
     };
   };
 
@@ -401,7 +485,8 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
               <MonthPicker
                 year={year}
                 month={month}
-                monthTotals={monthTotals}
+                monthTotals={months.totals}
+                monthCounts={months.counts}
                 scale={monthScale}
                 format={format}
                 onSelect={(m) => setMonthFor({ year, month: m })}
@@ -524,7 +609,10 @@ export function SpendingHeatmap({ data, year, format }: SpendingHeatmapProps) {
 
 interface CellProps {
   dateStr: string;
+  /** The day's NET expense total — signed once amounts can be refunds. */
   total: number;
+  /** Live expense rows on the day. The paint and the label key on THIS. */
+  count: number;
   opacity: number;
   label: string;
   isToday: boolean;
@@ -548,6 +636,7 @@ interface CellProps {
 function YearCell({
   dateStr,
   total,
+  count,
   opacity,
   label,
   isToday,
@@ -557,6 +646,7 @@ function YearCell({
   onKeyDown,
   onActivate,
 }: CellProps) {
+  const paint = chipPaint(total, count, opacity, isUpcoming);
   return (
     <Tooltip>
       <TooltipTrigger asChild>
@@ -602,11 +692,9 @@ function YearCell({
             aria-hidden="true"
             className={cn(
               'absolute inset-[1.5px] rounded-[2px]',
-              total === 0 && !isUpcoming && 'bg-muted',
+              paint.className,
             )}
-            style={
-              total > 0 ? { backgroundColor: chipFill(opacity) } : undefined
-            }
+            style={paint.style}
           />
         </button>
       </TooltipTrigger>
@@ -631,6 +719,7 @@ function YearCell({
 function MonthCell({
   dateStr,
   total,
+  count,
   opacity,
   label,
   isToday,
@@ -641,6 +730,7 @@ function MonthCell({
   onActivate,
 }: CellProps) {
   const day = Number(dateStr.slice(8, 10));
+  const paint = chipPaint(total, count, opacity, isUpcoming);
   return (
     <button
       type="button"
@@ -675,13 +765,14 @@ function MonthCell({
       <span
         className={cn(
           'absolute inset-[2px] flex items-center justify-center rounded-md text-xs font-medium',
-          // An upcoming day paints NOTHING — no fill at all, so it cannot be
-          // read as the `bg-muted` of a day that really did cost nothing. The
-          // month opens on today, so this is most of the default view.
-          total === 0 && !isUpcoming && 'bg-muted',
-          chipTextClass(total, opacity, isUpcoming),
+          // Every fill state — including the upcoming day that paints NOTHING,
+          // so it cannot be read as the `bg-muted` of a day that really did
+          // cost nothing (the month opens on today, so that is most of the
+          // default view) — is decided in `chipPaint`.
+          paint.className,
+          chipTextClass(total, count, opacity, isUpcoming),
         )}
-        style={total > 0 ? { backgroundColor: chipFill(opacity) } : undefined}
+        style={paint.style}
       >
         {day}
       </span>
@@ -702,6 +793,7 @@ function MonthPicker({
   year,
   month,
   monthTotals,
+  monthCounts,
   scale,
   format,
   onSelect,
@@ -709,6 +801,7 @@ function MonthPicker({
   year: number;
   month: number;
   monthTotals: number[];
+  monthCounts: number[];
   scale: (total: number) => number;
   format: (amount: number) => string;
   onSelect: (month: number) => void;
@@ -724,15 +817,23 @@ function MonthPicker({
     >
       {MONTH_NAMES_SHORT.map((name, m) => {
         const total = monthTotals[m] ?? 0;
-        const opacity = total > 0 ? scale(total) : 0;
+        const count = monthCounts[m] ?? 0;
+        const opacity = scale(total);
+        const paint = chipPaint(total, count, opacity, false);
         return (
           <button
             key={name}
             type="button"
             aria-pressed={m === month}
-            aria-label={`${MONTH_NAMES_FULL[m]} ${year}: ${
-              total > 0 ? `${format(total)} spent` : 'no spending'
-            }`}
+            // The same phrase the day cells announce, from the same function:
+            // a month whose refunds outweighed its spending must not report
+            // "no spending" while its days say otherwise. Never `upcoming` —
+            // a month is offered for selection whether or not it has begun.
+            aria-label={`${MONTH_NAMES_FULL[m]} ${year}: ${spendingSummaryPhrase(
+              total,
+              count,
+              format,
+            )}`}
             onClick={() => onSelect(m)}
             className={cn(
               // Same 44px floor as the day cells, and the same single painted
@@ -754,12 +855,10 @@ function MonthPicker({
             <span
               className={cn(
                 'absolute inset-0 flex items-center justify-center rounded-md text-xs font-medium',
-                total === 0 && 'bg-muted',
-                chipTextClass(total, opacity),
+                paint.className,
+                chipTextClass(total, count, opacity),
               )}
-              style={
-                total > 0 ? { backgroundColor: chipFill(opacity) } : undefined
-              }
+              style={paint.style}
             >
               {name}
             </span>

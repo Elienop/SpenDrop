@@ -4,6 +4,7 @@ import {
   Bar,
   XAxis,
   CartesianGrid,
+  ReferenceLine,
 } from 'recharts';
 import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
@@ -38,10 +39,16 @@ import {
 } from '@/components/ui/table';
 import { ButtonGroup } from '@/components/ui/button-group';
 import { Badge } from '@/components/ui/badge';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Undo2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Transaction, PaginatedResponse } from '../api/types';
-import { formatCurrency, DEFAULT_LOCALE } from '@/lib/format';
+import {
+  formatCurrency,
+  formatSignedCurrency,
+  displayAmount,
+  DEFAULT_LOCALE,
+} from '@/lib/format';
+import { AmountSignNote } from '@/components/AmountSignNote';
 import {
   MONTH_NAMES_SHORT,
   MONTH_NAMES_FULL,
@@ -55,7 +62,6 @@ import {
   DASHBOARD_RECENT_TX_LIMIT,
   DASHBOARD_CATEGORY_COLLAPSED_LIMIT,
 } from '@/lib/constants';
-import { TYPE_INCOME } from '@/lib/transaction-types';
 import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useIsMobileViewport } from '@/hooks/useIsMobileViewport';
 import { RecentTransactionCard } from '@/components/RecentTransactionCard';
@@ -122,6 +128,10 @@ export function Dashboard() {
   // `KpiCard` renders `{dollars}{cents}` verbatim (e.g. `-$1,598` + `.90`).
   const formatFull = (amount: number): string =>
     formatCurrency(amount, baseCurrency);
+  /** `formatFull` for figures that must carry their direction — see
+   *  `formatSignedCurrency`. Feed it `displayAmount(...)`, never a raw row. */
+  const formatSignedFull = (amount: number): string =>
+    formatSignedCurrency(amount, baseCurrency);
   const splitCurrency = (
     amount: number,
   ): { dollars: string; cents: string } => {
@@ -229,7 +239,17 @@ export function Dashboard() {
     }));
   }, [trend, cashFlowView]);
 
+  // NET, and stays net: it is the figure in the card header, and a month whose
+  // refunds outweighed its spending really did cost less than nothing.
   const totalCategorySpent = categories.reduce((sum, cat) => sum + cat.total, 0);
+
+  // GROSS, and only used as the gauge's share denominator — see the note at
+  // the `pct` computation. Summed over every category, not just the visible
+  // slice of them, so "Show more" cannot change any bar's width.
+  const categoryShareBase = categories.reduce(
+    (sum, cat) => sum + Math.max(cat.total, 0),
+    0,
+  );
 
   const overBudgetCount = categories.filter((cat) => cat.over).length;
 
@@ -492,8 +512,24 @@ export function Dashboard() {
                 />
               }
             />
-            <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
-            <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={[4, 4, 0, 0]} />
+            {/* The zero reference, and the reason this chart has one at all:
+                a month whose refunds outweigh its spending has a NEGATIVE
+                total, and recharts 3 grows its default [0, 'auto'] domain to
+                include negative data rather than clipping it — so the bar
+                draws downward and, with no YAxis on this chart, nothing else
+                on screen says where zero is. The same pattern as SavingsTab's
+                YoY chart and OverviewTab's Net Cash Flow.
+
+                NO YAxis here, unlike those two: this card renders at 360px on
+                the household's phone, where an 80px currency axis is a fifth
+                of the plot. The reference line is what the negative case
+                actually needs. */}
+            <ReferenceLine y={0} stroke="hsl(var(--border))" />
+            {/* Symmetric radius, not [4, 4, 0, 0]: the array form rounds the
+                visual TOP only, which leaves a downward bar glued to the axis
+                with its rounding on the wrong end. */}
+            <Bar dataKey="income" fill="url(#fillIncome)" stroke="var(--color-income)" strokeOpacity={0.3} radius={4} />
+            <Bar dataKey="expense" fill="url(#fillExpense)" stroke="var(--color-expense)" strokeOpacity={0.3} radius={4} />
           </BarChart>
         </ChartContainer>
       </ChartCard>
@@ -534,9 +570,21 @@ export function Dashboard() {
             ) : (
               <div className="flex flex-1 flex-col justify-between gap-4">
                 {gaugeData.map((slice) => {
-                  const pct = totalCategorySpent > 0
-                    ? (slice.value / totalCategorySpent) * 100
+                  // SHARE OF GROSS SPENDING, not of the net total. Refunds can
+                  // shrink `totalCategorySpent` below any one category's spend
+                  // — and can drive it to zero or negative outright — at which
+                  // point every share is > 100%, or flipped, or divided away.
+                  // `categoryShareBase` sums only the categories that spent
+                  // something, so a share stays "how much of the month's
+                  // spending was this" whatever the refunds do. For a month
+                  // with no refunds the two denominators are identical.
+                  const pct = categoryShareBase > 0
+                    ? (slice.value / categoryShareBase) * 100
                     : 0;
+                  // A category that netted <= 0 got more back than it spent.
+                  // It is NOT a small positive spender, so it is not painted
+                  // as one: no bar, and the note below names the state.
+                  const refunded = slice.value <= 0;
                   const budgetPct = slice.limit != null && slice.limit > 0
                     ? Math.round((slice.value / slice.limit) * 100)
                     : 0;
@@ -563,15 +611,32 @@ export function Dashboard() {
                         <span className="line-clamp-2 min-w-0 font-medium [overflow-wrap:anywhere]">
                           {slice.name}
                         </span>
-                        <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
-                          {formatFull(slice.value)}
+                        <span className="flex shrink-0 flex-col items-end">
+                          <span className="font-mono tabular-nums text-muted-foreground">
+                            {formatFull(slice.value)}
+                          </span>
+                          {refunded && (
+                            <span
+                              data-testid={`category-refunded-${slice.id}`}
+                              className="flex items-center gap-1 text-xs text-muted-foreground"
+                            >
+                              <Undo2 className="size-3 shrink-0" aria-hidden="true" />
+                              {slice.value < 0
+                                ? 'Net refund'
+                                : 'Refunded in full'}
+                            </span>
+                          )}
                         </span>
                       </div>
                       <div className="h-5 w-full rounded-full bg-muted">
+                        {/* The 2% floor exists so a tiny spender is still
+                            visible; it must not manufacture a visible bar for
+                            a category that spent nothing net, which is why the
+                            floor lives on the refunded branch's far side. */}
                         <div
                           className="h-full rounded-full transition-all"
                           style={{
-                            width: `${Math.max(pct, 2)}%`,
+                            width: refunded ? '0%' : `${Math.max(pct, 2)}%`,
                             backgroundColor: slice.color,
                           }}
                         />
@@ -589,13 +654,27 @@ export function Dashboard() {
                               </span>
                             )}
                           </div>
+                          {/* CLAMPED AT BOTH ENDS. `Math.min(budgetPct, 100)`
+                              alone was the worst wrong picture on this page:
+                              a refunded category makes `budgetPct` negative,
+                              `width: "-25%"` is invalid CSS, the browser drops
+                              the declaration, and the block div falls back to
+                              `width: auto` — which for a block element is the
+                              FULL track. The category the household got money
+                              back on painted as its budget fully consumed. The
+                              percentage text beside it keeps the real figure
+                              ("-25%"): the bar reports consumption, which
+                              cannot go below empty, and the number reports the
+                              arithmetic. */}
                           <div className="h-1.5 w-full rounded-full bg-muted">
                             <div
                               className={cn(
                                 'h-full rounded-full transition-all',
                                 slice.over ? 'bg-amber-500' : 'bg-primary',
                               )}
-                              style={{ width: `${Math.min(budgetPct, 100)}%` }}
+                              style={{
+                                width: `${Math.min(Math.max(budgetPct, 0), 100)}%`,
+                              }}
                             />
                           </div>
                         </div>
@@ -759,16 +838,26 @@ export function Dashboard() {
                           {tx.date}
                         </TableCell>
                         <TableCell className="text-right">
+                          {/* Sign and colour from the DISPLAYED value, so this
+                              cell and the phone card list above (which render
+                              the same rows through `AmountDisplay`) cannot
+                              disagree about a refund. */}
                           <span
                             className={cn(
                               'text-sm font-semibold tabular-nums',
-                              tx.category_type === TYPE_INCOME &&
+                              displayAmount(tx.amount, tx.category_type) > 0 &&
                                 'text-emerald-500',
                             )}
                           >
-                            {tx.category_type === TYPE_INCOME ? '+' : '-'}
-                            {formatFull(tx.amount)}
+                            {formatSignedFull(
+                              displayAmount(tx.amount, tx.category_type),
+                            )}
                           </span>
+                          <AmountSignNote
+                            amount={tx.amount}
+                            type={tx.category_type}
+                            className="justify-end"
+                          />
                         </TableCell>
                       </TableRow>
                     );

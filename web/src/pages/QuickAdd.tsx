@@ -38,9 +38,15 @@ import {
 } from '@/lib/save-failure';
 import { toCreatePayload } from '@/lib/currency';
 import { cn } from '@/lib/utils';
-import { formatCurrency } from '@/lib/format';
+import { displayAmount, formatSignedCurrency } from '@/lib/format';
 import { formatYYYYMMDD } from '@/lib/dates';
-import { isExpense, isIncome, TYPE_INCOME } from '@/lib/transaction-types';
+import {
+  isExpense,
+  isIncome,
+  TYPE_EXPENSE,
+  TYPE_INCOME,
+  type TransactionType,
+} from '@/lib/transaction-types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category } from '@/api/types';
@@ -262,6 +268,13 @@ export function QuickAdd() {
           tags: tapTags,
           categoryId: pickedCategoryId,
         };
+
+  // `EntryKind` and `TransactionType` carry the same two strings, but they are
+  // different types on purpose (one is a UI toggle, one is the wire's category
+  // type). The preview's sign is a LEDGER rule, so it is expressed in the
+  // ledger's vocabulary rather than by widening the toggle.
+  const previewType: TransactionType =
+    kind === 'income' ? TYPE_INCOME : TYPE_EXPENSE;
 
   // Identity of the entry currently on screen. A retry that lands long after
   // the failure compares against this to decide whether clearing the form
@@ -650,17 +663,26 @@ export function QuickAdd() {
 
             {raw.trim().length > 0 && (
               <div className="flex flex-col gap-4 rounded-lg border border-border p-4">
+                {/* THE SAME RULE THE SAVED ROW WILL RENDER BY: the preview is
+                    a promise about what lands in the ledger, so it signs the
+                    parsed amount through `displayAmount` +
+                    `formatSignedCurrency` exactly as `AmountDisplay` does.
+                    It used to prepend a '+' for income only, which composes
+                    "+-$5.00" the moment a negative amount is parseable. */}
                 <div
                   data-testid="quick-preview-amount"
                   className={cn(
                     'font-mono text-3xl font-semibold tabular-nums',
-                    kind === 'income' &&
-                      parsed.amount != null &&
+                    parsed.amount != null &&
+                      displayAmount(parsed.amount, previewType) > 0 &&
                       'text-emerald-500',
                   )}
                 >
                   {parsed.amount != null ? (
-                    `${kind === 'income' ? '+' : ''}${formatCurrency(parsed.amount, effective.currency)}`
+                    formatSignedCurrency(
+                      displayAmount(parsed.amount, previewType),
+                      effective.currency,
+                    )
                   ) : (
                     <span className="text-base font-normal text-muted-foreground">
                       Add an amount

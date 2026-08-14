@@ -387,8 +387,35 @@ describe('QuickAdd — Income kind', () => {
     await user.type(input, 'salary 1000');
 
     const preview = await screen.findByTestId('quick-preview-amount');
-    await waitFor(() => expect(preview.textContent ?? '').toMatch(/^\+/));
+    // WHOLE STRING, not `/^\+/`. The old assertion pinned an unconditional
+    // '+' prefix composed onto a formatter that emits its own sign, and
+    // "+-$1,000.00" satisfies `/^\+/` perfectly.
+    await waitFor(() =>
+      expect(preview.textContent).toBe('+$1,000.00'),
+    );
     expect(preview.className).toContain('text-emerald-500');
+  });
+
+  test('expense preview shows the sign the saved row will display', async () => {
+    // It used to show a bare "$12.00" — no sign at all — while the ledger
+    // renders the same row as "-$12.00". The preview is a promise about what
+    // lands, so it makes the same promise the ledger keeps.
+    //
+    // The REFUND quadrant is deliberately absent from this file: the freeform
+    // parser treats a leading minus as description text in v1, so a negative
+    // `parsed.amount` is not reachable from this screen yet. It is covered
+    // where it can be driven — `format.test.ts` for the rule, and the ledger
+    // surfaces for the render.
+    const user = userEvent.setup();
+    renderQuickAdd();
+    await screen.findByRole('button', { name: /groceries/i });
+
+    const input = screen.getByPlaceholderText(/lunch/i);
+    await user.type(input, 'lunch 12');
+
+    const preview = await screen.findByTestId('quick-preview-amount');
+    await waitFor(() => expect(preview.textContent).toBe('-$12.00'));
+    expect(preview.className).not.toContain('text-emerald-500');
   });
 
   test('switching to Income shows income chips and hides expense chips', async () => {

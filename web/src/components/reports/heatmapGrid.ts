@@ -187,42 +187,53 @@ export function monthLabelColumns(
  * reachable by construction: the largest total always has rank n, q = 1, and
  * lands in the last bucket for every n ≥ 1.
  *
- * ZERO-SPEND DAYS ARE ABSENT FROM `totals`, AND THAT IS LOAD-BEARING. The
- * backend's `SumExpensesByDay` groups by date over rows that exist, so a day
- * with no expense produces no row and never reaches this function (the cell
- * renderer takes its `bg-muted` branch first). If anyone ever "fixes" the
- * endpoint to emit all 365 days, three quarters of the ranks collapse onto
- * zero-totalled days and every real spending day jumps to the darkest stop.
+ * TOTAL, IN BOTH SENSES: it is defined for every input, including inputs the
+ * population never contained. The previous version looked its argument up in a
+ * `Map` of value → rank and fell back to `?? n` — the DARKEST stop — for
+ * anything absent, which is what a no-rows day (total 0) and, once amounts are
+ * signed, every refund-heavy day would have hit. Nothing showed only because
+ * both consumers gated on `total > 0` before they looked at the opacity, so
+ * relaxing either gate would have painted empty and refunded days black. That
+ * is backlog B27, and counting the population instead of indexing it is what
+ * closes it: there is no fallback branch left to be wrong.
  *
- * Ties share a rank — `rank` is "how many days total this much or less" — so
- * a year where every day spent the same amount paints uniformly rather than
- * inventing a gradient that is not in the data.
+ * NON-SPENDING DAYS ARE EXCLUDED FROM THE POPULATION AND GET THE PALEST STOP
+ * BY DECISION. The scale describes SPENDING — the legend says so — so a day
+ * that netted zero or negative is not a rank in it: including one would push a
+ * real spending day up a bucket, and mapping one to anything but the pale end
+ * would say a refund day was an intense day. The filter is inside this
+ * function rather than at the call sites so that every consumer gets the same
+ * population rule.
+ *
+ * What the `total <= 0` line actually buys, measured rather than assumed: with
+ * at least one spending day the counting arm below already returns the palest
+ * stop for a non-positive total (nothing ranks at or below it, so q = 0). The
+ * branch is load-bearing in the case that has none — a month or a year of
+ * pure refunds, where `n === 0` sends everything to the DARKEST stop. It is
+ * kept above both for that, and because the decision belongs where a reader
+ * looks for it rather than as a side effect of arithmetic two lines down.
+ *
+ * Ties share a rank — the rank is "how many spending days total this much or
+ * less" — so a year where every day spent the same amount paints uniformly
+ * rather than inventing a gradient that is not in the data.
  */
 export function buildIntensityScale(
   totals: number[],
 ): (total: number) => number {
-  const sorted = [...totals].sort((a, b) => a - b);
-  const n = sorted.length;
-  const rank = new Map<number, number>();
-  // Last write wins, so `rank.get(v)` is the count of days totalling <= v.
-  sorted.forEach((value, i) => rank.set(value, i + 1));
+  const spending = totals.filter((t) => t > 0).sort((a, b) => a - b);
+  const n = spending.length;
 
   const top = OPACITY_STOPS[OPACITY_STOPS.length - 1];
+  const palest = OPACITY_STOPS[0];
   return (total: number): number => {
+    if (total <= 0) return palest;
     if (n === 0) return top;
-    // `?? n` IS REACHED, and by the commonest input there is. `cellProps`
-    // calls this with `lookup.get(date) ?? 0` for EVERY day, and a day with no
-    // rows is absent from the map the scale was built from — so a zero total
-    // falls through here and comes back as the DARKEST stop. Nothing shows,
-    // only because both consumers gate on the total rather than on this value:
-    // the chip paints under `total > 0` and `chipTextClass` returns on
-    // `total === 0` before it looks at the opacity. That coupling is invisible
-    // from either end, so dropping one of those gates would paint empty days
-    // black. `buildIntensityScale.outOfPopulation` pins it.
-    //
-    // (`monthScale` genuinely cannot reach it — it is built from
-    // `filter(t => t > 0)` and called under the same predicate.)
-    const q = (rank.get(total) ?? n) / n;
+    // How many spending days totalled this much or less — computed by
+    // counting, so a value that is not in the population still lands between
+    // the two ranks it belongs between instead of falling off the end.
+    let rank = 0;
+    while (rank < n && spending[rank] <= total) rank += 1;
+    const q = rank / n;
     const bucket = Math.ceil(q * OPACITY_STOPS.length) - 1;
     return OPACITY_STOPS[Math.min(OPACITY_STOPS.length - 1, Math.max(0, bucket))];
   };
@@ -248,6 +259,16 @@ export function buildIntensityScale(
  * Days with no rows are skipped rather than compared: `lookup` has no entry
  * for them, and a grid with no spending at all must produce null so the caller
  * can render nothing instead of "Heaviest day: … $0.00".
+ *
+ * DEFINED OVER THE SIGNED NETS, DELIBERATELY. A day's total is now its net of
+ * spending and refunds, and "heaviest" reads as the day the household spent
+ * the most — so the day that gave the most back is not a candidate for it, and
+ * a month of nothing but refunds has no heaviest day at all rather than a
+ * least-negative one. The `value <= 0` skip stays what its comment below says
+ * it is: a fast path, not a guard. Re-derived for populations containing
+ * negatives — exhausting all 120 orderings of [-5, -5, 0, 3, 7] gives the same
+ * result with the skip relaxed to `value < 0` or removed entirely, because
+ * `total` starts at 0 and only ever moves up.
  */
 export function heaviestDay(
   dates: (string | null)[],
@@ -280,12 +301,13 @@ export function heaviestDay(
 /**
  * Whether a cell should be shown as NOT YET HAPPENED rather than as a zero.
  *
- * `total` is part of the question, not just the date. A future date normally
- * has no expense rows for the same reason a quiet day has none, so it arrives
- * as `total === 0` — but a household CAN enter a future-dated expense (the
- * ledger accepts any date up to `MaxDataYear`), and a future day that someone
- * has deliberately recorded spending on must paint and announce that spending,
- * not be blanked as "upcoming". So the two are ordered: recorded data wins.
+ * WHETHER THE DAY HAS ROWS is part of the question, not just the date — and it
+ * is `hasRows` rather than the total for the reason the whole file now turns
+ * on: a household CAN enter a future-dated expense (the ledger accepts any
+ * date up to `MaxDataYear`) and it CAN refund one, so a future day holding a
+ * spend and its refund nets to exactly zero. Keyed on the total, that day was
+ * blanked as "upcoming" — data the household entered, denied by the grid. The
+ * two are ordered: recorded data wins, whatever it nets to.
  *
  * ISO `YYYY-MM-DD` strings compare correctly with `>`, and both sides come
  * from the same generator, so no parsing is involved.
@@ -297,9 +319,37 @@ export function heaviestDay(
 export function isUpcoming(
   dateStr: string,
   todayIso: string,
-  total: number,
+  hasRows: boolean,
 ): boolean {
-  return total === 0 && dateStr > todayIso;
+  return !hasRows && dateStr > todayIso;
+}
+
+/**
+ * How a day's (or month's) spending reads in one phrase, for every state it
+ * can be in.
+ *
+ * ONE function because three surfaces say this — the cell's `aria-label`, the
+ * month picker's, and the day sheet's header — and the whole B10 heatmap
+ * defect was three places deciding independently what a total meant. A day
+ * that announces "no spending" while its sheet lists four transactions is
+ * worse than either surface being wrong alone.
+ *
+ * THE COUNT IS THE SUBJECT WHENEVER THE MONEY IS NOT. A net of zero or less is
+ * not a report about spending, it is a report about a day that spent and got
+ * money back — so the phrase names the rows, which is the fact the user can
+ * act on (they are one tap away in the sheet). "no spending" is reserved for
+ * days that genuinely have no rows: it is the one state where nothing happened.
+ */
+export function spendingSummaryPhrase(
+  total: number,
+  count: number,
+  format: (amount: number) => string,
+): string {
+  if (count <= 0) return 'no spending';
+  if (total > 0) return `${format(total)} spent`;
+  return `${format(total)} net across ${count} ${
+    count === 1 ? 'transaction' : 'transactions'
+  }`;
 }
 
 /**
@@ -313,35 +363,34 @@ export function isUpcoming(
  * screen reader, and independent of any overlay existing at all.
  *
  * "no spending" rather than "$0.00 spent": the payload omits days with no
- * expense rows entirely, so a zero cell means NO DATA, not a day that
+ * expense rows entirely, so a cell with no entry means NO DATA, not a day that
  * genuinely totalled zero.
  *
- * `total > 0` IS a safe stand-in for "this day has rows" only because amounts
- * cannot be zero or negative: `CHECK(amount_cents > 0)` on the transactions
- * table (migration 010) plus the handler's own "amount must be positive". If
- * signed amounts ever land — the refunds-offsetting-a-category question — a
- * day of refunds could sum to <= 0 and would then be announced as "no
- * spending" and skipped by the sheet's fetch gate, which reads the same
- * predicate. Both would need to move to a has-rows flag on the wire.
+ * KEYED ON THE ROW COUNT, NOT ON THE TOTAL, and that is the correction this
+ * function's previous comment predicted. `total > 0` was a stand-in for "this
+ * day has rows" that held only while `CHECK(amount_cents > 0)` did. With
+ * signed amounts a day of refunds nets to <= 0, and under the old rule it was
+ * announced as "no spending" — while its sheet, gated on the same predicate,
+ * refused to fetch the rows that would have contradicted it. `txn_count` on
+ * the wire is what makes "has rows" a fact rather than an inference.
  *
- * AND "upcoming" rather than either, for a day that has not happened. A
+ * AND "upcoming" rather than any of them, for a day that has not happened. A
  * future date has no expense rows for exactly the same reason a quiet day
- * has none, so it arrives here as `total === 0` and would otherwise assert
- * "no spending" — a claim about the future, not a report about the past. On
- * the phone this is not an edge case: the grid opens on the CURRENT month, so
- * for most of any month most of the first thing the household sees would be
- * that claim.
+ * has none, so it arrives here with no entry and would otherwise assert "no
+ * spending" — a claim about the future, not a report about the past. On the
+ * phone this is not an edge case: the grid opens on the CURRENT month, so for
+ * most of any month most of the first thing the household sees would be that
+ * claim.
  */
 export function heatmapCellLabel(
   dateStr: string,
   total: number,
+  count: number,
   format: (amount: number) => string,
   todayIso: string,
 ): string {
   const day = formatDate(parseISO(dateStr), FORMAT_DATE_FULL);
-  if (isUpcoming(dateStr, todayIso, total)) return `${day}: upcoming`;
+  if (isUpcoming(dateStr, todayIso, count > 0)) return `${day}: upcoming`;
   const prefix = dateStr === todayIso ? 'Today, ' : '';
-  return total > 0
-    ? `${prefix}${day}: ${format(total)} spent`
-    : `${prefix}${day}: no spending`;
+  return `${prefix}${day}: ${spendingSummaryPhrase(total, count, format)}`;
 }

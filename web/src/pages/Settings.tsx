@@ -2670,6 +2670,7 @@ const IMPORT_SKIP_REASON_LABELS: Record<string, string> = {
   unparseable_date: 'no readable date',
   empty_description: 'no description',
   zero_amount: 'no amount',
+  sign_mismatch: 'amount signs disagree',
   missing_category: 'no category',
   field_too_long: 'too long to store',
   error: 'could not be saved',

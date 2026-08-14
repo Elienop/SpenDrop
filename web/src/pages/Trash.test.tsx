@@ -1559,7 +1559,8 @@ describe('Trash', () => {
         const income = within(list).getByText('April salary').closest('li');
 
         // Anchored regexes, not toHaveTextContent's default substring
-        // match — "-$25.50" is a substring of plenty of wrong renders.
+        // match — "-$25.50" is a substring of plenty of wrong renders,
+        // "--$25.50" among them.
         const expenseAmount = within(expense!).getByTestId('amount-display');
         expect(expenseAmount).toHaveTextContent(/^-\$25\.50$/);
         expect(classes(expenseAmount)).toContain('text-foreground');
@@ -1572,6 +1573,51 @@ describe('Trash', () => {
         const incomeAmount = within(income!).getByTestId('amount-display');
         expect(incomeAmount).toHaveTextContent(/^\+\$2,500\.00$/);
         expect(classes(incomeAmount)).toContain('text-emerald-500');
+      });
+
+      test('a deleted REFUND reads as money back on both presentations', async () => {
+        // Trash is where a mis-entered refund gets found, so the card and the
+        // table have to tell the same story about it — the two render the
+        // amount through completely separate code (AmountDisplay vs the
+        // table cell), which is exactly how they drifted before.
+        mockedApi.get.mockResolvedValue({
+          ...defaultDeletedList,
+          transactions: [
+            { ...defaultDeletedList.transactions[0], amount: -25.5 },
+          ],
+          total: 1,
+        });
+        const list = await renderCardList();
+        const card = within(list).getByText('Weekly groceries').closest('li');
+        const amount = within(card!).getByTestId('amount-display');
+        expect(amount).toHaveTextContent(/^Refund\+\$25\.50$/);
+        expect(classes(amount)).toContain('text-emerald-500');
+      });
+
+      test('the desktop table tells the same story about the same refund', async () => {
+        // The table cell composes its own sign and colour — it does NOT go
+        // through AmountDisplay — so "the card is right" says nothing about
+        // it. This is the surface where the old `category_type === EXPENSE
+        // ? '-' : '+'` lived, and it would render "--$25.50" here while the
+        // card beside it read "+$25.50".
+        mockedApi.get.mockResolvedValue({
+          ...defaultDeletedList,
+          transactions: [
+            { ...defaultDeletedList.transactions[0], amount: -25.5 },
+          ],
+          total: 1,
+        });
+        setViewportWidth(DESKTOP_WIDTH);
+        renderTrash();
+        const row = (await screen.findByText('Weekly groceries')).closest('tr');
+        // The amount is a bare text node in the cell, so `getByText` resolves
+        // to the `<td>` itself — which is also what carries the colour.
+        const cell = within(row!).getByText('+$25.50');
+        expect(cell.tagName).toBe('TD');
+        expect(classes(cell)).toContain('text-emerald-500');
+        // Exact, including the note: a second sign character anywhere in the
+        // cell fails this.
+        expect(cell.textContent).toBe('+$25.50Refund');
       });
 
       test('a foreign-currency card shows what the row was booked in', async () => {
@@ -1593,11 +1639,14 @@ describe('Trash', () => {
         const card = within(list).getByText('Weekly groceries').closest('li');
 
         expect(within(card!).getByTestId('amount-display')).toHaveTextContent(
-          '-$25.50',
+          /-\$25\.50/,
         );
+        // Signed, like the figure above it: both lines describe the same
+        // money, so a refund cannot read one way on one and another on the
+        // other.
         expect(
           within(card!).getByTestId('amount-display-secondary'),
-        ).toHaveTextContent('2,250,000.00 LBP');
+        ).toHaveTextContent(/^-2,250,000\.00 LBP$/);
       });
 
       test('a base-currency card shows no second figure', async () => {

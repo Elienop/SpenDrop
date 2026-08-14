@@ -430,8 +430,9 @@ export interface ImportResult {
    * import; this is what makes it explicable.
    *
    * Keys are the backend's own reason strings — `duplicate`,
-   * `unparseable_date`, `empty_description`, `zero_amount`,
-   * `missing_category`, `field_too_long` — plus `user_skipped` (rows the
+   * `unparseable_date`, `empty_description`, `zero_amount`, `sign_mismatch`
+   * (amount and original_amount carry opposite signs), `missing_category`,
+   * `field_too_long` — plus `user_skipped` (rows the
    * user skipped in the preview) and `error`. Only non-zero causes appear,
    * so a consumer must render whatever keys arrive rather than a fixed list,
    * and the counts sum to `skipped`.
@@ -491,7 +492,21 @@ export interface ExpenseVelocityData {
 
 export interface HeatmapEntry {
   date: string;        // ISO date "YYYY-MM-DD"
+  /**
+   * The day's NET expense total: signed, so a day whose refunds outweigh its
+   * spending arrives as a negative number and a day that was fully refunded
+   * arrives as an exact zero.
+   */
   total: number;
+  /**
+   * How many live expense rows the day holds. NOT derivable from `total` once
+   * amounts are signed — a zero total means "refunded to nothing" on a day
+   * with rows and "nothing happened" on a day without, and the heatmap paints,
+   * announces and fetches differently for the two. Days with no rows produce
+   * no entry at all, so this is never 0 on the wire; the field exists so the
+   * client never has to infer rows from money.
+   */
+  txn_count: number;
 }
 
 export interface RecurringEntry {

@@ -273,6 +273,68 @@ describe('every month axis goes through the shared rule', () => {
   });
 });
 
+describe('every bar chart can be read in both directions', () => {
+  // ANOTHER SOURCE PIN, for the same reason as the axis rules above: whether a
+  // downward bar is rounded on the right end and whether a zero line is drawn
+  // are GEOMETRY, and happy-dom lays nothing out. What can be checked here is
+  // that each chart carries the two props the pattern is made of.
+  //
+  // The pattern is SavingsTab's, which arrived at it first (its own comment at
+  // the YoY chart records why): a symmetric `radius` and a `ReferenceLine` at
+  // zero. It matters now because `amount_cents` is signed — a month, a
+  // category or a tag whose refunds outweigh its spending nets NEGATIVE — and
+  // because recharts 3 does not clip that. Its default `[0, 'auto']` domain is
+  // EXTENDED to include negative data (`extendDomain`, with
+  // `allowDataOverflow` false), so the bar is drawn below or left of the axis
+  // whatever these props say. The only question is whether it is legible when
+  // it happens.
+  const CHART_OWNERS: ReadonlyArray<readonly [string, string, number]> = [
+    // Income vs Expenses, Net Cash Flow (Area, already had one), Budget vs Actual
+    ['OverviewTab.tsx', overviewSource, 3],
+    // Monthly net + YoY — the pair this whole pattern was derived from
+    ['SavingsTab.tsx', savingsSource, 2],
+    // Category Breakdown — horizontal, so its zero line is on x
+    ['SpendingTab.tsx', spendingSource, 1],
+    // Tag Analysis — horizontal
+    ['PatternsTab.tsx', patternsSource, 1],
+    // Cash Flow
+    ['Dashboard.tsx', dashboardSource, 1],
+  ];
+
+  const zeroLines = (source: string): string[] =>
+    stripComments(source).match(/<ReferenceLine\s+[xy]=\{0\}[^/]*\/>/g) ?? [];
+
+  test.each(CHART_OWNERS)('%s: draws its zero reference', (_name, source, count) => {
+    // Counted, not merely present: OverviewTab holds three charts and a single
+    // surviving line would satisfy a `toContain`.
+    expect(zeroLines(source)).toHaveLength(count);
+    for (const line of zeroLines(source)) {
+      // The border token, so the line reads as scaffolding rather than as a
+      // series. A hard-coded colour here would also miss the theme.
+      expect(line).toContain('stroke="hsl(var(--border))"');
+    }
+  });
+
+  test('no bar rounds one end only', () => {
+    // `radius={[4, 4, 0, 0]}` rounds the visual TOP, which leaves a bar
+    // growing downward glued to the axis with square corners at its own tip;
+    // `[0, 4, 4, 0]` is the same defect rotated for a horizontal chart. Both
+    // shipped here. The array FORM is what is banned — a symmetric `radius={4}`
+    // is correct in both directions — and the check is over the whole file
+    // rather than per-Bar because `<Bar>` is not always self-closing (the ones
+    // in SpendingTab and PatternsTab wrap `<Cell>` and `<LabelList>`).
+    for (const [, source] of CHART_OWNERS) {
+      expect(stripComments(source)).not.toMatch(/radius=\{\[/);
+    }
+    // Positive control: the sources really do contain bars with a radius, so
+    // the absence above is not vacuous over a set with no bars in it.
+    const withBars = CHART_OWNERS.filter(([, source]) =>
+      /radius=\{4\}/.test(stripComments(source)),
+    );
+    expect(withBars).toHaveLength(CHART_OWNERS.length);
+  });
+});
+
 describe('free-text table cells are bounded in both directions', () => {
   // Also a source pin, and for the same reason: a table that is 3464px wide
   // inside a 293px card is a layout fact, and happy-dom reports every element

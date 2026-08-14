@@ -5,7 +5,8 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/api/client';
 import { cn } from '@/lib/utils';
-import { formatCurrency } from '@/lib/format';
+import { displayAmount, formatSignedCurrency } from '@/lib/format';
+import { AmountSignNote } from '@/components/AmountSignNote';
 import {
   enqueue,
   removeQueued,
@@ -13,11 +14,7 @@ import {
 } from '@/lib/offline-queue';
 import { useOnline } from '@/hooks/useOnline';
 import { useRecentTransactions } from '@/hooks/useRecentTransactions';
-import {
-  TYPE_EXPENSE,
-  TYPE_INCOME,
-  type TransactionType,
-} from '@/lib/transaction-types';
+import { TYPE_EXPENSE, type TransactionType } from '@/lib/transaction-types';
 import { UNDO_TOAST_MS } from '@/lib/undo';
 import type { Category } from '@/api/types';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
@@ -215,15 +212,27 @@ export function RecentlyAdded({
             <li key={row.key} className="flex items-center gap-3 py-2 pl-3 pr-1">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
+                  {/* Sign and colour follow the DISPLAYED value, not the row
+                      type — see `displayAmount`. This panel lists pending
+                      offline rows as well as saved ones, and a queued refund
+                      has to read the same here as it will once it lands. */}
                   <span
                     className={cn(
                       'shrink-0 font-mono text-sm font-medium tabular-nums',
-                      row.type === TYPE_INCOME && 'text-emerald-500',
+                      displayAmount(row.amount, row.type) > 0 &&
+                        'text-emerald-500',
                     )}
                   >
-                    {row.type === TYPE_INCOME ? '+' : '-'}
-                    {formatCurrency(row.amount, row.currency)}
+                    {formatSignedCurrency(
+                      displayAmount(row.amount, row.type),
+                      row.currency,
+                    )}
                   </span>
+                  <AmountSignNote
+                    amount={row.amount}
+                    type={row.type}
+                    className="shrink-0"
+                  />
                   <span className="truncate text-sm">
                     {row.description || '—'}
                   </span>
