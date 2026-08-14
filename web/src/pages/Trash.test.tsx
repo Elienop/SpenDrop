@@ -1829,4 +1829,293 @@ describe('Trash', () => {
       });
     });
   });
+
+  // -------------------------------------------------------------------------
+  // Focus anchors. Both confirm dialogs are controlled and Trigger-less, so
+  // Radix's own restore aims at a null triggerRef — measured pre-fix on the
+  // built app (coarse pointer): Escape OR Cancel on either dialog, and a
+  // completed restore, all left document.activeElement on <body>.
+  // -------------------------------------------------------------------------
+  describe('purge and restore focus anchors', () => {
+    beforeEach(asAdmin);
+
+    test("Cancel on the purge dialog returns focus to that row's Purge button", async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeButton = screen.getByRole('button', {
+        name: /purge weekly groceries/i,
+      });
+
+      await user.click(purgeButton);
+      // Positive control: the dialog really opened, so the focus assertion
+      // below is not passing because focus never left the button.
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test("Escape on the purge dialog returns focus to that row's Purge button", async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeButton = screen.getByRole('button', {
+        name: /purge weekly groceries/i,
+      });
+
+      await user.click(purgeButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a confirmed purge parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue(undefined);
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('button', { name: /purge weekly groceries/i }),
+      );
+      await user.click(
+        screen.getByRole('button', { name: /purge permanently/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.del).toHaveBeenCalledWith('transactions/101/purge'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      // Fixture proof that the assertion above discriminates: the refetch
+      // mock returns the same list, so the row's Purge button is STILL
+      // MOUNTED at close time — the heading won over a live return target,
+      // not by being the only thing left.
+      expect(
+        screen.getByRole('button', { name: /purge weekly groceries/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('Cancel on the purge-all dialog returns focus to the toolbar Purge-all button', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      // Exact-anchored: /purge all/i alone would also match the dialog's
+      // "Purge all permanently" confirm button.
+      const purgeAllButton = screen.getByRole('button', {
+        name: /^purge all 2$/i,
+      });
+
+      await user.click(purgeAllButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeAllButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('Escape on the purge-all dialog returns focus to the toolbar Purge-all button', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+      const purgeAllButton = screen.getByRole('button', {
+        name: /^purge all 2$/i,
+      });
+
+      await user.click(purgeAllButton);
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+      await user.keyboard('{Escape}');
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+      );
+
+      await waitFor(() => expect(purgeAllButton).toHaveFocus());
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a confirmed purge-all parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.del.mockResolvedValue({ purged: 2 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(screen.getByRole('button', { name: /^purge all 2$/i }));
+      await user.click(
+        screen.getByRole('button', { name: /purge all permanently/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.del).toHaveBeenCalledWith('transactions/trash'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+    });
+
+    test('a single-row restore parks focus on the page heading once the row unmounts', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({});
+      // The refetch after a successful restore genuinely drops the row here,
+      // because the button focus sat on unmounting IS the defect shape —
+      // pre-fix, focus fell to <body> with it.
+      mockedApi.get.mockResolvedValueOnce(defaultDeletedList).mockResolvedValue({
+        ...defaultDeletedList,
+        transactions: [defaultDeletedList.transactions[1]],
+        total: 1,
+      });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('button', { name: /restore weekly groceries/i }),
+      );
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith('transactions/101/restore'),
+      );
+      await waitFor(() =>
+        expect(screen.queryByText('Weekly groceries')).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('a restore-all parks focus on the page heading', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 2, conflicted: 0 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(screen.getByRole('button', { name: /^restore all 2$/i }));
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith('transactions/restore-all'),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      // Same fixture proof the confirmed-purge test uses: the refetch mock
+      // answers with the SAME list, so the toolbar button the click focused is
+      // still mounted. The heading therefore won over a live element rather
+      // than by default — pre-fix, focus simply stayed on that button, which
+      // in the real emptied-trash case unmounts and drops focus on <body>.
+      expect(
+        screen.getByRole('button', { name: /^restore all 2$/i }),
+      ).toBeInTheDocument();
+    });
+
+    test('a batch restore parks focus on the page heading once the bulk bar unmounts', async () => {
+      const user = userEvent.setup();
+      mockedApi.post.mockResolvedValue({ restored: 2, conflicted: 0, skipped: 0 });
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select all on this page/i }),
+      );
+      // Positive control: the bar the assertion is about really rendered.
+      expect(screen.getByText(/2 selected/i)).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /^restore 2$/i }));
+
+      await waitFor(() =>
+        expect(mockedApi.post).toHaveBeenCalledWith(
+          'transactions/restore-batch',
+          { ids: [101, 102] },
+        ),
+      );
+      // Clearing the selection is what takes the clicked button away with it.
+      await waitFor(() =>
+        expect(screen.queryByText(/2 selected/i)).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    test('"Clear selection" parks focus on the page heading — it unmounts its own bar', async () => {
+      const user = userEvent.setup();
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      await user.click(
+        screen.getByRole('checkbox', { name: /select all on this page/i }),
+      );
+      expect(screen.getByText(/2 selected/i)).toBeInTheDocument();
+
+      await user.click(screen.getByRole('button', { name: /clear selection/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByText(/2 selected/i)).not.toBeInTheDocument(),
+      );
+      await waitFor(() =>
+        expect(
+          screen.getByRole('heading', { level: 1, name: /trash/i }),
+        ).toHaveFocus(),
+      );
+      expect(document.activeElement).not.toBe(document.body);
+    });
+
+    // The dismissal target is resolved by data-purge-row-id against the live
+    // tree because the Purge button is a DIFFERENT ELEMENT per presentation.
+    // The desktop tests above prove the table's; this proves the card's.
+    describe('on the phone card list', () => {
+      beforeEach(() => setViewportWidth(PHONE_WIDTH));
+      afterEach(() => setViewportWidth(DESKTOP_WIDTH));
+
+      test("dismissing the purge dialog returns focus to the card's Purge button", async () => {
+        const user = userEvent.setup();
+        renderTrash();
+        const list = await screen.findByRole('list', {
+          name: /deleted transactions/i,
+        });
+        const card = within(list).getByText('Weekly groceries').closest('li');
+        const purgeButton = within(card!).getByRole('button', {
+          name: /purge weekly groceries/i,
+        });
+
+        await user.click(purgeButton);
+        expect(await screen.findByRole('dialog')).toBeInTheDocument();
+
+        await user.click(screen.getByRole('button', { name: /^cancel$/i }));
+        await waitFor(() =>
+          expect(screen.queryByRole('dialog')).not.toBeInTheDocument(),
+        );
+
+        await waitFor(() => expect(purgeButton).toHaveFocus());
+        expect(document.activeElement).not.toBe(document.body);
+      });
+    });
+  });
 });
