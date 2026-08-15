@@ -1921,6 +1921,47 @@ describe('Settings', () => {
           { categoryMap: {}, defaultCategoryId: null },
         );
       });
+
+      // A SPACING pin, and the only one of the three sites cleared for Sonar
+      // typescript:S6772 that a test can reach. The label is a bare string
+      // followed by a `<span className="ml-1">`, so nothing in the source says
+      // whether the gap between them is a text space or a margin — and the
+      // obvious way to satisfy that rule, `{' '}`, would silently make it BOTH.
+      // It is the margin: the whole string is asserted with no space before
+      // the bracket, so a future "fix" there fails here instead of shipping.
+      test('the default-category label spaces its row count with a margin, not a text space', async () => {
+        mockedApi.upload.mockResolvedValue({
+          ...previewWithUnmapped,
+          unresolved_categories: [
+            // ONE row, so the singular branch of the count is the one rendered
+            // — "the 1 row", not "the 1 rows". The plural is exercised by the
+            // browser pass; what matters here is the whitespace either side.
+            { name: '', reason: 'missing' as const, row_ids: [1] },
+          ],
+        });
+        stubCategoriesFetch();
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(screen.getByLabelText(/default category/i)).toBeInTheDocument();
+        });
+
+        // Located by its own text, not by `getByLabelText`: that query returns
+        // the SelectTrigger (named by `aria-label`), and the trigger's name is
+        // exactly what this label's rendering CANNOT be read off.
+        const label = screen.getByText(/^Default Category/).closest('label');
+        expect(label).toHaveTextContent(
+          /^Default Category\(for the 1 row with an empty Category cell\)$/,
+        );
+
+        // Both halves, or the title above is the one over-claiming: the text
+        // carries no space AND the margin that replaces it is still there.
+        // Dropping `ml-1` leaves the string identical and the two runs of
+        // words touching.
+        expect(label?.querySelector('span')).toHaveClass('ml-1');
+      });
     });
 
     describe('import result', () => {

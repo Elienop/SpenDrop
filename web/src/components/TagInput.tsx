@@ -290,12 +290,15 @@ export function TagInput({
       and forwards a click on its whitespace to that input — the affordance a
       user expects from anything shaped like a text field.
 
-      `role="presentation"` is that statement, and it is what stops jsx-a11y's
-      `click-events-have-key-events` / `no-static-element-interactions` (Sonar
-      typescript:S1082 / S6848) from reporting the handler: both rules return
-      early on a presentation role, because — quoting the second rule's own
-      source — "presentation is an intentional signal from the author that this
-      element is not meant to be perceivable".
+      `role="presentation"` is that statement, and it is what stops SonarQube's
+      typescript:S1082 / S6848 from reporting the handler. Those are the rules
+      that flag it here — `eslint-plugin-jsx-a11y` is NOT installed in this
+      repo, so `npx eslint` says nothing about this line either way; S1082 and
+      S6848 are Sonar's ports of jsx-a11y's `click-events-have-key-events` and
+      `no-static-element-interactions`, and both of those return early on a
+      presentation role, because — quoting the second one's own source —
+      "presentation is an intentional signal from the author that this element
+      is not meant to be perceivable".
 
       What the rules guard against is functionality reachable ONLY by pointer,
       and there is none here: keyboard users Tab straight to the input, which

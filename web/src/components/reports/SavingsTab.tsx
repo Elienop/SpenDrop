@@ -122,7 +122,7 @@ export function SavingsTab() {
     // identical order, so the curve — negative months included — is unchanged.
     const result: { name: string; savings: number }[] = [];
     let running = 0;
-    for (const e of incExp.data.filter((e) => e.year === year)) {
+    for (const e of incExp.data.filter((entry) => entry.year === year)) {
       running += e.net;
       result.push({
         name: MONTH_NAMES_SHORT[e.month - 1],

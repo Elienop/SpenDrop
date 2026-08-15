@@ -617,7 +617,18 @@ export function PatternsTab() {
 
                     SpendingTab's category chart deliberately does NOT use this
                     mechanism; see the note on `breakdownSorted` there for the
-                    LabelList reason. */}
+                    LabelList reason.
+
+                    The one measured cost of `shape` here: it flips recharts'
+                    `hasCustomShape`, which stops it discarding zero-DIMENSION
+                    rects — so a tag whose refunds exactly cancel its spending
+                    now leaves an EMPTY `<g class="recharts-bar-rectangle">` in
+                    the SVG. It paints nothing (`Rectangle` returns null at
+                    width 0), has no geometry and so no hit area, and this Bar
+                    has no `<LabelList>` to put a "$0.00" beside it — which is
+                    exactly why the trade is affordable on THIS chart and not on
+                    Spending's. Do not go looking for a bug if a DOM diff turns
+                    that group up. */}
                 <Bar
                   dataKey="total"
                   radius={4}
