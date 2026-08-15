@@ -370,9 +370,16 @@ func TestProcessImportRows_FieldTooLongIsADeclaredSkipReason(t *testing.T) {
 	}
 	defer tx.Rollback()
 
+	// Row 1 is over-long AND carries a contradictory money pair (+5.75 against
+	// -1,000). Both gates would fire, and the ORDER decides which reason the
+	// row is counted under — length first, as it always has been. It is worth
+	// pinning because the money work gave sign_mismatch a second home: it is
+	// now also one of the reasons that exempt a row from money flags, and the
+	// obvious way to share that check is to hoist it up beside the date and
+	// description ones, which would silently relabel this row.
 	rows := []importRow{
 		{RowID: 0, Date: "2026-01-15", Description: "Groceries", Amount: 42.50},
-		{RowID: 1, Date: "2026-01-16", Description: strings.Repeat("d", MaxDescriptionLength+1), Amount: 5.75},
+		{RowID: 1, Date: "2026-01-16", Description: strings.Repeat("d", MaxDescriptionLength+1), Amount: 5.75, OriginalAmount: -1000},
 	}
 	result, _ := processImportRows(context.Background(), q.WithTx(tx), tx,
 		database.NewTransactionStore(db, q), importProcessInput{
@@ -389,7 +396,8 @@ func TestProcessImportRows_FieldTooLongIsADeclaredSkipReason(t *testing.T) {
 		t.Fatalf("skipped=%+v, want exactly one", result.Skipped)
 	}
 	if result.Skipped[0].Reason != skipReasonFieldTooLong {
-		t.Errorf("reason=%q, want %q", result.Skipped[0].Reason, skipReasonFieldTooLong)
+		t.Errorf("reason=%q, want %q — the length check runs before the sign check, and a row that trips both is counted as the one the user is asked to fix",
+			result.Skipped[0].Reason, skipReasonFieldTooLong)
 	}
 }
 

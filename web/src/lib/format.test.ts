@@ -3,6 +3,7 @@ import {
   amountSignNote,
   displayAmount,
   formatCurrency,
+  formatRate,
   formatSignedAmount,
   formatSignedCurrency,
 } from './format';
@@ -64,6 +65,24 @@ describe('amountSignNote', () => {
     // surface elsewhere — not a row to label "Refund".
     expect(amountSignNote(0, TYPE_EXPENSE)).toBeNull();
     expect(amountSignNote(0, TYPE_INCOME)).toBeNull();
+  });
+});
+
+describe('formatRate', () => {
+  test('groups a large rate without padding it to the cent', () => {
+    // The number the import offers as "today's rate" and then records as
+    // the row's booked_rate. "89,000.00" reads as money it is not.
+    expect(formatRate(89000)).toBe('89,000');
+    expect(formatRate(0.92)).toBe('0.92');
+  });
+
+  test('a rate below half a cent survives, where a money formatter would render zero', () => {
+    // THE reason this helper exists rather than a call to formatAmount:
+    // `rate_to_base` is foreign units per base unit, so a currency
+    // stronger than the base has a rate under 0.01 — and two decimals
+    // would tell the user the rate is 0.
+    expect(formatRate(0.000011)).toBe('0.000011');
+    expect(formatRate(0.000011)).not.toBe('0.00');
   });
 });
 

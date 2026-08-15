@@ -2,18 +2,52 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-const Table = React.forwardRef<
-  HTMLTableElement,
-  React.HTMLAttributes<HTMLTableElement>
->(({ className, ...props }, ref) => (
-  <div className="relative w-full overflow-auto">
-    <table
-      ref={ref}
-      className={cn("w-full caption-bottom text-sm", className)}
-      {...props}
-    />
-  </div>
-))
+export interface TableProps extends React.HTMLAttributes<HTMLTableElement> {
+  /**
+   * Props for the scroll wrapper this component renders around the
+   * `<table>` — className, tabIndex, ref, whatever the caller needs.
+   *
+   * IT EXISTS FOR STICKY HEADERS. `position: sticky` resolves against the
+   * nearest SCROLLING ancestor, and that is this wrapper, not whatever
+   * box the caller wraps around it: a caller that puts its own
+   * `max-h-* overflow-auto` outside leaves the wrapper scrolling
+   * horizontally and never vertically, so a sticky `th` sticks to a box
+   * that does not move and the column labels scroll away with the rows.
+   * Measured on the import preview at 1288px: `scrollTop = 300` put the
+   * thead at y = −26 while the scroller's top was 273.
+   *
+   * So the height cap and the vertical overflow belong HERE, on the same
+   * box as the `<table>`. `ref` comes through the same object because
+   * whichever element scrolls is also the one a caller has to scroll,
+   * measure, or use as a focus anchor.
+   *
+   * The wrapper's own `relative w-full overflow-auto` is merged with, not
+   * replaced by, `className` — dropping the horizontal overflow would
+   * make a wide table overflow its card instead.
+   */
+  containerProps?: React.HTMLAttributes<HTMLDivElement> & {
+    ref?: React.Ref<HTMLDivElement>
+  }
+}
+
+const Table = React.forwardRef<HTMLTableElement, TableProps>(
+  ({ className, containerProps, ...props }, ref) => {
+    const { className: containerClassName, ...restContainer } =
+      containerProps ?? {}
+    return (
+      <div
+        {...restContainer}
+        className={cn("relative w-full overflow-auto", containerClassName)}
+      >
+        <table
+          ref={ref}
+          className={cn("w-full caption-bottom text-sm", className)}
+          {...props}
+        />
+      </div>
+    )
+  }
+)
 Table.displayName = "Table"
 
 const TableHeader = React.forwardRef<

@@ -4,6 +4,7 @@ import {
   getImportSession,
   patchImportRow,
   FieldTooLongError,
+  MoneyErrorsError,
   NotFoundError,
   UnresolvedCategoriesError,
   UnresolvedCollisionsError,
@@ -178,6 +179,96 @@ describe('api/import', () => {
         { row_id: 5, field: 'notes' },
       ]);
     }
+  });
+
+  it('confirmImport throws MoneyErrorsError carrying field_errors on 409 MONEY_ERRORS', async () => {
+    // The money family is a SIBLING of FIELD_TOO_LONG, not a widening of
+    // it: same `field_errors` array shape, its own code, its own error
+    // class. The hook needs the two apart because the banner it writes
+    // names a different remedy ("shorten" vs "fix the money").
+    mockFetch([
+      {
+        ok: false,
+        status: 409,
+        body: {
+          code: 'MONEY_ERRORS',
+          field_errors: [
+            {
+              row_id: 1,
+              field: 'rate',
+              message:
+                'no rate for 1,500,000 LBP — enter one, or apply today’s 89,000',
+            },
+            {
+              row_id: 3,
+              field: 'original_currency',
+              message: "`LBX` isn't set up — add it under Settings → Currencies",
+            },
+          ],
+        },
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      await confirmImport({ import_id: 'abc', category_map: {} });
+      throw new Error('expected confirmImport to reject');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(MoneyErrorsError);
+    // Distinct from every sibling — the hook branches on type, and a
+    // money error that also satisfied `instanceof FieldTooLongError`
+    // would take the length branch and tell the user to shorten a row
+    // whose problem is a missing exchange rate.
+    expect(caught).not.toBeInstanceOf(FieldTooLongError);
+    expect(caught).not.toBeInstanceOf(UnresolvedCollisionsError);
+    expect(caught).not.toBeInstanceOf(UnresolvedCategoriesError);
+    if (caught instanceof MoneyErrorsError) {
+      expect(caught.field_errors).toEqual([
+        {
+          row_id: 1,
+          field: 'rate',
+          message:
+            'no rate for 1,500,000 LBP — enter one, or apply today’s 89,000',
+        },
+        {
+          row_id: 3,
+          field: 'original_currency',
+          message: "`LBX` isn't set up — add it under Settings → Currencies",
+        },
+      ]);
+    }
+  });
+
+  it('keeps FIELD_TOO_LONG on its own class now that MONEY_ERRORS is a sibling', async () => {
+    // The existing 409 must stay byte-identical in behaviour: the
+    // backend still emits FIELD_TOO_LONG for the length family and the
+    // frontend still routes it to FieldTooLongError. Pinned here (not
+    // only in the test above) because "add a sibling" is exactly the
+    // edit that turns one branch into the other by accident.
+    mockFetch([
+      {
+        ok: false,
+        status: 409,
+        body: {
+          code: 'FIELD_TOO_LONG',
+          field_errors: [{ row_id: 2, field: 'notes' }],
+        },
+      },
+    ]);
+
+    let caught: unknown;
+    try {
+      await confirmImport({ import_id: 'abc', category_map: {} });
+      throw new Error('expected confirmImport to reject');
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(caught).toBeInstanceOf(FieldTooLongError);
+    expect(caught).not.toBeInstanceOf(MoneyErrorsError);
   });
 
   it('confirmImport throws UnresolvedCategoriesError on 409 UNRESOLVED_CATEGORIES', async () => {

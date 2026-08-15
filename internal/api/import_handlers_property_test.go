@@ -66,6 +66,12 @@ type propertyFixture struct {
 	catNameToID map[string]int64
 	catIDToName map[int64]string
 	knownCats   []string
+	// currencies is the household's real table (USD base, LBP 89000, EUR
+	// 0.92 — migration 001's seed), loaded once. Every sampled row's money is
+	// resolved against it, so a foreign shape the generator draws resolves
+	// the same way it would in a real import rather than being flagged as an
+	// unknown currency by an empty snapshot.
+	currencies importCurrencies
 }
 
 // newPropertyFixture sets up the per-property-test fixture: migrated
@@ -93,6 +99,11 @@ func newPropertyFixture(t *testing.T) *propertyFixture {
 		knownCats = append(knownCats, c.Name)
 	}
 
+	currencies, err := loadImportCurrencies(context.Background(), q)
+	if err != nil {
+		t.Fatalf("loadImportCurrencies: %v", err)
+	}
+
 	return &propertyFixture{
 		db:          db,
 		q:           q,
@@ -100,6 +111,7 @@ func newPropertyFixture(t *testing.T) *propertyFixture {
 		catNameToID: nameToID,
 		catIDToName: idToName,
 		knownCats:   knownCats,
+		currencies:  currencies,
 	}
 }
 
@@ -130,6 +142,7 @@ func (f *propertyFixture) runProcess(t *rapid.T, rows []importRow) importResult 
 		DefaultCategoryID: 0,
 		CatNameToID:       f.catNameToID,
 		CatIDToName:       f.catIDToName,
+		Currencies:        f.currencies,
 	})
 	return result
 }
@@ -202,6 +215,23 @@ func genNonZeroAmount() *rapid.Generator[float64] {
 	})
 }
 
+// genForeignOriginalAtRate89000 draws a foreign original amount whose value at
+// the household's LBP rate is a storable base amount: at 89,000, the band
+// [1,000, 100,000,000] LBP lands between one cent and about $1,123. Both signs
+// are drawn, because a negative original is a foreign refund and derives a
+// negative base amount — the case that makes the sign half of
+// TestImportProperty_AmountSanity worth having.
+func genForeignOriginalAtRate89000() *rapid.Generator[float64] {
+	return rapid.Custom(func(t *rapid.T) float64 {
+		units := rapid.IntRange(1_000, 100_000_000).Draw(t, "orig_units")
+		f := float64(units)
+		if rapid.Bool().Draw(t, "orig_negative") {
+			f = -f
+		}
+		return f
+	})
+}
+
 // genImportRow picks a row "shape" and then draws fields consistent
 // with that shape. The shape labels match the rejection branches in
 // processImportRows one-to-one — a shape that should get Inserted
@@ -234,7 +264,7 @@ func genNonZeroAmount() *rapid.Generator[float64] {
 // where the conservation and sanity invariants matter most.
 func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 	return rapid.Custom(func(t *rapid.T) importRow {
-		shape := rapid.IntRange(0, 9).Draw(t, "shape")
+		shape := rapid.IntRange(0, 14).Draw(t, "shape")
 		switch shape {
 		case 0, 1, 2:
 			// Valid row (weighted higher so most rows hit the
@@ -341,8 +371,75 @@ func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 				OriginalAmount:   original,
 				OriginalCurrency: "LBP",
 			}
+		case 10:
+			// A row that states its money in LBP and the rate it was booked
+			// at, with NO base amount at all — the shape the per-row rate
+			// exists for. It INSERTS, with cents derived from the pair, and
+			// both signs are drawn so a foreign refund is covered.
+			//
+			// The original is drawn in a band that keeps the derived value
+			// storable at 89,000: 1,000 LBP is a cent and change, 100,000,000
+			// is about $1,123. Outside that band the row would be rejected as
+			// amount_invalid, which is a different property's business.
+			original := genForeignOriginalAtRate89000().Draw(t, "orig_for_rate")
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   original,
+				OriginalCurrency: rapid.SampledFrom([]string{"LBP", "lbp", "Lbp"}).Draw(t, "cur_case"),
+				Rate:             89000,
+				RawRate:          "89000",
+			}
+		case 11:
+			// A foreign original with no rate and no base amount — hits
+			// skipReasonRateMissing.
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   genForeignOriginalAtRate89000().Draw(t, "orig_no_rate"),
+				OriginalCurrency: "LBP",
+			}
+		case 12:
+			// A currency the household has not set up — hits
+			// skipReasonUnknownCurrency. The code is drawn from a set that
+			// cannot collide with the three seeded currencies.
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Amount:           genNonZeroAmount().Draw(t, "amount"),
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   genForeignOriginalAtRate89000().Draw(t, "orig_unknown_cur"),
+				OriginalCurrency: rapid.SampledFrom([]string{"LBX", "XXX", "ZZZ"}).Draw(t, "unknown_code"),
+			}
+		case 13:
+			// A Rate cell the sheet filled with something unusable — hits
+			// skipReasonRateInvalid. RawRate is what makes it distinguishable
+			// from case 11's absent rate.
+			return importRow{
+				Date:             genValidDateString().Draw(t, "date"),
+				Description:      genNonEmptyDescription().Draw(t, "desc"),
+				Amount:           genNonZeroAmount().Draw(t, "amount"),
+				Category:         rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				OriginalAmount:   genForeignOriginalAtRate89000().Draw(t, "orig_bad_rate"),
+				OriginalCurrency: "LBP",
+				RawRate:          rapid.SampledFrom([]string{"abc", "0", "-1", "1e400"}).Draw(t, "bad_rate"),
+			}
+		case 14:
+			// An Amount cell the parser cannot read — hits
+			// skipReasonAmountInvalid through the raw cell rather than
+			// vanishing into zero_amount. The drawn strings are the shapes a
+			// real sheet produces: the European decimal comma, a mis-grouped
+			// number, and plain text in a money column.
+			return importRow{
+				Date:        genValidDateString().Draw(t, "date"),
+				Description: genNonEmptyDescription().Draw(t, "desc"),
+				Category:    rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				RawAmount:   rapid.SampledFrom([]string{"1,5", "0,92", "1,00,000", "abc", "n/a"}).Draw(t, "bad_amount"),
+			}
 		}
-		// Unreachable — IntRange(0, 9) guarantees shape is in [0, 9].
+		// Unreachable — IntRange(0, 14) guarantees shape is in [0, 14].
 		// If a future refactor widens the range without adding a
 		// matching case, the default importRow{} here lands in the
 		// empty-date branch and is counted as skipReasonUnparseableDate,
@@ -415,6 +512,20 @@ func TestImportProperty_NoSilentDrops(t *testing.T) {
 		// this set, which would have turned a legitimate skip into a
 		// property failure the day a generator grew longer strings.
 		skipReasonFieldTooLong: {},
+		// The money family. Every one of these is a LAST-DITCH label — each
+		// condition is refused by confirm's MONEY_ERRORS gate long before the
+		// insert loop — but the loop can still reach them when a session is
+		// stale (a currency deleted between the gate and the commit), and a
+		// row dropped there must still name why. The generator draws three of
+		// them directly; the rest are covered by
+		// TestProcessImportRows_AllReasonsReachable.
+		skipReasonRateMissing:         {},
+		skipReasonRateInvalid:         {},
+		skipReasonRateOnBase:          {},
+		skipReasonRateWithoutCurrency: {},
+		skipReasonUnknownCurrency:     {},
+		skipReasonAmountDisagrees:     {},
+		skipReasonAmountInvalid:       {},
 	}
 	rapid.Check(t, func(t *rapid.T) {
 		rows := genImportRows(fix.knownCats).Draw(t, "rows")
@@ -474,6 +585,13 @@ func TestImportProperty_DateSanity(t *testing.T) {
 // through RowIndex is what gives the new half teeth — asserting merely
 // that some inserted rows are negative would pass on a build that
 // flipped every sign, since the generator draws both.
+//
+// Which cell the sign comes FROM widened with the per-row rate: a row may
+// state no base amount at all and derive one from its foreign original, and
+// such a row is a refund exactly when the ORIGINAL is negative. The property
+// reads the sign off whichever cell the sheet actually filled — deliberately
+// not off the resolver, which would make it a restatement of the code under
+// test.
 func TestImportProperty_AmountSanity(t *testing.T) {
 	fix := newPropertyFixture(t)
 	rapid.Check(t, func(t *rapid.T) {
@@ -486,11 +604,15 @@ func TestImportProperty_AmountSanity(t *testing.T) {
 					ins.RowIndex,
 				)
 			}
-			source := rows[ins.RowIndex].Amount
+			src := rows[ins.RowIndex]
+			source := src.Amount
+			if source == 0 {
+				source = src.OriginalAmount
+			}
 			if (ins.AmountCents < 0) != (source < 0) {
 				t.Fatalf(
-					"row %d sampled amount %.2f but stored AmountCents=%d — import must preserve the spreadsheet's sign",
-					ins.RowIndex, source, ins.AmountCents,
+					"row %d sampled amount %.2f / original %.2f but stored AmountCents=%d — import must preserve the spreadsheet's sign",
+					ins.RowIndex, src.Amount, src.OriginalAmount, ins.AmountCents,
 				)
 			}
 		}
@@ -516,6 +638,14 @@ func TestImportProperty_MoneyPairSignsAgree(t *testing.T) {
 		for _, ins := range result.Inserted {
 			src := rows[ins.RowIndex]
 			if src.OriginalAmount == 0 {
+				continue
+			}
+			// A zero base amount is ABSENCE, not disagreement — the same
+			// reading moneySignsDisagree itself takes. Since the per-row rate
+			// landed, a foreign row may legitimately state no base amount at
+			// all and derive one; there is no pair to contradict itself when
+			// only one half was written.
+			if src.Amount == 0 {
 				continue
 			}
 			if (src.Amount < 0) != (src.OriginalAmount < 0) {
@@ -565,6 +695,7 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 		defer tx.Rollback()
 		in.UserID = fix.userID
+		in.Currencies = fix.currencies
 		store := database.NewTransactionStore(fix.db, fix.q)
 		result, _ := processImportRows(ctx, fix.q.WithTx(tx), tx, store, in)
 		return result
@@ -697,6 +828,43 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate_in_batch_derived_row", func(t *testing.T) {
+		// The same identity, twice, on a row whose cents were COMPUTED. The
+		// non-derived arm above cannot see this: dedupe hashes the cents that
+		// will be stored, so a build that hashed the sheet's own (empty)
+		// Amount cell would hash zero for both rows and still call the second
+		// one a duplicate — for the wrong reason, and while merging every
+		// rate row in the file into one identity.
+		row := validBase
+		row.Amount = 0
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBP"
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		other := row
+		other.OriginalAmount = 890_000 // a different sum at the same rate
+
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row, row, other},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		if len(result.Inserted) != 2 {
+			t.Fatalf("expected 2 inserted (the first occurrence and the distinct sum), got %d: %+v",
+				len(result.Inserted), result.Inserted)
+		}
+		if len(result.Skipped) != 1 || result.Skipped[0].Reason != skipReasonDuplicate {
+			t.Fatalf("expected exactly one duplicate skip, got %+v", result.Skipped)
+		}
+		if result.Skipped[0].RowIndex != 1 {
+			t.Errorf("skipped RowIndex = %d, want 1 (the second occurrence)", result.Skipped[0].RowIndex)
+		}
+		if result.Inserted[0].AmountCents != 1685 || result.Inserted[1].AmountCents != 1000 {
+			t.Errorf("inserted cents = %d, %d; want 1685 and 1000 — the derived values, not the sheet's empty Amount cell",
+				result.Inserted[0].AmountCents, result.Inserted[1].AmountCents)
+		}
+	})
+
 	t.Run("errored_unknown_category_id", func(t *testing.T) {
 		// Wire a catNameToID that resolves the spreadsheet category
 		// to ID 9999, but leave catIDToName empty. resolveCategoryID
@@ -726,6 +894,172 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 		if !strings.Contains(result.Errored[0].Reason, "9999") {
 			t.Fatalf("expected errored reason to mention category_id=9999, got %q", result.Errored[0].Reason)
+		}
+	})
+
+	// The money family. Every one of these is refused by confirm's
+	// MONEY_ERRORS gate before the batch is opened, so from the HTTP path
+	// they are unreachable by construction — which is exactly why they need
+	// covering HERE, against processImportRows directly. The floor exists for
+	// the stale session (a currency deleted between the gate and the commit,
+	// a client that never read a preview), and a row dropped by it must name
+	// why rather than vanishing into an unexplained skipped count.
+	//
+	// One subtest per reason, because "some money reason fired" is not the
+	// contract: each one carries a different remedy, and an operator reading
+	// skipped_reasons has to be able to tell them apart.
+	t.Run("rate_missing", func(t *testing.T) {
+		row := validBase
+		row.Amount = 0
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBP"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonRateMissing)
+	})
+
+	t.Run("rate_invalid", func(t *testing.T) {
+		row := validBase
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBP"
+		row.RawRate = "abc" // a rate the user typed and got wrong
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonRateInvalid)
+	})
+
+	t.Run("rate_on_base", func(t *testing.T) {
+		row := validBase
+		row.OriginalCurrency = "USD"
+		row.Rate = 2
+		row.RawRate = "2"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonRateOnBase)
+	})
+
+	t.Run("rate_without_currency", func(t *testing.T) {
+		row := validBase
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonRateWithoutCurrency)
+	})
+
+	t.Run("unknown_currency", func(t *testing.T) {
+		row := validBase
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBX"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonUnknownCurrency)
+	})
+
+	t.Run("amount_disagrees", func(t *testing.T) {
+		// One cent apart: 1,500,000 ÷ 89,000 is 16.85, and the sheet says
+		// 16.84. The smallest disagreement there is, and the one a tolerance
+		// of any width would swallow.
+		row := validBase
+		row.Amount = 16.84
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBP"
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonAmountDisagrees)
+	})
+
+	t.Run("amount_invalid_unreadable_cell", func(t *testing.T) {
+		// The reachable shape on the base amount: a cell the parser refused,
+		// which used to become a zero and take the row out of the batch as
+		// zero_amount with nothing recording why.
+		row := validBase
+		row.Amount = 0
+		row.RawAmount = "1,5"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonAmountInvalid)
+	})
+
+	t.Run("zero_amount_survives_the_raw_cell", func(t *testing.T) {
+		// The control: a cell that READS as zero keeps the reason it has
+		// always had. Without this arm, widening amount_invalid to every
+		// zero-valued row would look correct.
+		row := validBase
+		row.Amount = 0
+		row.RawAmount = "0.00"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonZeroAmount)
+	})
+
+	t.Run("amount_invalid", func(t *testing.T) {
+		// 1 LBP at 89,000 is worth no cents at all, and the table's
+		// CHECK(amount_cents != 0) would answer that with a 500.
+		row := validBase
+		row.Amount = 0
+		row.OriginalAmount = 1
+		row.OriginalCurrency = "LBP"
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonAmountInvalid)
+	})
+
+	t.Run("derived_row_inserts", func(t *testing.T) {
+		// The control for all seven: a row whose money resolves through its
+		// rate must LAND, with the derived cents. Without this arm, a build
+		// that rejected every row carrying a rate would satisfy every
+		// assertion above.
+		row := validBase
+		row.Amount = 0
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "lbp"
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		if len(result.Skipped) != 0 || len(result.Errored) != 0 {
+			t.Fatalf("expected a clean insert, got skipped=%v errored=%v", result.Skipped, result.Errored)
+		}
+		if len(result.Inserted) != 1 {
+			t.Fatalf("expected 1 inserted, got %d", len(result.Inserted))
+		}
+		if result.Inserted[0].AmountCents != 1685 {
+			t.Errorf("inserted AmountCents=%d, want 1685", result.Inserted[0].AmountCents)
 		}
 	})
 }

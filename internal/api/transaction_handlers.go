@@ -279,17 +279,25 @@ type resolvedMoney struct {
 }
 
 // resolveCurrency applies currency conversion logic. If originalCurrency is
-// a non-base currency, it divides originalAmount by the rate_to_base to get
-// the converted amount, and records that rate on the result.
+// a non-base currency, it hands originalAmount and the row's rate_to_base to
+// convertForeignMoney — the one divisor this app has, shared with every other
+// door a foreign row can arrive through — and records that rate on the result.
 // The queries parameter allows callers to pass either h.queries (normal) or
 // a transactional qtx (batch) to ensure consistent reads within a transaction.
 //
+// This function owns everything about the REQUEST; the helper owns the
+// arithmetic. Which currency row applies, whether the wire amount agrees in
+// sign with the foreign one, and freezing the rate onto the stored row are all
+// decided here and are meaningless to a caller dividing by a rate off a
+// spreadsheet cell.
+//
 // Sign is carried through, not enforced: a negative amount is a refund (B10),
 // and on the division branch sign(base) == sign(original) holds by arithmetic
-// because every rate_to_base is positive (currency_handlers.go rejects <= 0 on
-// both the create and update paths). What every branch DOES enforce, via
-// validateMoneyAmount, is that the value it returns is finite, non-zero and
-// within MaxTransactionAmount in either direction.
+// because the rate is positive — currency_handlers.go rejects <= 0 on both the
+// create and update paths, and convertForeignMoney refuses any rate that is
+// not positive and finite rather than trust that. What every branch DOES
+// enforce, via validateMoneyAmount, is that the value it returns is finite,
+// non-zero and within MaxTransactionAmount in either direction.
 func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRequest) (resolvedMoney, error) {
 	if req.OriginalCurrency == "" {
 		// No foreign currency — use amount directly.
@@ -350,25 +358,21 @@ func resolveCurrency(ctx context.Context, q *database.Queries, req transactionRe
 		return resolvedMoney{}, fmt.Errorf("amount and original_amount must carry the same sign")
 	}
 
-	if currency.RateToBase == 0 {
-		return resolvedMoney{}, fmt.Errorf("currency %q has zero rate", req.OriginalCurrency)
-	}
-
-	converted := *req.OriginalAmount / currency.RateToBase
-	// Round to 2 decimal places. This is redundant with dollarsToCents (the
-	// single wire-edge rounding chokepoint, cents.go), which re-rounds *100 on
-	// the same scale and always agrees — so it is provably a no-op on the
-	// stored cents. Kept deliberately to avoid churning a money path for zero
-	// behavior change; see audit item h-resolvecurrency-double-round.
-	converted = math.Round(converted*100) / 100
-
-	// The division can carry an in-range original_amount out of range: a small
-	// rate_to_base multiplies it up. Bound the converted value too, or
-	// dollarsToCents launders it into int64 minimum at the storage edge. It can
-	// equally round the value INTO zero (0.001 LBP is worth no cents at all),
-	// which the same gate refuses — the table's CHECK(amount_cents != 0) would
-	// otherwise answer a legal-looking request with a 500.
-	if err := validateMoneyAmount(converted, "converted amount"); err != nil {
+	// The arithmetic lives in convertForeignMoney, not here, and that is the
+	// point of the function: import derives a row's dollars from a per-row Rate
+	// cell with no currency row behind it, and the two doors must produce
+	// byte-identical cents for the same (original amount, rate) pair. A second
+	// copy of the division could only stay in step by accident.
+	//
+	// Only the rate fault is re-worded on the way out. It arrives as a bare
+	// sentinel because the helper does not know which currency it was handed,
+	// and the user needs the code to know which rate to go and fix; the amount
+	// faults already name their own field.
+	converted, err := convertForeignMoney(*req.OriginalAmount, currency.RateToBase)
+	if err != nil {
+		if errors.Is(err, errRateInvalid) {
+			return resolvedMoney{}, fmt.Errorf("currency %q has an unusable rate: %w", req.OriginalCurrency, err)
+		}
 		return resolvedMoney{}, err
 	}
 

@@ -239,9 +239,55 @@ export interface ImportRow {
   content_hash?: string;
   date: string;
   description: string;
+  /**
+   * The base-currency value this row WILL STORE, in dollars — not
+   * necessarily the sheet's Amount cell. When the row quotes a foreign
+   * original and a rate, the backend divides one by the other and puts
+   * the result here, so the preview shows the money that is about to be
+   * written rather than a figure the import would then contradict.
+   * `amount_derived` below is how a reader tells the two apart.
+   */
   amount: number;
   original_amount?: number;
   original_currency?: string;
+  /**
+   * The sheet's exchange rate for this row, in the same units as
+   * `currencies.rate_to_base` — foreign units per base unit, so LBP
+   * 89000 means 89,000 LBP to the dollar.
+   *
+   * Absent (or 0) means the sheet quoted no rate. It does NOT mean the
+   * sheet quoted an unparseable one: the backend keeps the raw cell to
+   * itself and reports that case as a `rate` field error instead, so
+   * this side never has to guess which of the two a missing number was.
+   */
+  rate?: number;
+  /**
+   * The Rate cell's own text, echoed back ONLY when the sheet held
+   * something there that could not be used as a rate (`abc`, `1e999`,
+   * `0x1p10`). Absent for a usable rate — the number is already on the
+   * wire as `rate` — and absent for an empty cell, because there is
+   * nothing to show.
+   *
+   * ITS PRESENCE IS THE SIGNAL. A row whose rate is unusable has no
+   * parsed rate by definition, so without this the table would draw an
+   * empty box beside a message telling the user to clear or correct a
+   * cell they cannot see. Rendered verbatim, and fed to the editor
+   * unchanged, so "clear it" is something the user can actually do.
+   *
+   * It is also the only value that reaches a numeric column of this
+   * table UNPARSED, which is why the Rate cell bounds it the way the
+   * description column is bounded.
+   */
+  rate_raw?: string;
+  /**
+   * True when `amount` above was COMPUTED from `original_amount ÷ rate`
+   * rather than read from the sheet's Amount cell. Absent is false.
+   *
+   * The preview needs this to be honest about which number the user is
+   * looking at: a derived amount is not something they typed, and the
+   * row's second line shows the original and the rate it came from.
+   */
+  amount_derived?: boolean;
   category: string;
   tags?: string;
   notes?: string;
@@ -292,28 +338,51 @@ export interface CollisionGroup {
 }
 
 /**
- * The fields an uploaded row can carry that are longer than SpenDrop
- * stores. Only these three have a length bound worth reporting: `date`
- * and `amount` are parsed, so an over-long value fails as unparseable
- * long before length matters.
+ * The fields an uploaded row can be flagged on. Two families share one
+ * array on the wire, and the split matters to every consumer:
+ *
+ *   - LENGTH (`description`, `tags`, `notes`) — the value is longer than
+ *     SpenDrop stores. Only these three have a length bound worth
+ *     reporting: `date` and `amount` are parsed, so an over-long value
+ *     fails as unparseable long before length matters.
+ *   - MONEY (`rate`, `original_currency`, `amount`) — the row quotes
+ *     money the backend will not resolve into a stored value: no rate
+ *     for a foreign original, a currency the household has not set up,
+ *     or an Amount cell that disagrees with `original ÷ rate`.
+ *
+ * They are counted apart (`fieldErrorRowCount` vs `moneyErrorRowCount`)
+ * because their remedies are different sentences, and reported apart on
+ * confirm (`FIELD_TOO_LONG` vs `MONEY_ERRORS`) for the same reason.
+ * `isMoneyField` in `lib/import-field-errors.ts` is the one predicate
+ * that splits them.
  */
-export type ImportFieldErrorField = 'description' | 'tags' | 'notes';
+export type ImportFieldErrorField =
+  | 'description'
+  | 'tags'
+  | 'notes'
+  | 'rate'
+  | 'original_currency'
+  | 'amount';
 
 /**
- * One field on one row whose value exceeds the limit the rest of the
- * API enforces. Upload, PATCH and GET report these on the preview so
- * the UI can flag a row on load rather than only after a failed
- * confirm; confirm reports them again in its 409 body.
+ * One field on one row the backend will not import as it stands —
+ * either longer than SpenDrop stores or money it cannot resolve (see
+ * `ImportFieldErrorField`). Upload, PATCH and GET report these on the
+ * preview so the UI can flag a row on load rather than only after a
+ * failed confirm; confirm reports them again in its 409 body.
  *
  * Carries its own explanation. The remedies genuinely differ between
  * fields — a description is editable in the preview table ("shorten it
  * here") while tags and notes have no cell to point at and can only be
- * skipped or fixed in the source spreadsheet — but the backend writes
- * both, so this side never composes one. See `message` below.
+ * skipped or fixed in the source spreadsheet, and an unknown currency is
+ * fixed in Settings entirely outside this session — but the backend
+ * writes every one of those sentences, so this side never composes one.
+ * See `message` below.
  *
- * Where the error is SHOWN is still ours to decide: `description` goes
- * in its cell, the rest in a detail line under the row. That split is
- * `isEditableInPreview` in `lib/import-field-errors.ts`.
+ * Where the error is SHOWN is still ours to decide: `description`,
+ * `rate` and `amount` go in their cells, the rest in a detail line under
+ * the row. That split is `isEditableInPreview` in
+ * `lib/import-field-errors.ts`.
  */
 export interface ImportFieldError {
   row_id: number;
@@ -323,15 +392,23 @@ export interface ImportFieldError {
    * Do not reword it and do not compose an alternative: the same cell
    * can be filled from two directions — this list, and the 400 body of
    * a rejected PATCH — and the backend emits one string for both
-   * (`importFieldLengthMessage`, reused by `validateImportField`). Any
-   * wording written on this side would match only by coincidence, and
-   * only until either copy was edited.
+   * (`importFieldLengthMessage` for the length family and the money
+   * resolver's own messages for the rest, both reused by
+   * `validateImportField`). Any wording written on this side would match
+   * only by coincidence, and only until either copy was edited.
+   *
+   * The PATCH half is only true because of `apiErrorFrom` in
+   * `api/client.ts`: the rejection body is `{code, field, message}` with
+   * no `error` key, and while the client read `error` alone the cell got
+   * the string "HTTP 400" instead of any of this. Stated here because
+   * "the server owns the wording" is a claim about the whole route, and
+   * this is the link in it that is easy to shorten by accident.
    *
    * It is also why this side holds no length constants: the sentence
    * arrives with the number already in it, correct by construction.
    *
    * Optional so a response that omits it still type-checks;
-   * `fallbackFieldTooLongMessage` covers that case with a numberless
+   * `fallbackFieldErrorMessage` covers that case with a numberless
    * sentence rather than a guessed bound.
    */
   message?: string;
@@ -365,6 +442,24 @@ export interface UnresolvedCategory {
   name: string;
   reason: UnresolvedCategoryReason;
   row_ids: number[];
+}
+
+/**
+ * One row of the household's currencies table as the preview reports it
+ * — the rate SpenDrop would apply TODAY, for the rows whose sheet quoted
+ * none.
+ *
+ * It is on the preview rather than read from `useCurrencies` because the
+ * number the user is offered and the number the import records have to
+ * be the same one: "Apply today's 89,000" turns into a PATCH carrying
+ * that literal value, which the backend then stores as the row's
+ * `booked_rate`. Reading the rate from a second source would let the two
+ * disagree for exactly as long as one cache was staler than the other.
+ */
+export interface ImportCurrencySummary {
+  code: string;
+  rate_to_base: number;
+  is_base: boolean;
 }
 
 export interface ImportPreview {
@@ -406,6 +501,19 @@ export interface ImportPreview {
    */
   unresolved_categories?: UnresolvedCategory[];
   /**
+   * The currencies table as it stands, recomputed on every preview
+   * response — which is what lets a currency added in Settings clear an
+   * "unknown currency" flag on the next GET, with no re-upload.
+   *
+   * Optional for the same reason `field_errors` and
+   * `unresolved_categories` are: a preview built before the Go side
+   * emitted it would type-check while being `undefined` at runtime.
+   * Every read treats `undefined` as "no rate is known here", which
+   * costs the user the "apply today's rate" offer and nothing else — the
+   * rate cell is still editable by hand.
+   */
+  currencies?: ImportCurrencySummary[];
+  /**
    * ISO-8601 timestamp (UTC) at which the backend will evict this
    * session from the in-memory importStore. The frontend reads this
    * only to show a countdown in the footer (Chunk 5) — it does NOT
@@ -422,13 +530,18 @@ export interface ImportPreview {
 
 /**
  * Body for `PATCH /api/import/{importID}/rows/{rowID}`. The backend's
- * per-field validator splits on `field` — all four variants hit
- * different code paths server-side (date/amount go through the
- * existing parsers; description runs length + trim; skip is a raw
+ * per-field validator splits on `field` — every variant hits a different
+ * code path server-side (date/amount go through the existing parsers;
+ * rate parses as a positive finite number, and an empty string CLEARS it
+ * rather than failing; description runs length + trim; skip is a raw
  * boolean with no validation).
+ *
+ * `original_amount` and `original_currency` are deliberately absent: a
+ * row's foreign money is a fact about the spreadsheet, and an unknown
+ * currency is resolved in Settings rather than edited away here.
  */
 export interface PatchRowRequest {
-  field: 'date' | 'description' | 'amount' | 'skip';
+  field: 'date' | 'description' | 'amount' | 'rate' | 'skip';
   value: string | boolean;
 }
 

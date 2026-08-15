@@ -45,7 +45,13 @@ import type {
 } from '../api/types';
 import { AppVersion } from '@/components/AppVersion';
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
+import {
+  clearImportDecisions,
+  loadImportDecisions,
+  saveImportDecisions,
+} from '@/lib/import-decisions';
 import { useWebPush } from '@/hooks/useWebPush';
 import { useNotificationPrefs } from '@/hooks/useNotificationPrefs';
 import { Button } from '@/components/ui/button';
@@ -3036,6 +3042,8 @@ interface ImportPreviewStepProps {
     field: PatchRowRequest['field'],
     value: string | boolean,
   ) => Promise<void>;
+  /** The hook's bulk rate writer — see `applyRateToRows`. */
+  applyRateToRows: (rowIDs: number[], rate: number) => Promise<void>;
   categories: Category[];
   categoryMap: Record<string, string>;
   setCategoryMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
@@ -3053,6 +3061,7 @@ function ImportPreviewStep({
   canImport,
   pendingPatchCount,
   patchRow,
+  applyRateToRows,
   categories,
   categoryMap,
   setCategoryMap,
@@ -3144,6 +3153,7 @@ function ImportPreviewStep({
         canImport={canImport}
         pendingPatchCount={pendingPatchCount}
         onPatchRow={patchRow}
+        onApplyRate={applyRateToRows}
         onConfirm={onConfirm}
         onCancel={onCancel}
       />
@@ -3374,6 +3384,10 @@ function ImportCard() {
   // Import wizard state — preview / importStep / result are owned by the
   // hook now; destructure them so the rest of the function reads identically
   // to the old local-state version.
+  // The household's base currency, for the upload copy's worked example.
+  // Shares the one `['currencies']` cache entry the rest of the page (and
+  // the import session hook) reads, so this costs no extra request.
+  const baseCode = useBaseCurrency();
   const [defaultCategoryId, setDefaultCategoryId] = useState<number | null>(
     null,
   );
@@ -3406,8 +3420,18 @@ function ImportCard() {
   }, []);
 
   // Auto-map categories whenever the hook's preview changes to a new
-  // import_id. The guard avoids clobbering the user's manual re-mapping on
-  // unrelated re-renders (e.g. after a PATCH that only updates one row).
+  // import_id, then lay the user's own decisions back on top. The guard
+  // avoids clobbering a manual re-mapping on unrelated re-renders (e.g.
+  // after a PATCH that only updates one row).
+  //
+  // THE ORDER IS THE POINT. This card unmounts every time the Settings
+  // section changes, and the unknown-currency flag's own link sends the
+  // user to another section — so "remount" is a routine step in the
+  // journey, not a refresh. The session survives it (resumed from
+  // localStorage by the hook); the decisions survive it here. Restoring
+  // AFTER the auto-map means an explicit choice always wins over the name
+  // match it replaced, and a name the user never touched still gets its
+  // automatic destination.
   useEffect(() => {
     if (!preview) {
       // Upload cancelled / session reset — arm the ref for the next preview.
@@ -3415,9 +3439,57 @@ function ImportCard() {
       return;
     }
     if (lastAutoMappedImportIdRef.current === preview.import_id) return;
-    setCategoryMap(autoMapCategories(preview, categories));
+    const stored = loadImportDecisions(preview.import_id);
+    // The map MERGES and the default is ASSIGNED, which is not an
+    // inconsistency: the auto-map contributes real entries for names that
+    // matched, so a stored decision has to land on top of them, while
+    // there is no automatic default to preserve — the record's value
+    // (including a deliberate `null`) is the whole truth about it, and
+    // only when there IS a record.
+    setCategoryMap({
+      ...autoMapCategories(preview, categories),
+      ...(stored?.categoryMap ?? {}),
+    });
+    if (stored) setDefaultCategoryId(stored.defaultCategoryId);
     lastAutoMappedImportIdRef.current = preview.import_id;
   }, [preview, categories]);
+
+  // Persist them again on every change, so the record is current whenever
+  // the card is torn down — there is no unmount hook that could be trusted
+  // to run after the last keystroke.
+  //
+  // The first pass for a session is SKIPPED. On a remount the restore
+  // above and this effect run in the same commit, and the state the
+  // restore set is not visible until the next one — so without this,
+  // the first write would put the empty initial map over the very record
+  // just read.
+  //
+  // THE CLOBBER IS TRANSIENT, WHICH IS NOT THE SAME AS HARMLESS. The
+  // restored state lands one render later and this effect writes it
+  // straight back, so the stored VALUE recovers on its own and a test
+  // that reads it passes either way. The write SEQUENCE does not: a test
+  // watching `saveImportDecisions` sees the empty map go out, and that is
+  // what pins this branch (Settings.test.tsx, "a manual mapping survives
+  // a trip to another Settings section"). The window it closes is one
+  // tick wide, and a tab shut inside it loses the decisions.
+  const savedDecisionsForRef = useRef<string | null>(null);
+  useEffect(() => {
+    const importID = preview?.import_id;
+    if (!importID) return;
+    if (savedDecisionsForRef.current !== importID) {
+      savedDecisionsForRef.current = importID;
+      return;
+    }
+    saveImportDecisions(importID, { categoryMap, defaultCategoryId });
+  }, [preview?.import_id, categoryMap, defaultCategoryId]);
+
+  // A confirmed import has no decisions left to remember. Cancel and
+  // "import another file" clear them in their own handlers, where the rest
+  // of the reset lives; this covers the third exit, which has no handler
+  // of its own — the hook flips the step from inside confirmImport.
+  useEffect(() => {
+    if (importStep === 'done') clearImportDecisions();
+  }, [importStep]);
 
   function clearFileInput() {
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -3450,6 +3522,7 @@ function ImportCard() {
 
   async function handleCancelImport() {
     await importSession.cancelImport();
+    clearImportDecisions();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
@@ -3457,6 +3530,7 @@ function ImportCard() {
 
   function handleImportAnother() {
     importSession.startOver();
+    clearImportDecisions();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
@@ -3477,10 +3551,26 @@ function ImportCard() {
 
         {importStep === 'upload' && (
           <div className="flex flex-col gap-4">
+            {/*
+              The unit is stated, not left to be guessed. A rate column
+              is ambiguous in exactly one way that matters: the same rate
+              can be written in either direction, and the import reads it
+              as `currencies.rate_to_base` — foreign units per base unit.
+              Quoting the reciprocal does not reliably fail; for a
+              currency near parity it divides by a plausible number and
+              imports a plausible wrong amount (20 EUR at 1.087 rather
+              than 0.92 stores 18.40 instead of 21.74). Hence a worked
+              example rather than the word "rate" on its own.
+
+              The base code is READ, not written: this household's is USD
+              and the example says so, but the sentence is a rule about
+              `rate_to_base` and would be false the day the base changed.
+            */}
             <p className="text-sm text-muted-foreground">
               Upload an Excel file with columns: date, description, amount.
               Optional columns: category, tags, notes, original_amount,
-              original_currency.
+              original_currency, rate — the original currency's units per
+              one {baseCode}, e.g. 89000 for LBP.
             </p>
             <Input
               ref={fileInputRef}
@@ -3546,6 +3636,7 @@ function ImportCard() {
             canImport={importSession.canImport}
             pendingPatchCount={importSession.pendingPatchCount}
             patchRow={importSession.patchRow}
+            applyRateToRows={importSession.applyRateToRows}
             categories={categories}
             categoryMap={categoryMap}
             setCategoryMap={setCategoryMap}

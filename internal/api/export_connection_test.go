@@ -374,7 +374,7 @@ func TestDrainHelpers_ReleaseConnectionBeforeReturning(t *testing.T) {
 	assertConnectionFree(t, h, "drainMonthlyTotals")
 
 	txns, err := h.drainExportTxnRows(ctx, `SELECT t.date, t.description, c.name, c.type, t.amount_cents,
-		t.original_amount_cents, t.original_currency, t.tags, t.notes
+		t.original_amount_cents, t.original_currency, t.booked_rate, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		WHERE t.deleted_at IS NULL

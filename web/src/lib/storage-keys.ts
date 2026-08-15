@@ -39,6 +39,14 @@ export const STORAGE_KEYS = {
    */
   importId: 'spendrop-import-id',
   /**
+   * The category decisions made about the active import session, as JSON
+   * (see `lib/import-decisions.ts`). Separate from `importId` because the
+   * two have different owners — the hook owns the session, the card owns
+   * the decisions — and one record, not one per session, because there is
+   * only ever one session and a per-id key would accumulate forever.
+   */
+  importDecisions: 'spendrop-import-decisions',
+  /**
    * The last identity that the SERVER confirmed on this device, as JSON
    * (see `lib/last-user.ts`). Not a credential — no token, no password — it
    * exists so the offline capture screen is reachable when `GET /auth/me`

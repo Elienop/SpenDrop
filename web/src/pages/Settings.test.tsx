@@ -29,6 +29,16 @@ vi.mock('../api/client', async (importOriginal) => {
   };
 });
 
+// Passes through to the real module and only watches `saveImportDecisions`:
+// what the round-trip test cannot see in the stored VALUE — a write of the
+// empty initial map between the restore and the render that makes it visible
+// — is plain in the write SEQUENCE.
+vi.mock('@/lib/import-decisions', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/import-decisions')>();
+  return { ...actual, saveImportDecisions: vi.fn(actual.saveImportDecisions) };
+});
+
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -42,6 +52,7 @@ import { api, ApiError } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
 import { MAX_CURRENCY_SYMBOL_LENGTH } from '../lib/constants';
+import { saveImportDecisions } from '@/lib/import-decisions';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
@@ -1286,6 +1297,50 @@ describe('Settings', () => {
       expect(screen.getByText(/date.*description.*amount/i)).toBeInTheDocument();
     });
 
+    test('names rate among the optional columns, with the direction it is read in', async () => {
+      await goToDataTab();
+
+      const copy = screen.getByText(/Optional columns:/);
+      expect(copy.textContent).toContain('rate');
+      // The number and its direction, not just the word. A rate column
+      // is ambiguous in exactly one way that matters: 89000 LBP per USD
+      // and its reciprocal are the same rate written two ways, and a
+      // sheet quoting the other one imports every foreign row off by
+      // orders of magnitude instead of failing. Copy that named the
+      // column without the unit would leave that to be guessed.
+      expect(copy.textContent).toContain('89000');
+      expect(copy.textContent).toContain('LBP');
+    });
+
+    test('names the household’s OWN base currency, not USD', async () => {
+      // Deliberately NOT the default: this household's base is USD, so
+      // asserting "per one USD" against the standard fixture passes
+      // whether the code reads the base or hard-codes it — which is how
+      // the copy said "LBP per USD" to everyone in the first place.
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'currencies')
+          return Promise.resolve([
+            {
+              code: 'EUR',
+              name: 'Euro',
+              symbol: '\u20AC',
+              rate_to_base: 1,
+              is_base: true,
+              updated_at: '',
+            },
+          ]);
+        return Promise.resolve([]);
+      });
+
+      await goToDataTab();
+
+      const copy = screen.getByText(/Optional columns:/);
+      await waitFor(() => {
+        expect(copy.textContent).toMatch(/per one EUR/);
+      });
+      expect(copy.textContent).not.toMatch(/USD/);
+    });
+
     // End-to-end through Settings → ImportCard → ImportPreviewStep →
     // ImportPreviewTable, deliberately not through the hook or the table
     // in isolation. Both of those are gated correctly on their own; what
@@ -1793,6 +1848,78 @@ describe('Settings', () => {
           category_map: Record<string, number>;
         };
         expect(parsedBody.category_map.Grocries).toBe(1);
+      });
+
+      // The unknown-currency flag's remedy is a LINK to another Settings
+      // section, and Settings mounts one section at a time — so the card
+      // holding these decisions is torn down on the way there and rebuilt
+      // on the way back. Sending the user away and losing their work when
+      // they return is not an edge case here; it is the path the UI
+      // itself offers.
+      test('a manual mapping survives a trip to another Settings section', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+        // The resume the remount performs: the hook re-reads the session
+        // by id from localStorage, through raw fetch.
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(previewWithUnmapped),
+        } as Response);
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        );
+        await user.click(screen.getByRole('option', { name: 'Transport' }));
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+
+        // Off to Currencies and back — the round trip the detail row's
+        // own link performs.
+        await user.click(screen.getByRole('tab', { name: /currencies/i }));
+        await waitFor(() => {
+          expect(
+            screen.queryByRole('button', { name: /^Import \d+$/ }),
+          ).not.toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
+
+        // The session came back, and so did the decision made about it:
+        // the gate is open without the user having to choose Transport a
+        // second time.
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+        expect(
+          within(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).getByText('Transport'),
+        ).toBeInTheDocument();
+
+        // The write SEQUENCE, which is where the first-pass latch is
+        // observable at all. On the remount the restore and the persist
+        // effect run in the same commit, and the state the restore set is
+        // not visible until the next one — so an unlatched persist writes
+        // the empty initial map over the record it was just read from.
+        // The stored value recovers one render later, which is why the
+        // assertions above pass either way; this one does not.
+        expect(vi.mocked(saveImportDecisions)).not.toHaveBeenCalledWith(
+          expect.anything(),
+          { categoryMap: {}, defaultCategoryId: null },
+        );
       });
     });
 

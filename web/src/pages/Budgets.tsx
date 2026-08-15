@@ -56,6 +56,7 @@ import { isAdmin } from '@/lib/roles';
 import { Skeleton } from '@/components/ui/skeleton';
 import { TYPE_EXPENSE } from '@/lib/transaction-types';
 import { destructiveActionClass } from '@/lib/styles';
+import { ATTENTION_TEXT_CLASS } from '@/lib/attention';
 
 /* ---------- Module-scope constants ---------- */
 
@@ -75,15 +76,6 @@ const ROUTE_LABELS: Record<string, string> = {
   '/trash': 'Trash',
   '/settings': 'Settings',
 };
-
-/* ---------- Shared design tokens ---------- */
-
-// Amber is the canonical "attention without alarm" register per
-// docs/DESIGN_GUIDE.md (see `Alert variant="warning"`). Centralized
-// here so a future palette tweak (or migration to a future
-// `--warning` semantic token) is one edit, not a grep-and-replace
-// across every dirty-count indicator.
-const ATTENTION_TEXT_CLASS = 'text-amber-600 dark:text-amber-500';
 
 /**
  * What a read-only row shows for one entry of an edit buffer.

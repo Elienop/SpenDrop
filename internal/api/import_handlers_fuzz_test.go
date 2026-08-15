@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"unicode/utf8"
 )
 
 // Phase 3.7 fuzz tests for the two untrusted-string parsers in
@@ -100,10 +101,14 @@ var amountSeeds = []string{
 	// Currency and locale variations.
 	"1,234.56",     // US thousands
 	"$1,234.56",    // US with symbol
-	"€42,50",       // European notation; stripCurrencyFormat treats the comma as a US thousands separator and this parses as 4250, not 42.50
+	"€42,50",       // European notation; the comma is not in grouping position, so this is REFUSED rather than read as 4250
 	"(42.50)",      // accounting negative
 	"-$15.00",      // explicit negative with symbol
-	"1.234.567,89", // European thousands — ParseFloat will fail cleanly
+	"1.234.567,89", // European thousands — refused, both by the comma rule and by ParseFloat
+	"0,92",         // a decimal comma: refused, not read as 92
+	"1,5",          // likewise
+	"1,00,000",     // mis-grouped
+	"1,500,000.50", // the accepted shape: groups of exactly three, comma-free fraction
 
 	// Whitespace / empty / newline.
 	"",
@@ -170,6 +175,110 @@ func FuzzParseImportDate(f *testing.F) {
 // magnitude exceeds MaxTransactionAmount is a failure — parser-side
 // the check already rejects these, so this assertion is the
 // double-entry guard against a future refactor that relaxes it.
+// rateSeeds is the seed corpus for FuzzParseImportRate. It is short because
+// the parser's job is narrow, and every entry names a class rather than a
+// value: the empty cell (ABSENCE, and the one input that must return no error
+// AND no rate), household formatting, the three non-positive shapes, the two
+// non-finite ones a spreadsheet can actually produce, Go literal syntax that
+// strconv accepts and no sheet writes, non-ASCII digits, and the smallest
+// subnormal — which is positive, finite, usable, and unrenderable at fixed
+// decimals.
+var rateSeeds = []string{
+	"", "   ",
+	"89000", "89,000", "$89,000", "89,000.5", "0.92", ".5", "1.",
+	"0", "-1", "(89000)",
+	"NaN", "Inf", "1e999", "1e400",
+	"0x1p10", "1_000", "١٢٣", "89%",
+	"5e-324", "1e-7", "1e300",
+	// The comma rule: grouping position only. "0,92" is a decimal comma to
+	// half the world and was read as 92 — a hundredfold error booked onto
+	// the row for good.
+	"0,92", "1,5", "1,00,000", "1,500,000.50", "1.234,56", ",92", "1,",
+}
+
+// FuzzParseImportRate feeds rateSeeds (plus mutations) into the rate parser.
+//
+// The invariant is the one the whole stage rests on: a rate the parser
+// ACCEPTS is either absence (0, from an empty cell) or a divisor
+// convertForeignMoney can use. Anything else — a zero, a negative, a NaN, an
+// infinity — reaching a caller as "fine" would be a row silently valued at
+// nothing, at a flipped sign, or at int64 minimum.
+//
+// It is stated here as well as inside the parser on purpose: this is the
+// double-entry guard that survives a refactor of the parser's internals.
+func FuzzParseImportRate(f *testing.F) {
+	for _, s := range rateSeeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("parseImportRate panicked on %q: %v", s, r)
+			}
+		}()
+		v, err := parseImportRate(s)
+		if err != nil {
+			if v != 0 {
+				t.Errorf("parseImportRate(%q) returned %v alongside its error; a rejected rate must carry nothing", s, v)
+			}
+			return
+		}
+		if v == 0 {
+			return // absence: an empty cell, which is not a fault
+		}
+		if !importRateIsUsable(v) {
+			t.Errorf("parseImportRate(%q) accepted %v, which cannot divide", s, v)
+		}
+	})
+}
+
+// quantitySeeds is the seed corpus for FuzzFormatImportQuantity: the values
+// TestFormatImportQuantity states exact renders for, handed to the fuzzer so
+// its two invariants become claims about the FUNCTION rather than about that
+// table. The table says what these eleven look like; this says what none of
+// them may look like, for every float64 there is.
+var quantitySeeds = []float64{
+	89000, 0.92, 1500000, 1_000_000_000, 89000.5,
+	0.000001, 1e-7, 5e-324, -0.0000001, 1e300, 0,
+}
+
+// FuzzFormatImportQuantity pins the two properties of a rendered figure that a
+// message depends on, over every float64 rather than over a table.
+//
+//  1. A non-zero value never renders as zero. The messages put this straight
+//     into a sentence — "1,500,000 ÷ 89,000 = 16.85" — so a divisor rendered
+//     as "0" states a division by zero about a division that happened, and
+//     sends the user to fix a rate the app just used.
+//  2. The render stays short enough to read. 1e300 is 301 digits before
+//     grouping and 401 characters after, in a string that lands on four
+//     preview surfaces and inside a 409 body.
+//
+// Non-finite inputs are included deliberately: they cannot reach the callers
+// today (every rate is checked usable first), but the renderer is a general
+// helper and "NaN" must come out as NaN rather than as grouped nonsense.
+func FuzzFormatImportQuantity(f *testing.F) {
+	for _, v := range quantitySeeds {
+		f.Add(v)
+	}
+	f.Fuzz(func(t *testing.T, v float64) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("formatImportQuantity panicked on %v: %v", v, r)
+			}
+		}()
+		got := formatImportQuantity(v)
+		if got == "" {
+			t.Fatalf("formatImportQuantity(%v) rendered nothing", v)
+		}
+		if v != 0 && (got == "0" || got == "-0") {
+			t.Errorf("formatImportQuantity(%v) = %q — a message would state a division by zero", v, got)
+		}
+		if n := utf8.RuneCountInString(got); n > 32 {
+			t.Errorf("formatImportQuantity(%v) rendered %d characters; a message must stay readable", v, n)
+		}
+	})
+}
+
 func FuzzParseImportAmount(f *testing.F) {
 	for _, s := range amountSeeds {
 		f.Add(s)
