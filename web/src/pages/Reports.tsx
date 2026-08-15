@@ -16,9 +16,10 @@ import { useReportYears } from '@/hooks/useReportYears';
 
 /**
  * Trigger sizing for THIS strip's four tabs, applied at the call site rather
- * than to the shared `TabsTrigger` — Settings' six triggers cannot fit on a
- * phone at any padding, so they must keep scrolling, and FilterPanel and
- * QuickAdd lay their own tabs out on a grid.
+ * than to the shared `TabsTrigger` — Settings' strip could not fit on a phone
+ * at any padding (measured 2026-08-09, when it had six triggers; it has five
+ * now and swaps to a Select below `md` rather than scrolling), and FilterPanel
+ * and QuickAdd lay their own tabs out on a grid.
  *
  * WIDTH — phone-only. Measured on the built container at a 360px viewport, the
  * width of the owner's main phone: the four triggers came to 326.2px of

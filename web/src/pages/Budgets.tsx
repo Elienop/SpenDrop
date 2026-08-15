@@ -292,8 +292,18 @@ function MonthlyBudgetCard({
               questions: `type` is what the value is, `inputMode` is which
               keypad opens for it. Android in particular does not reliably infer
               a decimal keypad from `type="number"` alone, and every amount here
-              has cents. Pairs with the app's newest numeric field, the
-              large-transaction threshold in `Settings.tsx`. */}
+              has cents.
+
+              DEVICE EVIDENCE, and it is the whole basis of the pairing: the
+              owner confirmed on a real Galaxy S24 on 2026-08-15 (v0.44.2) that
+              these card fields raise the decimal keypad with both attributes
+              in place. Nothing in the repo can reproduce that — happy-dom
+              raises no soft keyboard and neither does headless Chrome — so the
+              suite pins the ATTRIBUTE and this paragraph is the record of the
+              MECHANISM.
+
+              This block is the canonical reasoning that every `type="number"`
+              site in the app points at, phone card or desktop table alike. */}
           <Input
             id={fieldId}
             type="number"
@@ -743,11 +753,17 @@ function MonthlyBudgetsSection({
                   Set all months ({baseCurrency})
                 </Label>
                 <div className="flex gap-2">
+                  {/* `inputMode` on a DESKTOP field: the household's tablet
+                      renders this tree in landscape while still being a
+                      coarse-pointer device, so the soft keypad applies here
+                      too. It is inert wherever a physical keyboard is
+                      attached. Mechanism: `<MonthlyBudgetCard>` above. */}
                   <Input
                     id="budget-set-all"
                     type="number"
                     step="0.01"
                     min="0"
+                    inputMode="decimal"
                     placeholder="0.00"
                     value={bulkInput}
                     onChange={(e) => setBulkInput(e.target.value)}
@@ -898,6 +914,9 @@ function MonthlyBudgetsSection({
                             type="number"
                             step="0.01"
                             min="0"
+                            // Decimal keypad on the coarse-pointer tablet that
+                            // reaches this table — see `budget-set-all` above.
+                            inputMode="decimal"
                             placeholder="0.00"
                             value={editAmounts[month] ?? ''}
                             onChange={(e) =>
@@ -1533,6 +1552,9 @@ function CategoryLimitsSection({
                             type="number"
                             step="0.01"
                             min="0"
+                            // Decimal keypad on the coarse-pointer tablet that
+                            // reaches this table — see `budget-set-all` above.
+                            inputMode="decimal"
                             placeholder="No limit"
                             value={editAmounts[cat.id] ?? ''}
                             onChange={(e) =>

@@ -220,6 +220,13 @@ export function AmountCurrencyInput({
           id={id}
           type="number"
           step="0.01"
+          // `inputMode` is what opens the phone's decimal keypad — `type`
+          // alone does not on Android; see `<MonthlyBudgetCard>` in
+          // `pages/Budgets.tsx` for the reasoning and the device evidence.
+          // This is the primary phone entry path: all four amount surfaces
+          // render this control — QuickAdd, TransactionEntryRow, the inline
+          // edit in TransactionRow, and TransactionEditSheet.
+          inputMode="decimal"
           // `min="0"` STAYS now that amounts can be negative, and it is a
           // feature rather than leftover strictness. The sign of a transaction
           // comes from the Refund toggle (`AmountSignToggle`) and from nothing

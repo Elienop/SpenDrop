@@ -136,6 +136,28 @@ describe('Savings page', () => {
     });
   });
 
+  // Keypad hints. The shape is explained once, on AmountCurrencyInput's
+  // `_PairsTypeNumberWithInputModeDecimal`; what is specific here is that the
+  // two fields in this one dialog want DIFFERENT keypads — a year has no
+  // fraction, a target amount has cents.
+  test('the goal dialog asks for a digits keypad on Year and a decimal one on Target', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    renderSavings();
+
+    await user.click(screen.getByRole('button', { name: /add goal/i }));
+    await waitFor(() => {
+      expect(screen.getByLabelText(/target amount/i)).toBeInTheDocument();
+    });
+
+    const yearInput = screen.getByLabelText(/^year$/i);
+    expect(yearInput).toHaveAttribute('type', 'number');
+    expect(yearInput).toHaveAttribute('inputmode', 'numeric');
+
+    const amountInput = screen.getByLabelText(/target amount/i);
+    expect(amountInput).toHaveAttribute('type', 'number');
+    expect(amountInput).toHaveAttribute('inputmode', 'decimal');
+  });
+
   test('clicking row Delete opens a confirm dialog naming year + amount', async () => {
     mockedApi.get.mockImplementation((path: string) => {
       if (path === 'savings-goals')

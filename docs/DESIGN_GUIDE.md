@@ -314,6 +314,8 @@ Props: `value: number`, `onValueChange: (v: number) => void`, `currency: string`
 
 The inner `<input>` is not self-labeled — wrap with a `<Label htmlFor={id}>` (or pass through a shadcn `FormControl` whose Radix `Slot` forwards `id={formItemId}`).
 
+The inner `<input>` already pairs `type="number"` with `inputMode="decimal"`, so every consumer gets the phone keypad for free — see the numeric-input rule in Quick Reference. A hand-rolled amount field does not; use this component rather than re-deriving one.
+
 ```tsx
 <AmountCurrencyInput
   value={amount}
@@ -640,6 +642,12 @@ The confirm AlertDialog (all-matching scope only) uses the **default primary** p
 - Use `gap-3` between cards, `gap-6` between sections
 - Use neutral colors (`--primary`, `--muted-foreground`) for non-category charts
 - Use `getCategoryColorVar()` for category-specific colors
+- Pair every `type="number"` `<Input>` with an `inputMode` — `decimal` for money and rates,
+  `numeric` for integer years and counts. `type` says what the value is, `inputMode` says which
+  soft keypad opens for it, and Android does not reliably infer one from the other (checked on
+  the household S24). A missing hint is drift; the reasoning lives at `<MonthlyBudgetCard>` in
+  `Budgets.tsx`. A shared cell editor serving several columns derives the hint per field rather
+  than putting it on the element — see `ImportPreviewTable`
 - Test BOTH themes. Dark is the default (`ThemeProvider defaultTheme="dark"`, `<html class="dark">`),
   but `ModeToggle` sits in the sidebar and the phone nav, so light is one tap away from every
   screen — and the two blocks in `globals.css` no longer hold the same chart values
