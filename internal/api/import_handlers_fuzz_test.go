@@ -2,6 +2,7 @@ package api
 
 import (
 	"testing"
+	"unicode/utf8"
 )
 
 // Phase 3.7 fuzz tests for the two untrusted-string parsers in
@@ -219,6 +220,53 @@ func FuzzParseImportRate(f *testing.F) {
 		}
 		if !importRateIsUsable(v) {
 			t.Errorf("parseImportRate(%q) accepted %v, which cannot divide", s, v)
+		}
+	})
+}
+
+// quantitySeeds is the seed corpus for FuzzFormatImportQuantity: the values
+// TestFormatImportQuantity states exact renders for, handed to the fuzzer so
+// its two invariants become claims about the FUNCTION rather than about that
+// table. The table says what these eleven look like; this says what none of
+// them may look like, for every float64 there is.
+var quantitySeeds = []float64{
+	89000, 0.92, 1500000, 1_000_000_000, 89000.5,
+	0.000001, 1e-7, 5e-324, -0.0000001, 1e300, 0,
+}
+
+// FuzzFormatImportQuantity pins the two properties of a rendered figure that a
+// message depends on, over every float64 rather than over a table.
+//
+//  1. A non-zero value never renders as zero. The messages put this straight
+//     into a sentence — "1,500,000 ÷ 89,000 = 16.85" — so a divisor rendered
+//     as "0" states a division by zero about a division that happened, and
+//     sends the user to fix a rate the app just used.
+//  2. The render stays short enough to read. 1e300 is 301 digits before
+//     grouping and 401 characters after, in a string that lands on four
+//     preview surfaces and inside a 409 body.
+//
+// Non-finite inputs are included deliberately: they cannot reach the callers
+// today (every rate is checked usable first), but the renderer is a general
+// helper and "NaN" must come out as NaN rather than as grouped nonsense.
+func FuzzFormatImportQuantity(f *testing.F) {
+	for _, v := range quantitySeeds {
+		f.Add(v)
+	}
+	f.Fuzz(func(t *testing.T, v float64) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("formatImportQuantity panicked on %v: %v", v, r)
+			}
+		}()
+		got := formatImportQuantity(v)
+		if got == "" {
+			t.Fatalf("formatImportQuantity(%v) rendered nothing", v)
+		}
+		if v != 0 && (got == "0" || got == "-0") {
+			t.Errorf("formatImportQuantity(%v) = %q — a message would state a division by zero", v, got)
+		}
+		if n := utf8.RuneCountInString(got); n > 32 {
+			t.Errorf("formatImportQuantity(%v) rendered %d characters; a message must stay readable", v, n)
 		}
 	})
 }

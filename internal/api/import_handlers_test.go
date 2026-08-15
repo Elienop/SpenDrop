@@ -3926,9 +3926,11 @@ func TestHandleImportConfirm_BaseCurrencyLabelCollapses(t *testing.T) {
 // half of the collapse. A currency named with no amount behind it has no
 // foreign money to record, and storing the code alone would create the
 // half-pair — original_currency set beside a NULL original_amount_cents —
-// that the app treats as a corruption shape and strips on the next save. A row
-// that silently changes the first time anyone edits it is worse than a row
-// that never carried the label.
+// that the write path will not take back: a PUT resending that currency
+// without an original amount is a 400, and one that drops the currency too
+// saves the row with both halves NULLed and nothing said about it. A row whose
+// first edit is a refusal, or a silent change, is worse than a row that never
+// carried the label.
 func TestHandleImportConfirm_BareCurrencyStoresNoForeignHalf(t *testing.T) {
 	clearImportStore()
 	q, db := setupTestDB(t)

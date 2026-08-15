@@ -314,9 +314,10 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 		{
 			// A currency named with no foreign money behind it stores NO
 			// original at all — the same collapse as #7. A lone
-			// original_currency beside a NULL original_amount_cents is the
-			// half-pair shape the app treats as corruption and strips on the
-			// next save, so import must not create it.
+			// original_currency beside a NULL original_amount_cents is a shape
+			// the write path will not accept: editing such a row is a 400
+			// unless the client also drops the currency, in which case both
+			// halves are NULLed without a word. Import must not create it.
 			name: "bare currency with nothing behind it collapses",
 			row: importRow{
 				Amount:           42.50,
@@ -526,6 +527,11 @@ func TestFormatImportQuantity(t *testing.T) {
 		{-0.0000001, "-1e-07"},
 		{1e300, "1e+300"},
 		{0, "0"},
+		// Not reachable from a message today, but the grouping loop used to
+		// read "+Inf" as an integer part and return "+,Inf".
+		{math.Inf(1), "+Inf"},
+		{math.Inf(-1), "-Inf"},
+		{math.NaN(), "NaN"},
 	}
 
 	for _, tc := range cases {

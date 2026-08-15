@@ -200,6 +200,14 @@ func (h *Handler) buildImportPreview(
 //
 // Skipped rows are exempt, for the same reason they are exempt from the
 // preview and from the length gate.
+//
+// Unlike buildImportPreview it needs no same-field dedupe against the length
+// family, because on this path the two can never be in the same response:
+// handleImportConfirm answers 409 FIELD_TOO_LONG and returns before it reaches
+// the money gate, so a row that is both too long and unresolvable is reported
+// as the length error alone. TestHandleImportUpload_OverLongCurrencyIsBounded-
+// LikeEveryOtherCell pins that ordering by asserting the code is FIELD_TOO_LONG
+// and not MONEY_ERRORS for exactly such a row.
 func importMoneyFieldErrors(rows []importRow, cur importCurrencies) []importFieldError {
 	fieldErrors := []importFieldError{}
 	for _, row := range rows {

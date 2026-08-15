@@ -241,9 +241,13 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 		// #7: the row is base money, and the code alone records nothing a
 		// reader could act on. Storing it would create the half-pair shape —
 		// original_currency set beside a NULL original_amount_cents — that the
-		// app already treats as corruption and strips on the next save, so
-		// import must not manufacture rows that will silently change the first
-		// time anyone edits them.
+		// app refuses to save as it stands: a PUT carrying a non-base currency
+		// and no original amount is answered 400 ("original_amount is required
+		// for non-base currency", resolveCurrency), and a client that drops the
+		// currency along with it saves the row with both halves NULLed and no
+		// mention of the change. Either way the row that comes back from the
+		// first edit is not the row import wrote, so import must not
+		// manufacture one.
 		return importMoney{AmountCents: usdCents}, nil, ""
 	}
 
@@ -562,6 +566,14 @@ func formatImportDollars(f float64) string {
 // is stating precision no household quoted, and the number stops being
 // readable.
 func formatImportQuantity(f float64) string {
+	// Nothing finite to group. These cannot reach the callers today — every
+	// rate is checked usable and every amount bounded before a message is
+	// composed — but this is a general renderer, and the grouping loop below
+	// reads "+Inf" as an integer part and returns "+,Inf".
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return strconv.FormatFloat(f, 'g', -1, 64)
+	}
+
 	s := strconv.FormatFloat(f, 'f', -1, 64)
 	if dot := strings.IndexByte(s, '.'); dot >= 0 && len(s)-dot-1 > 6 {
 		rounded := strings.TrimRight(strconv.FormatFloat(f, 'f', 6, 64), "0")
