@@ -1,5 +1,6 @@
 /// <reference types="vitest/config" />
 import path from 'node:path'
+import { isAgent } from 'std-env'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
@@ -75,16 +76,22 @@ export default defineConfig({
     setupFiles: ['./src/test/setup.ts'],
     // Every run also writes SonarQube's Generic Test Execution XML (test count,
     // pass/fail, duration — the "Unit Tests" figures; coverage below is the
-    // other channel) to coverage/, which is gitignored. Paths are rewritten to
-    // be repo-root-relative because the scanner's base dir is the repo root.
+    // other channel) to coverage/, which is gitignored. Setting `reporters`
+    // replaces vitest's defaults, so the first entries re-create them exactly
+    // as vitest picks them (`agent` under an AI agent, else `default`, plus
+    // `github-actions` in CI for PR annotations) — see vitest's resolveConfig.
     reporters: [
-      'default',
+      isAgent ? 'agent' : 'default',
+      ...(process.env.GITHUB_ACTIONS === 'true' ? (['github-actions'] as const) : []),
       [
         'vitest-sonar-reporter',
         {
           outputFile: 'coverage/sonar-report.xml',
           silent: true,
-          onWritePath: (p: string) => `web/${p}`,
+          // The reporter emits cwd-relative paths; the scanner's base dir is
+          // the repo root, so rewrite to `web/src/...` whatever the cwd.
+          onWritePath: (p: string) =>
+            path.relative(path.resolve(__dirname, '..'), path.resolve(p)),
         },
       ],
     ],

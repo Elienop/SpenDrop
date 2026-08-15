@@ -30,7 +30,10 @@ docs:
 # deliberately not baked in here because the flag does not exist on older Node.
 # `go list` filter: web/node_modules ships a stray Go package (flatted) that
 # `./...` would otherwise sweep into the profile.
+# gotestsum (pinned; `go run` fetches it into the module cache on first use)
+# writes the raw `go test -json` stream to the file AND keeps the terminal
+# human-readable — a bare `go test -json > file` would leave a failing test
+# fully silent. Its "DONE n tests" count includes subtests, as SonarQube's does.
 coverage:
-	go test -json $$(go list ./... | grep -v /node_modules/) -coverprofile=coverage.out > go-test-report.json
-	@printf 'go tests: %s passed, %s failed\n' "$$(grep -c '"Action":"pass".*"Test":' go-test-report.json)" "$$(grep -c '"Action":"fail".*"Test":' go-test-report.json)"
+	go run gotest.tools/gotestsum@v1.13.0 --jsonfile go-test-report.json -- $$(go list ./... | grep -v /node_modules/) -coverprofile=coverage.out
 	cd web && npm run test:coverage
