@@ -50,15 +50,57 @@ type EditingCell = { rowID: number; field: EditableField } | null;
  */
 const PREVIEW_COLUMN_COUNT = 6;
 
-/** DOM id of the explanation attached under a specific flagged row. */
+/**
+ * DOM id of the explanation attached under a specific flagged row.
+ *
+ * NAMED FOR THE LENGTH FAMILY, USED BY BOTH. The id and the
+ * `data-field-error-detail` attribute beside it now also carry the money
+ * family's one uneditable sentence (an unknown currency), because "the
+ * flags with no cell of their own" is one row-level surface and splitting
+ * it in two would give a row that trips both of them two detail rows.
+ * Left unrenamed on purpose — the attribute is a selector in this repo's
+ * tests — but do not read either name as "over-length only".
+ */
 const fieldErrorDetailId = (rowID: number) => `import-field-error-${rowID}`;
 
 /**
+ * The bulk bars, as focus targets.
+ *
+ * A burst can unmount the button that fired it — skipping the last
+ * over-length row removes its bar; applying a rate to the last row
+ * waiting on one removes that button, or the whole bar. The browser then
+ * drops focus to `document.body`, which strands a keyboard user at the
+ * top of the document with no announcement. So each bar's heading is a
+ * focus anchor, and every burst ends by moving focus deliberately: to the
+ * heading if the bar survived, to the Import button if it did not.
+ *
+ * The `aria-live` status line is NEVER the target. Focusing a live region
+ * makes screen readers announce it twice — once as a live update, once as
+ * the focused element — and it is not a place a keyboard user can act
+ * from.
+ */
+const LENGTH_BAR_KEY = 'length';
+const MONEY_BAR_KEY = 'money';
+const LENGTH_BAR_HEADING_ID = 'import-length-bar-heading';
+const MONEY_BAR_HEADING_ID = 'import-money-bar-heading';
+const collisionGroupBarKey = (groupID: string) => `group-${groupID}`;
+
+/**
  * Where the unknown-currency remedy lives. A ROUTE, not a modal: adding a
- * currency is a Settings section of its own, and the import session
- * survives the trip (it is resumed from localStorage on the way back, and
- * the hook re-reads it when the currencies change), so sending the user
- * there costs them none of the edits they have made.
+ * currency is a Settings section of its own.
+ *
+ * WHAT SURVIVES THE TRIP, and why each part had to be made to. The card
+ * that owns this table UNMOUNTS on the way — Settings renders one section
+ * at a time — so nothing in React state comes back on its own:
+ *   - the session and every row edit in it are the server's, resumed from
+ *     the `import_id` in localStorage;
+ *   - the money flags are recomputed against the currencies table as it
+ *     stands, which is what clears the one the user just went to fix
+ *     (and the hook re-reads the session if the table changes while this
+ *     is still mounted);
+ *   - the category destinations the user chose are persisted per session
+ *     (`lib/import-decisions.ts`). They were NOT, and a trip through this
+ *     link came back to a preview with every manual mapping gone.
  */
 const CURRENCIES_SETTINGS_PATH = '/settings?tab=currencies';
 
@@ -475,6 +517,12 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // anchor untouched — the browser's default focus-advance handles that.
   const editCellRef = useRef<HTMLTableCellElement | null>(null);
 
+  // The primary action, as the last-resort focus target for a burst that
+  // removed the bar it was fired from. Outside the scroll container on
+  // purpose: it is the one control on this surface that never unmounts
+  // while the preview is up.
+  const importButtonRef = useRef<HTMLButtonElement | null>(null);
+
   // Scrollable container — the max-h/overflow-auto wrapper around the
   // Table. Scoping scrollIntoView to this container's first collision row
   // prevents the 409 scroll-into-view effect from mis-targeting if the
@@ -543,8 +591,32 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // clean rows follow.
   const renderPlan = useMemo(() => buildRenderPlan(preview), [preview]);
 
+  /**
+   * Where focus goes when a burst finishes.
+   *
+   * Deferred to rAF for the same reason the scroll effect is: the parent
+   * re-renders from the last PATCH response, and this has to read the DOM
+   * that results, not the one that fired the click. The bar's heading is
+   * the first choice — the user is still in the context they acted on,
+   * and it announces what is left to do; the Import button is the
+   * fallback, because a bar that has vanished means the work it described
+   * is done and Import is what to do next.
+   */
+  const focusAfterBurst = useCallback((headingKey: string) => {
+    requestAnimationFrame(() => {
+      const heading = scrollContainerRef.current?.querySelector<HTMLElement>(
+        `[data-bulk-heading="${headingKey}"]`,
+      );
+      if (heading) {
+        heading.focus();
+        return;
+      }
+      importButtonRef.current?.focus();
+    });
+  }, []);
+
   const skipAllRows = useCallback(
-    async (rowIDs: number[]) => {
+    async (rowIDs: number[], headingKey: string) => {
       // Sequential awaits — the hook's patchQueueRef already serializes
       // cross-row PATCHes, but awaiting here keeps the fire order stable
       // and makes the button's pending count settle predictably.
@@ -562,8 +634,9 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
           /* surfaced on that row's cell by onPatchRow */
         }
       }
+      focusAfterBurst(headingKey);
     },
-    [onPatchRow],
+    [onPatchRow, focusAfterBurst],
   );
 
   // Both bulk escapes are the same burst over a different row set, so
@@ -571,7 +644,8 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // skipping every over-length row differ only in how the ids were
   // chosen.
   const skipAllInGroup = useCallback(
-    (group: CollisionGroup) => skipAllRows(group.member_row_ids),
+    (group: CollisionGroup) =>
+      skipAllRows(group.member_row_ids, collisionGroupBarKey(group.group_id)),
     [skipAllRows],
   );
 
@@ -601,8 +675,23 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
           /* surfaced on that row's amount cell by onPatchRow */
         }
       }
+      focusAfterBurst(MONEY_BAR_KEY);
     },
-    [onPatchRow],
+    [onPatchRow, focusAfterBurst],
+  );
+
+  /**
+   * "Apply today's rate" for one currency's rows. The burst itself lives
+   * in the hook (one serialized PATCH per row, each row's failure
+   * contained); this wrapper exists so the bulk actions all end the same
+   * way — with focus placed somewhere the user can act from.
+   */
+  const applyRate = useCallback(
+    async (offer: RateOffer) => {
+      await onApplyRate(offer.rowIDs, offer.rate);
+      focusAfterBurst(MONEY_BAR_KEY);
+    },
+    [onApplyRate, focusAfterBurst],
   );
 
   const keepCount = preview.rows.filter((r) => !r.skip).length;
@@ -887,12 +976,26 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
               <TableHead className="sticky top-0 z-10 bg-background text-right">Amount</TableHead>
               {/* Beside the Amount it divides, not at the end of the row:
                   the rate and the figure it produced are two halves of
-                  one statement about this row's money. */}
+                  one statement about this row's money.
+
+                  "Rate to base", the same words Settings → Currencies
+                  uses for the same number ("Rate to Base"), because a
+                  bare "Rate" does not say which way round it goes — and
+                  the upload copy spends a whole sentence closing exactly
+                  that ambiguity.
+
+                  ALWAYS RENDERED, even for a sheet with no rate column
+                  and no foreign row: a table whose shape depends on its
+                  data moves the Skip checkbox under the user's cursor
+                  between one upload and the next, and the empty cells
+                  are where a rate is TYPED (that is the fix for a
+                  rate-missing row, and it has to be reachable before the
+                  row has a rate). */}
               <TableHead
                 data-import-col="rate"
                 className="sticky top-0 z-10 bg-background text-right"
               >
-                Rate
+                Rate to base
               </TableHead>
               <TableHead className="sticky top-0 z-10 bg-background w-12">Skip</TableHead>
             </TableRow>
@@ -920,9 +1023,15 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                           same wording, phrased by us, free to drift.
                         */}
                         <div
+                          id={LENGTH_BAR_HEADING_ID}
+                          data-bulk-heading={LENGTH_BAR_KEY}
+                          // A focus ANCHOR, not a tab stop: the burst this
+                          // bar fires can unmount the button that fired it,
+                          // and focus has to land somewhere deliberate.
+                          tabIndex={-1}
                           role="heading"
                           aria-level={3}
-                          className="flex items-center gap-2 text-sm"
+                          className="flex items-center gap-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           <AlertTriangle
                             className="size-4 shrink-0 text-amber-500"
@@ -939,8 +1048,15 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                           variant="outline"
                           size="sm"
                           className="shrink-0"
+                          // Two bars can offer a "Skip these N rows" at
+                          // once, with the same count. The visible label
+                          // stays short because it reads in context; the
+                          // description supplies that context to a screen
+                          // reader, which does not have the column of
+                          // amber to look at.
+                          aria-describedby={LENGTH_BAR_HEADING_ID}
                           disabled={skipAllDisabled}
-                          onClick={() => void skipAllRows(unit.rowIDs)}
+                          onClick={() => void skipAllRows(unit.rowIDs, LENGTH_BAR_KEY)}
                         >
                           {count === 1
                             ? 'Skip this row'
@@ -956,11 +1072,6 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                 // Same guard as every other bulk control here: two fast
                 // clicks would double-fire the PATCH burst.
                 const bulkDisabled = pendingPatchCount > 0;
-                // One currency needs no label — "today's 89,000" is
-                // unambiguous when it is the only rate on offer. Two do:
-                // without the code, two buttons would differ only by a
-                // number the user has no way to attach to a row.
-                const manyCurrencies = unit.rateOffers.length > 1;
                 return (
                   <TableRow
                     key="money-error-bar"
@@ -979,9 +1090,14 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                           that row, exactly as in the over-length bar.
                         */}
                         <div
+                          id={MONEY_BAR_HEADING_ID}
+                          data-bulk-heading={MONEY_BAR_KEY}
+                          // Focus anchor — see the same attribute on the
+                          // bar above.
+                          tabIndex={-1}
                           role="heading"
                           aria-level={3}
-                          className="flex items-center gap-2 text-sm"
+                          className="flex items-center gap-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           <AlertTriangle
                             className="size-4 shrink-0 text-amber-500"
@@ -1003,10 +1119,9 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                                 variant="outline"
                                 size="sm"
                                 className="shrink-0"
+                                aria-describedby={MONEY_BAR_HEADING_ID}
                                 disabled={bulkDisabled}
-                                onClick={() =>
-                                  void onApplyRate(offer.rowIDs, offer.rate)
-                                }
+                                onClick={() => void applyRate(offer)}
                               >
                                 {/*
                                   The rate is IN the label because it is
@@ -1015,10 +1130,21 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                                   its booked rate, and a button that said
                                   only "apply today's rate" would ask the
                                   user to agree to a figure they cannot see.
+
+                                  So is the CODE, unconditionally — even
+                                  when only one currency is waiting. A rate
+                                  is a quantity with a direction (the
+                                  column header says "Rate to base" and
+                                  Settings calls the same number "Rate to
+                                  Base"), and a bare 89,000 is exactly the
+                                  ambiguity the upload copy warns about.
+                                  Naming the currency only when two are on
+                                  screen would make the clear version the
+                                  rare one.
                                 */}
-                                {`Apply today's ${formatRate(offer.rate)} to ${rows} ${
-                                  manyCurrencies ? `${offer.code} ` : ''
-                                }${rows === 1 ? 'row' : 'rows'}`}
+                                {`Apply today's ${formatRate(offer.rate)} ${offer.code} to ${rows} ${
+                                  rows === 1 ? 'row' : 'rows'
+                                }`}
                               </Button>
                             );
                           })}
@@ -1028,16 +1154,42 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                               variant="outline"
                               size="sm"
                               className="shrink-0"
+                              aria-describedby={MONEY_BAR_HEADING_ID}
                               disabled={bulkDisabled}
                               onClick={() =>
                                 void applyComputedAmounts(unit.computedAmounts)
                               }
                             >
                               {unit.computedAmounts.length === 1
-                                ? 'Use the computed amount for 1 row'
+                                ? `Use the computed ${formatAmount(unit.computedAmounts[0].amount)} for this row`
                                 : `Use the computed amounts for ${unit.computedAmounts.length} rows`}
                             </Button>
                           )}
+                          {/*
+                            The bar must never be actionless. Every money
+                            flag has a fix, but two of them (an unknown
+                            currency, a sheet that has to be corrected) are
+                            fixed somewhere else — so a bar can carry a
+                            count with no other button on it, while the
+                            status line beside it says "Fix or SKIP". This
+                            is the skip half, in the same words the
+                            over-length bar uses.
+                          */}
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="shrink-0"
+                            aria-describedby={MONEY_BAR_HEADING_ID}
+                            disabled={bulkDisabled}
+                            onClick={() =>
+                              void skipAllRows(unit.rowIDs, MONEY_BAR_KEY)
+                            }
+                          >
+                            {count === 1
+                              ? 'Skip this row'
+                              : `Skip these ${count} rows`}
+                          </Button>
                         </div>
                       </div>
                     </TableCell>
@@ -1063,12 +1215,17 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                       <div className="flex items-center justify-between gap-3">
                         <div
                           id={headerId}
+                          data-bulk-heading={collisionGroupBarKey(
+                            unit.group.group_id,
+                          )}
+                          // Focus anchor — see LENGTH_BAR_KEY above.
+                          tabIndex={-1}
                           role="heading"
                           aria-level={3}
-                          className="flex items-center gap-2 text-sm"
+                          className="flex items-center gap-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         >
                           <AlertTriangle
-                            className="h-4 w-4 text-amber-500"
+                            className="size-4 shrink-0 text-amber-500"
                             aria-hidden="true"
                           />
                           <span>
@@ -1218,15 +1375,27 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                     className="bg-amber-500/10 border-l-2 border-l-amber-500 hover:bg-amber-500/10"
                   >
                     <TableCell colSpan={PREVIEW_COLUMN_COUNT} className="pt-0">
-                      <div
-                        id={fieldErrorDetailId(row.row_id)}
-                        className="flex flex-col items-start gap-0.5 text-xs text-muted-foreground"
-                      >
-                        {rowMessages.map((detail) => (
-                          <span key={`${detail.field}:${detail.message}`}>
-                            {detail.message}
-                          </span>
-                        ))}
+                      <div className="flex flex-col items-start gap-0.5 text-xs text-muted-foreground">
+                        {/*
+                          The IDREF target is the SENTENCES, and nothing
+                          else. Every editable cell in this row points at
+                          it, so anything inside is announced once per
+                          cell — with the link in here, a screen reader
+                          read "Open Settings, Currencies, link" four
+                          times over on the way across one row. The link
+                          is a sibling: still in the detail, still one Tab
+                          away, no longer part of the description.
+                        */}
+                        <div
+                          id={fieldErrorDetailId(row.row_id)}
+                          className="flex flex-col items-start gap-0.5"
+                        >
+                          {rowMessages.map((detail) => (
+                            <span key={`${detail.field}:${detail.message}`}>
+                              {detail.message}
+                            </span>
+                          ))}
+                        </div>
                         {rowMessages.some(
                           (detail) => detail.field === 'original_currency',
                         ) && (
@@ -1281,6 +1450,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
             </Button>
           )}
           <Button
+            ref={importButtonRef}
             type="button"
             disabled={!canImport || pendingPatchCount > 0}
             onClick={onConfirm}

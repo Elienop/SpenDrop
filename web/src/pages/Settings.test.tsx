@@ -1809,6 +1809,66 @@ describe('Settings', () => {
         };
         expect(parsedBody.category_map.Grocries).toBe(1);
       });
+
+      // The unknown-currency flag's remedy is a LINK to another Settings
+      // section, and Settings mounts one section at a time — so the card
+      // holding these decisions is torn down on the way there and rebuilt
+      // on the way back. Sending the user away and losing their work when
+      // they return is not an edge case here; it is the path the UI
+      // itself offers.
+      test('a manual mapping survives a trip to another Settings section', async () => {
+        mockedApi.upload.mockResolvedValue(previewWithUnmapped);
+        stubCategoriesFetch();
+        // The resume the remount performs: the hook re-reads the session
+        // by id from localStorage, through raw fetch.
+        globalThis.fetch = vi.fn().mockResolvedValue({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve(previewWithUnmapped),
+        } as Response);
+
+        const user = await goToDataTab();
+        await user.upload(screen.getByLabelText(/excel file/i), makeXlsxFile());
+
+        await waitFor(() => {
+          expect(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).toBeInTheDocument();
+        });
+        await user.click(
+          screen.getByRole('combobox', { name: /Map category Grocries/i }),
+        );
+        await user.click(screen.getByRole('option', { name: 'Transport' }));
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+
+        // Off to Currencies and back — the round trip the detail row's
+        // own link performs.
+        await user.click(screen.getByRole('tab', { name: /currencies/i }));
+        await waitFor(() => {
+          expect(
+            screen.queryByRole('button', { name: /^Import \d+$/ }),
+          ).not.toBeInTheDocument();
+        });
+        await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
+
+        // The session came back, and so did the decision made about it:
+        // the gate is open without the user having to choose Transport a
+        // second time.
+        await waitFor(() => {
+          expect(
+            screen.getByRole('button', { name: /^Import \d+$/ }),
+          ).toBeEnabled();
+        });
+        expect(
+          within(
+            screen.getByRole('combobox', { name: /Map category Grocries/i }),
+          ).getByText('Transport'),
+        ).toBeInTheDocument();
+      });
     });
 
     describe('import result', () => {

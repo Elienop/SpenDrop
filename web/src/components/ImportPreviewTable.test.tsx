@@ -1,6 +1,8 @@
 import {
+  act,
   render as rtlRender,
   screen,
+  waitFor,
   within,
   type RenderOptions,
 } from '@testing-library/react';
@@ -875,15 +877,20 @@ describe('ImportPreviewTable — money', () => {
     const headers = screen
       .getAllByRole('columnheader')
       .map((th) => th.textContent);
-    // Order is the contract, not just membership: Rate reads as the
+    // Order is the contract, not just membership: the rate reads as the
     // divisor of the Amount beside it, and putting it anywhere else
     // leaves the two halves of one figure apart.
+    //
+    // "Rate to base", not "Rate": the same quantity is labelled "Rate to
+    // Base" in Settings → Currencies, and a bare "Rate" leaves its
+    // DIRECTION to be guessed — the one ambiguity the upload copy spends
+    // a sentence closing.
     expect(headers).toEqual([
       'Date',
       'Description',
       'Category',
       'Amount',
-      'Rate',
+      'Rate to base',
       'Skip',
     ]);
   });
@@ -1229,7 +1236,9 @@ describe('ImportPreviewTable — money', () => {
     // accepts a number they can read, and that number becomes the row's
     // booked_rate.
     await user.click(
-      screen.getByRole('button', { name: "Apply today's 89,000 to 2 rows" }),
+      screen.getByRole('button', {
+        name: "Apply today's 89,000 LBP to 2 rows",
+      }),
     );
     // The count on the button is the count of rows it can actually fix.
 
@@ -1272,12 +1281,12 @@ describe('ImportPreviewTable — money', () => {
     // One button per currency, each naming which rows it means — a single
     // "apply today's rate" would have to pick one of two numbers.
     await user.click(
-      screen.getByRole('button', { name: "Apply today's 0.92 to 1 EUR row" }),
+      screen.getByRole('button', { name: "Apply today's 0.92 EUR to 1 row" }),
     );
 
     expect(onApplyRate).toHaveBeenCalledWith([1], 0.92);
     expect(
-      screen.getByRole('button', { name: "Apply today's 89,000 to 1 LBP row" }),
+      screen.getByRole('button', { name: "Apply today's 89,000 LBP to 1 row" }),
     ).toBeInTheDocument();
   });
 
@@ -1330,7 +1339,9 @@ describe('ImportPreviewTable — money', () => {
     );
 
     await user.click(
-      screen.getByRole('button', { name: 'Use the computed amount for 1 row' }),
+      screen.getByRole('button', {
+        name: 'Use the computed 16.85 for this row',
+      }),
     );
 
     // 1,500,000 ÷ 89,000 = 16.853932..., which is 16.85 to the cent —
@@ -1338,6 +1349,207 @@ describe('ImportPreviewTable — money', () => {
     // value the server stores is the value the button promised.
     expect(onPatchRow).toHaveBeenCalledTimes(1);
     expect(onPatchRow).toHaveBeenCalledWith(0, 'amount', '16.85');
+  });
+
+  it('always offers a skip, even when nothing else on the bar can be automated', async () => {
+    // A bar of unknown-currency rows has no rate to apply and no amount
+    // to accept — every remedy is somewhere else. The status line still
+    // says "Fix or SKIP", so the bar has to carry the skip half or it is
+    // a heading with no way out.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onPatchRow = vi.fn().mockResolvedValue(undefined);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        {
+          row_id: 0,
+          field: 'original_currency',
+          message: SERVER_MONEY_MESSAGES.unknownCurrency,
+        },
+        {
+          row_id: 1,
+          field: 'original_currency',
+          message: SERVER_MONEY_MESSAGES.unknownCurrency,
+        },
+      ],
+    });
+    for (const row of preview.rows.slice(0, 2)) {
+      row.original_amount = 1500000;
+      row.original_currency = 'LBX';
+    }
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    const bar = document.querySelector('[data-money-error-bar="true"]')!;
+    expect(within(bar as HTMLElement).queryByRole('button', {
+      name: /Apply today's/,
+    })).toBeNull();
+
+    await user.click(
+      within(bar as HTMLElement).getByRole('button', {
+        name: 'Skip these 2 rows',
+      }),
+    );
+
+    expect(onPatchRow).toHaveBeenCalledTimes(2);
+    expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'skip', true);
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'skip', true);
+  });
+
+  it('describes each bar’s skip button by its own heading', () => {
+    // Both bars can be on screen at once offering "Skip these 2 rows".
+    // The visible labels stay short because they read in context; a
+    // screen reader gets that context from the description rather than
+    // from the column of amber.
+    render(
+      <ImportPreviewTable
+        preview={makePreview({
+          currencies: PREVIEW_CURRENCIES,
+          field_errors: [
+            fieldError(0, 'notes'),
+            {
+              row_id: 1,
+              field: 'rate',
+              message: SERVER_MONEY_MESSAGES.rateMissing,
+            },
+          ],
+        })}
+        {...noopProps}
+        canImport={false}
+      />,
+    );
+
+    const lengthBar = document.querySelector(
+      '[data-field-error-bar="true"]',
+    ) as HTMLElement;
+    const moneyBar = document.querySelector(
+      '[data-money-error-bar="true"]',
+    ) as HTMLElement;
+    const lengthSkip = within(lengthBar).getByRole('button', {
+      name: 'Skip this row',
+    });
+    const moneySkip = within(moneyBar).getByRole('button', {
+      name: 'Skip this row',
+    });
+
+    expect(
+      document.getElementById(lengthSkip.getAttribute('aria-describedby')!)
+        ?.textContent,
+    ).toMatch(/too long to import/);
+    expect(
+      document.getElementById(moneySkip.getAttribute('aria-describedby')!)
+        ?.textContent,
+    ).toMatch(/money problem/);
+  });
+
+  it('lands focus on the bar heading when the bar survives the burst', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onApplyRate = vi.fn().mockResolvedValue(undefined);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateMissing },
+      ],
+    });
+    preview.rows[0].original_amount = 1500000;
+    preview.rows[0].original_currency = 'LBP';
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        {...noopProps}
+        onApplyRate={onApplyRate}
+        canImport={false}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: "Apply today's 89,000 LBP to 1 row" }),
+    );
+
+    // The button that was clicked can be gone by the time the response
+    // lands; focus must not fall to document.body, and must not land on
+    // the aria-live status line either.
+    await waitFor(() => {
+      expect(
+        document.querySelector('[data-bulk-heading="money"]'),
+      ).toHaveFocus();
+    });
+  });
+
+  it('lands focus on Import when the burst clears the bar away', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    // The PATCH is held open so the preview can be replaced BEFORE the
+    // burst settles — which is the real order of events: the bar
+    // disappears BECAUSE the response landed, so by the time focus is
+    // placed there is nothing left of the bar to place it on.
+    let settlePatch!: () => void;
+    const onPatchRow = vi.fn().mockReturnValue(
+      new Promise<void>((resolve) => {
+        settlePatch = () => resolve();
+      }),
+    );
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={makePreview({ field_errors: [fieldError(0, 'notes')] })}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Skip this row' }));
+    rerender(
+      <ImportPreviewTable
+        preview={makePreview()}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+      />,
+    );
+    await act(async () => {
+      settlePatch();
+    });
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Import 3$/ })).toHaveFocus();
+    });
+  });
+
+  it('keeps the Settings link out of the row description it sits beside', () => {
+    // Every editable cell in the row points at the detail id, so anything
+    // inside it is announced once per cell — four times over for one
+    // link.
+    render(
+      <ImportPreviewTable
+        preview={makePreview({
+          currencies: PREVIEW_CURRENCIES,
+          field_errors: [
+            {
+              row_id: 0,
+              field: 'original_currency',
+              message: SERVER_MONEY_MESSAGES.unknownCurrency,
+            },
+          ],
+        })}
+        {...noopProps}
+        canImport={false}
+      />,
+    );
+
+    const description = document.getElementById('import-field-error-0')!;
+    expect(description.textContent).toBe(SERVER_MONEY_MESSAGES.unknownCurrency);
+    expect(within(description).queryByRole('link')).toBeNull();
+    // Still present, still one Tab away — just not part of the sentence.
+    const detailRow = description.closest('tr')!;
+    expect(within(detailRow).getByRole('link')).toHaveAttribute(
+      'href',
+      '/settings?tab=currencies',
+    );
   });
 
   it('keeps going when one row of a computed-amount burst is refused', async () => {

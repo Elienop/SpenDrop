@@ -46,6 +46,11 @@ import type {
 import { AppVersion } from '@/components/AppVersion';
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
+import {
+  clearImportDecisions,
+  loadImportDecisions,
+  saveImportDecisions,
+} from '@/lib/import-decisions';
 import { useWebPush } from '@/hooks/useWebPush';
 import { useNotificationPrefs } from '@/hooks/useNotificationPrefs';
 import { Button } from '@/components/ui/button';
@@ -3410,8 +3415,18 @@ function ImportCard() {
   }, []);
 
   // Auto-map categories whenever the hook's preview changes to a new
-  // import_id. The guard avoids clobbering the user's manual re-mapping on
-  // unrelated re-renders (e.g. after a PATCH that only updates one row).
+  // import_id, then lay the user's own decisions back on top. The guard
+  // avoids clobbering a manual re-mapping on unrelated re-renders (e.g.
+  // after a PATCH that only updates one row).
+  //
+  // THE ORDER IS THE POINT. This card unmounts every time the Settings
+  // section changes, and the unknown-currency flag's own link sends the
+  // user to another section — so "remount" is a routine step in the
+  // journey, not a refresh. The session survives it (resumed from
+  // localStorage by the hook); the decisions survive it here. Restoring
+  // AFTER the auto-map means an explicit choice always wins over the name
+  // match it replaced, and a name the user never touched still gets its
+  // automatic destination.
   useEffect(() => {
     if (!preview) {
       // Upload cancelled / session reset — arm the ref for the next preview.
@@ -3419,9 +3434,41 @@ function ImportCard() {
       return;
     }
     if (lastAutoMappedImportIdRef.current === preview.import_id) return;
-    setCategoryMap(autoMapCategories(preview, categories));
+    const stored = loadImportDecisions(preview.import_id);
+    setCategoryMap({
+      ...autoMapCategories(preview, categories),
+      ...(stored?.categoryMap ?? {}),
+    });
+    if (stored) setDefaultCategoryId(stored.defaultCategoryId);
     lastAutoMappedImportIdRef.current = preview.import_id;
   }, [preview, categories]);
+
+  // Persist them again on every change, so the record is current whenever
+  // the card is torn down — there is no unmount hook that could be trusted
+  // to run after the last keystroke.
+  //
+  // The first pass for a session is SKIPPED, and that is load-bearing: on a
+  // remount the restore above and this effect run in the same commit, and
+  // the state it set is not visible until the next one. Writing here would
+  // save the empty initial map over the very record just read.
+  const savedDecisionsForRef = useRef<string | null>(null);
+  useEffect(() => {
+    const importID = preview?.import_id;
+    if (!importID) return;
+    if (savedDecisionsForRef.current !== importID) {
+      savedDecisionsForRef.current = importID;
+      return;
+    }
+    saveImportDecisions(importID, { categoryMap, defaultCategoryId });
+  }, [preview?.import_id, categoryMap, defaultCategoryId]);
+
+  // A confirmed import has no decisions left to remember. Cancel and
+  // "import another file" clear them in their own handlers, where the rest
+  // of the reset lives; this covers the third exit, which has no handler
+  // of its own — the hook flips the step from inside confirmImport.
+  useEffect(() => {
+    if (importStep === 'done') clearImportDecisions();
+  }, [importStep]);
 
   function clearFileInput() {
     if (fileInputRef.current) fileInputRef.current.value = '';
@@ -3454,6 +3501,7 @@ function ImportCard() {
 
   async function handleCancelImport() {
     await importSession.cancelImport();
+    clearImportDecisions();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
@@ -3461,6 +3509,7 @@ function ImportCard() {
 
   function handleImportAnother() {
     importSession.startOver();
+    clearImportDecisions();
     setCategoryMap({});
     setDefaultCategoryId(null);
     clearFileInput();
