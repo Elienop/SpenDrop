@@ -367,7 +367,15 @@ condition *and* move the predicate, believing one was safe because the other was
   goes; now the display name is the `min-w-0 truncate` half and the handle a `shrink-0` sibling
   capped at `max-w-[50%]` (with `flex-1` on the row so the percentage has a definite basis —
   without it the cap clips even when there is room), `whitespace-pre` keeping the space a
-  rendered character; `title` carries the full pair for the desktop cell. Tests decode
+  rendered character; `title` carries the full pair for the desktop cell. Browser pass on the
+  rebuilt `:3535` (SW cleared; wire fingerprinted: `created_by_username` on every list row;
+  migration 020 applied at boot with its pre-migration snapshot): the admin renamed to
+  "Marie-Thérèse Abdelahad" for the probe — at 360×780 the phone card shows "Marie-Théré…
+  @Elienop" on the LBP row (name clipped 62px, handle clipped 0), Trash card and desktop row
+  clip nothing, page has zero horizontal overflow; the extreme (selection mode + LBP secondary
+  line, 81px row) clips the name to 40px and the handle to " @Elien…" — the 50% cap doing its
+  job of not starving the name entirely; `PUT /api/users/1 {role:'owner'}` → 400 whitelist,
+  self-demotion → 400; display name restored. Tests decode
   into maps with fixtures whose display_name ≠ username so a column swap is caught. Filed
   premise corrections: heatmap and RecentlyAdded are readers of the list endpoint, not producers;
   the username gate is `isValidUsername`, not `validateUsername`.
