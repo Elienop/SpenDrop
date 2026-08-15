@@ -73,6 +73,29 @@ export default defineConfig({
     // assertions pass no matter which parse the code uses.
     env: { TZ: 'America/Los_Angeles' },
     setupFiles: ['./src/test/setup.ts'],
+    // `vitest run --coverage` (see `make coverage` at the repo root) writes
+    // coverage/lcov.info for SonarQube (sonar.javascript.lcov.reportPaths).
+    // Only application source counts; tests, the shadcn primitives under
+    // components/ui, and the bundle entry points are not coverable code.
+    coverage: {
+      provider: 'v8',
+      // lcov paths are written relative to the REPO root (`web/src/...`),
+      // which is the scanner's base dir, so every SF: line resolves.
+      reporter: [
+        'text-summary',
+        ['lcov', { projectRoot: path.resolve(__dirname, '..') }],
+      ],
+      reportsDirectory: './coverage',
+      include: ['src/**/*.{ts,tsx}'],
+      exclude: [
+        'src/**/*.test.{ts,tsx}',
+        'src/**/*.d.ts',
+        'src/test/**',
+        'src/components/ui/**',
+        'src/main.tsx',
+        'src/sw.ts',
+      ],
+    },
     css: {
       modules: {
         classNameStrategy: 'non-scoped',
