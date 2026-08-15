@@ -232,26 +232,6 @@ close on `saving` would trap the user behind a hung request. The clean fix is an
 before the close still toasts.
 **Effort:** small.
 
-### B46 — "six sections" is stale in eight places since `users` merged into `account`
-**Verified: read** (2026-08-14, found during B30). `VALID_TABS` has five entries and the phone
-picker renders five options, but "six sections/labels/values" survives in
-`settings-sections.ts:109`, `Settings.mobile.test.tsx:40,102` and six spots in `Settings.tsx`.
-Deliberately NOT swept on the phone-residue branch: some of those lines record browser
-measurements taken when six labels existed ("568px of scrollWidth against 313"), and a blind
-renumbering would falsify a measurement record. Wants one deliberate pass that separates
-"stale count" (fix) from "historical measurement" (keep, dated). **Effort:** small.
-
-### B47 — ModeToggle's moon glyph has no positioned ancestor inside its own button
-**Verified: read** (2026-08-15, found during the B28 fix wave). `ModeToggle.tsx:27` renders
-`<Moon className="absolute …">` but `ui/button.tsx` has no `relative` in its base, so the
-icon's containing block is whatever positioned ancestor the placement supplies — inside the
-mobile drawer that is `SheetContent` itself, so the glyph escapes the body scroller's clipping
-and does not scroll with its own button (dark mode, drawer scrolled). Fix wants `relative` on
-ModeToggle's trigger (scoped) rather than on the Button base (app-wide blast radius — audit
-first). Browser-probed 2026-08-15: real but sub-visible today — the drawer's max scroll is
-only ~15px at 360x640 with the current nav length, so the detached moon stays inside its
-button's box; becomes user-visible only if the drawer's body grows. **Effort:** small.
-
 ### B48 — 11 test files strip a hook's contract with `as unknown as ReturnType<…>`
 **Verified: read** (2026-08-15, found during the B30 fix wave). The double cast opts a mock out
 of the mocked hook's type contract, so a required field added to the hook later feeds
@@ -263,32 +243,23 @@ ReturnType" web/src`). Caveat before sweeping: some casts wrap large React-Query
 where a fully typed object is genuinely impractical — the audit should separate "lazy auth/ctx
 mock" (fix) from "pragmatic partial of a huge generic" (document). **Effort:** small-medium.
 
-### B49 — `type="number"` fields ship no `inputMode="decimal"` hint outside three sites
-**Verified: read** (2026-08-15, found during the B44 fix wave). The pairing (which makes phones
-reliably raise the decimal keypad) exists on the Settings large-transaction threshold and, as
-of the phone-residue branch, both Budgets card fields — but five other files carry bare
-`type="number"`: `AmountCurrencyInput` (the primary phone entry path — fix first), `SpendingTab`,
-`PatternsTab`, `Savings`, `FilterPanel`; plus the Budgets desktop-table inputs, which the coarse
-Tab S10 FE reaches at ~1130px landscape (inputMode is inert for physical keyboards, so adding
-it there is zero-risk but changes desktop DOM — scoped out of the phone-residue batch on
-purpose). Un-verifiable in any repo test — headless Chrome raises no soft keyboard; verify on
-a real device or accept the hint on spec. **Effort:** small.
+### B51 — nothing in the UI says a negative Amount bound is how you find refunds
+**Verified: read** (2026-08-15, UX review of the B49 sweep). Since B10 made refunds negative,
+the Filters → Amount min/max pair is the only place a typed minus is meant, and that fact lives
+in a code comment (`FilterPanel.tsx`, the Amount-tab block) — no label, placeholder or chip says
+it. The durable fix is a sign affordance ("refunds only" switch or a sign chip) rather than any
+keypad-hint change: on Android/Chromium a bare `type="number"` and `inputMode="decimal"` are
+REPORTED to map to the same unsigned IME class (unverified — device only), and iOS is the one
+platform where `decimal` itself removes the minus. If the S24 keypad hides `-`, compare against a
+bare `type="number"` field first; then build the affordance. **Effort:** small-medium.
 
-### B50 — mount-time toasts are lost on cold loads: the Toaster subscribes too late
-**Verified: reproduced** (2026-08-15 browser pass, built container). A cold load of
-`/settings?tab=savings` (i.e. the bookmark case the forwarding toast exists for) shows NO
-toast — probed with a MutationObserver from t=0, nothing ever renders — while the same URL
-reached by in-app navigation toasts correctly ("Savings has its own page now · Open").
-Mechanism: the one-shot effect fires `toast.info` on Settings' mount, but `<Toaster/>` sits at
-`AppShell.tsx:114` AFTER the routed content, so on a cold mount the child's effect runs before
-sonner subscribes and the toast is dropped. Pre-existing since PR #63 (`182199b`) — this
-branch changed only the lookup expression, and the in-app probe proves the new Map lookup
-fires correctly. Any OTHER mount-time toast in the app is lost the same way (audit `toast.*`
-calls in mount effects). Fix candidates: mount `<Toaster/>` before the routed content in
-AppShell (verify sonner's fixed positioning makes DOM order irrelevant to stacking), or defer
-mount-time toasts one tick. NOTE the B30 interaction: the no-mount-write design keeps the raw
-`?tab=` exactly so this toast reproduces on reload — right design, currently moot for cold
-loads until this is fixed. **Effort:** small.
+### B52 — an emptied export Year still exports year 0
+**Verified: read** (2026-08-15, found while fixing the export field's clear-and-retype snap).
+`DataSection` derives `year = Number(yearInput)`, so an empty field is `0` and Export builds
+`/api/export/monthly/0/{m}` — pre-existing behaviour, deliberately preserved when the state moved
+from number to string (a fallback or clamp would change export semantics, which that fix ruled
+out). Wants a decision: disable Export while the field is empty/out of range, or fall back to the
+current year. **Effort:** small.
 
 ---
 
@@ -297,9 +268,10 @@ loads until this is fixed. **Effort:** small.
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
 PR #139 and released as v0.44.0 — see Closed.*
 
-- ~~Phone-residue batch (B44 + B45 + B28 + B30)~~ — **built and verified 2026-08-15** on
-  `fix/phone-residue-sheets-url-budgets-switches` — see Closed. Carried the `2bea69f` stamp
-  and the B43 / native-Android / import-rate / ⌘Z decision records as riders.
+- ~~Phone-residue batch (B44 + B45 + B28 + B30)~~ — **MERGED 2026-08-15** as PR #141
+  (`bf500ca`, v0.44.2) from `fix/phone-residue-sheets-url-budgets-switches` — see Closed.
+  Carried the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision
+  records as riders.
 - **Back-dated import rate** (decided 2026-08-14): the import sheet gets an optional per-row
   rate column; rows without one fall back to the import-day rate. Data-correctness stage on
   its own branch — import parser + validation, and the interaction with the import dedupe
@@ -317,8 +289,9 @@ PR #139 and released as v0.44.0 — see Closed.*
   channel; both pieces shipped in v0.39.0 — see B7 in Closed.
 - ~~**Native Android app — reassess.**~~ **Answered 2026-08-14: CLOSED — the PWA is the
   answer**, and it keeps improving ("the pwa is good enough now we can keep on improving for
-  the future as well"). The residue that last framed the question is dispatched: B28 and B30
-  are in the phone-residue batch in flight, and B43 closed as intended behavior — see Closed.
+  the future as well"). The residue that last framed the question is gone: B28 and B30
+  shipped in the phone-residue batch (PR #141, `bf500ca`), and B43 closed as intended
+  behavior — see Closed.
 - ~~**Import + foreign currency:** what rate should a back-dated import use?~~ **Answered
   2026-08-14: the import sheet carries its own optional per-row rate column; rows without one
   fall back to the import-day rate** — the sheet knows its own era best, and the fallback is
@@ -379,9 +352,53 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B49 + B50 + B46 + B47 — keypad hints, Toaster order, stale counts, ModeToggle containing
+  block** (2026-08-15, on `fix/phone-inputmode-toaster-order`; squash hash joins this entry at
+  merge). Two parallel builders with disjoint file ownership; 0 Critical / 0 Important from the
+  code / UX / design battery, every Minor fixed. Per item:
+  **B49** — every real `type="number"` `<Input>` now pairs with an `inputMode` (12 added: 9
+  `decimal` for money/rates incl. AmountCurrencyInput — the wrapper all four amount surfaces
+  render — FilterPanel min/max, Savings target, the three Budgets desktop inputs, the three
+  Settings rate fields; 2 `numeric` for the Savings and export Year fields), plus the shared
+  `ImportPreviewTable` cell editor deriving `decimal` per field for the amount column (found by
+  the UX review — invisible to a `type="number"` grep). The filed premise was wrong for two of
+  five files: `SpendingTab` and `PatternsTab` carry only recharts `<XAxis type="number">`, not
+  inputs — deliberately untouched, not skipped. Tests pin the ATTRIBUTE at every site (happy-dom
+  and headless Chrome raise no keyboard); the MECHANISM is the owner's S24 confirmation on the
+  Budgets cards (v0.44.2), now recorded in the canonical `<MonthlyBudgetCard>` comment that
+  every site points at, and the convention is in `docs/DESIGN_GUIDE.md`. Rider: the export Year
+  field keeps its raw string in state so clearing it no longer snaps to "0" (export URLs
+  byte-identical; the empty-→-year-0 residue is B52). Signed-bound caveat recorded at
+  FilterPanel and filed as B51. Device check still owed: FilterPanel's minus key on the S24.
+  **B50** — `<Toaster />` is the FIRST child of AppShell's root (was after `</main>`) and of
+  QuickAdd's root, so a `toast.*` fired from a route's mount effect renders on a cold load.
+  Mechanism confirmed in sonner 2.0.7 source: `Observer.addToast` publishes to current
+  subscribers only, the Toaster's `useState([])` never replays, and React flushes passive
+  effects in tree order. Audit found one live loser (Settings' `?tab=savings|budgets|general`
+  forwarding toast) and three async sites that were never at risk; QuickAdd was NOT latent —
+  its pin went red against the unfixed file (a mount-toasting CHILD is lost there today, none
+  exists yet). Placement is visually free (the wrapper `<section>` is in-flow, unstyled,
+  zero-height; only the `<ol>` is `position:fixed; z-index:999999999`, and it exists only with a
+  toast) and carries an accepted a11y consequence written at the site: a VISIBLE toast is now
+  the first Tab stop and "Notifications" first in the landmark list — and cold-load toasts are
+  now announced by the live region, which they never were. Both pins render the REAL Toaster
+  and were watched to die (Toaster moved back → `cold-load probe` never renders).
+  **B46** — the "six sections" sweep separated eight stale counts (fixed to five, including a
+  `Reports.tsx` comment the entry missed that also asserted retired scrolling behaviour) from
+  three dated browser measurements (568/313/461px kept verbatim, now labelled as taken
+  2026-08-09 at `cbaa4d0` when six sections existed; `users` merged into `account` at
+  `a8c484f`). No measurement was renumbered.
+  **B47** — `relative` on ModeToggle's trigger via `cn('relative', className)`, scoped rather
+  than on the Button base (the only other Button with a positioned descendant,
+  `password-input.tsx`, is itself `absolute`); structural pin walks from the `absolute` Moon to
+  its first positioned ancestor and asserts it is the trigger, with an anti-vacuity guard on
+  the glyph. `size-11` from MobileNav survives the merge (pinned).
+  Suites 2090 → 2108. Browser pass on `:3535`: pending at the time of writing — see the PR.
+
 - **B28 + B30 + B44 + B45 — the phone-residue batch** (2026-08-15, on
-  `fix/phone-residue-sheets-url-budgets-switches`, commits `6a16776..d324b12`; squash hash
-  joins this entry at merge). Three parallel builders with disjoint file ownership. Per item:
+  `fix/phone-residue-sheets-url-budgets-switches`, commits `6a16776..d324b12`; **merged as
+  PR #141, squash `bf500ca`, released v0.44.2**; owner confirmed the same day that the S24
+  raises the decimal keypad on the Budgets card fields). Three parallel builders with disjoint file ownership. Per item:
   **B28** — all four remaining sheet consumers (MobileNav, TransactionEditSheet, Categories
   editor, Transactions Filters) moved their `SheetHeader` into the primitive's `header` slot,
   so titles stay visible under body scroll; spacing preserved exactly (removed body margins
