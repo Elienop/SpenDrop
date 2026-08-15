@@ -97,8 +97,8 @@ export default defineConfig({
     ],
     // `vitest run --coverage` (see `make coverage` at the repo root) writes
     // coverage/lcov.info for SonarQube (sonar.javascript.lcov.reportPaths).
-    // Only application source counts; tests, the shadcn primitives under
-    // components/ui, and the bundle entry points are not coverable code.
+    // Only application source counts; tests and the bundle entry points are
+    // not coverable code. components/ui IS counted: half of it is forked.
     coverage: {
       provider: 'v8',
       // lcov paths are written relative to the REPO root (`web/src/...`),
@@ -115,7 +115,6 @@ export default defineConfig({
         'src/**/*.test.{ts,tsx}',
         'src/**/*.d.ts',
         'src/test/**',
-        'src/components/ui/**',
         'src/main.tsx',
         'src/sw.ts',
       ],

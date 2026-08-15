@@ -307,24 +307,27 @@ PR #139 and released as v0.44.0 — see Closed.*
   (asked 2026-08-02, reaction was pending since). Trash purge clears them, and tombstoned rows
   are excluded from every aggregate by the soft-delete invariant, so the only cost is Trash
   clutter.
-- **SonarQube: how hard should the Go cognitive-complexity rule bite?** (asked 2026-08-15, on
-  the Sonar baseline branch.) The default "Sonar way" Go profile keeps `go:S3776` at threshold
-  15; the baseline scan counts **131** existing violations, almost all handlers, and the gate
-  is "0 new issues", so every new handler above 15 (a bulk endpoint, the re-price stage's
-  filter path) will turn the gate red until it is split. Options: (a) keep the default and
-  treat a red gate as pressure to split (the default; nothing to do), or (b) copy the Go
-  profile to a "SpenDrop way" like the TypeScript one and raise the threshold to 25 for this
-  project. Not decided; the TS profile decision (three rules off) is recorded in Closed.
-- **SonarQube: two exclusions in `sonar-project.properties` hide real code** (deep review of the
-  Sonar baseline branch, 2026-08-15). `web/src/components/ui/**` (5,211 lines / 42 files) is
-  treated as vendored shadcn primitives, but it also holds local forks (`chart.tsx`,
-  `select.tsx`, `dropdown-menu.tsx`) and `password-input.tsx`, bespoke code for a credential
-  field — 10 of those files have their own test suites; a future edit to a fork gets no
-  new-code gate. `.github/**` hides the four workflows from the GitHub-Actions rules. Sonar
-  globs have no negation, so the honest options are: keep as-is; drop the `ui/**` exclusion
-  and eat the primitives' noise (S6759 is already off); or list the pristine primitives one by
-  one. Un-excluding either will surface pre-existing issues as *new* on the first scan after
-  (issue dates = analysis date), so do it in a quiet moment, not on a feature PR. Owner's call.
+- ~~**SonarQube: how hard should the Go cognitive-complexity rule bite?**~~ **Answered
+  2026-08-16: (a), pure — `go:S3776` stays at Sonar's default 15 with NO exclusions, tests
+  included** ("follow SonarQube rules if possible"). Measured baseline: 131 findings, 81 of them
+  in `_test.go`, median 22, 51 at ≥ 25, max 98 (`import_handlers.go` confirm handler). From
+  here every function a PR adds or touches that ends above 15 turns the gate red until it is
+  split (handlers → parse / validate / authorize / apply helpers — the re-price stage designs
+  for it); a table-driven test that would read worse split gets an individual Accept with a
+  reason, recorded in the vault's `spendrop-sonarqube` note. Declined: a Go "SpenDrop way" at
+  25; a `sonar.issue.ignore.multicriteria` carve-out for tests.
+- ~~**SonarQube: two exclusions in `sonar-project.properties` hide real code**~~ **Answered
+  2026-08-16.** `web/src/components/ui/**`: **analyse it** — git shows 17 of the 32 primitives
+  carry SpenDrop commits after their add (sheet/dialog heights, select, switch, table, chart,
+  sonner, the bespoke `password-input`), so "vendored" was half false; measured on a throwaway
+  scan: +74 findings (57 = deprecated `React.ElementRef` → `ComponentRef`, 4 context values
+  re-created per render, 3 nested components in calendar, 2 index keys, an empty-heading
+  `AlertTitle`, an unknown `cmdk-input-wrapper` attribute, two one-liners; 3 vanish under the
+  project profile), `ui/` itself 77% covered once the vitest collection exclude is lifted too,
+  overall coverage 86.0 → 85.7. Shipped on `chore/sonar-analyze-ui` with the findings fixed in
+  the same PR so the post-merge scan lands green. `.github/**`: **stays excluded** — this
+  server has no GitHub Actions analyzer (language list checked), so un-excluding buys nothing;
+  revisit when Community Build ships one.
 
 ---
 
@@ -380,7 +383,8 @@ condition *and* move the predicate, believing one was safe because the other was
   re-scanned `main`: v0.46.1 stamped, coverage 86.0% / new-code 88.7%, tests 4,655, bugs 0,
   vulnerabilities 0, all ratings A — and the gate went RED on exactly one new-code finding,
   `S6478` on the inline `shape={(props) => <Rectangle/>}` in PatternsTab, i.e. the gate doing
-  its job on new code; hoisted to a module-scoped `tagBarShape` on `chore/sonar-nested-shape`). The owner stood up a local
+  its job on new code; hoisted to a module-scoped `tagBarShape` — PR #147, squash `2f86bc5`,
+  released v0.46.2; the scan after it: gate OK, new coverage 100%, `sonar-issues` empty). The owner stood up a local
   SonarQube (Community Build 26.8, "Sonar way" profiles, default gate) and scanned `main` at
   `ef0ef4a`: gate OK only because a first analysis has zero new lines; underneath, 4
   "vulnerabilities" (Security C), 5 bugs (Reliability D), 44 reliability + 450 maintainability
