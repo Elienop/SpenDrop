@@ -441,3 +441,83 @@ describe('every production <ChartLegend> opts out of recharts 3 sorting', () => 
     expect(total).toBe(3);
   });
 });
+
+describe('ChartLegendContent placement', () => {
+  // recharts 3.10 deprecated `verticalAlign` in favour of `position`, so this
+  // padding branch reads `position` now. The default arm is what all three
+  // production legends hit — none of them positions the legend — and it has to
+  // keep landing on `pt-3`, which is where `verticalAlign`'s "bottom" default
+  // used to put it.
+  //
+  // The `position="top"` arm is the half that proves the branch is wired to a
+  // prop recharts actually forwards: `<Legend>` spreads its resolved props onto
+  // the `content` element, so a prop it did NOT forward would leave this test
+  // reading `pt-3` and the migration would be silently dead.
+  const CONFIG = { alpha: { label: 'Alpha', color: 'rgb(1, 1, 1)' } } satisfies ChartConfig
+
+  function renderLegend(position?: 'top' | 'bottom') {
+    return render(
+      <ChartContainer config={CONFIG}>
+        <BarChart data={[{ name: 'Jan', alpha: 1 }]}>
+          <XAxis dataKey="name" />
+          <ChartLegend
+            content={<ChartLegendContent />}
+            itemSorter={null}
+            position={position}
+          />
+          <Bar dataKey="alpha" fill="var(--color-alpha)" />
+        </BarChart>
+      </ChartContainer>
+    )
+  }
+
+  const row = (container: HTMLElement) => {
+    const el = container.querySelector('.recharts-legend-wrapper > div')
+    if (!el) throw new Error('no legend row rendered')
+    return el
+  }
+
+  test('an unpositioned legend pads on the side facing the plot', () => {
+    const { container } = renderLegend()
+    expect(row(container)).toHaveClass('pt-3')
+    expect(row(container)).not.toHaveClass('pb-3')
+  })
+
+  test('position="top" flips the padding to the other side', () => {
+    const { container } = renderLegend('top')
+    expect(row(container)).toHaveClass('pb-3')
+    expect(row(container)).not.toHaveClass('pt-3')
+  })
+})
+
+describe('ChartContainer config context', () => {
+  // The provider value is memoised (SonarQube S6481). `config` is the only
+  // thing any consumer reads off it, so it is the only dependency — and an
+  // empty dependency list would freeze the first config forever while
+  // `ChartStyle`, which reads the prop directly rather than the context,
+  // carried on updating. That divergence is exactly what this pins: the legend
+  // label comes from the CONTEXT, so a stale memo shows the old label.
+  const FIRST = { alpha: { label: 'Before Rename', color: 'rgb(1, 1, 1)' } } satisfies ChartConfig
+  const SECOND = { alpha: { label: 'After Rename', color: 'rgb(1, 1, 1)' } } satisfies ChartConfig
+
+  const tree = (config: ChartConfig) => (
+    <ChartContainer config={config}>
+      <BarChart data={[{ name: 'Jan', alpha: 1 }]}>
+        <XAxis dataKey="name" />
+        <ChartLegend content={<ChartLegendContent />} itemSorter={null} />
+        <Bar dataKey="alpha" fill="var(--color-alpha)" />
+      </BarChart>
+    </ChartContainer>
+  )
+
+  test('a changed config reaches consumers instead of being cached', () => {
+    const { rerender } = render(tree(FIRST))
+    // Positive control: the first config really is what rendered, so the
+    // assertion below is a change and not just an absence.
+    expect(screen.getByText('Before Rename')).toBeInTheDocument()
+
+    rerender(tree(SECOND))
+    expect(screen.getByText('After Rename')).toBeInTheDocument()
+    expect(screen.queryByText('Before Rename')).toBeNull()
+  })
+})

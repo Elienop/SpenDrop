@@ -55,10 +55,15 @@ const ChartContainer = React.forwardRef<
   }
 >(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId()
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  const chartId = `chart-${id || uniqueId.replaceAll(":", "")}`
+
+  // Memoised so the provider's value identity only changes when `config` does.
+  // Every consumer reads `config` and nothing else, so `config` is the whole
+  // dependency list — a wider one would just reintroduce the per-render churn.
+  const chartContextValue = React.useMemo(() => ({ config }), [config])
 
   return (
-    <ChartContext.Provider value={{ config }}>
+    <ChartContext.Provider value={chartContextValue}>
       <div
         data-chart={chartId}
         ref={ref}
@@ -215,6 +220,16 @@ const ChartTooltipContent = React.forwardRef<
                 // which is not a valid React key. The index is stable here:
                 // this list is a single tooltip's payload, rendered in place
                 // and never reordered.
+                //
+                // Deliberate: SonarQube S6479 ("do not use array index in
+                // keys") is ACCEPTED on this line. A payload item carries no
+                // identity that is both stable and unique — `name` is shared by
+                // design (see the "two series sharing a name" test in
+                // chart.test.tsx) and `dataKey` may be a function, whose
+                // stringification two series can also share. A composite of
+                // those can collide, and a colliding key is strictly worse than
+                // the index: React conflates the two rows. Position in the
+                // payload IS the identity recharts gives us.
                 <div
                   key={index}
                   className={cn(
@@ -297,12 +312,16 @@ const ChartLegendContent = React.forwardRef<
     RechartsPrimitive.DefaultLegendContentProps & {
       hideIcon?: boolean
       nameKey?: string
+      // recharts 3.10 deprecated `verticalAlign` (and `align`) in favour of
+      // `position`, which is declared on `<Legend>` rather than on
+      // `DefaultLegendContentProps` — so it has to be restated here. `<Legend>`
+      // spreads its resolved props straight onto the `content` element
+      // (Legend.js `LegendContent`), so whatever the call site passes arrives
+      // here untouched, and an unset `position` arrives as `undefined`.
+      position?: RechartsPrimitive.CartesianPosition
     }
 >(
-  (
-    { className, hideIcon = false, payload, verticalAlign = "bottom", nameKey },
-    ref
-  ) => {
+  ({ className, hideIcon = false, payload, position, nameKey }, ref) => {
     const { config } = useChart()
 
     if (!payload?.length) {
@@ -323,7 +342,14 @@ const ChartLegendContent = React.forwardRef<
           // series named. `gap-y` is smaller than `gap-x` because the vertical
           // gap only exists once wrapping happens.
           "flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5",
-          verticalAlign === "top" ? "pb-3" : "pt-3",
+          // The padding separates the legend from the plot, so it goes on the
+          // side facing it. This branched on `verticalAlign === "top"` until
+          // recharts 3.10 deprecated that prop; `position` is its documented
+          // replacement and already overrides it inside recharts, so reading
+          // `position` is what a call site would have to set to move the legend
+          // anyway. All three production legends leave it unset, which lands on
+          // `pt-3` exactly as `verticalAlign`'s "bottom" default did.
+          position === "top" ? "pb-3" : "pt-3",
           className
         )}
       >
@@ -355,7 +381,12 @@ const ChartLegendContent = React.forwardRef<
               // `item.value` — the series NAME, which two series may legitimately
               // share — is not a key either. Same reasoning as
               // `ChartTooltipContent` above: this list is one legend's payload,
-              // rendered in place and never reordered.
+              // rendered in place and never reordered. SonarQube S6479 is
+              // ACCEPTED here for the same reason it is accepted there, and the
+              // `ChartLegendContent React keys` describe block in
+              // chart.test.tsx is the guard that stops a "stable-looking" key
+              // being reinvented: it renders two series that share a name and
+              // fails on React's duplicate-key warning.
               //
               // `whitespace-nowrap` keeps a label on one line — but on its own
               // it also makes the chip UNSHRINKABLE, because a flex item's
