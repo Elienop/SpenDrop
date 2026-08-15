@@ -176,10 +176,11 @@ func TestExportTxnRows_DataWidthMatchesHeaderWidth(t *testing.T) {
 	}
 }
 
-// TestExportTransactions_RateColumn pins the Rate column: its position in the
-// header, the value it carries for a converted row, its EMPTINESS for a row
-// that was never converted, and that a tombstoned row's rate never reaches the
-// workbook.
+// TestExportTransactions_RateColumn pins the Rate column on BOTH sheets that
+// carry transactions — the top-level export and the monthly one: its position
+// in the header, the value it carries for a converted row, its EMPTINESS for a
+// row that was never converted, and that a tombstoned row's rate never reaches
+// the workbook.
 //
 // Position is asserted, not just presence. The import maps columns by header
 // name, so a Rate column that landed in the wrong place would still re-import —
@@ -277,5 +278,52 @@ func TestExportTransactions_RateColumn(t *testing.T) {
 					"and it brought its booked rate with it", r+1, c+1, cell)
 			}
 		}
+	}
+
+	// The monthly export writes the SAME Transactions sheet through the same
+	// two helpers, but from its own SELECT — and that SELECT is the half a
+	// shared helper cannot protect. A monthly query that omits the rate, or
+	// lists it in the wrong place, is caught here rather than by whichever
+	// unrelated test happens to seed a value that will not scan into a float.
+	monthRec := httptest.NewRecorder()
+	h.handleExportMonthly(monthRec, withUserAndURLParams(
+		httptest.NewRequest(http.MethodGet, "/api/export/monthly/2026/3", nil),
+		user, map[string]string{"year": "2026", "month": "3"}))
+	if monthRec.Code != http.StatusOK {
+		t.Fatalf("monthly export status %d: %s", monthRec.Code, monthRec.Body.String())
+	}
+	mf, err := excelize.OpenReader(bytes.NewReader(monthRec.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("parse monthly xlsx: %v", err)
+	}
+	defer mf.Close()
+
+	monthRows, err := mf.GetRows("Transactions")
+	if err != nil {
+		t.Fatalf("read monthly Transactions sheet: %v", err)
+	}
+	if len(monthRows) == 0 || len(monthRows[0]) <= rateIdx {
+		t.Fatalf("monthly header row is %v: no column at index %d", monthRows, rateIdx)
+	}
+	if monthRows[0][rateIdx] != "Rate" {
+		t.Errorf("monthly header[%d] = %q, want %q", rateIdx, monthRows[0][rateIdx], "Rate")
+	}
+	monthCell := func(cell string) string {
+		v, err := mf.GetCellValue("Transactions", cell)
+		if err != nil {
+			t.Fatalf("read monthly %s: %v", cell, err)
+		}
+		return v
+	}
+	if got := monthCell("B2"); got != "FOREIGN ROW" {
+		t.Fatalf("monthly B2 = %q, want %q: the H2 assertion below would read the wrong row",
+			got, "FOREIGN ROW")
+	}
+	if got := monthCell("H2"); got != "89000" {
+		t.Errorf("monthly converted row H2 (Rate) = %q, want %q — the monthly sheet drops "+
+			"the booked rate the top-level export carries", got, "89000")
+	}
+	if got := monthCell("H3"); got != "" {
+		t.Errorf("monthly base row H3 (Rate) = %q, want empty", got)
 	}
 }
