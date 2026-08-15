@@ -22,8 +22,11 @@ describe('urlBase64ToUint8Array', () => {
 
   // Byte-for-byte pin. The literal below is the independent decode of
   // PUBLIC_KEY (`Buffer.from(key, 'base64url')`), so any change to the
-  // padding / charset / code-unit half of the conversion shows up as a
-  // concrete byte diff rather than a length that still looks plausible.
+  // charset / code-unit half of the conversion shows up as a concrete byte
+  // diff rather than a length that still looks plausible. (The `padding`
+  // line is NOT pinned by anything: WHATWG forgiving-base64 decodes unpadded
+  // input identically, so its only observable effect is the DOMException
+  // message on a length % 4 == 1 input — invalid either way.)
   test('decodes the whole key to the exact expected bytes', () => {
     expect(Array.from(urlBase64ToUint8Array(PUBLIC_KEY))).toEqual([
       4, 73, 122, 218, 37, 24, 129, 72, 175, 196, 137, 47, 235, 220, 149, 136,

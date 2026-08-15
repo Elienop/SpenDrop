@@ -585,6 +585,34 @@ describe('offline-queue — IndexedDB failures reject with an Error', () => {
     expect(named?.name).toBe('VersionError');
   });
 
+  test('an aborted transaction rejects with an Error, not null', async () => {
+    // `abort()` leaves IDBTransaction.error NULL (spec; fake-indexeddb's
+    // FDBTransaction._abort(null) matches), so this is the one arm
+    // `idbFailure`'s `?? new Error(context)` fallback exists for. Abort AFTER
+    // the request succeeds, so the failure can only come from txDone's onabort.
+    const realAdd = IDBObjectStore.prototype.add;
+    const spy = vi
+      .spyOn(IDBObjectStore.prototype, 'add')
+      .mockImplementationOnce(function (
+        this: IDBObjectStore,
+        ...args: Parameters<IDBObjectStore['add']>
+      ) {
+        const req = realAdd.apply(this, args);
+        const tx = this.transaction;
+        req.addEventListener('success', () => tx.abort());
+        return req;
+      });
+
+    const failure = await enqueue(778, payload()).then(
+      () => 'resolved',
+      (err: unknown) => err,
+    );
+    spy.mockRestore();
+
+    expect(failure).not.toBe('resolved');
+    expect(failure).toBeInstanceOf(Error);
+  });
+
   test('a blocked open settles with an Error without reading req.error', async () => {
     // `onblocked` fires when another connection still holds the old version
     // open. It fires MID-FLIGHT: readyState is 'pending', and IDBRequest.error

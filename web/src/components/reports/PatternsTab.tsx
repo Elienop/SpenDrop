@@ -609,11 +609,12 @@ export function PatternsTab() {
                     `radius`, active state and the animation frame props — so
                     only the fill is ours.
 
-                    `originalDataIndex`, NOT `index`: `index` is the position
-                    among the rects that survived filtering, while
                     `originalDataIndex` is the row's position in `tags.data` —
                     the same index the `<Cell>` children were mapped over, so
-                    every tag keeps the colour it had.
+                    every tag keeps the colour it had. (`index` would read the
+                    same today: with a custom `shape` recharts filters no rect
+                    out — see the cost below — so the two never diverge; the
+                    original index is simply the one that names the row.)
 
                     SpendingTab's category chart deliberately does NOT use this
                     mechanism; see the note on `breakdownSorted` there for the

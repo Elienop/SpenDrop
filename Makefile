@@ -25,6 +25,8 @@ docs:
 # on a host whose Node ships the experimental global localStorage (26+), set
 # NODE_OPTIONS=--no-experimental-webstorage in the environment first — it is
 # deliberately not baked in here because the flag does not exist on older Node.
+# `go list` filter: web/node_modules ships a stray Go package (flatted) that
+# `./...` would otherwise sweep into the profile.
 coverage:
-	go test ./... -coverprofile=coverage.out
+	go test $$(go list ./... | grep -v /node_modules/) -coverprofile=coverage.out
 	cd web && npm run test:coverage

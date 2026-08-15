@@ -272,7 +272,6 @@ describe('SpendingTab renders real recharts output', () => {
     ]);
   });
 
-
   test('Category Breakdown bar labels are currency-formatted by the LabelList formatter', async () => {
     // recharts 3 retyped `LabelList`'s formatter argument as `RenderableText`
     // (string | number | boolean | null | undefined), so SpendingTab's
