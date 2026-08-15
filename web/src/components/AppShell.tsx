@@ -69,6 +69,43 @@ export function AppShell() {
 
   return (
     <div className="min-h-screen bg-background text-foreground">
+      {/*
+        FIRST child, and that ordering is load-bearing — do not move it back
+        below <main> for tidiness (B50, 2026-08-15).
+
+        sonner's Toaster subscribes to the toast bus from a passive effect over
+        state that starts empty (`useState([])`), and `Observer.addToast`
+        publishes to whoever is subscribed AT THAT MOMENT and never replays
+        (`sonner@2.0.7`: `addToast = (data) => { this.publish(data); … }`).
+        React flushes passive effects in tree order, so a routed page's mount
+        effect runs before the effects of any sibling that comes LATER in the
+        DOM. With the Toaster last, every `toast.*` fired from a page's mount
+        effect was published to zero subscribers and silently dropped on a cold
+        load — Settings' one-shot `?tab=savings` forwarding toast was the
+        reported case, and it worked only when reached by in-app navigation,
+        where the Toaster was already mounted.
+
+        Moving it first costs nothing visually. sonner renders an unstyled
+        wrapper <section> that holds an <ol data-sonner-toaster>, and only the
+        <ol> exists (`if (!filteredToasts.length) return null`) and only the
+        <ol> is positioned — `[data-sonner-toaster]{position:fixed; …
+        z-index:999999999}` in dist/styles.css. So the wrapper is an empty,
+        zero-height block wherever it sits, and the toasts themselves are out of
+        flow and carry an explicit z that beats the `z-50` dialog/sheet overlays
+        and the `z-40` mobile header. Nothing between here and the document root
+        opens a stacking context that could trap them.
+
+        Accepted a11y consequence, recorded so a later pass does not "fix" it by
+        moving this back: the always-mounted wrapper is
+        `<section aria-label="Notifications alt+T" tabIndex={-1}
+        aria-live="polite">`, so the Notifications region is now FIRST in the
+        landmark list, and because each toast is an `<li tabIndex={0}>` inside
+        the <ol>, a VISIBLE toast is the first Tab stop on the page. That is
+        inherent to having the Toaster subscribe first, and it comes with the
+        upside that a cold-load toast is now announced by the live region as
+        well as shown — before this change it was neither.
+      */}
+      <Toaster />
       <Sidebar />
       <MobileNav />
       {/*
@@ -111,7 +148,6 @@ export function AppShell() {
           </Routes>
         </div>
       </main>
-      <Toaster />
     </div>
   );
 }

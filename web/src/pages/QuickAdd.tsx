@@ -568,6 +568,15 @@ export function QuickAdd() {
 
   return (
     <div className="flex min-h-screen flex-col bg-background text-foreground">
+      {/* FIRST child, deliberately — `/quick` mounts its own Toaster, so it
+          needs the same ordering guarantee as the shell; the WHY is written out
+          at AppShell.tsx's <Toaster /> (B50, 2026-08-15). Layout-neutral here
+          even though this root is a flex column: sonner's wrapper <section>
+          carries no styles and renders no <ol> until a toast exists, so it is a
+          zero-height flex item — and the <ol> is out of flow (`position:fixed`)
+          once it does exist, so the section stays zero-height afterwards. This
+          root sets no `gap`, so nothing else reserves space for it either. */}
+      <Toaster />
       <header className="flex items-center justify-between border-b border-border px-4 py-3">
         <h1 className="sr-only">Quick add</h1>
         <span className="text-lg font-semibold tracking-tight">SpenDrop</span>
@@ -873,8 +882,6 @@ export function QuickAdd() {
           {saving ? 'Saving…' : 'Add'}
         </Button>
       </footer>
-
-      <Toaster />
     </div>
   );
 }
