@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode"
@@ -347,6 +348,19 @@ func parseImportRate(s string) (float64, error) {
 	if cleaned == "" {
 		return 0, nil
 	}
+	// A rate is a decimal number as a human writes one: digits, an optional
+	// sign, at most one decimal point, an optional exponent. Grouping commas
+	// and currency symbols were stripped above.
+	//
+	// The grammar is checked BEFORE strconv because strconv accepts Go
+	// LITERAL syntax that no spreadsheet produces — "0x1p10" is 1024 and
+	// "1_000" is 1000 — and a rate arriving from a cell nobody could have
+	// typed is far more likely to be a mangled export than a divisor the user
+	// meant. It also refuses "NaN" and "Inf" by shape rather than leaving
+	// them to the finite check below, which stays as the second line.
+	if !importRateGrammar.MatchString(cleaned) {
+		return 0, fmt.Errorf("rate is not a decimal number: %q", s)
+	}
 	parsed, err := strconv.ParseFloat(cleaned, 64)
 	if err != nil {
 		return 0, fmt.Errorf("parse rate %q: %w", s, err)
@@ -356,6 +370,12 @@ func parseImportRate(s string) (float64, error) {
 	}
 	return parsed, nil
 }
+
+// importRateGrammar is the shape parseImportRate accepts, after
+// stripCurrencyFormat has removed grouping commas and symbols. \d is ASCII
+// here (Go's regexp Perl classes are), so Eastern Arabic digits are refused
+// too — they parse in no locale this app has.
+var importRateGrammar = regexp.MustCompile(`^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$`)
 
 // --- messages -------------------------------------------------------------
 //
@@ -494,18 +514,38 @@ func importAmountOutOfRangeMessage() string {
 // rendered on.
 func importCurrencyLabel(code string) string {
 	code = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		switch {
+		case unicode.Is(unicode.Cc, r), // C0/C1 controls
+			unicode.Is(unicode.Cf, r), // formatting: bidi overrides/isolates, ZWSP, ZWJ
+			unicode.Is(unicode.Zl, r), // LINE SEPARATOR
+			unicode.Is(unicode.Zp, r), // PARAGRAPH SEPARATOR
+			unicode.Is(unicode.Mn, r): // combining marks with no base of their own
 			return -1
+		case unicode.IsSpace(r):
+			// Every other space — NBSP, the en/em quads, the ideographic
+			// space — folds to a plain one, so a code cannot smuggle a line
+			// break's worth of blank into a sentence.
+			return ' '
 		}
 		return r
-	}, strings.TrimSpace(code))
+	}, code)
+	code = strings.TrimSpace(code)
 
-	const maxRunes = 12 // real codes are three; this is room for a typo
-	if utf8.RuneCountInString(code) > maxRunes {
-		return string([]rune(code)[:maxRunes]) + "…"
+	if utf8.RuneCountInString(code) > MaxCurrencyCodeLength {
+		return string([]rune(code)[:MaxCurrencyCodeLength]) + "…"
 	}
 	return code
 }
+
+// MaxCurrencyCodeLength bounds a sheet's Original Currency cell.
+//
+// It is an IMPORT-side cap, not a schema one: currencies.code is plain TEXT,
+// but currency_handlers.go accepts only three uppercase letters, so every code
+// the household can actually own is three characters. Twelve leaves room for a
+// legacy label or a typo to be shown back to the user, and refuses the 32,767
+// characters an xlsx cell may hold — a value that would otherwise be echoed
+// into a server-authored sentence, once per row, on four preview surfaces.
+const MaxCurrencyCodeLength = 12
 
 // formatImportDollars renders a base-currency amount for a message: always two
 // decimals, because that is how the ledger holds it and how every other
@@ -524,11 +564,34 @@ func formatImportDollars(f float64) string {
 func formatImportQuantity(f float64) string {
 	s := strconv.FormatFloat(f, 'f', -1, 64)
 	if dot := strings.IndexByte(s, '.'); dot >= 0 && len(s)-dot-1 > 6 {
-		s = strings.TrimRight(strconv.FormatFloat(f, 'f', 6, 64), "0")
-		s = strings.TrimSuffix(s, ".")
+		rounded := strings.TrimRight(strconv.FormatFloat(f, 'f', 6, 64), "0")
+		rounded = strings.TrimSuffix(rounded, ".")
+		// Six decimals ANNIHILATE anything below 5e-7, so a rate the parser
+		// accepted and the app divided by would be quoted as "0" — a message
+		// stating a division by zero, about a division that happened. Fall
+		// back to the shortest exponent form instead: unfamiliar, but true.
+		if rounded == "0" || rounded == "-0" {
+			return strconv.FormatFloat(f, 'g', -1, 64)
+		}
+		s = rounded
 	}
-	return groupImportThousands(s)
+
+	grouped := groupImportThousands(s)
+	// The other end: 1e300 is 301 digits, and 401 characters once grouped, in
+	// a sentence that lands on four surfaces and inside a 409 body. Bounded
+	// for the same reason importCurrencyLabel is — a message the user cannot
+	// read is not a message.
+	if len(grouped) > maxImportQuantityChars {
+		return strconv.FormatFloat(f, 'g', -1, 64)
+	}
+	return grouped
 }
+
+// maxImportQuantityChars bounds a rendered figure. MaxTransactionAmount
+// grouped is thirteen characters, so this leaves room for cents and a sign on
+// the largest value a row may legally carry, and refuses anything that could
+// only have come from a cell no household typed.
+const maxImportQuantityChars = 24
 
 // groupImportThousands inserts thousands separators into the integer part of
 // an already-formatted decimal string. Written here rather than pulled from a

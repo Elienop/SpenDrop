@@ -170,6 +170,59 @@ func FuzzParseImportDate(f *testing.F) {
 // magnitude exceeds MaxTransactionAmount is a failure — parser-side
 // the check already rejects these, so this assertion is the
 // double-entry guard against a future refactor that relaxes it.
+// rateSeeds is the seed corpus for FuzzParseImportRate. It is short because
+// the parser's job is narrow, and every entry names a class rather than a
+// value: the empty cell (ABSENCE, and the one input that must return no error
+// AND no rate), household formatting, the three non-positive shapes, the two
+// non-finite ones a spreadsheet can actually produce, Go literal syntax that
+// strconv accepts and no sheet writes, non-ASCII digits, and the smallest
+// subnormal — which is positive, finite, usable, and unrenderable at fixed
+// decimals.
+var rateSeeds = []string{
+	"", "   ",
+	"89000", "89,000", "$89,000", "89,000.5", "0.92", ".5", "1.",
+	"0", "-1", "(89000)",
+	"NaN", "Inf", "1e999", "1e400",
+	"0x1p10", "1_000", "١٢٣", "89%",
+	"5e-324", "1e-7", "1e300",
+}
+
+// FuzzParseImportRate feeds rateSeeds (plus mutations) into the rate parser.
+//
+// The invariant is the one the whole stage rests on: a rate the parser
+// ACCEPTS is either absence (0, from an empty cell) or a divisor
+// convertForeignMoney can use. Anything else — a zero, a negative, a NaN, an
+// infinity — reaching a caller as "fine" would be a row silently valued at
+// nothing, at a flipped sign, or at int64 minimum.
+//
+// It is stated here as well as inside the parser on purpose: this is the
+// double-entry guard that survives a refactor of the parser's internals.
+func FuzzParseImportRate(f *testing.F) {
+	for _, s := range rateSeeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("parseImportRate panicked on %q: %v", s, r)
+			}
+		}()
+		v, err := parseImportRate(s)
+		if err != nil {
+			if v != 0 {
+				t.Errorf("parseImportRate(%q) returned %v alongside its error; a rejected rate must carry nothing", s, v)
+			}
+			return
+		}
+		if v == 0 {
+			return // absence: an empty cell, which is not a fault
+		}
+		if !importRateIsUsable(v) {
+			t.Errorf("parseImportRate(%q) accepted %v, which cannot divide", s, v)
+		}
+	})
+}
+
 func FuzzParseImportAmount(f *testing.F) {
 	for _, s := range amountSeeds {
 		f.Add(s)

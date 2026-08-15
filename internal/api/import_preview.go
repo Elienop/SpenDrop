@@ -124,6 +124,18 @@ func (h *Handler) buildImportPreview(
 	// Settings — drops out of the array with no client-side bookkeeping.
 	fieldErrors := checkImportRowLengths(entry.Rows)
 
+	// A length error claims its cell. The two families can land on the SAME
+	// field — a 400-character currency cell is both too long and (necessarily)
+	// not a currency the household owns — and the frontend keys its per-cell
+	// errors by row and field, so a second entry would simply overwrite the
+	// first and which sentence survived would depend on append order. The
+	// length one is kept because it is the actionable half: a code that long
+	// cannot be added under Settings, it has to be fixed in the sheet.
+	claimed := make(map[[2]any]struct{}, len(fieldErrors))
+	for _, fe := range fieldErrors {
+		claimed[[2]any{fe.RowID, fe.Field}] = struct{}{}
+	}
+
 	rows := make([]importPreviewRow, 0, len(entry.Rows))
 	for _, row := range entry.Rows {
 		money, moneyErr := importRowMoney(row, currencies)
@@ -136,7 +148,9 @@ func (h *Handler) buildImportPreview(
 			// The row shows the sheet's own amount: a blocked row has no
 			// resolved value to show, and showing a derived one would erase
 			// the disagreement the user has to resolve.
-			fieldErrors = append(fieldErrors, *moneyErr)
+			if _, taken := claimed[[2]any{moneyErr.RowID, moneyErr.Field}]; !taken {
+				fieldErrors = append(fieldErrors, *moneyErr)
+			}
 		case money.Derived:
 			previewRow.Amount = centsToDollars(money.AmountCents)
 			previewRow.AmountDerived = true

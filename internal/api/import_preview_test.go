@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -682,6 +683,68 @@ func TestBuildImportPreview_RowRejectedBeforeMoneyCarriesNoFlag(t *testing.T) {
 	if _, flagged := fieldErrorsByRow(t, resumed)[0][importFieldOriginalCurrency]; !flagged {
 		t.Errorf("the footer row kept its exemption after its date was fixed: %v", resumed["field_errors"])
 	}
+}
+
+// TestHandleImportUpload_OverLongCurrencyIsBoundedLikeEveryOtherCell adds the
+// one row value that had no bound. An xlsx cell holds 32,767 characters, and
+// until this stage an unknown currency was stored verbatim rather than
+// reported — now it is reported, per row, on four surfaces.
+//
+// The row gets ONE flag, not two: a code that long can never be a currency the
+// household owns, so the unknown-currency sentence would be noise stacked on
+// the actionable one, and both land on the same cell.
+func TestHandleImportUpload_OverLongCurrencyIsBoundedLikeEveryOtherCell(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "longcode", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			{"2026-01-15", "Long code", "10.00", "Food", "1000", strings.Repeat("L", 400)},
+			// The positive control: an ordinary 3-letter code is NOT flagged
+			// for length, so the cap is a bound and not a blanket.
+			{"2026-01-16", "Short code", "10.00", "Food", "1000", "LBX"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	errs := fieldErrorsByRow(t, preview)
+
+	want := "This row's currency code is longer than the 12 characters a currency code can be. Skip this row, or fix it in your spreadsheet and upload again."
+	if got := errs[0][importFieldOriginalCurrency]; got != want {
+		t.Errorf("row 0 message = %q\nwant          = %q", got, want)
+	}
+	if n := countFieldErrorsFor(t, preview, 0); n != 1 {
+		t.Errorf("row 0 carries %d flags, want exactly 1 — the length sentence is the actionable one and both land on the same cell", n)
+	}
+	if got := errs[1][importFieldOriginalCurrency]; got != "LBX isn't set up — add it under Settings → Currencies." {
+		t.Errorf("row 1 lost its unknown-currency flag: %q", got)
+	}
+
+	// And confirm refuses it as a length error, exactly like a long note.
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "FIELD_TOO_LONG" {
+		t.Errorf("code = %q, want FIELD_TOO_LONG", code)
+	}
+}
+
+// countFieldErrorsFor counts every entry in a preview's field_errors for one
+// row, which the row->field->message index cannot report (a second entry on
+// the same field overwrites the first).
+func countFieldErrorsFor(t *testing.T, preview map[string]any, rowID int) int {
+	t.Helper()
+	list, _ := preview["field_errors"].([]any)
+	n := 0
+	for _, item := range list {
+		if entry, ok := item.(map[string]any); ok && int(entry["row_id"].(float64)) == rowID {
+			n++
+		}
+	}
+	return n
 }
 
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length

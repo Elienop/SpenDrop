@@ -3,6 +3,7 @@ package api
 import (
 	"database/sql"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -462,6 +463,87 @@ func TestResolveImportMoney_RateMissingWithoutAUsableTodaysRate(t *testing.T) {
 	}
 }
 
+// TestImportCurrencyLabel is the unit test the echo helper never had. Every
+// rune class below survives `unicode.IsControl` and reaches a sentence the
+// frontend renders verbatim on four surfaces.
+//
+// U+202E (RIGHT-TO-LEFT OVERRIDE) is the one that matters most: it is the
+// Trojan-Source display attack, and in a message that already names something
+// the household should go and create, a code that renders as one thing and
+// says another is worth blocking on principle rather than on a demonstrated
+// exploit.
+func TestImportCurrencyLabel(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain code passes through", "LBX", "LBX"},
+		{"surrounding space is trimmed", "  LBX  ", "LBX"},
+		{"bidi override is dropped", "USD\u202eEVIL", "USDEVIL"},
+		{"zero-width space is dropped", "L\u200bBX", "LBX"},
+		{"rtl mark is dropped", "LBX\u200f", "LBX"},
+		{"bidi isolates are dropped", "\u2066LBX\u2069", "LBX"},
+		{"line separator is dropped", "LBX\u2028X", "LBXX"},
+		{"paragraph separator is dropped", "LBX\u2029X", "LBXX"},
+		{"combining acute is dropped", "LB\u0301X", "LBX"},
+		{"nbsp folds to a plain space", "LB\u00a0X", "LB X"},
+		{"control character is dropped", "LB\x07X", "LBX"},
+		{"newline is dropped", "LB\nX", "LBX"},
+		{"an over-long cell is cut with an ellipsis", strings.Repeat("A", 40), strings.Repeat("A", 12) + "…"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := importCurrencyLabel(tc.in); got != tc.want {
+				t.Errorf("importCurrencyLabel(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFormatImportQuantity covers both ends of a rate the parser accepts but
+// the fixed-decimal renderer cannot state.
+//
+// The low end is the one that produces a false sentence: 1e-7 renders as "0"
+// at six decimals, so the amount_disagrees message reads "… ÷ 0 = …" about a
+// divisor SpenDrop just divided by. The high end is a length problem — 1e300
+// is 301 digits before grouping, 401 characters after, in a string that lands
+// on four surfaces and in a 409 body.
+func TestFormatImportQuantity(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{89000, "89,000"},
+		{0.92, "0.92"},
+		{1500000, "1,500,000"},
+		{1_000_000_000, "1,000,000,000"},
+		{89000.5, "89,000.5"},
+		{0.000001, "0.000001"},
+		{1e-7, "1e-07"},
+		{5e-324, "5e-324"},
+		{-0.0000001, "-1e-07"},
+		{1e300, "1e+300"},
+		{0, "0"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			got := formatImportQuantity(tc.in)
+			if got != tc.want {
+				t.Errorf("formatImportQuantity(%v) = %q, want %q", tc.in, got, tc.want)
+			}
+			if got == "0" && tc.in != 0 {
+				t.Errorf("formatImportQuantity(%v) rendered a non-zero value as %q — a message would state a division by zero", tc.in, got)
+			}
+			if len(got) > 32 {
+				t.Errorf("formatImportQuantity(%v) rendered %d characters; a message must stay readable", tc.in, len(got))
+			}
+		})
+	}
+}
+
 // TestParseImportRate pins the parser that decides #5 from #9. The empty
 // string is the load-bearing case: it must be ABSENCE (0, nil), never an
 // error, because a sheet with no Rate column has to keep importing exactly
@@ -486,6 +568,15 @@ func TestParseImportRate(t *testing.T) {
 		{in: "89%", wantErr: true},
 		{in: "1e400", wantErr: true},
 		{in: "1e999", wantErr: true}, // parses to +Inf: positive, and unusable
+		// Go literal syntax that no spreadsheet writes and strconv accepts:
+		// refused, so "what the parser takes" is the decimal number a human
+		// would type and nothing else.
+		{in: "0x1p10", wantErr: true},
+		{in: "1_000", wantErr: true},
+		{in: "١٢٣", wantErr: true},
+		{in: "5e-324", want: 5e-324},
+		{in: ".5", want: 0.5},
+		{in: "1.", want: 1},
 		{in: "NaN", wantErr: true},
 		{in: "Inf", wantErr: true},
 	}

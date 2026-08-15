@@ -3603,6 +3603,47 @@ func TestHandleImportPatchRow_RateInvalidReturns400(t *testing.T) {
 	}
 }
 
+// TestHandleImportPatchRow_RateThatStripsToNothingIs400 closes the gap between
+// what the PATCH accepts and what the resolver blocks.
+//
+// "$" and "," survive stripCurrencyFormat as an empty string, so they parsed
+// as ABSENCE and the edit was taken as a clear — leaving the row's rate cell
+// empty on the wire while the resolver flagged it as unusable. The user is
+// then looking at an empty cell being told to fix the rate in it.
+func TestHandleImportPatchRow_RateThatStripsToNothingIs400(t *testing.T) {
+	for _, value := range []string{"$", ",", "()", " , "} {
+		t.Run(value, func(t *testing.T) {
+			clearImportStore()
+			q, db := setupTestDB(t)
+			h := NewHandler(q, db)
+			user := seedTestUser(t, q, "stripnothing", "admin")
+
+			_, importID := uploadImportSheet(t, h, user, rateSheet(t))
+
+			rec := patchImportRow(t, h, user, importID, 0, "rate", value)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("patch rate %q: expected 400, got %d; body: %s", value, rec.Code, rec.Body.String())
+			}
+			if code := decodedCode(t, rec); code != "INVALID_RATE" {
+				t.Errorf("code = %q, want INVALID_RATE", code)
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("unmarshal 400: %v", err)
+			}
+			if body["message"] != importRateInvalidMessage() {
+				t.Errorf("message = %v, want the preview's own sentence", body["message"])
+			}
+
+			// The control that keeps this test about the PREDICATE and not
+			// about rejecting everything: a real clear still works.
+			if rec := patchImportRow(t, h, user, importID, 0, "rate", ""); rec.Code != http.StatusOK {
+				t.Errorf("clearing the rate: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 // TestHandleImportPatchRow_RateOnBaseFlags covers the other half of the edit:
 // a rate that PARSES is accepted by the field validator and then judged by the
 // resolver, which is where "this rate cannot apply to this row" lives. A rate

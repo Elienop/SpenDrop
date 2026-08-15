@@ -184,6 +184,15 @@ func importFieldLengthMessage(field string) string {
 		return fmt.Sprintf(
 			"This row's note is longer than the %d characters SpenDrop stores. Skip this row, or shorten the note in your spreadsheet and upload again.",
 			MaxNotesLength)
+	case importFieldOriginalCurrency:
+		// "can be", not "SpenDrop stores": the column has no limit, the
+		// household's own currency codes are three uppercase letters, and this
+		// cap is what a code may be for import to consider it one at all. The
+		// remedy is the spreadsheet, like tags and notes — the preview has no
+		// currency editor, because an unknown currency is resolved in Settings.
+		return fmt.Sprintf(
+			"This row's currency code is longer than the %d characters a currency code can be. Skip this row, or fix it in your spreadsheet and upload again.",
+			MaxCurrencyCodeLength)
 	}
 	return ""
 }
@@ -224,6 +233,14 @@ func checkImportRowLengths(rows []importRow) []importFieldError {
 			{importFieldDescription, row.Description, MaxDescriptionLength},
 			{importFieldTags, row.Tags, MaxTagsLength},
 			{importFieldNotes, row.Notes, MaxNotesLength},
+			// The currency cell is bounded here rather than only where it is
+			// echoed, because it is the one row value with no column limit
+			// behind it: an xlsx cell holds 32,767 characters, and until this
+			// stage an unknown code was stored verbatim rather than reported.
+			// Now it is reported — once per row, on four preview surfaces and
+			// in a 409 body — so the cap is what keeps a preview response
+			// proportional to a household's ledger. See MaxCurrencyCodeLength.
+			{importFieldOriginalCurrency, row.OriginalCurrency, MaxCurrencyCodeLength},
 		} {
 			if charLen(check.value) > check.limit {
 				fieldErrors = append(fieldErrors, importFieldError{
@@ -523,7 +540,14 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 			return nil, "INVALID_RATE", "rate must be a string"
 		}
 		parsed, err := parseImportRate(str)
-		if err != nil {
+		// The accept predicate here is the resolver's BLOCK predicate, stated
+		// once: a cell with something in it that cannot divide is refused.
+		// parseImportRate alone is not enough — stripCurrencyFormat reduces
+		// "$" and "," to nothing, so they parse as ABSENCE and would be taken
+		// as a clear, landing a row whose rate cell now reads empty beside a
+		// flag saying the rate is unusable. The user would be looking at an
+		// empty cell being told to fix it.
+		if err != nil || (strings.TrimSpace(str) != "" && !importRateIsUsable(parsed)) {
 			return nil, "INVALID_RATE", importRateInvalidMessage()
 		}
 		// Both halves travel together so the row cannot end up saying one
