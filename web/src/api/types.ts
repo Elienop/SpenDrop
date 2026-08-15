@@ -262,6 +262,24 @@ export interface ImportRow {
    */
   rate?: number;
   /**
+   * The Rate cell's own text, echoed back ONLY when the sheet held
+   * something there that could not be used as a rate (`abc`, `1e999`,
+   * `0x1p10`). Absent for a usable rate — the number is already on the
+   * wire as `rate` — and absent for an empty cell, because there is
+   * nothing to show.
+   *
+   * ITS PRESENCE IS THE SIGNAL. A row whose rate is unusable has no
+   * parsed rate by definition, so without this the table would draw an
+   * empty box beside a message telling the user to clear or correct a
+   * cell they cannot see. Rendered verbatim, and fed to the editor
+   * unchanged, so "clear it" is something the user can actually do.
+   *
+   * It is also the only value that reaches a numeric column of this
+   * table UNPARSED, which is why the Rate cell bounds it the way the
+   * description column is bounded.
+   */
+  rate_raw?: string;
+  /**
    * True when `amount` above was COMPUTED from `original_amount ÷ rate`
    * rather than read from the sheet's Amount cell. Absent is false.
    *

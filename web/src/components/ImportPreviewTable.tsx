@@ -269,6 +269,31 @@ function derivedAmount(row: ImportRow): number | null {
 }
 
 /**
+ * What the Rate cell shows, and what its editor opens on.
+ *
+ * Three states, and the ORDER matters: an unusable cell is echoed back
+ * verbatim (`rate_raw` is emitted only for that case, so its presence is
+ * the signal), a usable rate is grouped like the money it divides, and an
+ * empty cell stays empty.
+ *
+ * The two differ for exactly one of the three: a grouped "89,000" reads
+ * as the same quantity as the money beside it, while the draft is PATCHed
+ * verbatim and the server parses a number, so the editor has to hold
+ * "89000". For the raw case they are the same string on purpose — the
+ * server's message asks the user to clear or correct THAT text, so that
+ * text is what the editor must contain for the instruction to be true.
+ */
+function rateCellText(row: ImportRow): string {
+  if (row.rate_raw) return row.rate_raw;
+  return row.rate ? formatRate(row.rate) : '';
+}
+
+function rateCellEditValue(row: ImportRow): string {
+  if (row.rate_raw) return row.rate_raw;
+  return row.rate ? String(row.rate) : '';
+}
+
+/**
  * Joins the blocker phrases into one readable list: "a", "a and b",
  * "a, b and c".
  *
@@ -860,14 +885,21 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     // undefined so we never emit a useless attribute.
     const describedby =
       [extraAriaDescribedby, errorMessageId].filter(Boolean).join(' ') || undefined;
-    // Description is the only free-text editable column, so it is the
-    // only one whose value can be arbitrarily long — date and amount are
-    // both parsed before they reach here. An unbounded cell renders the
-    // whole value: a 5,500-character description measured 2,211px tall,
-    // burying the banner that asks the user to act on it under two
-    // screens of its own text. The rows that get flagged are exactly the
-    // rows that would make the preview unreadable.
-    const isFreeText = field === 'description';
+    // Free text = a value that reached this table UNPARSED, and so with
+    // no bound on its length. Description always; the Rate cell when it
+    // is echoing back a cell the parser rejected, which is the one way a
+    // numeric column here can hold arbitrary sheet text (date and amount
+    // are both parsed before they reach the table, and a usable rate is
+    // a number).
+    //
+    // An unbounded cell renders the whole value: a 5,500-character
+    // description measured 2,211px tall, burying the banner that asks
+    // the user to act on it under two screens of its own text. The rows
+    // that get flagged are exactly the rows that would make the preview
+    // unreadable — and a rejected rate cell is a flagged row by
+    // definition.
+    const isFreeText =
+      field === 'description' || (field === 'rate' && !!row.rate_raw);
     return (
       <TableCell
         className={`${extraClass} ${isFreeText ? 'max-w-[28rem]' : ''} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring`}
@@ -1398,6 +1430,15 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                     EDITOR still opens on the raw "89000": the draft is
                     PATCHed verbatim and the server parses a number.
 
+                    UNLESS the sheet held something unusable there, in
+                    which case the cell shows exactly that text
+                    (`rate_raw`) and the editor opens on it too. Nothing
+                    else can be shown — an unusable cell parses to no
+                    number at all — and showing nothing puts an empty box
+                    beside a message about a value the user cannot see.
+                    Verbatim, and unformatted: it is not a rate, it is
+                    what someone typed where a rate goes.
+
                     Empty when the sheet quoted no rate — no dash and no
                     zero here, unlike the Amount beside it. This is the
                     cell the user TYPES the missing rate into, and a
@@ -1407,11 +1448,11 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                   {renderEditableCell(
                     row,
                     'rate',
-                    row.rate ? formatRate(row.rate) : '',
+                    rateCellText(row),
                     `text-right font-mono tabular-nums ${skipClass}`,
                     rowDescribedby,
                     undefined,
-                    row.rate ? String(row.rate) : '',
+                    rateCellEditValue(row),
                   )}
                   <TableCell>
                     {/*

@@ -862,6 +862,8 @@ const SERVER_MONEY_MESSAGES = {
     'no rate for 1,500,000 LBP — enter one, or apply today’s 89,000',
   unknownCurrency: "`LBX` isn't set up — add it under Settings → Currencies",
   amountDisagrees: '16.00 ≠ 1,500,000 ÷ 89,000 = 16.85',
+  rateInvalid:
+    'That is not a rate SpenDrop can use. Enter the rate this row was booked at, or clear the cell.',
 } as const;
 
 /** The currencies table as the preview reports it. */
@@ -1356,6 +1358,86 @@ describe('ImportPreviewTable — money', () => {
     // value the server stores is the value the button promised.
     expect(onPatchRow).toHaveBeenCalledTimes(1);
     expect(onPatchRow).toHaveBeenCalledWith(0, 'amount', '16.85');
+  });
+
+  it('shows the sheet’s own text when the rate cell cannot be used', async () => {
+    // `rate_raw` arrives ONLY for this case, so its presence is the
+    // signal. Without it the cell is empty — an empty box beside a
+    // message telling the user to clear or correct a value they cannot
+    // see.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateInvalid },
+      ],
+    });
+    preview.rows[0].rate_raw = 'abc';
+    preview.rows[0].original_amount = 1500000;
+    preview.rows[0].original_currency = 'LBP';
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    const rateCell = screen
+      .getByText('Starbucks')
+      .closest('tr')!
+      .querySelector('[data-import-col="rate"]') as HTMLElement;
+    // Verbatim and unformatted: it is not a rate, it is what someone
+    // typed where a rate goes.
+    expect(within(rateCell).getByText('abc')).toBeInTheDocument();
+
+    // And the editor opens on that same string, which is what makes
+    // "clear the cell" — the server's own instruction — a thing the user
+    // can do.
+    await user.dblClick(within(rateCell).getByText('abc'));
+    expect(await screen.findByDisplayValue('abc')).toBeInTheDocument();
+  });
+
+  it('leaves a row without rate_raw exactly as it was', () => {
+    // The negative half: `rate_raw` is absent for a usable rate and for
+    // an empty cell, and neither may start rendering as raw text.
+    const preview = makePreview({ currencies: PREVIEW_CURRENCIES });
+    preview.rows[0].rate = 89000;
+
+    render(<ImportPreviewTable preview={preview} {...noopProps} />);
+
+    const rateCellOf = (description: string) =>
+      screen
+        .getByText(description)
+        .closest('tr')!
+        .querySelector('[data-import-col="rate"]') as HTMLElement;
+    expect(rateCellOf('Starbucks').textContent).toBe('89,000');
+    expect(rateCellOf('Amazon').textContent).toBe('');
+  });
+
+  it('bounds an unusable rate cell the way it bounds a long description', () => {
+    // `rate_raw` is the only value that reaches a numeric column of this
+    // table unparsed, so it is the only one that can be arbitrarily long
+    // — the same shape as the 5,500-character description that measured
+    // 2,211px tall, in a narrower column.
+    const long = 'z'.repeat(4000);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateInvalid },
+      ],
+    });
+    preview.rows[0].rate_raw = long;
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    const value = screen.getByText(long);
+    expect(value.className).toContain('truncate');
+    expect(value.className).toContain('block');
+    // Hover reveals the whole cell without entering the editor.
+    expect(value.getAttribute('title')).toBe(long);
+    // The bound is on the CELL, and the message under it must still wrap
+    // — the trap the description cell documents.
+    const cell = value.closest('td')!;
+    expect(cell.className).toContain('max-w-[28rem]');
+    expect(cell.className).not.toContain('truncate');
   });
 
   it('refuses to claim a rate-missing row is worth 0.00', async () => {
