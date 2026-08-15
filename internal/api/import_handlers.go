@@ -2231,7 +2231,12 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		// The raw cell travels with the value. validateImportField has already
 		// refused anything unparseable, so this always clears an amount_invalid
 		// flag rather than carrying a stale one past the edit that fixed it.
-		row.RawAmount = strings.TrimSpace(req.Value.(string))
+		// The comma-ok form because this reads the REQUEST rather than the
+		// normalized value its neighbours assert on: the validator has proved
+		// it is a string, and a bare assertion here would panic a handler on a
+		// body it has already answered for.
+		rawAmount, _ := req.Value.(string)
+		row.RawAmount = strings.TrimSpace(rawAmount)
 	case importFieldRate:
 		rate := normalized.(importRateValue)
 		row.Rate = rate.Rate

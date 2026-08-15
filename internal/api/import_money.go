@@ -177,6 +177,15 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 	// count.
 	if raw := strings.TrimSpace(row.RawAmount); raw != "" && usdCents == 0 {
 		if _, err := parseImportAmount(raw); err != nil {
+			// Two faults reach here, and they are not the same sentence. A
+			// figure the ledger will not hold is a perfectly good number —
+			// telling its owner it "is not a number SpenDrop can read" sends
+			// them to look for a typo that is not there — and it already has a
+			// sentence, the one the PATCH 400 returns for the same value.
+			// Same condition, two spellings, one string.
+			if errors.Is(err, errImportAmountRange) {
+				return blocked(importFieldAmount, importAmountOutOfRangeMessage(), skipReasonAmountInvalid)
+			}
 			return blocked(importFieldAmount, importAmountUnreadableMessage(), skipReasonAmountInvalid)
 		}
 	}
@@ -242,7 +251,16 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 	// division, because a LABEL row (#2) would otherwise store an
 	// out-of-range original_amount_cents that nothing downstream re-bounds.
 	if origCents == 0 {
-		if strings.TrimSpace(row.RawOriginalAmount) != "" {
+		if raw := strings.TrimSpace(row.RawOriginalAmount); raw != "" {
+			// Same split as the base amount above, in the same order. An
+			// original written "1,5" is not out of range, and a sentence
+			// telling its owner it must be "no more than 1,000,000,000" is
+			// simply false about it. A cell that PARSES and lands on zero
+			// keeps the range sentence, which says "at least one cent" and is
+			// exactly right about a zero.
+			if _, err := parseImportAmount(raw); err != nil && !errors.Is(err, errImportAmountRange) {
+				return blocked(importFieldAmount, importOriginalAmountUnreadableMessage(), skipReasonAmountInvalid)
+			}
 			return blocked(importFieldAmount, importOriginalAmountInvalidMessage(), skipReasonAmountInvalid)
 		}
 	} else if err := validateMoneyAmount(row.OriginalAmount, "original_amount"); err != nil {
@@ -497,6 +515,18 @@ func importAmountDisagreesMessage(usd, original, rate, derived float64) string {
 // preview cell.
 func importAmountUnreadableMessage() string {
 	return "That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row."
+}
+
+// importOriginalAmountUnreadableMessage explains an Original Amount cell the
+// parser cannot read — the foreign twin of importAmountUnreadableMessage, and
+// separate from it for one word that matters: the remedy.
+//
+// The preview has no editor for this cell (only date, description, amount,
+// rate and skip are patchable, because a row's foreign money is a fact about
+// the spreadsheet), so it says fix it there rather than "fix it here" — an
+// instruction the UI could not honour.
+func importOriginalAmountUnreadableMessage() string {
+	return "That original amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it in your spreadsheet, or skip this row."
 }
 
 // importOriginalAmountInvalidMessage explains an ORIGINAL amount that is not a

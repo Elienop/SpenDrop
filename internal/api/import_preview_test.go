@@ -1042,14 +1042,22 @@ func TestHandleImportUpload_DecimalCommaIsReportedOnEveryMoneyCell(t *testing.T)
 	preview, importID := uploadImportSheet(t, h, user, xlsxData)
 	errs := fieldErrorsByRow(t, preview)
 
+	// The exact sentence per cell, not merely that one arrived. All three say
+	// the same thing about punctuation and differ where they must: the base
+	// amount is editable in the preview ("fix it here"), the original is not
+	// (fix the spreadsheet), and the rate has its own long-standing wording.
 	for _, want := range []struct {
-		rowID int
-		field string
-		cell  string
+		rowID   int
+		field   string
+		cell    string
+		message string
 	}{
-		{0, importFieldAmount, "Amount"},
-		{1, importFieldAmount, "Original Amount"},
-		{2, importFieldRate, "Rate"},
+		{0, importFieldAmount, "Amount",
+			"That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row."},
+		{1, importFieldAmount, "Original Amount",
+			"That original amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it in your spreadsheet, or skip this row."},
+		{2, importFieldRate, "Rate",
+			"That rate is not a positive, finite number. Enter the rate this row was booked at, or clear the cell."},
 	} {
 		msg, flagged := errs[want.rowID][want.field]
 		if !flagged {
@@ -1057,8 +1065,8 @@ func TestHandleImportUpload_DecimalCommaIsReportedOnEveryMoneyCell(t *testing.T)
 				want.cell, want.rowID, errs[want.rowID])
 			continue
 		}
-		if msg == "" {
-			t.Errorf("row %d carries an empty message for the %s cell", want.rowID, want.cell)
+		if msg != want.message {
+			t.Errorf("the %s cell reads\n  %q\nwant\n  %q", want.cell, msg, want.message)
 		}
 	}
 
@@ -1073,6 +1081,49 @@ func TestHandleImportUpload_DecimalCommaIsReportedOnEveryMoneyCell(t *testing.T)
 	}
 	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
 		t.Errorf("%d rows landed from cells nobody could read", n)
+	}
+}
+
+// TestHandleImportUpload_OverLargeAmountReadsTheSameOnBothDoors pins the
+// four-surfaces-one-string rule where BOTH spellings of a condition exist.
+//
+// An Amount cell of 2,000,000,000 is a perfectly good number the ledger will
+// not hold. It can be met two ways — uploaded in a sheet, or typed into the
+// preview — and the second already had its sentence. Answering the first with
+// "not a number SpenDrop can read" would send the user hunting for a typo in a
+// figure that has none, and would make one condition read two ways depending
+// on how they got there.
+func TestHandleImportUpload_OverLargeAmountReadsTheSameOnBothDoors(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "overlarge", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{{"2026-01-15", "A whole bank", "2000000000", "Food"}})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	uploaded, flagged := fieldErrorsByRow(t, preview)[0][importFieldAmount]
+	if !flagged {
+		t.Fatalf("the over-large amount was not flagged: %v", preview["field_errors"])
+	}
+	if uploaded != importAmountOutOfRangeMessage() {
+		t.Errorf("upload says\n  %q\nwant\n  %q", uploaded, importAmountOutOfRangeMessage())
+	}
+
+	// The same value through the other door.
+	rec := patchImportRow(t, h, user, importID, 0, "amount", "2000000000")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 400: %v", err)
+	}
+	if body["message"] != uploaded {
+		t.Errorf("the PATCH says %q and the preview says %q — one condition, two readings",
+			body["message"], uploaded)
 	}
 }
 

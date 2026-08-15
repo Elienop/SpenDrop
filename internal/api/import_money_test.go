@@ -329,6 +329,40 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 			wantReason:  skipReasonAmountInvalid,
 		},
 		{
+			// The other reason a cell can fail to parse: it is a perfectly
+			// good number that the ledger will not hold. That is a different
+			// fault with a different fix, and it already has a sentence —
+			// the one the PATCH 400 returns for the same value. Two spellings
+			// of one condition must not read two ways.
+			name: "an over-large amount cell says so, not that it is unreadable",
+			row: importRow{
+				RawAmount: "2000000000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That amount is outside what SpenDrop can store — a row may not exceed 1,000,000,000 in either direction.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// The mirror on the foreign side: an Original Amount cell written
+			// in the other convention is not out of range, and telling its
+			// owner it must be "no more than 1,000,000,000" is a false
+			// statement about 1,5.
+			//
+			// The remedy differs from the base amount's too: the preview has
+			// no editor for this cell, so the sentence points at the
+			// spreadsheet rather than saying "fix it here".
+			name: "an unreadable original amount is not called out of range",
+			row: importRow{
+				OriginalCurrency:  "LBP",
+				RawOriginalAmount: "1,5",
+				Rate:              89000,
+				RawRate:           "89000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That original amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it in your spreadsheet, or skip this row.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
 			// The control, and the line between the two: a cell that READS as
 			// zero is not unreadable. A bank statement's 0.00 fee line has
 			// always left as zero_amount, silently and correctly — it is a row
