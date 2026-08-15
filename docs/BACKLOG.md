@@ -256,8 +256,8 @@ PR #139 and released as v0.44.0 — see Closed.*
   (`bf500ca`, v0.44.2) from `fix/phone-residue-sheets-url-budgets-switches` — see Closed.
   Carried the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision
   records as riders.
-- ~~Import per-row rate~~ — **BUILT 2026-08-15** on `feat/import-per-row-rate` (squash hash
-  joins the Closed entry at merge) — see Closed.
+- ~~Import per-row rate~~ — **MERGED 2026-08-15** as PR #144 (`ef0ef4a`, v0.46.0) from
+  `feat/import-per-row-rate` — see Closed.
 - **Re-price older rows at a new rate** (owner asked 2026-08-15: "if I want to apply a new rate
   for older data can I do that?" — today: no; the freeze-on-edit is one-way and the only escape
   is the undiscoverable two-save trick). Now honest to build because every manual row records
@@ -343,7 +343,8 @@ condition *and* move the predicate, believing one was safe because the other was
 *(Move items here with their commit hash rather than deleting them.)*
 
 - **Import per-row rate — a `Rate` column is the source of a foreign row's USD** (2026-08-15, on
-  `feat/import-per-row-rate`; squash hash joins this entry at merge). **Corrected premise first:**
+  `feat/import-per-row-rate`; merged the same day as PR #144, squash `ef0ef4a`, released
+  **v0.46.0**). **Corrected premise first:**
   at `804dbc2` the import performed NO currency conversion — it required the USD `Amount` column,
   stored `Original Amount`/`Original Currency` verbatim as labels, never read the currencies
   table, and left `booked_rate` NULL; the 2026-08-14 "import-day rate fallback" wording assumed a
