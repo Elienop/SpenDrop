@@ -40,7 +40,11 @@ function RouteNotFound() {
         <span className="font-medium text-foreground [overflow-wrap:anywhere]">
           {pathname}
         </span>
-        .
+        {/* The full stop is glued to the tag above, and stays that way. On its
+            own line JSX collapses the newline and renders the same string, but
+            nothing in the source says which was meant — the space that IS
+            wanted, before the path, had to be written as `{' '}` for exactly
+            that reason. */}.
       </p>
       {/* Button styles on the Link keep the 44px touch floor. */}
       <Button asChild variant="outline">

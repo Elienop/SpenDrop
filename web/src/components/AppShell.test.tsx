@@ -151,6 +151,13 @@ describe('AppShell routing', () => {
     // The echoed path is the point of a panel over a redirect: it is what
     // shows a typo'd bookmark its typo.
     expect(screen.getByText('/nonsense')).toBeInTheDocument();
+    // ...and it reads as a SENTENCE. The path sits in its own <span> with the
+    // full stop outside it, so the surrounding whitespace is decided by JSX
+    // line breaks rather than by anything visible in the source. Pinned as the
+    // whole string: one space before the path, none before the stop.
+    expect(
+      screen.getByText('/nonsense').closest('p'),
+    ).toHaveTextContent(/^Nothing lives at \/nonsense\.$/);
     expect(
       screen.getByRole('link', { name: 'Back to Dashboard' }),
     ).toHaveAttribute('href', '/');

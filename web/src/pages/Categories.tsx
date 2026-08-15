@@ -747,7 +747,7 @@ function CategoryEditorSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode, editingId]);
 
-  function handleSubmit(e: React.FormEvent) {
+  function handleSubmit(e: React.SubmitEvent) {
     e.preventDefault();
     if (!name.trim()) return;
     onSave({ name: name.trim(), type, icon: icon.trim() });

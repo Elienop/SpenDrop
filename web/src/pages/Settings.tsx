@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { ChangeEvent, FormEvent, ReactNode, RefObject } from 'react';
+import type { ChangeEvent, ReactNode, RefObject, SubmitEvent } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -720,18 +720,18 @@ function CurrenciesSection() {
     });
   }, [fetchCurrencies]);
 
-  async function handleSaveRates(e: FormEvent) {
+  async function handleSaveRates(e: SubmitEvent) {
     e.preventDefault();
     setSaving(true);
     try {
       for (const currency of currencies) {
         if (currency.is_base) continue;
         const newRateVal = editRates[currency.code];
-        if (newRateVal && parseFloat(newRateVal) !== currency.rate_to_base) {
+        if (newRateVal && Number.parseFloat(newRateVal) !== currency.rate_to_base) {
           await api.put(`currencies/${currency.code}`, {
             name: currency.name,
             symbol: currency.symbol,
-            rate_to_base: parseFloat(newRateVal),
+            rate_to_base: Number.parseFloat(newRateVal),
             is_base: currency.is_base,
           });
         }
@@ -2951,11 +2951,13 @@ function ApiTokensSection() {
         >
           <AlertDialogHeader>
             <AlertDialogTitle>
+              {/* The question mark stays glued to the closing tag: on its own
+                  line JSX renders it identically, but nothing in the source
+                  says so — see the note at `AppShell.tsx`'s RouteNotFound. */}
               Revoke{' '}
               <span className="font-mono">
                 &quot;{revokingTokenName}&quot;
-              </span>
-              ?
+              </span>?
             </AlertDialogTitle>
             <AlertDialogDescription>
               Anything using this token will stop working immediately.
@@ -3259,7 +3261,11 @@ function ImportPreviewStep({
       {needsDefaultCategory && (
         <div className="flex max-w-sm flex-col gap-2">
           <Label htmlFor="default-category">
-            Default Category
+            {/* No space between the two: the gap is the span's `ml-1`, and
+                writing the label as an expression says so. As bare text on its
+                own line it renders the same way, but whether it was meant to
+                is exactly what a reader cannot tell. */}
+            {'Default Category'}
             <span className="ml-1 text-xs font-normal text-muted-foreground">
               {missingCategoryRows > 0
                 ? `(for the ${missingCategoryRows === 1 ? '1 row' : `${missingCategoryRows} rows`} with an empty Category cell)`
@@ -3512,7 +3518,7 @@ function ImportCard() {
     // Convert string IDs to numbers for the backend (Go expects int64).
     const numericCategoryMap: Record<string, number> = {};
     for (const [name, id] of Object.entries(categoryMap)) {
-      if (id) numericCategoryMap[name] = parseInt(id, 10);
+      if (id) numericCategoryMap[name] = Number.parseInt(id, 10);
     }
     // confirmImport never throws — it converts 409s into a local
     // collision_groups update + error message, and non-409s into

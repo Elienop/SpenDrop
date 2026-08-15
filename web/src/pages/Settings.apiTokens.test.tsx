@@ -448,6 +448,13 @@ describe('ApiTokensSection', () => {
     // Title quotes the token name inside a <span class="font-mono">.
     const monoName = within(alertDialog).getByText(/"Homepage dashboard"/);
     expect(monoName).toHaveClass('font-mono');
+    // And it reads as a QUESTION: the name is its own <span> with the question
+    // mark outside it, so the spacing on either side comes from JSX line
+    // breaks, not from anything visible in the source. One space after
+    // "Revoke", none before the "?".
+    expect(within(alertDialog).getByRole('heading')).toHaveTextContent(
+      /^Revoke "Homepage dashboard"\?$/,
+    );
     // Body copy matches the new short wording.
     expect(
       within(alertDialog).getByText(

@@ -5,7 +5,7 @@ import {
   useMemo,
   useRef,
 } from 'react';
-import type { FormEvent, RefObject } from 'react';
+import type { RefObject, SubmitEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '../api/client';
@@ -467,7 +467,7 @@ function MonthlyBudgetsSection({
     }
   }
 
-  async function handleSave(e: FormEvent) {
+  async function handleSave(e: SubmitEvent) {
     e.preventDefault();
 
     // Bucket the 12 rows into pending (PUT), cleared (DELETE), invalid
@@ -1243,7 +1243,7 @@ function CategoryLimitsSection({
     setMonth(next);
   }
 
-  async function handleSave(e: FormEvent) {
+  async function handleSave(e: SubmitEvent) {
     e.preventDefault();
 
     // Bucket each category row into puts (positive change), deletes
