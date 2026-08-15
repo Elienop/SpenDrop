@@ -530,13 +530,14 @@ describe('Transactions page', () => {
     });
   });
 
-  // The ledger table is seven fixed-content columns plus one that gives
-  // ground. happy-dom lays nothing out, so what is pinned here is the
+  // The ledger table is six fixed-content columns plus one that gives
+  // ground (seven in all). happy-dom lays nothing out, so what is pinned here is the
   // structure that keeps the table inside its scroller; the widths behind each
   // assertion were measured in Chrome on the built app (see the cell's comment
   // in TransactionRow.tsx). Before this, one imported 40-character description
-  // on page 1 put a 1063px table inside a 985px scroller at a 1288px window
-  // and the Actions column was off the right edge.
+  // on page 1 put a 1063px table inside a 951px scroller at a 1288px window
+  // (985px at 1130 with the sidebar collapsed) and the Actions column was off
+  // the right edge.
   describe('table width', () => {
     /** Class tokens of an element. Exact tokens, never substrings. */
     const tokens = (el: Element) => el.className.split(/\s+/).filter(Boolean);

@@ -384,11 +384,12 @@ export function TransactionRow({
           `white-space: nowrap`, so the cell contributes its full text width as
           the column's min-content, and Chrome's auto table layout then sizes
           the column from max-content CAPPED BY the cap — making 448px the
-          width a long description always got. Measured on the built app at a
-          1288px window, one imported `DASHLONG-…` row on page 1 put a 1063px
-          table inside a 985px scroller: 78px gone, which is the whole Actions
-          column plus the cents of every amount, reachable only by scrolling
-          the card sideways.
+          width a long description always got. Measured on the built app, one
+          imported `DASHLONG-…` row on page 1 put a 1063px table inside a
+          951px scroller at a 1288px window with the sidebar open (985px at
+          the tablet's 1130px landscape with it collapsed): 112px / 78px
+          gone, which is the whole Actions column plus the cents of every
+          amount, reachable only by scrolling the card sideways.
 
             `max-w-0` clamps that min-content contribution to zero, so the
             column may shrink and the inner `truncate` finally has something to
@@ -397,7 +398,7 @@ export function TransactionRow({
             187px, Date 156, Amount 201 — every fixed column bloated).
             `w-full` asks for 100% of the table, which routes the slack HERE
             and leaves the others at their content width. Alone it changes
-            nothing at all: still 1063px in a 985px scroller.
+            nothing at all: still 1063px in the same scroller.
 
           Measured with both, Chrome, built app, /transactions: overflow 0px at
           1024/1130/1288/1400, description 264 -> 640px, and Date 120 /

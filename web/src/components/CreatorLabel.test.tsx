@@ -180,7 +180,7 @@ describe('CreatorLabel', () => {
 
   test('offers the untruncated pair as a tooltip', () => {
     // Mirrors the description's own `title` one line up in the desktop
-    // max-w-md cells. Dead on touch, which is why it is a bonus and not the
+    // tables' slack cell (`w-full max-w-0`). Dead on touch, which is why it is a bonus and not the
     // fix — the clipping order above is the fix.
     const { unmount } = render(
       <CreatorLabel createdBy="Elie" createdByUsername="elienop" />,

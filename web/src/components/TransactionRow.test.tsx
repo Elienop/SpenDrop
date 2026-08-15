@@ -220,9 +220,10 @@ describe('TransactionRow description column width', () => {
   // observable here. What is observable is the structure that makes it true,
   // and each token below was measured in Chrome on the built app before it was
   // pinned (numbers in TransactionRow.tsx's comment). This cell WAS `max-w-md`
-  // and that cap put a 1063px table inside a 985px scroller at a 1288px
-  // window: the Actions column and the cents of every amount lived off the
-  // right edge behind a horizontal scroll.
+  // and that cap put a 1063px table inside a 951px scroller at a 1288px
+  // window (985px at 1130 with the sidebar collapsed): the Actions column and
+  // the cents of every amount lived off the right edge behind a horizontal
+  // scroll.
 
   it('lets the description cell shrink, so the fixed columns always fit', () => {
     const long = 'DASHLONG-' + 'Y'.repeat(80);
