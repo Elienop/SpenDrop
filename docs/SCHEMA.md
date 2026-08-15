@@ -1224,3 +1224,207 @@ CREATE UNIQUE INDEX idx_transactions_idempotency_key
     WHERE idempotency_key IS NOT NULL;
 ````
 
+## 020_users_role_integrity.sql
+
+````sql
+-- 020_users_role_integrity.sql
+-- B20 part 1: users.role becomes well-formed AT THE STORAGE LAYER.
+--
+-- The set is exactly two values, 'admin' and 'member' — RoleAdmin/RoleMember
+-- in internal/api/constants.go, mirrored by the two-value union `Role` in
+-- web/src/lib/roles.ts. Until this file, `role TEXT NOT NULL DEFAULT 'member'`
+-- accepted any string at all, and the ONLY thing standing between the column
+-- and a malformed value was one whitelist in one handler
+-- (handleUpdateUser/handleCreateUser: `req.Role != RoleMember && req.Role !=
+-- RoleAdmin`). Any future path that writes role — an import, a repair script,
+-- a CLI, a second admin endpoint — bypasses that whitelist by default, and a
+-- mutated handler writes `role = ''` cleanly.
+--
+-- Every READ of the column is fail-closed: internal/auth/middleware.go asks
+-- `user.Role != "admin"`, and so does every handler gate. So an out-of-set
+-- value never grants privilege — it silently produces a user who is neither
+-- an admin nor describable as a member, which the frontend's `Role` union
+-- then decodes as a type it says cannot exist. This file is about the column
+-- meaning what it says, not about closing a privilege hole.
+--
+-- ============================================================================
+-- WHY TRIGGERS AND NOT `CHECK(role IN ('admin','member'))`
+-- ============================================================================
+-- A CHECK constraint is the obvious mechanism and it is the one B20 filed.
+-- SQLite cannot ALTER TABLE … ADD CONSTRAINT, so adding one means rebuilding
+-- `users` in the style of migrations 002/010/019 (CREATE new, copy, DROP old,
+-- RENAME). Those three rebuilt `transactions` and `saved_filters`, which are
+-- CHILD tables — nothing holds an inbound foreign key to them. `users` is the
+-- PARENT of the entire schema. Seven inbound edges point at it today:
+--
+--   api_tokens.user_id          -> users(id)  ON DELETE CASCADE
+--   balance_checkpoints.user_id -> users(id)  ON DELETE CASCADE
+--   push_subscriptions.user_id  -> users(id)  ON DELETE CASCADE
+--   saved_filters.user_id       -> users(id)  ON DELETE CASCADE
+--   sessions.user_id            -> users(id)  ON DELETE CASCADE
+--   transactions.user_id        -> users(id)  ON DELETE CASCADE
+--   transaction_audit.actor_user_id -> users(id) ON DELETE SET NULL
+--
+-- (Enumerated with PRAGMA foreign_key_list over a fully migrated database, not
+-- read off the migration files — 002 and 010 changed edges that 001 declared.)
+--
+-- Under `PRAGMA foreign_keys = ON` — which is what production runs, from
+-- Config.SQLiteDSN's `_foreign_keys=on`, defaulted true in config.go —
+-- `DROP TABLE users` performs an implicit `DELETE FROM users` first, and that
+-- delete fires every ON DELETE action above. NOT ONE of the seven edges is
+-- NO ACTION, so nothing raises: the drop SUCCEEDS and takes the ledger with
+-- it. Measured on a database built from these very migrations, with the
+-- rebuild wrapped in one transaction exactly as the runner wraps it:
+--
+--   BEFORE  users=2 transactions=2 sessions=2 checkpoints=1 api_tokens=1
+--           push_subs=1 saved_filters=1 audit_with_actor=1
+--   AFTER   users=2 transactions=0 sessions=0 checkpoints=0 api_tokens=0
+--           push_subs=0 saved_filters=0 audit_with_actor=0
+--
+-- One row seeded on EVERY edge in the list above, and all seven emptied:
+-- every transaction, every session, every reconciliation checkpoint, every
+-- API token, every saved filter and every push subscription destroyed, the
+-- audit trail anonymised — and COMMIT returned success. No tombstones, no
+-- Trash, no restore path: the cascade is a hard delete of rows the soft-delete
+-- contract promises are recoverable. A user would discover it as an empty
+-- ledger after a routine upgrade.
+--
+-- The escape hatches do not exist here:
+--
+--   * `PRAGMA foreign_keys = OFF` cannot help. applyPendingMigrations
+--     (internal/database/migrate.go) runs each file inside a transaction, and
+--     the pragma is a silent NO-OP inside an active transaction — it returns
+--     no error and the setting does not change. Measured: after issuing
+--     `PRAGMA foreign_keys=OFF` inside an open transaction, `PRAGMA
+--     foreign_keys` still reads 1. A toggle here would READ as a safeguard
+--     while doing nothing, which is worse than not writing one. (Migrations
+--     010 and 019 record the same fact for their own rebuilds.)
+--
+--   * `PRAGMA defer_foreign_keys` defers the CHECKING of constraints to
+--     commit; it does not stop ON DELETE CASCADE from ACTING. The rows are
+--     gone either way.
+--
+--   * Rename-first ordering is worse, not better. Since SQLite 3.25
+--     `ALTER TABLE users RENAME TO users_old` REWRITES every child's foreign
+--     key clause to point at the new name. Measured: after the rename,
+--     sessions reads `REFERENCES "users_old"(id) ON DELETE CASCADE`. The
+--     schema is then load-bearing on a table we are about to drop, and the
+--     drop cascades exactly as above.
+--
+-- So the rebuild is not "risky if done carelessly" — it is a data-destroying
+-- operation with no safe ordering available to a migration in this runner.
+--
+-- ============================================================================
+-- WHAT THE TRIGGERS BUY, AND WHAT THEY DO NOT
+-- ============================================================================
+-- Two BEFORE triggers with RAISE(ABORT) enforce the same invariant a CHECK
+-- would, on every write path, with no rebuild and no cascade exposure.
+-- Measured coverage on a database carrying these triggers:
+--
+--   REJECTED: INSERT role='' | 'superadmin' | 'Admin' (case matters)
+--   REJECTED: UPDATE … SET role=''
+--   REJECTED: INSERT OR REPLACE … role='bogus'
+--   REJECTED: UPDATE OR IGNORE … SET role='bogus'   <- OR IGNORE does NOT
+--             swallow a RAISE(ABORT); the statement still fails.
+--   ACCEPTED: INSERT role='admin', INSERT with role omitted (DEFAULT
+--             'member'), UPDATE … SET role='member', and any UPDATE that
+--             does not name role at all.
+--
+-- The differences from a CHECK, stated rather than discovered later:
+--
+--   1. A trigger validates WRITES, not rows already stored. A CHECK is also
+--      only enforced on write — but the rebuild that installs one re-inserts
+--      every existing row, so a bad legacy value would abort the migration.
+--      That difference is handled by the normalisation below, which is the
+--      better answer anyway (see it for why an abort would be wrong).
+--
+--   2. `UPDATE OF role` fires whenever role appears in a SET list, even if
+--      the value is unchanged. That is deliberate and it is what makes the
+--      guard total: SQL has no way to change a column without naming it, so
+--      no role write can slip past. UpdateUser's SET list always carries
+--      role, so it is always checked; UpdateUserDisplayName and
+--      UpdateUserPassword never name role and are never charged for the
+--      check.
+--
+--   3. Triggers belong to their table. An unrelated table's rebuild leaves
+--      them alone (measured), but any future rebuild of `users` itself would
+--      DROP them silently — the same trap migration 019 documents for
+--      indexes. If `users` is ever rebuilt despite the above, recreate these
+--      two triggers, or bake the CHECK into the new table definition and
+--      delete them.
+--
+--   4. The abort message is ours, not SQLite's `CHECK constraint failed: …`.
+--      It reaches Go verbatim through mattn/go-sqlite3. No handler matches on
+--      it and none should: handleCreateUser maps only "UNIQUE constraint
+--      failed" specially, everything else is a 500 — and a 500 is the correct
+--      answer here, because a trigger that fires means a code path reached
+--      the column WITHOUT passing the handler whitelist. That is a bug in the
+--      caller, not user input to be answered with a 400.
+--
+-- ============================================================================
+-- THE NORMALISATION, AND WHY IT IS NOT AN ABORT
+-- ============================================================================
+-- Production cannot hold an out-of-set role today: the only three writers are
+-- handleRegister (RoleMember, or RoleAdmin for the first user),
+-- handleCreateUser and handleUpdateUser, and the latter two whitelist against
+-- the same two constants. So on every database this project has ever
+-- created, the UPDATE below matches zero rows and is a no-op.
+--
+-- It exists for the database this project did NOT create: a row hand-edited
+-- with the sqlite3 CLI, a restore from a partial backup, a future import. For
+-- such a row the choice is repair or refuse, and the Migration Backfill
+-- Discipline in .claude/CLAUDE.md is explicit that a migration must not turn
+-- first-boot-after-upgrade into a crash loop the operator cannot escape
+-- without SQL surgery (reference incident: migration 008's content_hash
+-- backfill on TrueNAS).
+--
+-- Repair is also semantics-PRESERVING here, which is what makes it safe
+-- rather than merely convenient: every authorization gate in the codebase
+-- asks `role == 'admin'`, so a row holding 'owner' or '' is ALREADY treated
+-- as a member by every read in the system. Writing 'member' into it changes
+-- no decision the app makes — it makes the stored value agree with the
+-- behaviour that value already produces. The one thing it cannot do is
+-- silently demote an admin: 'admin' is excluded by the predicate.
+--
+-- Without this line the guard would still be sound but the failure would be
+-- displaced onto the next edit: handleUpdateUser merges the STORED role when
+-- a request omits it, so renaming a user whose stored role was malformed
+-- would write that malformed value back, hit the trigger, and 500 — leaving
+-- an account no admin could edit through the UI at all.
+--
+-- updated_at is deliberately NOT bumped. It records when a human last changed
+-- the account; a schema repair is not that, and rewriting it would put a
+-- misleading timestamp on the Users tab.
+UPDATE users SET role = 'member' WHERE role NOT IN ('admin', 'member');
+
+-- DROP-then-CREATE rather than CREATE TRIGGER IF NOT EXISTS. The runner never
+-- re-applies a recorded migration, so this only matters when the tracking row
+-- is missing but the schema is not (a restore taken between the two, an
+-- operator rebuilding schema_migrations). In that case IF NOT EXISTS would
+-- silently keep whatever body is already installed; this pair converges the
+-- database on the body written HERE, and is equally idempotent.
+DROP TRIGGER IF EXISTS users_role_guard_insert;
+CREATE TRIGGER users_role_guard_insert
+BEFORE INSERT ON users
+FOR EACH ROW WHEN NEW.role NOT IN ('admin', 'member')
+BEGIN
+    SELECT RAISE(ABORT, 'users.role must be ''admin'' or ''member''');
+END;
+
+-- NULL needs no arm of its own: `NEW.role NOT IN (…)` evaluates to NULL for a
+-- NULL role, so this WHEN clause does not fire — and the column's own NOT NULL
+-- constraint rejects the row a moment later regardless. Two different error
+-- messages for two different mistakes, both refusals.
+DROP TRIGGER IF EXISTS users_role_guard_update;
+CREATE TRIGGER users_role_guard_update
+BEFORE UPDATE OF role ON users
+FOR EACH ROW WHEN NEW.role NOT IN ('admin', 'member')
+BEGIN
+    SELECT RAISE(ABORT, 'users.role must be ''admin'' or ''member''');
+END;
+
+-- Forward-only, like every migration here. Reverting means dropping the two
+-- triggers by name; no data written under them is unrepresentable without
+-- them, so unlike 019 there is nothing a rollback would have to reshape.
+````
+

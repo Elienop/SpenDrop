@@ -1,6 +1,7 @@
 package api
 
 import (
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -198,8 +199,69 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch existing user to merge unspecified fields
-	existing, fetchErr := h.queries.GetUserByID(r.Context(), id)
+	// THE MERGE READ, THE WRITE AND THE SESSION WIPE SHARE ONE TRANSACTION, so
+	// that a 200 on this endpoint is a promise about BOTH: the role that is
+	// stored, and the absence of any session predating it. Before B20 the wipe
+	// was
+	// `_ = h.queries.DeleteSessionsByUserID(...)` — a discarded error, so a
+	// failed DELETE answered "updated" while every old session survived.
+	//
+	// Rolling the role change BACK on a failed wipe is the deliberate choice
+	// over letting the demotion stand, for two reasons:
+	//
+	//   * The retry has to work. handleUpdateUser merges the stored role when
+	//     the request omits one and only wipes `if role != existing.Role`, so
+	//     a demotion that persisted WITHOUT its wipe is invisible to the next
+	//     attempt: the retry sees role == existing.Role, skips the wipe
+	//     entirely, and returns 200 over the sessions it was meant to clear.
+	//     All-or-nothing makes the retry identical to the first attempt.
+	//
+	//   * Nothing urgent is lost by rolling back. Authorization is re-read per
+	//     request — authenticateSession and RequireAPIToken both call
+	//     GetUserByID and RequireAdmin reads that row's Role — so a surviving
+	//     cookie carries no stale privilege in the first place. The wipe
+	//     exists to force a fresh login (the client caches its own copy of the
+	//     role), not to be the revocation itself. So the trade is "the whole
+	//     edit lands, or none of it does, and the admin is told" against
+	//     "half of it lands and the admin is told it all did".
+	//
+	// Same shape and same reasoning as runPasswordResetCascade in
+	// password_change_handlers.go, which has wrapped its password write and
+	// its session wipe in one transaction since the credential-cascade work.
+	//
+	// THE MERGE READ IS INSIDE THE TRANSACTION, and that placement is
+	// load-bearing rather than tidy. This is a read-modify-write: the request
+	// may omit display_name or role, and the omitted field is filled from the
+	// stored row. Reading that row on h.queries before BeginTx released the
+	// connection between the read and the write, so two concurrent PUTs on the
+	// same user could interleave read, read, write, write. Both would see
+	// role='admin'; a demotion could commit and wipe the sessions; a rename
+	// arriving with no role of its own would then merge its stale snapshot,
+	// write role='admin' back, and — because its own comparison `role !=
+	// existing.Role` is false against that stale value — return 200 without
+	// wiping anything. Net effect: an acknowledged demotion silently reverted,
+	// with live sessions, and no error anywhere. Inside the transaction the
+	// read and the write are one unit: SetMaxOpenConns(1) means the
+	// transaction holds the only connection for its whole life, so no second
+	// request can run a statement between them.
+	//
+	// The corollary is that NOTHING here may use h.queries: a query issued on
+	// the pool while this transaction is open waits for a connection only the
+	// transaction can release, which is a deadlock rather than a slow path.
+	// Every read below goes through qtx.
+	tx, err := h.db.BeginTx(r.Context(), &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user")
+		return
+	}
+	defer tx.Rollback() //nolint:errcheck // no-op once Commit succeeds
+	qtx := h.queries.WithTx(tx)
+
+	// Fetch existing user to merge unspecified fields. The 404 return here
+	// leaves the transaction open on the stack; the deferred Rollback above is
+	// what hands the single connection back, so this early exit must never be
+	// rewritten to return before that defer is registered.
+	existing, fetchErr := qtx.GetUserByID(r.Context(), id)
 	if fetchErr != nil {
 		writeError(w, http.StatusNotFound, "user not found")
 		return
@@ -214,19 +276,28 @@ func (h *Handler) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		role = existing.Role
 	}
 
-	err = h.queries.UpdateUser(r.Context(), database.UpdateUserParams{
+	if err := qtx.UpdateUser(r.Context(), database.UpdateUserParams{
 		DisplayName: displayName,
 		Role:        role,
 		ID:          id,
-	})
-	if err != nil {
+	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to update user")
 		return
 	}
 
-	// Invalidate sessions if role changed (prevents privilege persistence)
+	// Invalidate sessions if role changed (prevents privilege persistence).
+	// The comparison is against the STORED role, so a request that re-sends
+	// the role a user already has logs nobody out.
 	if role != existing.Role {
-		_ = h.queries.DeleteSessionsByUserID(r.Context(), id)
+		if err := qtx.DeleteSessionsByUserID(r.Context(), id); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to invalidate sessions after role change")
+			return
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update user")
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
@@ -303,8 +374,33 @@ func (h *Handler) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Clean up sessions before deleting the user
-	_ = h.queries.DeleteSessionsByUserID(r.Context(), id)
+	// Clean up sessions before deleting the user.
+	//
+	// KEPT DESPITE THE CASCADE, and error-checked rather than discarded.
+	// sessions.user_id is ON DELETE CASCADE (migration 001, verified against a
+	// fully migrated database with PRAGMA foreign_key_list), and production
+	// runs with _foreign_keys=on — so on the default configuration DeleteUser
+	// below would clear these rows by itself. The explicit delete covers the
+	// configuration where it would not: Config.SQLite.ForeignKeys is a field,
+	// and a handle opened with `_foreign_keys=off` fires no cascade at all.
+	//
+	// What it is NOT is a security control. An orphaned session is inert:
+	// authenticateSession resolves the row, then calls GetUserByID, and a
+	// missing user is a 401. So the cost of the FK-off case is stale rows, not
+	// access — which is why this runs before the delete without a transaction
+	// around the pair. The only interleaving that leaves work half done is
+	// "sessions cleared, user delete then failed", i.e. an account that is
+	// still present but logged out, which the owner resolves by logging in
+	// again.
+	//
+	// The error is surfaced instead of discarded because a DELETE that cannot
+	// run says the database is refusing writes; continuing on to a DELETE of
+	// the user row is not a recovery, it is the same failure with a bigger
+	// blast radius.
+	if err := h.queries.DeleteSessionsByUserID(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clean up user sessions")
+		return
+	}
 
 	result, err := h.queries.DeleteUser(r.Context(), id)
 	if err != nil {
