@@ -1565,7 +1565,7 @@ describe('ImportPreviewTable — money', () => {
     );
 
     expect(
-      screen.getByRole('button', { name: 'Clear the rate on 1 row' }),
+      screen.getByRole('button', { name: 'Clear the rate on this row' }),
     ).toBeInTheDocument();
     // Row 0 has no rate to clear; it is the one the rate OFFER is for.
     expect(
@@ -1627,7 +1627,42 @@ describe('ImportPreviewTable — money', () => {
 
     expect(screen.queryByRole('button', { name: /Apply today's/ })).toBeNull();
     expect(
-      screen.getByRole('button', { name: 'Clear the rate on 1 row' }),
+      screen.getByRole('button', { name: 'Clear the rate on this row' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers no rate for a row whose currency cannot be resolved at all', () => {
+    // The backend evaluates `rate_invalid` BEFORE it looks the currency
+    // up (`import_money.go`), so this row — unusable Rate cell, currency
+    // the household does not have, original amount present — is flagged
+    // on `rate` while carrying a code this side cannot resolve. Reading
+    // `.is_base` off that miss throws during render, which is a blank
+    // preview rather than a missing button.
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateInvalid },
+      ],
+    });
+    preview.rows[0].rate_raw = 'abc';
+    preview.rows[0].original_amount = 500;
+    preview.rows[0].original_currency = 'LBX';
+
+    expect(() =>
+      render(
+        <ImportPreviewTable
+          preview={preview}
+          {...noopProps}
+          canImport={false}
+        />,
+      ),
+    ).not.toThrow();
+
+    expect(screen.queryByRole('button', { name: /Apply today's/ })).toBeNull();
+    // The row is still actionable: its cell holds text, so it can be
+    // cleared.
+    expect(
+      screen.getByRole('button', { name: 'Clear the rate on this row' }),
     ).toBeInTheDocument();
   });
 

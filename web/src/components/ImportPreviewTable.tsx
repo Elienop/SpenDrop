@@ -471,6 +471,12 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
         if (row.rate || row.rate_raw) clearableRateRowIDs.push(fe.row_id);
         if (row.original_amount == null) continue;
         const currency = findCurrency(preview.currencies, row.original_currency);
+        // `!currency` is not defensive. The backend evaluates
+        // `rate_invalid` BEFORE it looks the currency up
+        // (`import_money.go`), so a row with an unusable Rate cell AND a
+        // currency the household does not have arrives flagged on
+        // `rate`, carrying a code this side cannot resolve — reading
+        // `.is_base` off the miss would throw during render.
         if (!currency || currency.is_base || !(currency.rate_to_base > 0)) {
           continue;
         }
@@ -1278,7 +1284,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                               }
                             >
                               {unit.clearableRateRowIDs.length === 1
-                                ? 'Clear the rate on 1 row'
+                                ? 'Clear the rate on this row'
                                 : `Clear the rate on ${unit.clearableRateRowIDs.length} rows`}
                             </Button>
                           )}
