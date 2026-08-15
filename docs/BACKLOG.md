@@ -315,6 +315,16 @@ PR #139 and released as v0.44.0 — see Closed.*
   treat a red gate as pressure to split (the default; nothing to do), or (b) copy the Go
   profile to a "SpenDrop way" like the TypeScript one and raise the threshold to 25 for this
   project. Not decided; the TS profile decision (three rules off) is recorded in Closed.
+- **SonarQube: two exclusions in `sonar-project.properties` hide real code** (deep review of the
+  Sonar baseline branch, 2026-08-15). `web/src/components/ui/**` (5,211 lines / 42 files) is
+  treated as vendored shadcn primitives, but it also holds local forks (`chart.tsx`,
+  `select.tsx`, `dropdown-menu.tsx`) and `password-input.tsx`, bespoke code for a credential
+  field — 10 of those files have their own test suites; a future edit to a fork gets no
+  new-code gate. `.github/**` hides the four workflows from the GitHub-Actions rules. Sonar
+  globs have no negation, so the honest options are: keep as-is; drop the `ui/**` exclusion
+  and eat the primitives' noise (S6759 is already off); or list the pristine primitives one by
+  one. Un-excluding either will surface pre-existing issues as *new* on the first scan after
+  (issue dates = analysis date), so do it in a quiet moment, not on a feature PR. Owner's call.
 
 ---
 
@@ -413,7 +423,7 @@ condition *and* move the predicate, believing one was safe because the other was
   (50k); charts pixel-diffed before/after on the rebuilt `:3535` in both themes (0 px on
   spending-light, ≤15 px at delta 1/255 elsewhere, all inside the sidebar theme toggle);
   `tsc -b --force`, eslint 0 errors, vitest 2236/2236. Commits: `4ccae75`, `f042263`, `4a526da`,
-  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`. Filed: B55, B56, and the Go
+  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above). Filed: B55, B56, and the Go
   threshold decision. **Branch scanned into a throwaway project** (`spendrop-branchcheck`, so `main`'s analysis
   stayed untouched — Community Build has no branch analysis): 0 analysis warnings, coverage
   **86.0%** (both reports resolved), every targeted rule at 0, and the residue is exactly the
