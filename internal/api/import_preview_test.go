@@ -491,6 +491,42 @@ func TestHandleImportUpload_CurrenciesSummary(t *testing.T) {
 	}
 }
 
+// TestHandleImportUpload_InfiniteRateCellIsInvalidNotAbsent walks the one
+// wrong-looking rate a "positive number" check lets through. A cell reading
+// 1e999 parses to +Inf — positive, and useless: an infinite rate rounds every
+// amount to zero.
+//
+// The failure it guards against is not a bad message but a SILENT one: if the
+// parser reported such a cell as absent, the row would quietly become a
+// rate-less foreign row and the user would be asked to supply a rate they can
+// see they already typed.
+func TestHandleImportUpload_InfiniteRateCellIsInvalidNotAbsent(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "infrate", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", "1e999"},
+		})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+	got, flagged := fieldErrorsByRow(t, preview)[0][importFieldRate]
+	if !flagged {
+		t.Fatalf("an infinite rate cell was not flagged at all: %v", preview["field_errors"])
+	}
+	want := "That rate is not a positive, finite number. Enter the rate this row was booked at, or clear the cell."
+	if got != want {
+		t.Errorf("message = %q\nwant    = %q\n(a rate the user typed and got wrong is a different fix from one they never typed)", got, want)
+	}
+	rows := previewRows(t, preview)
+	if r, present := rows[0]["rate"]; present {
+		t.Errorf("the preview carries rate = %v; an unusable rate must not reach the wire as a number", r)
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.

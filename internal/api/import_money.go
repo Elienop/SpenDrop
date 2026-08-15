@@ -241,19 +241,39 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 		}, nil, ""
 	}
 
-	// #3, #4 and #12. One divisor for the whole app.
+	// #12, first half. The ORIGINAL is judged here, on its own, before any
+	// division — not left to the converter to report.
+	//
+	// convertForeignMoney validates the original before it looks at the rate,
+	// so a row that is bad in both fields comes back with the amount error and
+	// the rate fault is invisible. Reading the row's fault off which error the
+	// helper happened to return would therefore be inferring a field from an
+	// internal check ORDER, and it would make the message lie in a case the
+	// helper handles perfectly well: an out-of-range original divided by a
+	// large rate yields a value that IS storable, so a sentence blaming the
+	// quotient would be arithmetically false. Deciding here keeps every
+	// message true of the row it names, whatever order the helper checks in.
+	if err := validateMoneyAmount(row.OriginalAmount, "original_amount"); err != nil {
+		return blocked(importFieldAmount, importOriginalAmountInvalidMessage(row.OriginalAmount), skipReasonAmountInvalid)
+	}
+
+	// #3, #4 and #12's second half. One divisor for the whole app.
 	converted, err := convertForeignMoney(row.OriginalAmount, row.Rate)
 	if err != nil {
 		// Unreachable from here — importRateIsUsable has already refused
 		// every rate convertForeignMoney refuses — but reported as the rate
 		// fault it is rather than folded into the amount family, so the two
-		// can never diverge silently if either predicate is widened.
+		// can never diverge silently if either predicate is widened. errors.Is
+		// is the only safe discriminator: the sentinel's TEXT is not ours and
+		// has already been reworded once.
 		if errors.Is(err, errRateInvalid) {
 			return blocked(importFieldRate, importRateInvalidMessage(), skipReasonRateInvalid)
 		}
-		// #12. Either half can be out of range: the original itself, or the
-		// value the division lands on — a small rate multiplies, a large one
-		// rounds the row away to nothing.
+		// What is left is the CONVERTED value falling outside what a row may
+		// hold — a small rate multiplies an in-range original out of range, a
+		// large one rounds it away to nothing — because the original was
+		// bounded a few lines above. That is what lets this message state the
+		// division as the thing that failed.
 		return blocked(importFieldAmount, importAmountInvalidMessage(row.OriginalAmount, row.Rate), skipReasonAmountInvalid)
 	}
 	derivedCents := dollarsToCents(converted)
@@ -337,8 +357,20 @@ func parseImportRate(s string) (float64, error) {
 // takes no arguments on purpose: the same sentence answers the PATCH 400 for
 // a rate the user typed a moment ago, where echoing their input back would add
 // nothing they cannot see in the cell.
+//
+// It says positive AND finite because both halves are reachable from a
+// spreadsheet: 0 and -5 are the obvious ones, and a cell reading 1e999 parses
+// to +Inf, which is positive — "not a positive number" would be a false
+// statement about a real cell. An infinite rate makes every amount round to
+// zero, so it has to report as a rate fault rather than sending the user to
+// fix a figure that is fine.
+//
+// It is deliberately OUR sentence rather than errRateInvalid's text. That
+// sentinel belongs to the shared converter, its wording has already changed
+// once, and a user-facing string that tracks another package's error text
+// changes whenever that package is edited.
 func importRateInvalidMessage() string {
-	return "That rate is not a positive number. Enter the rate this row was booked at, or clear the cell."
+	return "That rate is not a positive, finite number. Enter the rate this row was booked at, or clear the cell."
 }
 
 // importRateMissingMessage explains a foreign original with no rate (#5) and
@@ -389,11 +421,28 @@ func importAmountDisagreesMessage(usd, original, rate, derived float64) string {
 		formatImportDollars(usd), formatImportQuantity(original), formatImportQuantity(rate), formatImportDollars(derived))
 }
 
-// importAmountInvalidMessage explains a conversion that lands outside what a
-// row may hold (#12) — in either direction, since a small rate multiplies an
-// in-range original out of range and a large one rounds it away to nothing.
-// One sentence states the whole legal band rather than guessing which end was
-// hit.
+// importOriginalAmountInvalidMessage explains an ORIGINAL amount that is not a
+// storable figure in the first place (#12's first half) — before any rate is
+// applied to it, and therefore without mentioning one. Sharing
+// importAmountInvalidMessage's sentence would state a division that either did
+// not happen or did not fail.
+//
+// It names the same band, because it is the same band: every money figure on a
+// row, foreign or base, has to be at least one cent and no more than
+// MaxTransactionAmount.
+func importOriginalAmountInvalidMessage(original float64) string {
+	return fmt.Sprintf("%s is not an amount SpenDrop can store — a figure has to be at least one cent and no more than %s. Fix the original amount.",
+		formatImportQuantity(original), formatImportQuantity(MaxTransactionAmount))
+}
+
+// importAmountInvalidMessage explains a CONVERSION that lands outside what a
+// row may hold (#12's second half) — in either direction, since a small rate
+// multiplies an in-range original out of range and a large one rounds it away
+// to nothing. One sentence states the whole legal band rather than guessing
+// which end was hit.
+//
+// It can state the division as the thing that failed because the original was
+// bounded before the division ran; see resolveImportMoney.
 func importAmountInvalidMessage(original, rate float64) string {
 	return fmt.Sprintf("%s ÷ %s is not an amount SpenDrop can store — it has to be at least one cent and no more than %s. Fix the original amount or the rate.",
 		formatImportQuantity(original), formatImportQuantity(rate), formatImportQuantity(MaxTransactionAmount))

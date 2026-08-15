@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"math"
 	"testing"
 
 	"github.com/elienop/spendrop/internal/database"
@@ -195,7 +196,7 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 				RawRate:          "abc",
 			},
 			wantField:   importFieldRate,
-			wantMessage: "That rate is not a positive number. Enter the rate this row was booked at, or clear the cell.",
+			wantMessage: "That rate is not a positive, finite number. Enter the rate this row was booked at, or clear the cell.",
 			wantReason:  skipReasonRateInvalid,
 		},
 		{
@@ -221,6 +222,44 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 			wantField:   importFieldRate,
 			wantMessage: "This row has a rate but nothing to convert — a rate needs both an original amount and an original currency. Add them, or clear the rate.",
 			wantReason:  skipReasonRateWithoutCurrency,
+		},
+		{
+			// #9 again, from the half a "positive number" test would miss: a
+			// cell reading 1e999 parses to +Inf, which IS positive. It must
+			// report as an unusable RATE — not be treated as absent (which
+			// would silently make the row a #5 or a #2), and not be blamed on
+			// the amount (an infinite rate rounds every figure to zero, and
+			// the figures are fine).
+			name: "#9 infinite rate",
+			row: importRow{
+				OriginalAmount:   1500000,
+				OriginalCurrency: "LBP",
+				Rate:             math.Inf(1),
+				RawRate:          "1e999",
+			},
+			wantField:   importFieldRate,
+			wantMessage: "That rate is not a positive, finite number. Enter the rate this row was booked at, or clear the cell.",
+			wantReason:  skipReasonRateInvalid,
+		},
+		{
+			// #12's FIRST half: the original is not a storable figure to begin
+			// with, so no division happens and the message must not claim one
+			// did. 1,000,000,001 ÷ 89,000 is $11,236 — perfectly storable — so
+			// a sentence blaming the quotient would be arithmetically false.
+			//
+			// The converter checks the original before the rate, so this case
+			// is also what stops the row's fault being read off whichever
+			// error the helper happened to return.
+			name: "#12 original amount out of range",
+			row: importRow{
+				OriginalAmount:   MaxTransactionAmount + 1,
+				OriginalCurrency: "LBP",
+				Rate:             89000,
+				RawRate:          "89000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "1,000,000,001 is not an amount SpenDrop can store — a figure has to be at least one cent and no more than 1,000,000,000. Fix the original amount.",
+			wantReason:  skipReasonAmountInvalid,
 		},
 		{
 			// #12 lower bound — the division rounds away to nothing, which
@@ -384,6 +423,7 @@ func TestParseImportRate(t *testing.T) {
 		{in: "abc", wantErr: true},
 		{in: "89%", wantErr: true},
 		{in: "1e400", wantErr: true},
+		{in: "1e999", wantErr: true}, // parses to +Inf: positive, and unusable
 		{in: "NaN", wantErr: true},
 		{in: "Inf", wantErr: true},
 	}
