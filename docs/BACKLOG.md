@@ -375,7 +375,12 @@ condition *and* move the predicate, believing one was safe because the other was
 *(Move items here with their commit hash rather than deleting them.)*
 
 - **SonarQube baseline — the first scan, read, triaged, and cleared** (2026-08-15, on
-  `chore/sonar-baseline`; squash hash joins this entry at merge). The owner stood up a local
+  `chore/sonar-baseline`; merged 2026-08-16 as PR #145, squash `1b143f0`, released
+  **v0.46.1**; the owner applied the profile and the seven markings in the web UI and
+  re-scanned `main`: v0.46.1 stamped, coverage 86.0% / new-code 88.7%, tests 4,655, bugs 0,
+  vulnerabilities 0, all ratings A — and the gate went RED on exactly one new-code finding,
+  `S6478` on the inline `shape={(props) => <Rectangle/>}` in PatternsTab, i.e. the gate doing
+  its job on new code; hoisted to a module-scoped `tagBarShape` on `chore/sonar-nested-shape`). The owner stood up a local
   SonarQube (Community Build 26.8, "Sonar way" profiles, default gate) and scanned `main` at
   `ef0ef4a`: gate OK only because a first analysis has zero new lines; underneath, 4
   "vulnerabilities" (Security C), 5 bugs (Reliability D), 44 reliability + 450 maintainability

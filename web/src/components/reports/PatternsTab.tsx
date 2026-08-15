@@ -206,6 +206,19 @@ function RecurringCard({
   );
 }
 
+/** One colour per tag, cycling the 20 chart slots — the `shape` renderer for
+ * the tag chart's `<Bar>` (see the comment at the call site for why `shape`
+ * and not `<Cell>`, and what it costs). Module-scoped so it is one stable
+ * function, not a fresh closure per render (SonarQube S6478). */
+function tagBarShape(props: BarShapeProps) {
+  return (
+    <Rectangle
+      {...props}
+      fill={`hsl(var(--chart-${(props.originalDataIndex % 20) + 1}))`}
+    />
+  );
+}
+
 export function PatternsTab() {
   const now = new Date();
   // Where focus goes when a dismiss removes the row it was sitting on — see
@@ -630,16 +643,7 @@ export function PatternsTab() {
                     exactly why the trade is affordable on THIS chart and not on
                     Spending's. Do not go looking for a bug if a DOM diff turns
                     that group up. */}
-                <Bar
-                  dataKey="total"
-                  radius={4}
-                  shape={(props: BarShapeProps) => (
-                    <Rectangle
-                      {...props}
-                      fill={`hsl(var(--chart-${(props.originalDataIndex % 20) + 1}))`}
-                    />
-                  )}
-                />
+                <Bar dataKey="total" radius={4} shape={tagBarShape} />
               </BarChart>
             </ChartContainer>
           )}
