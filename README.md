@@ -222,13 +222,15 @@ npm run lint        # TypeScript + ESLint
 ### Coverage and static analysis
 
 ```bash
-make coverage       # go test ./... -coverprofile=coverage.out  +  vitest --coverage → web/coverage/lcov.info
+make coverage       # Go: coverage.out + go-test-report.json   web: web/coverage/{lcov.info,sonar-report.xml}
 ```
 
-Both reports are gitignored. [`sonar-project.properties`](sonar-project.properties) points a SonarQube
-scanner at them (and excludes generated code, the shadcn primitives and the entry points from analysis
-or coverage); the owner's local SonarQube runs `make coverage` before every upload. Without the reports
-the default gate reads 0% coverage on new code and fails every PR.
+All four reports are gitignored. [`sonar-project.properties`](sonar-project.properties) points a SonarQube
+scanner at them — coverage from the Go cover profile and vitest's lcov, the "Unit Tests" figures from the
+`go test -json` stream and `vitest-sonar-reporter`'s XML — and excludes generated code, the shadcn
+primitives and the entry points from analysis or coverage; the owner's local SonarQube runs
+`make coverage` before every upload. Without the coverage reports the default gate reads 0% coverage on
+new code and fails every PR.
 
 ### Documentation
 

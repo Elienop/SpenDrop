@@ -51,9 +51,10 @@ docs/superpowers/
 # Reference templates (local-only)
 docs/templates/
 
-# Test coverage
+# Test coverage / test-execution reports (see `make coverage`)
 coverage/
 *.out
+go-test-report.json
 
 # pgregory.net/rapid persists shrunk failure reproductions under
 # testdata/rapid/... on any failing rapid.Check. Those files are only

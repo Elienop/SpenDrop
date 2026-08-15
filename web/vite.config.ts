@@ -73,6 +73,21 @@ export default defineConfig({
     // assertions pass no matter which parse the code uses.
     env: { TZ: 'America/Los_Angeles' },
     setupFiles: ['./src/test/setup.ts'],
+    // Every run also writes SonarQube's Generic Test Execution XML (test count,
+    // pass/fail, duration — the "Unit Tests" figures; coverage below is the
+    // other channel) to coverage/, which is gitignored. Paths are rewritten to
+    // be repo-root-relative because the scanner's base dir is the repo root.
+    reporters: [
+      'default',
+      [
+        'vitest-sonar-reporter',
+        {
+          outputFile: 'coverage/sonar-report.xml',
+          silent: true,
+          onWritePath: (p: string) => `web/${p}`,
+        },
+      ],
+    ],
     // `vitest run --coverage` (see `make coverage` at the repo root) writes
     // coverage/lcov.info for SonarQube (sonar.javascript.lcov.reportPaths).
     // Only application source counts; tests, the shadcn primitives under

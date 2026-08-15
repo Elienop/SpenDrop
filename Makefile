@@ -16,10 +16,13 @@ docs:
 
 .PHONY: coverage
 
-# Produce the coverage reports SonarQube reads (see sonar-project.properties):
-#   coverage.out        — Go cover profile over every package
-#   web/coverage/lcov.info — vitest (v8) over web/src
-# Both paths are gitignored. `sonar-scan` (the host wrapper) runs this target
+# Produce the coverage and test-execution reports SonarQube reads (see
+# sonar-project.properties):
+#   coverage.out              — Go cover profile over every package
+#   go-test-report.json       — `go test -json` stream (test count / pass / duration)
+#   web/coverage/lcov.info    — vitest (v8) over web/src
+#   web/coverage/sonar-report.xml — vitest-sonar-reporter (Generic Test Execution)
+# All four are gitignored. `sonar-scan` (the host wrapper) runs this target
 # before uploading an analysis; run it by hand to inspect coverage locally.
 # The vitest step needs the same Node the rest of the frontend toolchain uses;
 # on a host whose Node ships the experimental global localStorage (26+), set
@@ -28,5 +31,6 @@ docs:
 # `go list` filter: web/node_modules ships a stray Go package (flatted) that
 # `./...` would otherwise sweep into the profile.
 coverage:
-	go test $$(go list ./... | grep -v /node_modules/) -coverprofile=coverage.out
+	go test -json $$(go list ./... | grep -v /node_modules/) -coverprofile=coverage.out > go-test-report.json
+	@printf 'go tests: %s passed, %s failed\n' "$$(grep -c '"Action":"pass".*"Test":' go-test-report.json)" "$$(grep -c '"Action":"fail".*"Test":' go-test-report.json)"
 	cd web && npm run test:coverage
