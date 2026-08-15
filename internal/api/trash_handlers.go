@@ -32,8 +32,9 @@ type deletedTransactionResponse struct {
 	// and "restore" is a destructive-adjacent action to take on a row you
 	// cannot attribute.
 	//
-	// It carries users.display_name, NOT users.username, matching the live
-	// list and everywhere else this app names a person.
+	// It carries users.display_name — the label, matching the live list and
+	// everywhere else this app names a person. The username is not absent from
+	// the row, it travels beside it in CreatedByUsername below.
 	//
 	// Display-only. Ownership, the 404-oracle guard order on restore/purge,
 	// and audit attribution are all untouched by it.
@@ -41,20 +42,36 @@ type deletedTransactionResponse struct {
 	// The key is ALWAYS emitted (no omitempty) so the frontend never has to
 	// tell "absent" from "unknown". An empty string means the creator's user
 	// row is gone — see the LEFT JOIN in ListDeletedTransactions.
-	CreatedBy        string   `json:"created_by"`
-	Date             string   `json:"date"`
-	Amount           float64  `json:"amount"`
-	OriginalAmount   *float64 `json:"original_amount,omitempty"`
-	OriginalCurrency string   `json:"original_currency,omitempty"`
-	Description      string   `json:"description"`
-	CategoryID       int64    `json:"category_id"`
-	Tags             string   `json:"tags,omitempty"`
-	Notes            string   `json:"notes,omitempty"`
-	CreatedAt        string   `json:"created_at"`
-	UpdatedAt        string   `json:"updated_at"`
-	DeletedAt        string   `json:"deleted_at"`
-	CategoryName     string   `json:"category_name,omitempty"`
-	CategoryType     string   `json:"category_type,omitempty"`
+	CreatedBy string `json:"created_by"`
+	// CreatedByUsername is users.username for the same person CreatedBy names —
+	// the disambiguator, because two members can hold the same display_name
+	// (B36) and a member cannot resolve user_id themselves (GET /api/users is
+	// admin-only). See transactionResponse.CreatedByUsername for the full
+	// security reasoning behind putting a login identifier on the wire; it
+	// applies unchanged here, and the case for it is stronger: restoring or
+	// purging is a decision taken about somebody else's row.
+	//
+	// Same presence semantics as CreatedBy — ALWAYS emitted, empty string when
+	// the creator's user row is gone. Both come off the ONE users LEFT JOIN in
+	// ListDeletedTransactions / ListDeletedTransactionsByUser, so they are
+	// empty together and never disagree.
+	//
+	// Display-only. Ownership, the 404-oracle guard order on restore/purge, and
+	// audit attribution are untouched by it.
+	CreatedByUsername string   `json:"created_by_username"`
+	Date              string   `json:"date"`
+	Amount            float64  `json:"amount"`
+	OriginalAmount    *float64 `json:"original_amount,omitempty"`
+	OriginalCurrency  string   `json:"original_currency,omitempty"`
+	Description       string   `json:"description"`
+	CategoryID        int64    `json:"category_id"`
+	Tags              string   `json:"tags,omitempty"`
+	Notes             string   `json:"notes,omitempty"`
+	CreatedAt         string   `json:"created_at"`
+	UpdatedAt         string   `json:"updated_at"`
+	DeletedAt         string   `json:"deleted_at"`
+	CategoryName      string   `json:"category_name,omitempty"`
+	CategoryType      string   `json:"category_type,omitempty"`
 }
 
 // deletedTransactionListResponse wraps a paginated trash view. Same
@@ -77,8 +94,8 @@ type deletedTransactionListResponse struct {
 // The query goes through sqlc (ListDeletedTransactions) so the chokepoint
 // rule in CLAUDE.md — "all transactions reads live in queries.sql so the
 // deleted_at filter is reviewable in one place" — is respected. The
-// generated row projects c.name, c.type and the creator's display name, so
-// this handler has no raw SQL.
+// generated row projects c.name, c.type and BOTH creator columns — display
+// name and username, off one LEFT JOIN — so this handler has no raw SQL.
 //
 // Pagination is identical to handleListTransactions so the frontend
 // trash view can reuse the same pager component — page + per_page
@@ -157,16 +174,18 @@ func (h *Handler) handleListDeletedTransactions(w http.ResponseWriter, r *http.R
 			ID:     row.ID,
 			UserID: row.UserID,
 			// NULL only when the LEFT JOIN found no user row; the empty string
-			// it maps to is the documented "creator unknown" value on the wire.
-			CreatedBy:    row.CreatedBy.String,
-			Date:         row.Date.Format("2006-01-02"),
-			Amount:       centsToDollars(row.AmountCents),
-			Description:  row.Description,
-			CategoryID:   row.CategoryID,
-			CreatedAt:    row.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:    row.UpdatedAt.Format(time.RFC3339),
-			CategoryName: row.CategoryName,
-			CategoryType: row.CategoryType,
+			// both map to is the documented "creator unknown" value on the
+			// wire. One join, so they are empty together.
+			CreatedBy:         row.CreatedBy.String,
+			CreatedByUsername: row.CreatedByUsername.String,
+			Date:              row.Date.Format("2006-01-02"),
+			Amount:            centsToDollars(row.AmountCents),
+			Description:       row.Description,
+			CategoryID:        row.CategoryID,
+			CreatedAt:         row.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:         row.UpdatedAt.Format(time.RFC3339),
+			CategoryName:      row.CategoryName,
+			CategoryType:      row.CategoryType,
 		}
 		// deleted_at is only reached via WHERE t.deleted_at IS NOT NULL,
 		// so the sql.NullTime should always be valid here; the guard

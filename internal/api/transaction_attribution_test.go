@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -316,5 +318,211 @@ func TestHandleBatchCreateTransactions_ReturnsCreatorDisplayName(t *testing.T) {
 			t.Errorf("batch row %d: created_by = %q, want the display name %q (username is %q)",
 				i, got, "Elie", "elienop")
 		}
+	}
+}
+
+// B36: the display name alone cannot identify a person. Self-service rename
+// lets a member PATCH their display_name to the exact string another member
+// uses, and because created_by comes from a live JOIN the relabel applies
+// retroactively to every row they ever entered. The fix is not server-side
+// display-name uniqueness — that error leaks the SET of existing names to any
+// member who probes for it — but rendering @username beside the name, which
+// needs the username ON THE WIRE: GET /api/users is admin-only, so a member
+// cannot resolve user_id client-side.
+//
+// Every test below seeds users whose display_name AND username differ, from
+// each other and between users, so a query that selected the same column twice
+// or swapped the two goes red instead of passing on coinciding values.
+
+// createdByUsernameOf pulls the username attribution off a raw row, failing
+// loudly when the key is absent — the failure a typed decode would zero-fill
+// into a passing test.
+func createdByUsernameOf(t *testing.T, row map[string]any) string {
+	t.Helper()
+	raw, present := row["created_by_username"]
+	if !present {
+		t.Fatalf("row is missing the created_by_username key entirely: %#v", row)
+	}
+	name, ok := raw.(string)
+	if !ok {
+		t.Fatalf("created_by_username must be a string, got %T (%#v)", raw, raw)
+	}
+	return name
+}
+
+// assertAttribution checks both attribution fields on one row at once. Doing
+// them as a pair is the point: the two values must never be sourced from the
+// same column, and the mismatch check below is what catches a query that
+// selected u.display_name twice.
+func assertAttribution(t *testing.T, where string, row map[string]any, wantName, wantUsername string) {
+	t.Helper()
+	if got := createdByOf(t, row); got != wantName {
+		t.Errorf("%s: created_by = %q, want the display name %q", where, got, wantName)
+	}
+	if got := createdByUsernameOf(t, row); got != wantUsername {
+		t.Errorf("%s: created_by_username = %q, want the username %q", where, got, wantUsername)
+	}
+	if wantName != wantUsername && createdByOf(t, row) == createdByUsernameOf(t, row) {
+		t.Errorf("%s: both fields report %q — one column is feeding both",
+			where, createdByOf(t, row))
+	}
+}
+
+// TestHandleListTransactions_CarriesCreatorUsername is the core contract for
+// the list: two creators, four distinct strings, read by a MEMBER who owns one
+// of the two rows. The member is the whole reason the field exists — an admin
+// could already resolve every username through GET /api/users.
+func TestHandleListTransactions_CarriesCreatorUsername(t *testing.T) {
+	h := setupHandler(t)
+	owner := seedNamedUser(t, h.queries, "elienop", "Elie", RoleAdmin)
+	member := seedNamedUser(t, h.queries, "partner", "Partner Name", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	ownerRow := seedTestTransaction(t, h.queries, owner.ID, catID, "2026-03-01", 40, "Supermarket")
+	memberRow := seedTestTransaction(t, h.queries, member.ID, catID, "2026-03-02", 12, "Bakery")
+
+	rows, total := listTransactionsRaw(t, h, member)
+	if total != 2 {
+		t.Fatalf("expected 2 rows, got %d", total)
+	}
+
+	assertAttribution(t, "admin's row", rowByID(t, rows, ownerRow.ID), "Elie", "elienop")
+	assertAttribution(t, "member's row", rowByID(t, rows, memberRow.ID), "Partner Name", "partner")
+
+	// Per-row, not per-request: a mutant that stamped the READER's own username
+	// on everything passes both assertions above only if the two rows agree.
+	if createdByUsernameOf(t, rowByID(t, rows, ownerRow.ID)) ==
+		createdByUsernameOf(t, rowByID(t, rows, memberRow.ID)) {
+		t.Error("both rows report the same creator username; attribution is not per-row")
+	}
+}
+
+// TestHandleListTransactions_DeletedCreatorRendersEmptyUsername is the presence
+// half of the contract: the key is ALWAYS emitted, and an absent creator makes
+// it the empty string rather than making it disappear. transactions.user_id is
+// NOT NULL REFERENCES users(id) ON DELETE CASCADE, so an orphan needs a
+// restored backup or a connection that lost _foreign_keys=on — under an INNER
+// join the row would vanish from the ledger entirely.
+func TestHandleListTransactions_DeletedCreatorRendersEmptyUsername(t *testing.T) {
+	h := setupHandler(t)
+	reader := seedNamedUser(t, h.queries, "reader", "Reader Name", RoleMember)
+	ghost := seedNamedUser(t, h.queries, "ghost", "Ghost Name", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	orphan := seedTestTransaction(t, h.queries, ghost.ID, catID, "2026-03-01", 40, "Legacy row")
+	live := seedTestTransaction(t, h.queries, reader.ID, catID, "2026-03-02", 12, "Current row")
+
+	deleteUserWithoutCascade(t, h, ghost.ID)
+
+	rows, total := listTransactionsRaw(t, h, reader)
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("the orphaned row must still be listed: total = %d, rows = %d, want 2 and 2",
+			total, len(rows))
+	}
+
+	// Both fields empty TOGETHER — they come off one join, so a row can never
+	// report a name without an identifier or the reverse.
+	orphanRow := rowByID(t, rows, orphan.ID)
+	if got := createdByUsernameOf(t, orphanRow); got != "" {
+		t.Errorf("orphaned row: created_by_username = %q, want the empty string", got)
+	}
+	if got := createdByOf(t, orphanRow); got != "" {
+		t.Errorf("orphaned row: created_by = %q, want the empty string", got)
+	}
+	assertAttribution(t, "live row", rowByID(t, rows, live.ID), "Reader Name", "reader")
+}
+
+// TestHandleCreateTransaction_ReturnsCreatorUsername pins the create emit site.
+// There is no join here: the value comes from the authenticated user's STORED
+// Username, who owns the row by construction. Sourcing it from the session
+// rather than the request body is what stops a client claiming someone else's
+// identifier.
+func TestHandleCreateTransaction_ReturnsCreatorUsername(t *testing.T) {
+	h := setupHandler(t)
+	user := seedNamedUser(t, h.queries, "elienop", "Elie", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	body := strings.NewReader(`{
+		"date": "2026-03-01",
+		"amount": 40.00,
+		"description": "Supermarket",
+		"category_id": ` + itoa(catID) + `
+	}`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", body), user)
+	rec := httptest.NewRecorder()
+	h.handleCreateTransaction(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	decodeResponse(t, rec, &resp)
+	assertAttribution(t, "create response", resp, "Elie", "elienop")
+}
+
+// TestHandleCreateTransaction_IdempotentReplayCarriesCreatorUsername covers the
+// FOURTH emit site, which is easy to miss: an idempotent replay returns early
+// from its own writeJSON call, several hundred lines before the one the test
+// above exercises. The replay must be byte-identical to the original response —
+// a client retried precisely because it does not know whether the first attempt
+// landed — so a field added to one branch and not the other is a real defect,
+// not a cosmetic one.
+func TestHandleCreateTransaction_IdempotentReplayCarriesCreatorUsername(t *testing.T) {
+	h := setupHandler(t)
+	user := seedNamedUser(t, h.queries, "elienop", "Elie", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	body := withKey(lunchBody(catID), "36000000-0000-0000-0000-000000000036")
+
+	first := postCreate(t, h, user, body)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first create: status = %d, body = %s", first.Code, first.Body.String())
+	}
+	firstObj := decodeObject(t, first)
+	assertAttribution(t, "first create", firstObj, "Elie", "elienop")
+
+	replay := postCreate(t, h, user, body)
+	if replay.Code != http.StatusCreated {
+		t.Fatalf("replay: status = %d, body = %s", replay.Code, replay.Body.String())
+	}
+	replayObj := decodeObject(t, replay)
+	assertAttribution(t, "replay", replayObj, "Elie", "elienop")
+
+	if n := countTransactionRows(t, h); n != 1 {
+		t.Fatalf("transactions rows = %d, want 1 — the replay created a second row", n)
+	}
+	if !reflect.DeepEqual(firstObj, replayObj) {
+		t.Errorf("replay body differs from the original.\n first: %#v\nreplay: %#v", firstObj, replayObj)
+	}
+}
+
+// TestHandleBatchCreateTransactions_ReturnsCreatorUsername pins the batch emit
+// site. Nothing under web/src posts to this endpoint today; the API-token
+// surface can, and the deep review's surviving mutant on the display-name
+// version proved the point — toTransactionResponse's explicit parameters make
+// every call site pass SOMETHING, but only a test checks WHAT.
+func TestHandleBatchCreateTransactions_ReturnsCreatorUsername(t *testing.T) {
+	h := setupHandler(t)
+	user := seedNamedUser(t, h.queries, "elienop", "Elie", RoleMember)
+	catID := seedExpenseCategory(t, h.queries, "Groceries-"+t.Name())
+
+	body := strings.NewReader(`[
+		{"date": "2026-03-01", "amount": 12.00, "description": "Batch row one", "category_id": ` + itoa(catID) + `},
+		{"date": "2026-03-02", "amount": 7.50, "description": "Batch row two", "category_id": ` + itoa(catID) + `}
+	]`)
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions/batch", body), user)
+	rec := httptest.NewRecorder()
+	h.handleBatchCreateTransactions(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp []map[string]any
+	decodeResponse(t, rec, &resp)
+	if len(resp) != 2 {
+		t.Fatalf("expected 2 created rows in the response, got %d", len(resp))
+	}
+	for i, row := range resp {
+		assertAttribution(t, fmt.Sprintf("batch row %d", i), row, "Elie", "elienop")
 	}
 }

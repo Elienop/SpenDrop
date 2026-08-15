@@ -132,10 +132,12 @@ type transactionResponse struct {
 	// field a member learned a row was somebody else's only when Save came
 	// back 403.
 	//
-	// It carries users.display_name, NOT users.username, because display_name
-	// is what this app shows wherever it names a person (the sidebar renders
-	// display_name as the primary label with @username beneath it; Settings
-	// copy uses display_name throughout). The key is deliberately not called
+	// It carries users.display_name, because display_name is what this app
+	// shows wherever it names a person (the sidebar renders display_name as
+	// the primary label with @username beneath it; Settings copy uses
+	// display_name throughout). The username is not absent from the row — it
+	// travels beside it in CreatedByUsername below, under its own key rather
+	// than folded into this one. The key here is deliberately not called
 	// "username" — carrying a display name under that key would misdescribe
 	// the value and collide with the login-identifier meaning `username` has
 	// everywhere else on the wire.
@@ -147,19 +149,57 @@ type transactionResponse struct {
 	// The key is ALWAYS emitted (no omitempty) so the frontend never has to
 	// tell "absent" from "unknown". An empty string means the creator's user
 	// row is gone — see the LEFT JOIN in handleListTransactions.
-	CreatedBy        string   `json:"created_by"`
-	Date             string   `json:"date"`
-	Amount           float64  `json:"amount"`
-	OriginalAmount   *float64 `json:"original_amount,omitempty"`
-	OriginalCurrency string   `json:"original_currency,omitempty"`
-	Description      string   `json:"description"`
-	CategoryID       int64    `json:"category_id"`
-	Tags             string   `json:"tags,omitempty"`
-	Notes            string   `json:"notes,omitempty"`
-	CreatedAt        string   `json:"created_at"`
-	UpdatedAt        string   `json:"updated_at"`
-	CategoryName     string   `json:"category_name,omitempty"`
-	CategoryType     string   `json:"category_type,omitempty"`
+	CreatedBy string `json:"created_by"`
+	// CreatedByUsername is users.username for the same person CreatedBy names:
+	// their login identifier. It exists because a display name is not an
+	// identity — self-service rename (B36) lets two members hold the SAME
+	// display_name, and the ledger is household-wide, so the name alone can
+	// attribute a row to the wrong person. The UI renders @username beside the
+	// display name, which is the sidebar's existing idiom, and the ambiguity
+	// disappears. A member cannot resolve it client-side: GET /api/users is
+	// admin-only (auth.RequireAdmin on the /users route in router.go), so the
+	// value has to arrive here.
+	//
+	// Exposing the login identifier household-wide is a deliberate trade:
+	//   - For an admin it discloses nothing new — /api/users already returns
+	//     every username and Settings shows the column beside Display Name.
+	//   - For a member it IS new information. What it costs is the non-secret
+	//     half of a credential pair: login is rate-limited per client IP
+	//     (h.loginFailureLimiter in handleLogin) and a user-miss pays a dummy
+	//     bcrypt (auth.DummyCheckPassword), so a known username buys neither a
+	//     timing oracle nor extra attempts. Against someone who already shares
+	//     the ledger, the username was never the boundary; the password is.
+	//   - The alternative, enforcing display_name uniqueness server-side, was
+	//     REJECTED in B36: the uniqueness error leaks the SET of existing
+	//     display names to any member who probes for it — strictly more
+	//     disclosure than this field — and it takes a name away from whoever
+	//     asks second.
+	//
+	// It cannot carry a newline, a quote or markup into the JSON or the UI.
+	// users.username is written on exactly two paths, handleRegister and
+	// handleCreateUser, and both gate it through isValidUsername, whose
+	// regexp admits only [a-zA-Z0-9_-]; no statement in queries.sql updates
+	// the column, so the value is immutable ASCII from creation.
+	//
+	// Display-only, exactly like CreatedBy. user_id is unchanged and every
+	// mutation path's 403/404 behaviour and audit attribution are untouched.
+	//
+	// ALWAYS emitted (no omitempty), same presence semantics as CreatedBy: an
+	// empty string means the creator's user row is gone (the LEFT JOIN found
+	// no partner), so the frontend never has to tell absent from unknown.
+	CreatedByUsername string   `json:"created_by_username"`
+	Date              string   `json:"date"`
+	Amount            float64  `json:"amount"`
+	OriginalAmount    *float64 `json:"original_amount,omitempty"`
+	OriginalCurrency  string   `json:"original_currency,omitempty"`
+	Description       string   `json:"description"`
+	CategoryID        int64    `json:"category_id"`
+	Tags              string   `json:"tags,omitempty"`
+	Notes             string   `json:"notes,omitempty"`
+	CreatedAt         string   `json:"created_at"`
+	UpdatedAt         string   `json:"updated_at"`
+	CategoryName      string   `json:"category_name,omitempty"`
+	CategoryType      string   `json:"category_type,omitempty"`
 }
 
 // transactionListResponse wraps a paginated list of transactions.
@@ -177,23 +217,25 @@ type transactionListResponse struct {
 // dropped in migration 010 — integer cents are now the only money columns,
 // so the handler path cannot touch a float sum and float drift is impossible
 // by construction for every aggregation that flows through this function.
-// createdBy is the display name of t.UserID. It is a parameter rather than
-// something derived here because database.Transaction carries only the id: the
-// list path gets the name from its LEFT JOIN, and the create paths take it from
-// the authenticated user's stored DisplayName, who by construction is the row's
-// owner. Making it explicit means a new emit site cannot silently ship a blank
-// attribution — the compiler asks the question.
-func toTransactionResponse(t database.Transaction, createdBy string) transactionResponse {
+// createdBy is the display name of t.UserID and createdByUsername is that same
+// user's username. They are parameters rather than something derived here
+// because database.Transaction carries only the id: the list path gets both
+// from its LEFT JOIN, and the create paths take them from the authenticated
+// user's stored row, who by construction is the row's owner. Making them
+// explicit means a new emit site cannot silently ship a blank attribution —
+// the compiler asks the question, once per field.
+func toTransactionResponse(t database.Transaction, createdBy, createdByUsername string) transactionResponse {
 	resp := transactionResponse{
-		ID:          t.ID,
-		UserID:      t.UserID,
-		CreatedBy:   createdBy,
-		Date:        t.Date.Format("2006-01-02"),
-		Amount:      centsToDollars(t.AmountCents),
-		Description: t.Description,
-		CategoryID:  t.CategoryID,
-		CreatedAt:   t.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:   t.UpdatedAt.Format(time.RFC3339),
+		ID:                t.ID,
+		UserID:            t.UserID,
+		CreatedBy:         createdBy,
+		CreatedByUsername: createdByUsername,
+		Date:              t.Date.Format("2006-01-02"),
+		Amount:            centsToDollars(t.AmountCents),
+		Description:       t.Description,
+		CategoryID:        t.CategoryID,
+		CreatedAt:         t.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:         t.UpdatedAt.Format(time.RFC3339),
 	}
 	if t.OriginalAmountCents.Valid {
 		amt := centsToDollars(t.OriginalAmountCents.Int64)
@@ -416,8 +458,12 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	// wire edge via centsToDollars — no per-row float round-trip, so no
 	// IEEE-754 drift in the list endpoint.
 	//
+	// Both attribution columns come off the ONE users LEFT JOIN below —
+	// display_name for CreatedBy and username for CreatedByUsername. A second
+	// join or a per-row lookup would buy nothing and cost a query per row.
+	//
 	// users is LEFT joined, not inner joined, and that is the whole
-	// safety story for the attribution column: transactions.user_id is
+	// safety story for the attribution columns: transactions.user_id is
 	// NOT NULL REFERENCES users(id) ON DELETE CASCADE, so a row whose
 	// creator is gone should not exist — but a restored backup or a
 	// connection that lost _foreign_keys=on can produce one. Under an
@@ -428,7 +474,7 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 	offset := (page - 1) * perPage
 	dataQuery := `SELECT t.id, t.user_id, t.date, t.amount_cents, t.original_amount_cents, t.original_currency,
 		t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at,
-		c.name AS category_name, c.type AS category_type, u.display_name
+		c.name AS category_name, c.type AS category_type, u.display_name, u.username
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		LEFT JOIN users u ON t.user_id = u.id` + liveClause + orderClause + ` LIMIT ? OFFSET ?`
@@ -458,14 +504,15 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 			updatedAt    time.Time
 			categoryName string
 			categoryType string
-			// Nullable because of the LEFT JOIN, not because display names can
-			// be empty — the column is NOT NULL on users.
-			createdBy sql.NullString
+			// Both nullable because of the LEFT JOIN, not because the values can
+			// be empty — display_name and username are NOT NULL on users.
+			createdBy         sql.NullString
+			createdByUsername sql.NullString
 		)
 		if err := rows.Scan(
 			&tr.ID, &tr.UserID, &date, &amountCents, &origAmtCents, &origCur,
 			&tr.Description, &tr.CategoryID, &tags, &notes, &createdAt, &updatedAt,
-			&categoryName, &categoryType, &createdBy,
+			&categoryName, &categoryType, &createdBy, &createdByUsername,
 		); err != nil {
 			writeError(w, http.StatusInternalServerError, "failed to scan transaction")
 			return
@@ -476,9 +523,12 @@ func (h *Handler) handleListTransactions(w http.ResponseWriter, r *http.Request)
 		tr.UpdatedAt = updatedAt.Format(time.RFC3339)
 		tr.CategoryName = categoryName
 		tr.CategoryType = categoryType
-		// NULL only when the LEFT JOIN found no user row; the empty string it
-		// maps to is the documented "creator unknown" value on the wire.
+		// NULL only when the LEFT JOIN found no user row; the empty string both
+		// map to is the documented "creator unknown" value on the wire. They
+		// move together — one join, so a row never reports a name without an
+		// identifier or the reverse.
 		tr.CreatedBy = createdBy.String
+		tr.CreatedByUsername = createdByUsername.String
 		if origAmtCents.Valid {
 			v := centsToDollars(origAmtCents.Int64)
 			tr.OriginalAmount = &v
@@ -665,7 +715,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 		// The caller's stored DisplayName is the right attribution even on a
 		// replay: the row was looked up by (user_id = user.ID,
 		// idempotency_key), so the caller owns it by construction.
-		writeJSON(w, http.StatusCreated, toTransactionResponse(existing, user.DisplayName))
+		writeJSON(w, http.StatusCreated, toTransactionResponse(existing, user.DisplayName, user.Username))
 		return
 	}
 	if err != nil {
@@ -692,7 +742,7 @@ func (h *Handler) handleCreateTransaction(w http.ResponseWriter, r *http.Request
 	// dashboard totals, the reports aggregates, and the budget cells.
 	h.publishInvalidate("transactions", "dashboard", "reports", "budgets")
 
-	writeJSON(w, http.StatusCreated, toTransactionResponse(txn, user.DisplayName))
+	writeJSON(w, http.StatusCreated, toTransactionResponse(txn, user.DisplayName, user.Username))
 }
 
 // handleUpdateTransaction updates an existing transaction by ID.
@@ -1046,7 +1096,7 @@ func (h *Handler) handleBatchCreateTransactions(w http.ResponseWriter, r *http.R
 		cellSet[cellForDate(txn.CategoryID, txn.Date)] = struct{}{}
 		// Every row in a batch is created with UserID: user.ID, so the caller
 		// is the creator of all of them.
-		results = append(results, toTransactionResponse(txn, user.DisplayName))
+		results = append(results, toTransactionResponse(txn, user.DisplayName, user.Username))
 	}
 
 	if err := tx.Commit(); err != nil {
