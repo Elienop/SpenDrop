@@ -1299,11 +1299,35 @@ describe('Settings', () => {
       // column without the unit would leave that to be guessed.
       expect(copy.textContent).toContain('89000');
       expect(copy.textContent).toContain('LBP');
-      // The BASE half is read from the household's own currencies, not
-      // written into the string: the sentence is a rule about
-      // `rate_to_base`, and it would be false the day the base changed.
-      // The fixture's base is USD (`api.get('currencies')` above).
-      expect(copy.textContent).toMatch(/per one USD/);
+    });
+
+    test('names the household’s OWN base currency, not USD', async () => {
+      // Deliberately NOT the default: this household's base is USD, so
+      // asserting "per one USD" against the standard fixture passes
+      // whether the code reads the base or hard-codes it — which is how
+      // the copy said "LBP per USD" to everyone in the first place.
+      mockedApi.get.mockImplementation((path: string) => {
+        if (path === 'currencies')
+          return Promise.resolve([
+            {
+              code: 'EUR',
+              name: 'Euro',
+              symbol: '\u20AC',
+              rate_to_base: 1,
+              is_base: true,
+              updated_at: '',
+            },
+          ]);
+        return Promise.resolve([]);
+      });
+
+      await goToDataTab();
+
+      const copy = screen.getByText(/Optional columns:/);
+      await waitFor(() => {
+        expect(copy.textContent).toMatch(/per one EUR/);
+      });
+      expect(copy.textContent).not.toMatch(/USD/);
     });
 
     // End-to-end through Settings → ImportCard → ImportPreviewStep →

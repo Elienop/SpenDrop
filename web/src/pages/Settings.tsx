@@ -3452,10 +3452,19 @@ function ImportCard() {
   // the card is torn down — there is no unmount hook that could be trusted
   // to run after the last keystroke.
   //
-  // The first pass for a session is SKIPPED, and that is load-bearing: on a
-  // remount the restore above and this effect run in the same commit, and
-  // the state it set is not visible until the next one. Writing here would
-  // save the empty initial map over the very record just read.
+  // The first pass for a session is SKIPPED. On a remount the restore
+  // above and this effect run in the same commit, and the state the
+  // restore set is not visible until the next one — so without this,
+  // the first write would put the empty initial map over the very record
+  // just read.
+  //
+  // WHAT IT DOES NOT DO, stated because a mutation removing it survives
+  // the suite: the clobber it prevents is transient. The restored state
+  // lands one render later and this effect writes it straight back, so
+  // nothing a test can observe changes either way, and the round-trip
+  // test passes without it. The window is real but it is one tick wide —
+  // a tab closed inside it loses the decisions — and closing it costs
+  // four lines, so it stays. Do not read it as load-bearing.
   const savedDecisionsForRef = useRef<string | null>(null);
   useEffect(() => {
     const importID = preview?.import_id;
