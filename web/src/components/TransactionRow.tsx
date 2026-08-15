@@ -372,20 +372,55 @@ export function TransactionRow({
       <TableCell className="whitespace-nowrap">
         {format(parseISO(transaction.date), 'MMM d, yyyy')}
       </TableCell>
-      {/* Width-bounded on purpose. Import does not enforce the 500-character
+      {/* THE SLACK COLUMN. Import does not enforce the 500-character
           description limit the rest of the app does — validateImportField runs
           only on the per-row edit route — so a spreadsheet cell can put a far
           longer description into the ledger. Unbounded, one such row stretches
           the table for every row and both members. title= keeps the full text
           reachable on hover.
 
+          `w-full max-w-0` — both halves, and neither works alone. This cell
+          was `max-w-md`, and a CAP is not a FLOOR: `truncate` sets
+          `white-space: nowrap`, so the cell contributes its full text width as
+          the column's min-content, and Chrome's auto table layout then sizes
+          the column from max-content CAPPED BY the cap — making 448px the
+          width a long description always got. Measured on the built app at a
+          1288px window, one imported `DASHLONG-…` row on page 1 put a 1063px
+          table inside a 985px scroller: 78px gone, which is the whole Actions
+          column plus the cents of every amount, reachable only by scrolling
+          the card sideways.
+
+            `max-w-0` clamps that min-content contribution to zero, so the
+            column may shrink and the inner `truncate` finally has something to
+            truncate against. Alone it fixes the overflow but the freed space is
+            shared out over all seven columns (measured at 1130: description
+            187px, Date 156, Amount 201 — every fixed column bloated).
+            `w-full` asks for 100% of the table, which routes the slack HERE
+            and leaves the others at their content width. Alone it changes
+            nothing at all: still 1063px in a 985px scroller.
+
+          Measured with both, Chrome, built app, /transactions: overflow 0px at
+          1024/1130/1288/1400, description 264 -> 640px, and Date 120 /
+          Category 128 / Tags 99 / Amount 154 / Actions 82 IDENTICAL at every
+          one of those widths. The floor is this column's own header — the
+          "Description" sort button, ~143px — so the table needs a ~903px
+          window (623px scroller at 768 vs 758px of table); below that it
+          scrolls as it always has. Every household width that renders this
+          table is above it (Tab S10 FE landscape is 1130).
+
+          NOT the Dashboard's `[overflow-wrap:anywhere]` + `line-clamp-2`,
+          which solves the same overflow in a card that has no columns to
+          protect: it wraps, and measured here it took the row from 71px to
+          91px. This table keeps one line per row, so it truncates instead.
+
           The creator rides UNDER the description rather than in a column of
           its own: the ledger is household-wide, so a member needs to know a
           row is her spouse's BEFORE she edits it and gets a 403 — but a
           seventh always-on column would cost width the 390px phone layout
           does not have. A second muted line costs row height instead, which
-          the phone has. Not a tooltip: those are dead on touch. */}
-      <TableCell className="max-w-md">
+          the phone has. Not a tooltip: those are dead on touch. It shrinks
+          with the cell (measured: never spills past the cell's right edge). */}
+      <TableCell className="w-full max-w-0">
         <div className="truncate font-medium" title={transaction.description}>
           {transaction.description}
         </div>

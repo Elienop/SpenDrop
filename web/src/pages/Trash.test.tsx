@@ -495,13 +495,90 @@ describe('Trash', () => {
 
       // Exact tokens, not substrings — `expect(className).toContain('truncate')`
       // also passes for `truncate-none` or any longer token containing it.
-      // Both halves are load-bearing and neither works alone: max-w-md bounds
-      // the cell, truncate clips inside it.
-      expect(description.className.split(/\s+/)).toContain('truncate');
-      expect(description.className.split(/\s+/)).toContain('font-medium');
+      // Both halves are load-bearing and neither works alone: the cell's
+      // `max-w-0` (below) lets the column shrink, truncate clips inside it.
+      expect(classes(description)).toContain('truncate');
+      expect(classes(description)).toContain('font-medium');
       const cell = description.closest('td');
       expect(cell).not.toBeNull();
-      expect(cell!.className.split(/\s+/)).toContain('max-w-md');
+      expect(classes(cell!)).toContain('max-w-0');
+    });
+
+    // WHY CLASS PINS. happy-dom lays nothing out, so the invariant — this
+    // eight-column table never renders wider than its scroller, so Restore and
+    // Purge are never off the right edge — is not observable here. What is
+    // observable is the structure that makes it true, measured in Chrome on
+    // the built app first (numbers in the cell's comment in Trash.tsx).
+    test('the description column is the one that gives ground', async () => {
+      renderTrash();
+      const description = await screen.findByText('Weekly groceries');
+      const cell = description.closest('td');
+      expect(cell).not.toBeNull();
+
+      // `max-w-0` makes the column shrinkable at all: `truncate` sets
+      // `white-space: nowrap`, so unclamped this cell hands the column its
+      // full text width as min-content.
+      expect(classes(cell!)).toContain('max-w-0');
+      // `w-full` routes the freed width HERE rather than fattening the other
+      // seven columns.
+      expect(classes(cell!)).toContain('w-full');
+
+      // The cap this cell used to carry — and any replacement for it. Chrome's
+      // auto table layout sizes this column from max-content capped by
+      // max-width, so ANY `max-w-*` other than 0 becomes the width a long
+      // description always gets: `max-w-md` measured 1153px of table inside a
+      // 1000px scroller at 1130.
+      const caps = classes(cell!).filter(
+        (t) => t.startsWith('max-w-') && t !== 'max-w-0',
+      );
+      expect(caps).toEqual([]);
+
+      // EXACTLY ONE slack column, and no cap anywhere else on the row: two
+      // cells asking for 100% split the surplus, and a capped Deleted / Date /
+      // Amount cell would clip its own content rather than bounding the table.
+      const row = cell!.closest('tr');
+      expect(row).not.toBeNull();
+      const slack = [...row!.children].filter((td) =>
+        classes(td).includes('w-full'),
+      );
+      expect(slack).toHaveLength(1);
+      expect(slack[0]).toBe(cell);
+      const capped = [...row!.children].filter((td) =>
+        classes(td).some((t) => t.startsWith('max-w-')),
+      );
+      expect(capped).toHaveLength(1);
+      expect(capped[0]).toBe(cell);
+    });
+
+    test('the table is left on auto layout, which the shrink depends on', async () => {
+      renderTrash();
+      const table = await screen.findByRole('table');
+
+      // `table-fixed` would INVERT the mechanism: under fixed layout the first
+      // row's declared widths are the column widths, so `max-w-0` would give
+      // the description a zero-width column and every other column an equal
+      // share regardless of its content. Measured with fixed layout and no
+      // explicit widths: all eight columns at 85px at 768, with Date, Amount
+      // and both action buttons spilling out of their cells.
+      expect(classes(table)).not.toContain('table-fixed');
+    });
+
+    test('the description header stays unclamped, so the column has a floor', async () => {
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      // The body cell can now shrink to nothing, so this header is the
+      // column's floor and the only thing stopping the label itself from being
+      // clipped. Clamping it too measured a 32px column and a header reading
+      // nothing at 768.
+      const header = screen
+        .getAllByRole('columnheader')
+        .find((th) => th.textContent?.trim() === 'Description');
+      expect(header).toBeDefined();
+      expect(classes(header!).filter((t) => t.startsWith('max-w-'))).toEqual(
+        [],
+      );
+      expect(classes(header!)).not.toContain('w-full');
     });
 
     test('renders "Unknown" when the creator\'s user row is gone', async () => {

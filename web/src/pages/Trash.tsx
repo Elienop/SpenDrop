@@ -1143,21 +1143,40 @@ export function Trash() {
                     <TableCell className="whitespace-nowrap">
                       {format(parseISO(row.date), 'MMM d, yyyy')}
                     </TableCell>
-                    {/* Width-bounded on purpose, exactly as in
-                        TransactionRow's description cell: import does not
-                        enforce the 500-character description limit the rest of
-                        the app does — validateImportField runs only on the
-                        per-row edit route — so a spreadsheet cell can put a
-                        far longer description into the ledger, and deleting
-                        such a row lands it HERE. Unbounded, one of them
-                        stretches the table for every row and pushes the
-                        Actions column — Restore and Purge, the whole point of
-                        the surface — off the right edge behind a horizontal
-                        scroll. (Phone width is no longer this cell's problem:
-                        below `md` the card list renders instead, and bounds
-                        the same text its own way.) title= keeps the full text
-                        on hover; max-w-md plus the inner truncate is what
-                        makes either truncate do anything at all.
+                    {/* THE SLACK COLUMN, exactly as in TransactionRow's
+                        description cell: import does not enforce the
+                        500-character description limit the rest of the app
+                        does — validateImportField runs only on the per-row
+                        edit route — so a spreadsheet cell can put a far longer
+                        description into the ledger, and deleting such a row
+                        lands it HERE. Unbounded, one of them stretches the
+                        table for every row and pushes the Actions column —
+                        Restore and Purge, the whole point of the surface —
+                        off the right edge behind a horizontal scroll. (Phone
+                        width is no longer this cell's problem: below `md` the
+                        card list renders instead, and bounds the same text its
+                        own way.) title= keeps the full text on hover.
+
+                        `w-full max-w-0`, both halves load-bearing, and the
+                        reasoning is TransactionRow's — read the long version
+                        there. In one line: `max-w-md` was a cap, not a floor,
+                        so `truncate`'s `white-space: nowrap` still handed the
+                        column its full text as min-content and Chrome sized
+                        the column at the cap; `max-w-0` clamps that to zero so
+                        the inner truncate has something to truncate against,
+                        and `w-full` routes the freed space to this column
+                        instead of fattening the other seven.
+
+                        This table is the TIGHTER of the two — eight columns,
+                        and Actions carries two labelled buttons (205px, vs 82
+                        for the ledger's icon menu). Measured on the built app
+                        with a long description in row 1: 1153px of table in a
+                        1000px scroller at 1130, 0px of overflow after, with
+                        Deleted 107 / Date 116 / Category 92 / Tags 63 / Amount
+                        91 / Actions 205 unchanged at 1024, 1130, 1288 and
+                        1400. Its floor is the plain "Description" header cell
+                        (~107px), so the table needs a ~942px window; below
+                        that it scrolls, as it always has.
 
                         The creator rides UNDER the description rather than in
                         a column of its own: a ninth always-on column would
@@ -1166,7 +1185,7 @@ export function Trash() {
                         — an admin's trash spans the whole household, and
                         Restore/Purge are poor things to aim at a row you
                         cannot attribute. */}
-                    <TableCell className="max-w-md">
+                    <TableCell className="w-full max-w-0">
                       <div
                         className="truncate font-medium"
                         title={row.description || undefined}

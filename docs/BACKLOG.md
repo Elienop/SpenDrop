@@ -375,7 +375,20 @@ condition *and* move the predicate, believing one was safe because the other was
   clip nothing, page has zero horizontal overflow; the extreme (selection mode + LBP secondary
   line, 81px row) clips the name to 40px and the handle to " @Elien…" — the 50% cap doing its
   job of not starving the name entirely; `PUT /api/users/1 {role:'owner'}` → 400 whitelist,
-  self-demotion → 400; display name restored. Tests decode
+  self-demotion → 400; display name restored.
+  **Rider — the desktop tables overflowed their card at ≤ ~1380px** (owner-reported during
+  this pass at 1288: amounts read `-$9` and the Actions column was scrolled off). Pre-existing
+  and data-dependent, not B36 (measured identical with the handle removed): the Description
+  cell's `max-w-md` is a cap not a floor, so one long description grew the column to 448px and
+  the table past its `overflow-auto` scroller (1063 vs 951). Fix: `w-full max-w-0` on the
+  Description cell of both the Transactions and Trash tables — `max-w-0` is what lets the column
+  shrink (Chrome sizes an auto-layout column FROM the cap), `w-full` routes the slack to it
+  instead of fattening the other six; every other column byte-identical (DOM-diffed). Measured
+  on the rebuilt container: 0 overflow at 1400/1288/1130/1024 on both pages (was 78–153px at
+  1130), cents and Actions in view, phone card lists untouched. Still overflows in the
+  768–~900px band (seven fixed columns alone exceed 623px; no household device sits there —
+  the tablet is ~720 portrait/card list, ~1130 landscape/fits); closing that band means
+  dropping a column below `lg`, a separate call. Tests decode
   into maps with fixtures whose display_name ≠ username so a column swap is caught. Filed
   premise corrections: heatmap and RecentlyAdded are readers of the list endpoint, not producers;
   the username gate is `isValidUsername`, not `validateUsername`.

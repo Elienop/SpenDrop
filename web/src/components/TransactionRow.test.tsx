@@ -188,14 +188,103 @@ describe('TransactionRow creator attribution', () => {
     // The handle is longer text on the same line, but it is NOT the part that
     // gives ground: it is `shrink-0` beside the name's truncating span, so a
     // 64-character display name clips and the identifier survives. The line
-    // still cannot widen the cell past its own max-w-md — the shrink lives on
-    // the name, one level down.
+    // still cannot widen the cell — the shrink lives on the name, one level
+    // down, and the cell's own bound is the `max-w-0` pinned below.
     const handle = screen.getByText('@elienop');
     expect(handle).toHaveClass('shrink-0');
     expect(screen.getByText('Entered by').parentElement).toHaveClass(
       'min-w-0',
       'truncate',
     );
+  });
+});
+
+/** Class tokens of an element. Exact tokens, never substrings. */
+function classTokens(el: Element): string[] {
+  return el.className.split(/\s+/).filter(Boolean);
+}
+
+/** The `<td>` holding a row's description text. */
+function descriptionCell(description: string): HTMLTableCellElement {
+  const cell = screen.getByTitle(description).closest('td');
+  // Asserted to EXIST rather than `?.className ?? ''`: the latter passes
+  // happily against '' if this stops being a table, which is the one shape
+  // that would make every token assertion below meaningless.
+  expect(cell).not.toBeNull();
+  return cell as HTMLTableCellElement;
+}
+
+describe('TransactionRow description column width', () => {
+  // WHY THESE ARE CLASS PINS. happy-dom lays nothing out, so the invariant
+  // itself — the table never renders wider than its scroller — is not
+  // observable here. What is observable is the structure that makes it true,
+  // and each token below was measured in Chrome on the built app before it was
+  // pinned (numbers in TransactionRow.tsx's comment). This cell WAS `max-w-md`
+  // and that cap put a 1063px table inside a 985px scroller at a 1288px
+  // window: the Actions column and the cents of every amount lived off the
+  // right edge behind a horizontal scroll.
+
+  it('lets the description cell shrink, so the fixed columns always fit', () => {
+    const long = 'DASHLONG-' + 'Y'.repeat(80);
+    renderRow(makeTx({ description: long }));
+    const cell = descriptionCell(long);
+
+    // `max-w-0` is what makes the column SHRINKABLE. `truncate` sets
+    // `white-space: nowrap`, so without a clamp this cell hands the column its
+    // full text width as min-content and no amount of container pressure can
+    // reduce it.
+    expect(classTokens(cell)).toContain('max-w-0');
+
+    // And the cap that was there before must not come back. Asserted as "no
+    // OTHER max-w-* token" rather than "not max-w-md", because any cap — 12rem,
+    // 28rem, a bracket value — reintroduces the same bug: Chrome's auto table
+    // layout sizes this column from max-content capped by max-width, so a long
+    // description makes the cap the width.
+    const caps = classTokens(cell).filter(
+      (t) => t.startsWith('max-w-') && t !== 'max-w-0',
+    );
+    expect(caps).toEqual([]);
+
+    // The inner truncation is the other half: `max-w-0` gives the ellipsis
+    // something to happen against, and `title` is the only route back to the
+    // full text once it does.
+    const inner = screen.getByTitle(long);
+    expect(classTokens(inner)).toContain('truncate');
+    expect(inner).toHaveAttribute('title', long);
+  });
+
+  it('sends the slack to the description column and nowhere else', () => {
+    // `w-full` (width: 100%) is what routes freed space HERE. Removing it
+    // measured 187px of description at a 1130px window with Date at 156 and
+    // Amount at 201 — the fixed columns fattening instead, which is the
+    // opposite of the intent even though the overflow is gone.
+    const long = 'DASHLONG-' + 'Y'.repeat(80);
+    renderRow(makeTx({ description: long, tags: 'groceries,weekly' }));
+    const cell = descriptionCell(long);
+    expect(classTokens(cell)).toContain('w-full');
+
+    // EXACTLY ONE slack column. Two cells asking for 100% split the surplus
+    // between them, and the fixed column that acquired the second `w-full`
+    // would grow with the window for no reason.
+    const row = cell.closest('tr');
+    expect(row).not.toBeNull();
+    const slackCells = [...row!.children].filter((td) =>
+      classTokens(td).includes('w-full'),
+    );
+    // Identity, not deep equality: `toEqual` on DOM nodes walks the element
+    // tree and can pass on a structurally similar cell.
+    expect(slackCells).toHaveLength(1);
+    expect(slackCells[0]).toBe(cell);
+
+    // The other six keep their content-sized widths, so none of them may
+    // carry a cap either — a capped Category or Amount cell would clip user
+    // data (a 100-character category name, the `-1,500,000.00 LBP` second
+    // line) rather than bounding the table.
+    const capped = [...row!.children].filter((td) =>
+      classTokens(td).some((t) => t.startsWith('max-w-')),
+    );
+    expect(capped).toHaveLength(1);
+    expect(capped[0]).toBe(cell);
   });
 });
 
