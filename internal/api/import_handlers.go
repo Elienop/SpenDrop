@@ -70,6 +70,12 @@ type importRow struct {
 	// it back under rate_raw only when it is unusable, so the table can show
 	// what the sheet held beside a message telling the user to fix it.
 	RawRate string `json:"-"`
+	// RawAmount is the Amount cell as it arrived — the third and last of these
+	// raw twins, and the one whose absence was doing the most damage: an
+	// unreadable base amount became a zero and the row left as zero_amount,
+	// counted in "N skipped" with no row named and no message anywhere. That
+	// is silent data loss on the primary money column.
+	RawAmount string `json:"-"`
 	// RawOriginalAmount is the Original Amount cell as it arrived, kept for
 	// exactly the reason RawRate is. parseImportAmount ZEROES a cell it cannot
 	// use — out of range, or unparseable — so OriginalAmount alone cannot tell
@@ -543,11 +549,13 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		parsed, err := parseImportRate(str)
 		// The accept predicate here is the resolver's BLOCK predicate, stated
 		// once: a cell with something in it that cannot divide is refused.
-		// parseImportRate alone is not enough — stripCurrencyFormat reduces
-		// "$" and "," to nothing, so they parse as ABSENCE and would be taken
-		// as a clear, landing a row whose rate cell now reads empty beside a
-		// flag saying the rate is unusable. The user would be looking at an
-		// empty cell being told to fix it.
+		// parseImportRate alone is not enough. A cell holding only symbols or
+		// whitespace — "$", "()", "  " — strips to nothing and parses as
+		// ABSENCE, so it would be taken as a clear, landing a row whose rate
+		// cell now reads empty beside a flag saying the rate is unusable. The
+		// user would be looking at an empty cell being told to fix it. (A
+		// lone "," is refused by the parser itself now, as a comma outside
+		// grouping position; the symbols are what still need this.)
 		if err != nil || (strings.TrimSpace(str) != "" && !importRateIsUsable(parsed)) {
 			return nil, "INVALID_RATE", importRateInvalidMessage()
 		}
@@ -1403,6 +1411,10 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 				case "description":
 					ir.Description = val
 				case "amount":
+					// The raw cell is kept whatever the parse does with it, so
+					// a value nobody can read stays distinguishable from an
+					// empty cell — see importRow.RawAmount.
+					ir.RawAmount = val
 					if val != "" {
 						// parseImportAmount normalizes to cents and
 						// rejects NaN/Inf/out-of-range values; on any
@@ -2216,6 +2228,10 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		row.Description = normalized.(string)
 	case "amount":
 		row.Amount = normalized.(float64)
+		// The raw cell travels with the value. validateImportField has already
+		// refused anything unparseable, so this always clears an amount_invalid
+		// flag rather than carrying a stale one past the edit that fixed it.
+		row.RawAmount = strings.TrimSpace(req.Value.(string))
 	case importFieldRate:
 		rate := normalized.(importRateValue)
 		row.Rate = rate.Rate
@@ -2686,16 +2702,6 @@ func stripCurrencySymbols(s string) string {
 	return s
 }
 
-// stripCurrencyFormat removes currency symbols, commas and whitespace so the
-// string can be parsed as a float, and converts accounting negatives.
-//
-// It deletes commas UNCONDITIONALLY and is therefore not safe to parse with on
-// its own — see cleanImportNumber, which is what the parsers call. This is
-// kept as the display-level stripper it has always been.
-func stripCurrencyFormat(s string) string {
-	return strings.ReplaceAll(stripCurrencySymbols(s), ",", "")
-}
-
 // importGroupedInteger matches an integer part whose commas are all thousands
 // separators: one to three digits, then groups of exactly three.
 var importGroupedInteger = regexp.MustCompile(`^\d{1,3}(,\d{3})+$`)
@@ -2707,8 +2713,8 @@ var importGroupedInteger = regexp.MustCompile(`^\d{1,3}(,\d{3})+$`)
 // because no other rule is available. Half the world writes 0,92 for what the
 // other half writes 0.92; a bare spreadsheet cell carries no locale, and
 // "1,500" is one thousand five hundred to one reader and one and a half to
-// another. Deleting every comma — which is what stripCurrencyFormat does, and
-// what these parsers used to do — resolves that ambiguity by silently picking
+// another. Deleting every comma — which is what these parsers used to do —
+// resolves that ambiguity by silently picking
 // the reading that is a HUNDREDFOLD error when it is wrong: "0,92" became 92.
 // On a rate that is worse than wrong, because a booked rate is frozen onto
 // the row: 100 EUR at a "0,92" rate stored $1.09 and a booked rate of 92,
@@ -2740,8 +2746,9 @@ func cleanImportNumber(s string) (string, error) {
 
 // parseImportAmount converts a string from an imported xlsx Amount cell
 // (or Original Amount cell) into an int64 cents value. It strips
-// currency formatting via stripCurrencyFormat, parses the remainder as
-// a float64, and rounds to cents via dollarsToCents.
+// currency formatting via cleanImportNumber — which also refuses any comma
+// that is not a thousands separator — parses the remainder as a float64, and
+// rounds to cents via dollarsToCents.
 //
 // Extracted for two reasons:
 //
@@ -2752,7 +2759,7 @@ func cleanImportNumber(s string) (string, error) {
 //     whole xlsx→row plumbing.
 //
 //  2. Phase 3.1 cents-normalization hygiene. Callers that previously
-//     ran `stripCurrencyFormat + ParseFloat` inline now route through
+//     ran a strip-and-`ParseFloat` inline now route through
 //     one place that also validates NaN/Inf and magnitude. Previously
 //     an xlsx cell containing "NaN" or "1e20" would parse to a garbage
 //     float and flow silently into dollarsToCents, producing an

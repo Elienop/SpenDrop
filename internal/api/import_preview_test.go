@@ -944,6 +944,138 @@ func TestBuildImportPreview_SignMismatchedRowCarriesNoMoneyFlag(t *testing.T) {
 	}
 }
 
+// TestHandleImportUpload_UnreadableAmountIsFlaggedNotZeroed walks the last
+// money cell that could still fail in silence.
+//
+// An Amount cell the parser cannot read — "1,5" in the European convention,
+// or anything else — became a zero, and the row left the import as
+// `zero_amount`: counted in "3 imported, 1 skipped" with no row named and no
+// message anywhere. That is the failure the rate and the original were both
+// given raw cells to prevent, and the amount was the one still missing it.
+func TestHandleImportUpload_UnreadableAmountIsFlaggedNotZeroed(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "unreadableamount", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{
+			{"2026-01-15", "European lunch", "1,5", "Food"},
+			// The control: a zero amount is not unreadable, and keeps its
+			// long-standing silent skip.
+			{"2026-01-16", "Waived fee", "0.00", "Food"},
+			{"2026-01-17", "Groceries", "42.50", "Food"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	errs := fieldErrorsByRow(t, preview)
+
+	want := "That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row."
+	if got := errs[0][importFieldAmount]; got != want {
+		t.Errorf("row 0 message = %q\nwant          = %q", got, want)
+	}
+	if flags, flagged := errs[1]; flagged {
+		t.Errorf("the 0.00 row was flagged: %v — a cell that reads as zero is not one nobody can read", flags)
+	}
+	if flags, flagged := errs[2]; flagged {
+		t.Errorf("the ordinary row was flagged: %v", flags)
+	}
+
+	// It blocks confirm like every other money condition…
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "MONEY_ERRORS" {
+		t.Errorf("code = %q, want MONEY_ERRORS", code)
+	}
+
+	// …and one edit clears it, leaving the zero row to skip quietly as it
+	// always has.
+	if rec := patchImportRow(t, h, user, importID, 0, "amount", "1.5"); rec.Code != http.StatusOK {
+		t.Fatalf("patch amount: %d %s", rec.Code, rec.Body.String())
+	}
+	confirmRec := confirmImport(t, h, q, user, importID)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("confirm after the fix: expected 200, got %d; body: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(confirmRec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal confirm result: %v", err)
+	}
+	reasons, _ := result["skipped_reasons"].(map[string]any)
+	if reasons["zero_amount"] != 1.0 {
+		t.Errorf("skipped_reasons = %v, want one zero_amount (the 0.00 row)", reasons)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 2 {
+		t.Errorf("live rows = %d, want 2", n)
+	}
+}
+
+// TestHandleImportUpload_DecimalCommaIsReportedOnEveryMoneyCell is the README
+// sentence as a test.
+//
+// The docs promise that a number written in the other convention "is reported
+// as unparseable instead of being silently misread by a factor of a hundred".
+// That is a claim about THREE cells — Amount, Original Amount and Rate — and
+// it only became true of all three once the Amount cell got its raw twin. A
+// promise in a README that holds for two cells out of three is worse than no
+// promise: it is the third one nobody checks.
+func TestHandleImportUpload_DecimalCommaIsReportedOnEveryMoneyCell(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "commaeverywhere", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			// The base amount.
+			{"2026-01-15", "Bakery", "0,92", "Food", "", "", ""},
+			// The foreign original.
+			{"2026-01-16", "Souk run", "", "Food", "1,5", "LBP", "89000"},
+			// The rate.
+			{"2026-01-17", "Paris lunch", "", "Food", "100", "EUR", "0,92"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	errs := fieldErrorsByRow(t, preview)
+
+	for _, want := range []struct {
+		rowID int
+		field string
+		cell  string
+	}{
+		{0, importFieldAmount, "Amount"},
+		{1, importFieldAmount, "Original Amount"},
+		{2, importFieldRate, "Rate"},
+	} {
+		msg, flagged := errs[want.rowID][want.field]
+		if !flagged {
+			t.Errorf("a decimal comma in the %s cell was not reported (row %d): %v",
+				want.cell, want.rowID, errs[want.rowID])
+			continue
+		}
+		if msg == "" {
+			t.Errorf("row %d carries an empty message for the %s cell", want.rowID, want.cell)
+		}
+	}
+
+	// None of them may reach the ledger, and none of them may leave as a
+	// silent skip: confirm refuses the batch by name.
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "MONEY_ERRORS" {
+		t.Errorf("code = %q, want MONEY_ERRORS", code)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed from cells nobody could read", n)
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.

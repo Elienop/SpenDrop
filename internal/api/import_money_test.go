@@ -297,6 +297,51 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 			wantReason:  skipReasonAmountInvalid,
 		},
 		{
+			// The Amount cell is the one money cell that used to have no raw
+			// twin, so a cell the parser could not read became a zero and the
+			// row left as zero_amount with nothing said about it — the same
+			// silent-loss shape the rate and the original were given raw cells
+			// to prevent. Every decimal-comma amount now lands here.
+			name: "an unreadable amount cell is diagnosed, not zeroed",
+			row: importRow{
+				RawAmount: "1,5",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// Same shape, arriving beside a foreign pair that resolves
+			// perfectly well: a populated cell must still mean something, and
+			// deriving the amount from the rate while ignoring what the sheet
+			// says in the amount column is how the two come to disagree
+			// without anyone noticing.
+			name: "an unreadable amount is not rescued by a usable rate",
+			row: importRow{
+				RawAmount:        "abc",
+				OriginalAmount:   1500000,
+				OriginalCurrency: "LBP",
+				Rate:             89000,
+				RawRate:          "89000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// The control, and the line between the two: a cell that READS as
+			// zero is not unreadable. A bank statement's 0.00 fee line has
+			// always left as zero_amount, silently and correctly — it is a row
+			// worth nothing, not a row nobody can parse — and turning it into
+			// a blocker would make every such statement need a Skip tick per
+			// fee line.
+			name: "an amount cell that reads as zero is not a diagnosis",
+			row: importRow{
+				RawAmount: "0.00",
+			},
+			wantAmountCents: 0,
+		},
+		{
 			// #10's third arm: a currency and a rate, and no original for the
 			// rate to convert. The raw original cell is EMPTY, which is what
 			// separates this from the two cases above — absent, not wrong.

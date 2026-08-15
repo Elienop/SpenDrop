@@ -264,7 +264,7 @@ func genForeignOriginalAtRate89000() *rapid.Generator[float64] {
 // where the conservation and sanity invariants matter most.
 func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 	return rapid.Custom(func(t *rapid.T) importRow {
-		shape := rapid.IntRange(0, 13).Draw(t, "shape")
+		shape := rapid.IntRange(0, 14).Draw(t, "shape")
 		switch shape {
 		case 0, 1, 2:
 			// Valid row (weighted higher so most rows hit the
@@ -426,8 +426,20 @@ func genImportRow(knownCats []string) *rapid.Generator[importRow] {
 				OriginalCurrency: "LBP",
 				RawRate:          rapid.SampledFrom([]string{"abc", "0", "-1", "1e400"}).Draw(t, "bad_rate"),
 			}
+		case 14:
+			// An Amount cell the parser cannot read — hits
+			// skipReasonAmountInvalid through the raw cell rather than
+			// vanishing into zero_amount. The drawn strings are the shapes a
+			// real sheet produces: the European decimal comma, a mis-grouped
+			// number, and plain text in a money column.
+			return importRow{
+				Date:        genValidDateString().Draw(t, "date"),
+				Description: genNonEmptyDescription().Draw(t, "desc"),
+				Category:    rapid.SampledFrom(knownCats).Draw(t, "cat"),
+				RawAmount:   rapid.SampledFrom([]string{"1,5", "0,92", "1,00,000", "abc", "n/a"}).Draw(t, "bad_amount"),
+			}
 		}
-		// Unreachable — IntRange(0, 13) guarantees shape is in [0, 13].
+		// Unreachable — IntRange(0, 14) guarantees shape is in [0, 14].
 		// If a future refactor widens the range without adding a
 		// matching case, the default importRow{} here lands in the
 		// empty-date branch and is counted as skipReasonUnparseableDate,
@@ -975,6 +987,36 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 			CatIDToName: fix.catIDToName,
 		})
 		assertSingleSkip(t, result, skipReasonAmountDisagrees)
+	})
+
+	t.Run("amount_invalid_unreadable_cell", func(t *testing.T) {
+		// The reachable shape on the base amount: a cell the parser refused,
+		// which used to become a zero and take the row out of the batch as
+		// zero_amount with nothing recording why.
+		row := validBase
+		row.Amount = 0
+		row.RawAmount = "1,5"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonAmountInvalid)
+	})
+
+	t.Run("zero_amount_survives_the_raw_cell", func(t *testing.T) {
+		// The control: a cell that READS as zero keeps the reason it has
+		// always had. Without this arm, widening amount_invalid to every
+		// zero-valued row would look correct.
+		row := validBase
+		row.Amount = 0
+		row.RawAmount = "0.00"
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		assertSingleSkip(t, result, skipReasonZeroAmount)
 	})
 
 	t.Run("amount_invalid", func(t *testing.T) {

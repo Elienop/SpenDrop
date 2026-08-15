@@ -163,6 +163,23 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 	hasRate := importRateIsUsable(row.Rate)
 
 	usdCents := dollarsToCents(row.Amount)
+
+	// The AMOUNT cell, before anything is decided about currencies or rates,
+	// because an unreadable base amount is a fault on every shape of row.
+	//
+	// The test is the PARSE, not the value: a cell that reads as zero is not a
+	// cell nobody can read. A bank statement's 0.00 fee line has always left
+	// as zero_amount — silently, and correctly, because it is a row worth
+	// nothing — and turning that into a blocker would demand a Skip tick per
+	// fee line on files that import cleanly today. A cell like "1,5" is a
+	// different thing: the sheet states money and SpenDrop cannot tell what,
+	// so it says so instead of storing a zero and dropping the row into a
+	// count.
+	if raw := strings.TrimSpace(row.RawAmount); raw != "" && usdCents == 0 {
+		if _, err := parseImportAmount(raw); err != nil {
+			return blocked(importFieldAmount, importAmountUnreadableMessage(), skipReasonAmountInvalid)
+		}
+	}
 	origCents := dollarsToCents(row.OriginalAmount)
 	code := strings.TrimSpace(row.OriginalCurrency)
 
@@ -343,7 +360,8 @@ func importRateIsUsable(rate float64) bool {
 // caller keeps the raw cell so it can tell the two apart: rate_missing (#5)
 // and rate_invalid (#9) carry different fixes.
 //
-// Formatting tolerance matches the amount cells (stripCurrencyFormat), so
+// Formatting tolerance matches the amount cells — both go through
+// cleanImportNumber — so
 // "89,000" parses — but note that accounting parentheses make a rate NEGATIVE
 // and therefore invalid, which is correct: a negative rate would flip a
 // purchase into a refund.
@@ -381,7 +399,7 @@ func parseImportRate(s string) (float64, error) {
 }
 
 // importRateGrammar is the shape parseImportRate accepts, after
-// stripCurrencyFormat has removed grouping commas and symbols. \d is ASCII
+// cleanImportNumber has removed grouping commas and symbols. \d is ASCII
 // here (Go's regexp Perl classes are), so Eastern Arabic digits are refused
 // too — they parse in no locale this app has.
 var importRateGrammar = regexp.MustCompile(`^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$`)
@@ -466,6 +484,19 @@ func importRateWithoutCurrencyMessage() string {
 func importAmountDisagreesMessage(usd, original, rate, derived float64) string {
 	return fmt.Sprintf("%s ≠ %s ÷ %s = %s. Fix the amount, the original or the rate — SpenDrop stores what the rate produces.",
 		formatImportDollars(usd), formatImportQuantity(original), formatImportQuantity(rate), formatImportDollars(derived))
+}
+
+// importAmountUnreadableMessage explains an Amount cell the parser cannot
+// read. It names the punctuation rule because that is what the cell almost
+// always is — a decimal comma, written by half the world — and because the
+// alternative ("not a valid number") tells someone looking at 1,5 nothing they
+// do not already believe is false.
+//
+// It says "fix it here" where the length messages for tags and notes say fix
+// the spreadsheet, and the difference is real: the amount IS an editable
+// preview cell.
+func importAmountUnreadableMessage() string {
+	return "That amount is not a number SpenDrop can read — figures use a period for decimals, and a comma only between thousands. Fix it here, or skip this row."
 }
 
 // importOriginalAmountInvalidMessage explains an ORIGINAL amount that is not a

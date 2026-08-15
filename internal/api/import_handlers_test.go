@@ -1191,8 +1191,8 @@ func TestHandleImportConfirm_PurchaseAndRefund_DistinctIdentities(t *testing.T) 
 }
 
 // TestHandleImportConfirm_AccountingNegative_LandsNegative walks the
-// accounting-format path end to end. stripCurrencyFormat has always turned
-// "(42.50)" into "-42.50" and TestStripCurrencyFormat_AccountingNegatives has
+// accounting-format path end to end. The parser's stripper has always turned
+// "(42.50)" into "-42.50" and TestStripCurrencySymbols_AccountingNegatives has
 // always pinned that — but with the sign stripped at insert, the conversion
 // was moot below the parser. This is the test that makes the whole chain
 // load-bearing: a bookkeeper's parenthesised credit reaches the ledger as a
@@ -1261,7 +1261,7 @@ func TestHandleImportConfirm_AccountingNegative_LandsNegative(t *testing.T) {
 	}
 }
 
-func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
+func TestStripCurrencySymbols_AccountingNegatives(t *testing.T) {
 	tests := []struct {
 		input    string
 		expected string
@@ -1269,18 +1269,18 @@ func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
 		{"$42.50", "42.50"},
 		{"-$15.00", "-15.00"},
 		{"($42.50)", "-42.50"},
-		{"(€1,234.56)", "-1234.56"},
+		{"(€1,234.56)", "-1,234.56"},
 		{"(£100.00)", "-100.00"},
 		{"$ (42.50)", "-42.50"},
-		{"1,234.56", "1234.56"},
+		{"1,234.56", "1,234.56"},
 		{" $42.50 ", "42.50"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.input, func(t *testing.T) {
-			got := stripCurrencyFormat(tc.input)
+			got := stripCurrencySymbols(tc.input)
 			if got != tc.expected {
-				t.Errorf("stripCurrencyFormat(%q) = %q, want %q", tc.input, got, tc.expected)
+				t.Errorf("stripCurrencySymbols(%q) = %q, want %q", tc.input, got, tc.expected)
 			}
 		})
 	}
@@ -3715,8 +3715,8 @@ func TestHandleImportPatchRow_RateInvalidReturns400(t *testing.T) {
 // TestHandleImportPatchRow_RateThatStripsToNothingIs400 closes the gap between
 // what the PATCH accepts and what the resolver blocks.
 //
-// "$" and "," survive stripCurrencyFormat as an empty string, so they parsed
-// as ABSENCE and the edit was taken as a clear — leaving the row's rate cell
+// A cell holding only symbols or whitespace strips to an empty string, so it
+// parsed as ABSENCE and the edit was taken as a clear — leaving the row's rate cell
 // empty on the wire while the resolver flagged it as unusable. The user is
 // then looking at an empty cell being told to fix the rate in it.
 func TestHandleImportPatchRow_RateThatStripsToNothingIs400(t *testing.T) {
