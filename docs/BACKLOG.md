@@ -206,6 +206,10 @@ keypad-hint change: on Android/Chromium a bare `type="number"` and `inputMode="d
 REPORTED to map to the same unsigned IME class (unverified — device only), and iOS is the one
 platform where `decimal` itself removes the minus. If the S24 keypad hides `-`, compare against a
 bare `type="number"` field first; then build the affordance. **Effort:** small-medium.
+**Device result 2026-08-15 (owner screenshot, S24 / Samsung Keyboard):** the decimal keypad on
+Filters → Amount shows `1–9 0 . ,` and NO `−`, so a phone user cannot type a negative bound at
+all — confirmed real. The bare-`type="number"` comparison is still open; the fix is the sign
+affordance, as its own small UI stage (not a rider on a data-correctness branch).
 
 ### B52 — an emptied export Year still exports year 0
 **Verified: read** (2026-08-15, found while fixing the export field's clear-and-retype snap).
@@ -242,10 +246,26 @@ PR #139 and released as v0.44.0 — see Closed.*
   (`bf500ca`, v0.44.2) from `fix/phone-residue-sheets-url-budgets-switches` — see Closed.
   Carried the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision
   records as riders.
-- **Back-dated import rate** (decided 2026-08-14): the import sheet gets an optional per-row
-  rate column; rows without one fall back to the import-day rate. Data-correctness stage on
-  its own branch — import parser + validation, and the interaction with the import dedupe
-  hash must be designed, not assumed. Next after the phone-residue batch.
+- **Import per-row rate** (redesigned 2026-08-15 — IN PROGRESS on `feat/import-per-row-rate`).
+  **Corrected premise:** at `804dbc2` the import performs NO currency conversion — it requires
+  the USD `Amount` column, stores `Original Amount`/`Original Currency` verbatim as labels,
+  never reads the currencies table, and leaves `booked_rate` NULL. There is no "import-day
+  rate" to fall back to; the 2026-08-14 wording assumed one. Owner chose **option A**: a `Rate`
+  column is the SOURCE of the USD (`amount = original ÷ rate`, `booked_rate` recorded, same
+  divisor as manual entry); a foreign row with no rate and no USD is a preview blocker with an
+  explicit "enter one / apply today's N" fix — never a silent fallback (which would break same-
+  sheet re-import dedupe, since the hash keys on USD cents); an unknown currency blocks with
+  "add it under Settings → Currencies"; export gains a `Rate` column so a SpenDrop export
+  re-imports losslessly. Hash formula and schema unchanged.
+- **Re-price older rows at a new rate** (owner asked 2026-08-15: "if I want to apply a new rate
+  for older data can I do that?" — today: no; the freeze-on-edit is one-way and the only escape
+  is the undiscoverable two-save trick). Now honest to build because every manual row records
+  `booked_rate` (#139) and imported rows will (stage above). Two sizes, own branch after the
+  import-rate stage: (1) an editable **Rate** on the transaction edit form (USD recomputes,
+  `booked_rate` updates — also the discoverable escape from the freeze); (2) a filter-scoped
+  bulk "re-price all rows in currency C between A and B at rate R" that previews the touched
+  rows and before/after totals, writes an audit row per row, clears their `content_hash` (the
+  money moved), and fires the checkpoint + budget hooks like every bulk path must.
 
 ---
 
@@ -263,12 +283,11 @@ PR #139 and released as v0.44.0 — see Closed.*
   shipped in the phone-residue batch (PR #141, `bf500ca`), and B43 closed as intended
   behavior — see Closed.
 - ~~**Import + foreign currency:** what rate should a back-dated import use?~~ **Answered
-  2026-08-14: the import sheet carries its own optional per-row rate column; rows without one
-  fall back to the import-day rate** — the sheet knows its own era best, and the fallback is
-  today's behavior. Context that framed it: import accepts an `original_currency` column, so a
-  sheet of back-dated LBP rows was valued at the rate current *when you import* — harmless
-  while the rate never moved, real once it does; the booked-rate column (B1 step 2) shipped in
-  PR #139 and unblocked this. Promoted to the queued import-rate stage above.
+  2026-08-14, premise CORRECTED 2026-08-15:** the 08-14 answer ("rows without a rate fall back
+  to the import-day rate — today's behaviour") assumed the importer converts; it does not (see
+  the queued stage above for the measured facts). Owner's 08-15 decision: the sheet's `Rate`
+  column is the source of the USD; no silent fallback; unknown currencies block with an
+  "add it first" note. Promoted to the queued import-rate stage above.
 - **Entry-row ⌘Z leaves member-visible tombstones** — **Answered 2026-08-14: fine as-is**
   (asked 2026-08-02, reaction was pending since). Trash purge clears them, and tombstoned rows
   are excluded from every aggregate by the soft-delete invariant, so the only cost is Trash
@@ -323,7 +342,8 @@ condition *and* move the predicate, believing one was safe because the other was
 *(Move items here with their commit hash rather than deleting them.)*
 
 - **B20 + B36 — role integrity at the DB layer, and `@username` attribution** (2026-08-15, on
-  `fix/role-guard-and-username-attribution`; squash hash joins this entry at merge). Three
+  `fix/role-guard-and-username-attribution`; merged via PR #143, squash `804dbc2`, released
+  **v0.45.0**). Three
   parallel builders with disjoint ownership (backend B20, backend B36 wire, frontend B36 render).
   **B20** — migration `020_users_role_integrity.sql`: `BEFORE INSERT` + `BEFORE UPDATE OF role`
   triggers `RAISE(ABORT)` on any `users.role` outside {'admin','member'}, plus a repair `UPDATE
@@ -464,7 +484,9 @@ condition *and* move the predicate, believing one was safe because the other was
   old coercion per value, but a lone `-`/`1e` no longer collapses to 0 mid-typing, so `-5` now
   reaches the URL and is 400'd instead of exporting year 5 — measured by the deep review; that
   and the empty-→-year-0 residue are B52). Signed-bound caveat recorded at
-  FilterPanel and filed as B51. Device check still owed: FilterPanel's minus key on the S24.
+  FilterPanel and filed as B51. Device check DONE 2026-08-15 (owner screenshot): the S24's
+  decimal keypad on FilterPanel's Amount fields shows `.` and `,` and NO `−` — B51 is a real
+  phone gap, see its entry.
   **B50** — `<Toaster />` is the FIRST child of AppShell's root (was after `</main>`) and of
   QuickAdd's root, so a `toast.*` fired from a route's mount effect renders on a cold load.
   Mechanism confirmed in sonner 2.0.7 source: `Observer.addToast` publishes to current
