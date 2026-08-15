@@ -386,7 +386,11 @@ condition *and* move the predicate, believing one was safe because the other was
   produced (fixed: `make coverage` → `coverage.out` + `web/coverage/lcov.info` with repo-root
   paths, `sonar-project.properties` points at both and is now versioned — it holds no secrets —
   and the wrapper runs the target before every upload; without it the default gate's
-  `new_coverage < 80%` fails every PR); a `WARN Invalid character` at
+  `new_coverage < 80%` fails every PR — and, on the owner's friend's tip the next day, the
+  SEPARATE test-execution channel: `go test -json` → `sonar.go.tests.reportPaths` and
+  `vitest-sonar-reporter` XML → `sonar.testExecutionReportPaths`, so the dashboard's Unit Tests
+  count / pass density / duration exist at all — verified on the throwaway project: tests 4,655,
+  success density 100%); a `WARN Invalid character` at
   `export_truncation_test.go:359` was a literal U+FFFD (valid UTF-8; the Go lexer cannot tell it
   from a decode failure) — spelled `'\uFFFD'`, and the neutralizer test's raw bidi/C1/zero-width
   fixtures became `\u` escapes (`4ccae75`), so no source file carries an invisible character.
@@ -423,7 +427,7 @@ condition *and* move the predicate, believing one was safe because the other was
   (50k); charts pixel-diffed before/after on the rebuilt `:3535` in both themes (0 px on
   spending-light, ≤15 px at delta 1/255 elsewhere, all inside the sidebar theme toggle);
   `tsc -b --force`, eslint 0 errors, vitest 2236/2236. Commits: `4ccae75`, `f042263`, `4a526da`,
-  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above). Filed: B55, B56, and the Go
+  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above), `80fa965` (test-execution reports). Filed: B55, B56, and the Go
   threshold decision. **Branch scanned into a throwaway project** (`spendrop-branchcheck`, so `main`'s analysis
   stayed untouched — Community Build has no branch analysis): 0 analysis warnings, coverage
   **86.0%** (both reports resolved), every targeted rule at 0, and the residue is exactly the
