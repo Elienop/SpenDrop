@@ -1956,9 +1956,12 @@ describe('ImportPreviewTable — money', () => {
   });
 
   it('colours the blocked status line for both themes', () => {
-    // amber-500 on the light theme's white is ≈2.1:1 at 14px. Both halves
-    // of the token are pinned: a rule that only fixed the dark theme
-    // would look identical in a className that contained just one.
+    // Computed, not eyeballed: on the light card (pure white) amber-500
+    // is 2.15:1 and amber-600 — the first attempt at this fix — is
+    // 3.19:1, which clears the 3:1 for non-text and not the 4.5:1 body
+    // text needs. amber-700 is 5.02:1. Both halves of the token are
+    // pinned because a fix that only reached the dark theme would look
+    // identical in a className carrying just one of them.
     render(
       <ImportPreviewTable
         preview={makePreview({ field_errors: [fieldError(0, 'notes')] })}
@@ -1968,16 +1971,26 @@ describe('ImportPreviewTable — money', () => {
     );
 
     const status = screen.getByText(/^Fix or skip/);
-    expect(status.className).toContain('text-amber-600');
+    expect(status.className).toContain('text-amber-700');
     expect(status.className).toContain('dark:text-amber-500');
   });
 
   it('leaves a preview with no money problems exactly as it was', async () => {
-    // THE POSITIVE CONTROL. The snapshot file was written by the
-    // component BEFORE this feature existed; the only thing removed from
-    // the current render is the new Rate column, so anything else that
-    // moved — a class, an attribute, a cell, the status line — fails
-    // here rather than being noticed in a browser later.
+    // THE POSITIVE CONTROL. The only thing removed from the current
+    // render is the new Rate column, so anything else that moves — a
+    // class, an attribute, a cell, the status line — fails here rather
+    // than being noticed in a browser later.
+    //
+    // PROVENANCE. The baseline began as the component's own output from
+    // before this feature existed, and has been re-blessed twice since,
+    // each time by applying the INTENDED difference and letting the test
+    // prove it was the only one: the singular "Ready to import 1 row",
+    // and (a3e8327) the scroll container collapsing into the table's own
+    // wrapper so the sticky header has something that scrolls — two
+    // opening divs merged into one carrying both sets of classes, one
+    // closing tag removed. It is not a snapshot of whatever the
+    // component happens to render today; re-blessing it means diffing it
+    // and being able to name every line that moved.
     const { container } = render(
       <ImportPreviewTable
         preview={{

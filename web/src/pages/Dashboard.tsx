@@ -10,6 +10,7 @@ import { Link } from 'react-router-dom';
 import { useDashboard } from '../hooks/useDashboard';
 import { useAuth } from '../hooks/useAuth';
 import { api } from '../api/client';
+import { ATTENTION_TEXT_CLASS } from '@/lib/attention';
 import { getCategoryColorVar } from '@/lib/chart-colors';
 import { KpiCard, type KpiDelta } from '@/components/KpiCard';
 import { ChartCard } from '@/components/ChartCard';
@@ -694,7 +695,7 @@ export function Dashboard() {
                                   {formatFull(slice.value)} / {formatFull(slice.limit)} · {budgetPct}%
                                 </span>
                                 {slice.over && (
-                                  <span className="flex items-center gap-1 font-medium text-amber-600 dark:text-amber-500">
+                                  <span className={`flex items-center gap-1 font-medium ${ATTENTION_TEXT_CLASS}`}>
                                     <AlertTriangle className="h-3.5 w-3.5" aria-hidden="true" />
                                     over {formatFull(slice.value - slice.limit)}
                                   </span>
