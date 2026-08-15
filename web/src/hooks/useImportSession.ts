@@ -15,14 +15,17 @@ import {
   confirmImport as confirmImportAPI,
   cancelImport as cancelImportAPI,
   FieldTooLongError,
+  MoneyErrorsError,
   NotFoundError,
   UnresolvedCategoriesError,
   UnresolvedCollisionsError,
 } from '../api/import';
 import {
-  fallbackFieldTooLongMessage,
+  fallbackFieldErrorMessage,
   isEditableInPreview,
+  isMoneyField,
 } from '@/lib/import-field-errors';
+import { useCurrencies } from '@/hooks/useCurrencies';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 export type ImportStep = 'upload' | 'preview' | 'done';
@@ -96,8 +99,23 @@ export interface UseImportSessionResult {
    * Distinct non-skipped rows carrying at least one over-length field.
    * Blocks `canImport` on its own, so the button is disabled straight
    * off the upload response rather than only after a failed confirm.
+   *
+   * LENGTH ONLY. Money flags ride the same `field_errors` array and are
+   * counted by `moneyErrorRowCount` below — a row whose rate is missing
+   * is not a row that is too long, and the status line names them apart
+   * because the remedies are different sentences.
    */
   fieldErrorRowCount: number;
+  /**
+   * Distinct non-skipped rows the backend will not resolve money for:
+   * no rate for a foreign original, an unknown currency, an Amount cell
+   * that disagrees with `original ÷ rate`.
+   *
+   * Blocks `canImport` on its own for the same reason the two counts
+   * above do — confirm's 409 MONEY_ERRORS is the backstop, not the
+   * experience.
+   */
+  moneyErrorRowCount: number;
   /**
    * Distinct category values still awaiting a decision. Blocks `canImport`
    * on its own so the button is disabled straight off the upload response,
@@ -113,6 +131,19 @@ export interface UseImportSessionResult {
     field: PatchRowRequest['field'],
     value: string | boolean,
   ) => Promise<void>;
+  /**
+   * Records one rate against every named row: one PATCH per row through
+   * the same single-lane queue `patchRow` uses, value stringified as the
+   * PATCH contract carries it.
+   *
+   * The rate is passed IN rather than looked up here because the number
+   * the user was OFFERED is the number that must be recorded — the bulk
+   * button shows a rate off the preview's own `currencies` snapshot, and
+   * a row's `booked_rate` should be the rate that was on screen when the
+   * user accepted it, not whatever the table says by the time the PATCH
+   * lands.
+   */
+  applyRateToRows: (rowIDs: number[], rate: number) => Promise<void>;
   confirmImport: (
     categoryMap: Record<string, number>,
     defaultCategoryId: number | null,
@@ -157,6 +188,50 @@ export function activeFieldErrors(
   });
 }
 
+/**
+ * The two halves of `field_errors`, as row-id sets: rows blocked on
+ * LENGTH and rows blocked on MONEY. Both are counted per ROW, not per
+ * error, because that is the unit the user acts on — a row whose
+ * description AND note are both too long is one row to shorten or skip,
+ * and reporting "2" for it would not match anything the table
+ * highlights.
+ *
+ * Exported and shared by the gate (this hook) and the table for the same
+ * reason `activeFieldErrors` is: deriving "which rows are blocked, and
+ * which way" twice is how the button ends up disabled against rows
+ * nothing on screen is flagging.
+ */
+export function blockedRowIDs(
+  fieldErrors: ImportFieldError[] | undefined,
+  rows: ImportRow[],
+): { length: Set<number>; money: Set<number> } {
+  const length = new Set<number>();
+  const money = new Set<number>();
+  for (const fe of activeFieldErrors(fieldErrors, rows)) {
+    (isMoneyField(fe.field) ? money : length).add(fe.row_id);
+  }
+  return { length, money };
+}
+
+/**
+ * Whether two snapshots of the same row carry the same values. Used to
+ * keep object identity across a background refresh — see `applyRefresh`.
+ *
+ * Walks the union of both key sets rather than a hard-coded field list,
+ * because a wire field this file does not know about (the backend adds
+ * one before the type does — `rate` and `amount_derived` both arrived
+ * that way) must still count as a change. A list here would silently
+ * treat the new field as absent on both sides and report "unchanged"
+ * for a row whose money had just been re-resolved.
+ */
+function sameImportRow(a: ImportRow, b: ImportRow): boolean {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    if (a[key as keyof ImportRow] !== b[key as keyof ImportRow]) return false;
+  }
+  return true;
+}
+
 function computeUnresolvedCount(
   groups: CollisionGroup[],
   rows: ImportRow[],
@@ -195,6 +270,27 @@ export function useImportSession(
   // concurrent PATCHes for the same import_id. See design doc
   // "Race prevention (cross-row PATCH ordering)".
   const patchQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  // The household's currencies, watched rather than read: every preview
+  // surface recomputes its money flags against the CURRENT table, so a
+  // change here means this session's flags are out of date. Shares the
+  // one `['currencies']` cache entry with the rest of the app, so this
+  // costs no extra request — and the live-update subscriber's
+  // `invalidateQueries({ queryKey: ['currencies'] })` is what makes a
+  // currency added on another device reach an open preview.
+  const { list: currencyList, loading: currenciesLoading } = useCurrencies();
+  // A VALUE signature, not the array's identity: `useCurrencies` hands
+  // back a fresh `[]` on every render while the query has no data, and
+  // an effect keyed on the reference would re-read the session forever.
+  // Rate and base flag are in it because both move a row's resolution —
+  // only the code changing would miss a re-priced currency.
+  const currencySignature = useMemo(
+    () =>
+      currencyList
+        .map((c) => `${c.code}:${c.rate_to_base}:${c.is_base}`)
+        .join('|'),
+    [currencyList],
+  );
 
   // ---- localStorage resume on mount ----
   useEffect(() => {
@@ -255,20 +351,19 @@ export function useImportSession(
     return computeUnresolvedCount(preview.collision_groups, preview.rows);
   }, [preview]);
 
-  // Number of distinct rows still carrying an over-length field. Counted
-  // per ROW, not per error, because that is the unit the user acts on:
-  // a row whose description AND note are both too long is one row to
-  // shorten or skip, and reporting "2" for it would not match anything
-  // the table highlights.
-  const fieldErrorRowCount = useMemo(() => {
-    if (!preview) return 0;
-    const active = activeFieldErrors(preview.field_errors, preview.rows);
-    return new Set(active.map((fe) => fe.row_id)).size;
+  // The two blocked-row sets, derived together from one walk of the
+  // server's flags. See `blockedRowIDs` for why they are counted per row
+  // and why the split is not this file's private business.
+  const blocked = useMemo(() => {
+    if (!preview) return { length: new Set<number>(), money: new Set<number>() };
+    return blockedRowIDs(preview.field_errors, preview.rows);
   }, [preview]);
+  const fieldErrorRowCount = blocked.length.size;
+  const moneyErrorRowCount = blocked.money.size;
 
   /**
-   * Per-cell errors as the table consumes them: the server's own
-   * over-length flags merged under any error from a rejected PATCH.
+   * Per-cell errors as the table consumes them: the server's own row
+   * flags merged under any error from a rejected PATCH.
    *
    * Merging here rather than seeding `patchCellErrors` from the upload
    * response keeps the two halves on the lifecycles they actually have.
@@ -281,9 +376,11 @@ export function useImportSession(
    * the stale-flag bug the table's build-from-props rule exists to
    * prevent.
    *
-   * Only fields the preview can actually edit appear here — today just
-   * `description`, which is the only over-lengthable column rendered as
-   * a cell. `tags` and `notes` have nothing to attach to and are
+   * Only fields the preview can actually edit appear here —
+   * `description`, `amount` and `rate`, the three columns rendered as
+   * editable cells. `tags` and `notes` have nothing to attach to, and
+   * `original_currency` deliberately has no cell (an unknown currency is
+   * added in Settings, not edited away in the preview); all three are
    * surfaced at row level by the table instead.
    *
    * Both halves carry the SERVER's sentence. That is the whole point of
@@ -302,7 +399,7 @@ export function useImportSession(
         if (!isEditableInPreview(fe.field)) continue;
         merged[`${fe.row_id}:${fe.field}`] = {
           field: fe.field,
-          message: fe.message || fallbackFieldTooLongMessage(fe.field),
+          message: fe.message || fallbackFieldErrorMessage(fe.field),
         };
       }
     }
@@ -322,6 +419,7 @@ export function useImportSession(
     preview !== null &&
     unresolvedCount === 0 &&
     fieldErrorRowCount === 0 &&
+    moneyErrorRowCount === 0 &&
     unresolvedCategoryCount === 0 &&
     pendingPatchCount === 0;
 
@@ -356,6 +454,96 @@ export function useImportSession(
     },
     [],
   );
+
+  /**
+   * Applies a session snapshot nobody asked for — the re-read that
+   * follows a change to the currencies table. Unlike `applyResponse`
+   * above there is no patched row to privilege, so it takes the server's
+   * value for every row that MOVED and keeps the previous object for
+   * every row that did not.
+   *
+   * Both halves matter. Taking the server's values is the whole point:
+   * the flags this refresh exists to clear live on the rows. Keeping the
+   * identity of unchanged rows is what stops a background refresh from
+   * remounting the cell the user is typing in — the same reconciliation
+   * property `applyResponse` protects, arrived at from the other side.
+   *
+   * A snapshot for a DIFFERENT session is dropped: the user can cancel
+   * and upload again while a refresh is in flight, and applying the old
+   * session's rows over the new one would be worse than doing nothing.
+   */
+  const applyRefresh = useCallback((fresh: ImportPreview) => {
+    setPreview((prev) => {
+      if (!prev) return prev;
+      if (prev.import_id !== fresh.import_id) return prev;
+      const previousByRowID = new Map<number, ImportRow>();
+      for (const row of prev.rows) previousByRowID.set(row.row_id, row);
+      return {
+        ...fresh,
+        rows: fresh.rows.map((row) => {
+          const previous = previousByRowID.get(row.row_id);
+          return previous && sameImportRow(previous, row) ? previous : row;
+        }),
+      };
+    });
+  }, []);
+
+  /**
+   * Re-reads the session THROUGH THE PATCH LANE, which is the load-
+   * bearing half: a GET fired beside the queue could overtake an
+   * in-flight PATCH and answer with the pre-edit snapshot, handing the
+   * user their own typing back undone. Chaining it behind whatever is
+   * queued makes that ordering impossible.
+   *
+   * Failures are swallowed on purpose. This is a background read the
+   * user did not ask for; a banner over it would explain nothing, and an
+   * expired session still surfaces properly on the next action the user
+   * DOES take. It also deliberately does not touch `pendingPatchCount`
+   * — that count gates the Import button, and a background read is not a
+   * reason to disable it.
+   */
+  const refreshSession = useCallback(
+    (importID: string) => {
+      const next = patchQueueRef.current
+        .then(async () => {
+          const fresh = await getImportSession(importID);
+          applyRefresh(fresh);
+        })
+        .catch(() => {});
+      patchQueueRef.current = next;
+      return next;
+    },
+    [applyRefresh],
+  );
+
+  /**
+   * Re-read the session when the household's currencies change.
+   *
+   * Every preview surface recomputes its money flags against the CURRENT
+   * currencies table, so adding the missing currency in Settings and
+   * re-reading is what clears an `unknown_currency` flag — without it the
+   * user's only route back is a re-upload, which throws away every edit
+   * and every skip they have made in this session.
+   *
+   * Latched on the signature rather than fired per render: the effect
+   * must run once per real change to the table, and `useCurrencies`
+   * returns a fresh array on renders where nothing moved. The first
+   * signature is recorded WITHOUT a read — mounting is not a change, and
+   * a session that has just been uploaded or resumed is already current.
+   */
+  const seenCurrencySignatureRef = useRef<string | null>(null);
+  const previewImportID = preview?.import_id ?? null;
+  useEffect(() => {
+    if (currenciesLoading) return;
+    if (seenCurrencySignatureRef.current === null) {
+      seenCurrencySignatureRef.current = currencySignature;
+      return;
+    }
+    if (seenCurrencySignatureRef.current === currencySignature) return;
+    seenCurrencySignatureRef.current = currencySignature;
+    if (!previewImportID) return;
+    void refreshSession(previewImportID);
+  }, [currencySignature, currenciesLoading, previewImportID, refreshSession]);
 
   // ---- actions ----
   const uploadFile = useCallback(async (file: File) => {
@@ -425,6 +613,36 @@ export function useImportSession(
       return next;
     },
     [preview, applyResponse],
+  );
+
+  /**
+   * "Apply today's rate" for a set of rows: one `rate` PATCH each,
+   * sequential, through the same lane every other edit uses. Identical in
+   * shape to the table's bulk skip — a burst of ordinary single-field
+   * PATCHes, not a new endpoint — so each row's response re-resolves its
+   * money and drops its flag exactly as a hand-typed rate would.
+   *
+   * `String(rate)` because the PATCH body carries every field as a
+   * string; the server parses it with the same tolerance as the sheet
+   * cell.
+   *
+   * A rejected row does NOT abort the rest. `patchRow` has already
+   * recorded that row's message against its rate cell, and stopping the
+   * burst would leave the remaining rows silently untouched — the user
+   * would have to guess which of them the click reached.
+   */
+  const applyRateToRows = useCallback(
+    async (rowIDs: number[], rate: number): Promise<void> => {
+      const value = String(rate);
+      for (const rowID of rowIDs) {
+        try {
+          await patchRow(rowID, 'rate', value);
+        } catch {
+          /* surfaced on that row's cell by patchRow */
+        }
+      }
+    },
+    [patchRow],
   );
 
   const confirmImport = useCallback(
@@ -503,6 +721,20 @@ export function useImportSession(
           );
           return;
         }
+        if (err instanceof MoneyErrorsError) {
+          // The money sibling of the branch above, and identical by
+          // design: replace only the field_errors slice the server just
+          // recomputed, leave the rows (and every edit on them) alone.
+          // The banner is its own sentence because the remedy is —
+          // "shorten" is not what a row with no exchange rate needs.
+          setPreview((prev) =>
+            prev ? { ...prev, field_errors: err.field_errors } : prev,
+          );
+          setError(
+            'Some rows have money SpenDrop cannot resolve — fix or skip the highlighted rows',
+          );
+          return;
+        }
         setError(err instanceof Error ? err.message : 'Import failed');
       }
     },
@@ -545,10 +777,12 @@ export function useImportSession(
     cellErrors,
     unresolvedCount,
     fieldErrorRowCount,
+    moneyErrorRowCount,
     unresolvedCategoryCount,
     canImport,
     uploadFile,
     patchRow,
+    applyRateToRows,
     confirmImport,
     cancelImport,
     startOver,

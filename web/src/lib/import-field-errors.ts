@@ -31,12 +31,40 @@ import type { ImportFieldErrorField, PatchRowRequest } from '@/api/types';
  */
 
 /**
+ * The half of the flag family that is about money rather than length —
+ * see `ImportFieldErrorField`. Split out as a predicate because the two
+ * families are counted separately, blocked separately, and explained
+ * with different verbs: "shorten or skip" against "fix the money".
+ *
+ * A LIST rather than a comparison chain so the type and the runtime
+ * check cannot drift: `ImportMoneyField` is derived from the same array
+ * the predicate walks, and adding a money field to one adds it to both.
+ */
+export const IMPORT_MONEY_FIELDS = [
+  'rate',
+  'original_currency',
+  'amount',
+] as const satisfies readonly ImportFieldErrorField[];
+
+export type ImportMoneyField = (typeof IMPORT_MONEY_FIELDS)[number];
+
+export function isMoneyField(
+  field: ImportFieldErrorField,
+): field is ImportMoneyField {
+  return (IMPORT_MONEY_FIELDS as readonly ImportFieldErrorField[]).includes(
+    field,
+  );
+}
+
+/**
  * Whether a flagged field can be fixed inside the preview table. This
- * is a property of OUR table, not of the API: `description` is the only
- * over-lengthable column the preview renders as editable, so it is the
- * only field whose error has a cell to hang a message on. `tags` and
- * `notes` are not rendered at all, so their errors are shown at row
- * level with Skip as the fix.
+ * is a property of OUR table, not of the API: `description`, `amount`
+ * and `rate` are the columns the preview renders as editable cells, so
+ * they are the fields whose errors have a cell to hang a message on.
+ * `tags` and `notes` are not rendered at all, and `original_currency`
+ * has no cell BY DESIGN — an unknown currency is resolved in Settings,
+ * outside this session — so those are shown at row level, with Skip (or
+ * a trip to Settings → Currencies) as the fix.
  *
  * Typed as a predicate narrowing to `EditableImportField`, the
  * intersection of "can be reported too long" and "the PATCH endpoint
@@ -59,7 +87,7 @@ export type EditableImportField = Extract<
 export function isEditableInPreview(
   field: ImportFieldErrorField,
 ): field is EditableImportField {
-  return field === 'description';
+  return field === 'description' || field === 'rate' || field === 'amount';
 }
 
 /**
@@ -75,13 +103,23 @@ export function isEditableInPreview(
  * it and so nothing catches it, whereas "This value is too long" on
  * screen is a visible signal that a response arrived malformed.
  *
- * States no bound, for the same reason. A number here would recreate
- * the mirror this module exists to be rid of, in the one place where
- * nobody would ever see it was wrong.
+ * States no bound and no number, for the same reason — not the length
+ * limit, and not a rate. A number here would recreate the mirror this
+ * module exists to be rid of, in the one place where nobody would ever
+ * see it was wrong. The money branch is deliberately vaguer than the
+ * server's sentence rather than a shortened version of it: this side
+ * cannot know WHICH of the money conditions tripped (the wire carries
+ * that only in the message it just failed to send), so it says what it
+ * knows and points at the cells.
  */
-export function fallbackFieldTooLongMessage(
+export function fallbackFieldErrorMessage(
   field: ImportFieldErrorField,
 ): string {
+  if (isMoneyField(field)) {
+    return isEditableInPreview(field)
+      ? 'SpenDrop cannot work out this row’s money. Correct the amount or the rate here, or skip this row.'
+      : 'SpenDrop cannot work out this row’s money. Skip this row, or add the currency under Settings → Currencies.';
+  }
   return isEditableInPreview(field)
     ? 'This value is too long for SpenDrop. Shorten it here, or skip this row.'
     : 'This value is too long for SpenDrop. Skip this row, or shorten it in your spreadsheet and upload again.';

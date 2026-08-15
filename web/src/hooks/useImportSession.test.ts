@@ -1,12 +1,61 @@
-import { renderHook, act, waitFor } from '@testing-library/react';
+import { renderHook as rtlRenderHook, act, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { createElement, type ReactNode } from 'react';
 import {
   useImportSession,
   type ImportCategoryDecisions,
 } from './useImportSession';
+import type { Currency } from '@/api/types';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 const originalFetch = globalThis.fetch;
+
+/**
+ * The hook watches the `['currencies']` query so that adding a missing
+ * currency in Settings clears an "unknown currency" flag without a
+ * re-upload, which means every render of it now needs a QueryClient.
+ *
+ * The cache is SEEDED rather than fetched, and `staleTime: Infinity`
+ * keeps it that way: `useCurrencies`' queryFn goes through the same
+ * global `fetch` these tests replace with a queue of import responses,
+ * so a real currencies request would eat a queued reply meant for an
+ * upload or a PATCH — and the serialization test counts fetch calls
+ * exactly. Seeding also makes the update explicit: a test that wants the
+ * currencies to change calls `setQueryData`, which is what the live SSE
+ * `invalidateQueries({ queryKey: ['currencies'] })` amounts to here.
+ */
+const CURRENCIES: Currency[] = [
+  {
+    code: 'USD',
+    name: 'US Dollar',
+    symbol: '$',
+    rate_to_base: 1,
+    is_base: true,
+    updated_at: '',
+  },
+  {
+    code: 'LBP',
+    name: 'Lebanese Pound',
+    symbol: 'L£',
+    rate_to_base: 89000,
+    is_base: false,
+    updated_at: '',
+  },
+];
+
+let queryClient: QueryClient;
+
+function renderHook<Result, Props>(
+  callback: (props: Props) => Result,
+  options?: { initialProps?: Props },
+) {
+  return rtlRenderHook(callback, {
+    ...options,
+    wrapper: ({ children }: { children: ReactNode }) =>
+      createElement(QueryClientProvider, { client: queryClient }, children),
+  });
+}
 
 /**
  * "The user has decided nothing." Correct for every preview in this file,
@@ -126,6 +175,12 @@ const SERVER_FIELD_MESSAGES: Record<string, string> = {
 describe('useImportSession', () => {
   beforeEach(() => {
     localStorage.clear();
+    queryClient = new QueryClient({
+      defaultOptions: {
+        queries: { retry: false, staleTime: Infinity, refetchOnWindowFocus: false },
+      },
+    });
+    queryClient.setQueryData(['currencies'], CURRENCIES);
   });
 
   afterEach(() => {
@@ -857,6 +912,368 @@ describe('useImportSession', () => {
       // Staying on the preview is what gives the user somewhere to fix it.
       expect(result.current.importStep).toBe('preview');
       // Rows survive the 409: only the unresolved slice is replaced.
+      expect(result.current.preview?.rows).toHaveLength(2);
+    });
+  });
+
+  describe('money errors', () => {
+    /**
+     * The strings the backend's money resolver emits, mirrored here as
+     * test INPUT only — exactly like SERVER_FIELD_MESSAGES above. The
+     * hook renders whatever the wire carries and composes none of these,
+     * which is why a money fixture without a message would be testing a
+     * response the backend cannot produce.
+     */
+    const SERVER_MONEY_MESSAGES = {
+      rate: 'no rate for 1,500,000 LBP — enter one, or apply today’s 89,000',
+      original_currency:
+        "`LBX` isn't set up — add it under Settings → Currencies",
+      amount: '16.00 ≠ 1,500,000 ÷ 89,000 = 16.85',
+    } as const;
+
+    type MoneyField = keyof typeof SERVER_MONEY_MESSAGES;
+
+    /**
+     * The 2-row fixture with money flags attached. Rows carry the foreign
+     * cells a flagged row really has, so a consumer reading the response
+     * can tell the original from the stored value.
+     */
+    function bodyWithMoneyErrors(
+      moneyErrors: { row_id: number; field: MoneyField }[],
+      rowOverrides: Partial<{ skip: boolean }>[] = [],
+    ) {
+      const base = freshPreviewBody('money-1');
+      return {
+        ...base,
+        rows: base.rows.map((r, i) => ({
+          ...r,
+          original_amount: 1500000,
+          original_currency: 'LBP',
+          ...(rowOverrides[i] ?? {}),
+        })),
+        field_errors: moneyErrors.map((fe) => ({
+          ...fe,
+          message: SERVER_MONEY_MESSAGES[fe.field],
+        })),
+        currencies: [
+          { code: 'USD', rate_to_base: 1, is_base: true },
+          { code: 'LBP', rate_to_base: 89000, is_base: false },
+        ],
+      };
+    }
+
+    async function uploadWith(body: unknown) {
+      const fetchMock = installFetchQueue([{ body }]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      return { result, fetchMock };
+    }
+
+    it('blocks import straight from the upload response, before any confirm', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([{ row_id: 0, field: 'rate' }]),
+      );
+
+      expect(result.current.moneyErrorRowCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+      // Counted APART from the length family: the status line names a
+      // different remedy for each, and a row whose rate is missing is not
+      // a row that is too long.
+      expect(result.current.fieldErrorRowCount).toBe(0);
+      expect(result.current.unresolvedCount).toBe(0);
+    });
+
+    it('counts rows, not errors — one row flagged twice is one row to fix', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([
+          { row_id: 0, field: 'rate' },
+          { row_id: 0, field: 'amount' },
+        ]),
+      );
+
+      expect(result.current.moneyErrorRowCount).toBe(1);
+    });
+
+    it('treats a skipped row as resolved, exactly like a skipped over-length row', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([{ row_id: 1, field: 'rate' }], [{}, { skip: true }]),
+      );
+
+      expect(result.current.moneyErrorRowCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('ignores a money flag naming a row the preview does not hold', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([{ row_id: 99, field: 'rate' }]),
+      );
+
+      expect(result.current.moneyErrorRowCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+    });
+
+    it('seeds cell errors for the two money fields with a cell, and not for the one without', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([
+          { row_id: 0, field: 'rate' },
+          { row_id: 1, field: 'amount' },
+        ]),
+      );
+
+      expect(result.current.cellErrors['0:rate']).toEqual({
+        field: 'rate',
+        message: SERVER_MONEY_MESSAGES.rate,
+      });
+      expect(result.current.cellErrors['1:amount']).toEqual({
+        field: 'amount',
+        message: SERVER_MONEY_MESSAGES.amount,
+      });
+    });
+
+    it('gives an unknown currency no cell — it is resolved outside the session', async () => {
+      const { result } = await uploadWith(
+        bodyWithMoneyErrors([{ row_id: 0, field: 'original_currency' }]),
+      );
+
+      // There is no `original_currency` cell in the preview and PATCH
+      // does not accept the field, so a cell error keyed on it would be
+      // an error the user has no control to act on.
+      expect(result.current.cellErrors['0:original_currency']).toBeUndefined();
+      // It still blocks — the remedy is Settings → Currencies, and the
+      // table renders the sentence at row level.
+      expect(result.current.moneyErrorRowCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+    });
+
+    it('a rejected rate PATCH lands on the rate cell', async () => {
+      installFetchQueue([
+        { body: freshPreviewBody('money-2') },
+        {
+          ok: false,
+          status: 400,
+          body: { code: 'INVALID_RATE', field: 'rate', error: 'INVALID_RATE' },
+        },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+
+      await act(async () => {
+        try {
+          await result.current.patchRow(0, 'rate', 'abc');
+        } catch {
+          /* expected */
+        }
+      });
+
+      expect(result.current.cellErrors['0:rate']).toBeDefined();
+      expect(result.current.cellErrors['0:rate']?.field).toBe('rate');
+    });
+
+    it('applyRateToRows fires one string-valued rate PATCH per row, in order', async () => {
+      const fetchMock = installFetchQueue([
+        { body: bodyWithMoneyErrors([{ row_id: 0, field: 'rate' }]) },
+        { body: bodyWithMoneyErrors([]) },
+        { body: bodyWithMoneyErrors([]) },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+
+      await act(async () => {
+        await result.current.applyRateToRows([0, 1], 89000);
+      });
+
+      // Upload + one PATCH per row, and nothing for a row that was not
+      // named — a bulk escape that touched clean rows would record a rate
+      // against money the sheet already resolved.
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      const [, first, second] = fetchMock.mock.calls;
+      expect(String(first[0])).toContain('/rows/0');
+      expect(String(second[0])).toContain('/rows/1');
+      // A STRING value, because that is what the PATCH contract carries
+      // for every field — a number here would serialize to `89000` and
+      // the server's string switch would reject it.
+      expect(JSON.parse(String(first[1].body))).toEqual({
+        field: 'rate',
+        value: '89000',
+      });
+      expect(JSON.parse(String(second[1].body))).toEqual({
+        field: 'rate',
+        value: '89000',
+      });
+    });
+
+    it('re-reads the session once when the currencies table changes', async () => {
+      const cleared = {
+        ...bodyWithMoneyErrors([]),
+        currencies: [
+          { code: 'USD', rate_to_base: 1, is_base: true },
+          { code: 'LBP', rate_to_base: 89000, is_base: false },
+          { code: 'LBX', rate_to_base: 3.5, is_base: false },
+        ],
+      };
+      const fetchMock = installFetchQueue([
+        { body: bodyWithMoneyErrors([{ row_id: 0, field: 'original_currency' }]) },
+        { body: cleared },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      expect(result.current.moneyErrorRowCount).toBe(1);
+      // Only the upload so far: mounting must not re-read a session it
+      // just received.
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      // What adding the missing currency in Settings does to this cache
+      // — the SSE subscriber invalidates `['currencies']` and the query
+      // lands new data.
+      await act(async () => {
+        queryClient.setQueryData(['currencies'], [
+          ...CURRENCIES,
+          {
+            code: 'LBX',
+            name: 'Test Pound',
+            symbol: 'X',
+            rate_to_base: 3.5,
+            is_base: false,
+            updated_at: '',
+          },
+        ]);
+      });
+
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/import/money-1');
+      // The flag cleared without a re-upload — the whole point.
+      expect(result.current.moneyErrorRowCount).toBe(0);
+      expect(result.current.canImport).toBe(true);
+
+      // ONCE per update: a re-render, and a write of the same currency
+      // list, must not fire a second GET. Without a latch this effect
+      // re-reads the session on every render the query touches.
+      await act(async () => {
+        queryClient.setQueryData(['currencies'], [
+          ...CURRENCIES,
+          {
+            code: 'LBX',
+            name: 'Test Pound',
+            symbol: 'X',
+            rate_to_base: 3.5,
+            is_base: false,
+            updated_at: '',
+          },
+        ]);
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not re-read anything when there is no session to re-read', async () => {
+      // The negative control for the test above: the effect must be
+      // latched on the currencies, not fire once per mount, and the
+      // upload step has no import_id to GET.
+      const fetchMock = installFetchQueue([{ body: freshPreviewBody('money-3') }]);
+      renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
+
+      await act(async () => {
+        queryClient.setQueryData(['currencies'], []);
+      });
+
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('the currencies re-read keeps the server state and does not remount untouched rows', async () => {
+      // The refetch runs through the PATCH lane and merges like a PATCH
+      // response: rows whose values did not move keep their object
+      // identity (React keeps the open editor mounted), and an edit the
+      // server has already accepted comes back as the server's own value
+      // rather than being reverted to what the client uploaded.
+      const edited = {
+        ...bodyWithMoneyErrors([]),
+        rows: bodyWithMoneyErrors([]).rows.map((r, i) =>
+          i === 0 ? { ...r, description: 'Starbucks NYC' } : r,
+        ),
+      };
+      const fetchMock = installFetchQueue([
+        { body: bodyWithMoneyErrors([{ row_id: 0, field: 'rate' }]) },
+        { body: edited }, // PATCH response
+        { body: edited }, // currencies-driven GET
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      await act(async () => {
+        await result.current.patchRow(0, 'description', 'Starbucks NYC');
+      });
+      expect(result.current.preview?.rows[0].description).toBe('Starbucks NYC');
+      const untouchedBefore = result.current.preview?.rows[1];
+
+      await act(async () => {
+        queryClient.setQueryData(['currencies'], [CURRENCIES[0]]);
+      });
+      await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+      expect(result.current.preview?.rows[0].description).toBe('Starbucks NYC');
+      expect(result.current.preview?.rows[1]).toBe(untouchedBefore);
+    });
+
+    it('409 MONEY_ERRORS refreshes the flags, keeps the rows, and stays on the preview', async () => {
+      installFetchQueue([
+        { body: freshPreviewBody('money-4') },
+        {
+          ok: false,
+          status: 409,
+          body: {
+            code: 'MONEY_ERRORS',
+            field_errors: [
+              {
+                row_id: 1,
+                field: 'rate',
+                message: SERVER_MONEY_MESSAGES.rate,
+              },
+            ],
+          },
+        },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+      // The upload response carried no money flags, so the client let the
+      // confirm through — which is when the server's gate has to hold.
+      expect(result.current.canImport).toBe(true);
+
+      await act(async () => {
+        await result.current.confirmImport({}, null);
+      });
+
+      expect(result.current.preview?.field_errors).toEqual([
+        { row_id: 1, field: 'rate', message: SERVER_MONEY_MESSAGES.rate },
+      ]);
+      expect(result.current.moneyErrorRowCount).toBe(1);
+      expect(result.current.canImport).toBe(false);
+      expect(result.current.error).toBe(
+        'Some rows have money SpenDrop cannot resolve — fix or skip the highlighted rows',
+      );
+      expect(result.current.importStep).toBe('preview');
+      // Rows survive the 409: only the field_errors slice is replaced.
       expect(result.current.preview?.rows).toHaveLength(2);
     });
   });

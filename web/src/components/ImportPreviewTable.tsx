@@ -12,7 +12,7 @@ import type { CollisionGroup, ImportPreview, PatchRowRequest } from '@/api/types
 import type { CellError } from '@/hooks/useImportSession';
 import { activeFieldErrors } from '@/hooks/useImportSession';
 import {
-  fallbackFieldTooLongMessage,
+  fallbackFieldErrorMessage,
   isEditableInPreview,
 } from '@/lib/import-field-errors';
 import {
@@ -103,7 +103,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
   for (const fe of active) {
     if (isEditableInPreview(fe.field)) continue;
     const existing = rowLevelMessages.get(fe.row_id) ?? [];
-    existing.push(fe.message || fallbackFieldTooLongMessage(fe.field));
+    existing.push(fe.message || fallbackFieldErrorMessage(fe.field));
     rowLevelMessages.set(fe.row_id, existing);
   }
 

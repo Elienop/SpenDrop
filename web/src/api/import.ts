@@ -87,6 +87,35 @@ export class FieldTooLongError extends Error {
 }
 
 /**
+ * Thrown when `POST /api/import/confirm` returns 409 MONEY_ERRORS — at
+ * least one row the user asked to import quotes money the backend will
+ * not resolve into a stored value: a foreign original with no rate, a
+ * currency the household has not set up, or an Amount cell that
+ * disagrees with `original ÷ rate`. Carries the server's full
+ * `field_errors` array so the hook can refresh the flags without a
+ * second round-trip.
+ *
+ * A SIBLING of `FieldTooLongError`, not a widening of it, and that is
+ * the point: both carry `field_errors` in the same shape, but the two
+ * codes stay distinct on the wire so `FIELD_TOO_LONG` keeps meaning
+ * exactly what it meant before money flags existed (its tests, and the
+ * backend's own gate order, both pin it). The hook branches on the
+ * class, and a money error that also satisfied `instanceof
+ * FieldTooLongError` would tell the user to shorten a row whose problem
+ * is a missing exchange rate.
+ */
+export class MoneyErrorsError extends Error {
+  readonly field_errors: ImportFieldError[];
+
+  constructor(field_errors: ImportFieldError[]) {
+    super('Import has money that cannot be resolved');
+    Object.setPrototypeOf(this, MoneyErrorsError.prototype);
+    this.name = 'MoneyErrorsError';
+    this.field_errors = field_errors;
+  }
+}
+
+/**
  * Thrown when `POST /api/import/confirm` returns 409 UNRESOLVED_CATEGORIES —
  * at least one row the user asked to import carries a category value no
  * decision covers. Carries the server's full list so the hook can refresh
@@ -226,6 +255,11 @@ export async function confirmImport(payload: {
     }
     if (body?.code === 'FIELD_TOO_LONG') {
       throw new FieldTooLongError(body.field_errors ?? []);
+    }
+    // Same payload shape as the branch above, deliberately a different
+    // code and a different class — see MoneyErrorsError.
+    if (body?.code === 'MONEY_ERRORS') {
+      throw new MoneyErrorsError(body.field_errors ?? []);
     }
     if (body?.code === 'UNRESOLVED_CATEGORIES') {
       throw new UnresolvedCategoriesError(body.unresolved_categories ?? []);
