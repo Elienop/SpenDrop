@@ -1180,6 +1180,48 @@ describe('useImportSession', () => {
       expect(fetchMock).toHaveBeenCalledTimes(2);
     });
 
+    it('does not re-read a session it has just resumed, when the currencies land after it', async () => {
+      // The ordering the latch exists for, and the only one that
+      // reaches it: on a cold page the currencies query is still in
+      // flight while the localStorage resume completes, so the FIRST
+      // signature this hook ever sees arrives with a session already
+      // loaded. Recording it without reading is what makes that a
+      // non-event; treating it as a change re-reads a session that is
+      // one second old.
+      //
+      // Routed by URL and asserted on the session calls only, so it does
+      // not depend on which of the two mount fetches goes first — the
+      // currencies reply is deliberately the slow one.
+      localStorage.setItem(STORAGE_KEYS.importId, 'resume-1');
+      queryClient = new QueryClient({
+        defaultOptions: {
+          queries: { retry: false, staleTime: Infinity, refetchOnWindowFocus: false },
+        },
+      });
+      const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+        if (String(url).includes('currencies')) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          return okResponse(CURRENCIES);
+        }
+        return okResponse(freshPreviewBody('resume-1'));
+      });
+      globalThis.fetch = fetchMock;
+
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+
+      await waitFor(() => expect(result.current.importStep).toBe('preview'));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+      });
+
+      const sessionCalls = fetchMock.mock.calls.filter((call) =>
+        String(call[0]).includes('/import/'),
+      );
+      expect(sessionCalls).toHaveLength(1);
+    });
+
     it('does not re-read anything when there is no session to re-read', async () => {
       // The negative control for the test above: the effect must be
       // latched on the currencies, not fire once per mount, and the
