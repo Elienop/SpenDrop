@@ -394,7 +394,8 @@ condition *and* move the predicate, believing one was safe because the other was
   spacing" disambiguated WITHOUT `{' '}` (which would have added a space — JSX collapses the
   newline, so no space renders today; rendered text pinned byte-identical), TagInput's
   click-to-focus box marked `role="presentation"` (chips, remove buttons and the input's label
-  untouched; no tab stop). *Deliberate, accepted server-side with rationale* — the Math.random
+  untouched; no tab stop — under the DEFAULT profile that role trips `S6819`, which answers "use
+  `<img alt>`" for a div: the third exhibit for switching that rule off). *Deliberate, accepted server-side with rationale* — the Math.random
   fallback in `client-key.ts` (Web Crypto first; per-user idempotency scope), `.sort()` on ISO
   `YYYY-MM` keys, `e.returnValue = ''` beside `preventDefault()` in beforeunload, keyboard
   shortcuts on `<form onKeyDown>` / the row wrapper. *Profile* — TypeScript "SpenDrop way" =
@@ -412,11 +413,14 @@ condition *and* move the predicate, believing one was safe because the other was
   (50k); charts pixel-diffed before/after on the rebuilt `:3535` in both themes (0 px on
   spending-light, ≤15 px at delta 1/255 elsewhere, all inside the sidebar theme toggle);
   `tsc -b --force`, eslint 0 errors, vitest 2236/2236. Commits: `4ccae75`, `f042263`, `4a526da`,
-  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`. Filed: B55, B56, and the Go
-  threshold decision. **Not verified:** the branch itself was not scanned (Community Build has
-  no branch analysis; a scan overwrites `main`'s) — the owner's post-merge scan is the oracle
-  for "clears the finding"; the classifier blocked the server-side profile/marking POSTs from
-  the session, so they ship as `sonar-server-setup.sh` for the owner to run.
+  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`. Filed: B55, B56, and the Go
+  threshold decision. **Branch scanned into a throwaway project** (`spendrop-branchcheck`, so `main`'s analysis
+  stayed untouched — Community Build has no branch analysis): 0 analysis warnings, coverage
+  **86.0%** (both reports resolved), every targeted rule at 0, and the residue is exactly the
+  deliberate set (S2245, S2871, S6822×12, S6847×2, S6848×1, S1874×2 `returnValue`, plus the
+  S6819 above). Not verified: the server-side profile/marking POSTs were blocked from the
+  session by the permission classifier, so they ship as `sonar-server-setup.sh` for the owner
+  to run; the throwaway project is to be deleted after.
 
 - **Import per-row rate — a `Rate` column is the source of a foreign row's USD** (2026-08-15, on
   `feat/import-per-row-rate`; merged the same day as PR #144, squash `ef0ef4a`, released
