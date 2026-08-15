@@ -12,11 +12,13 @@ import (
 // from — and both need errors.Is to tell "this rate is unusable" apart from
 // "this amount is out of range", which arrive from the same call.
 //
-// The message says positive, not non-zero, because that is the whole legal
-// class: a negative rate would silently flip the direction of the money (a
-// purchase booked as a refund), and currency_handlers.go already refuses <= 0
-// on both the create and the update path.
-var errRateInvalid = errors.New("rate must be a positive number")
+// The message names both halves of the gate, and it has to. "Positive" alone
+// covers zero (never a divisor) and negative (it would silently flip the
+// direction of the money — a purchase booked as a refund, which
+// currency_handlers.go already refuses <= 0 to prevent), but +Inf IS positive,
+// so a user handed "rate must be a positive number" for an infinite rate would
+// read it as a description of a rate they had got right.
+var errRateInvalid = errors.New("rate must be a positive, finite number")
 
 // convertForeignMoney divides a signed foreign amount by a rate and returns the
 // base-currency value the row will store, in dollars.
@@ -57,11 +59,21 @@ func convertForeignMoney(originalAmount, rate float64) (float64, error) {
 
 	converted := originalAmount / rate
 
-	// Round to 2 decimal places. This is redundant with dollarsToCents (the
-	// single wire-edge rounding chokepoint, cents.go), which re-rounds *100 on
-	// the same scale and always agrees — so it is provably a no-op on the
-	// stored cents. Kept deliberately to avoid churning a money path for zero
-	// behavior change; see audit item h-resolvecurrency-double-round.
+	// Round to 2 decimal places. dollarsToCents (the single wire-edge rounding
+	// chokepoint, cents.go) re-rounds *100 on the same scale and always agrees,
+	// so this line cannot change the CENTS that get stored — rounding an
+	// already-rounded value is idempotent.
+	//
+	// It is not, however, a no-op on the accept/reject DECISION, because it runs
+	// before the bound below. Measured: 500,000,000.002 at a rate of 0.5 divides
+	// to 1,000,000,000.004, which this line pulls back to exactly
+	// MaxTransactionAmount and the bound then admits; without it the same pair
+	// is refused as out of range. Both spellings store the identical
+	// 100,000,000,000 cents, so what the line decides is who gets a 400 at the
+	// last four thousandths of a cent above the cap, not what any accepted row
+	// is worth. Kept as it stands: the ordering is inherited from
+	// resolveCurrency, and moving or dropping it would move that boundary for
+	// every foreign row in the app to buy nothing.
 	converted = math.Round(converted*100) / 100
 
 	// The division can carry an in-range original amount out of range: a small

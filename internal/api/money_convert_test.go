@@ -186,24 +186,46 @@ func TestConvertForeignMoney_RejectsEveryUnusableRate(t *testing.T) {
 	}
 }
 
+// TestErrRateInvalid_DescribesTheWholeGate pins the sentinel's wording. The
+// message is the only part of this gate a user ever sees — resolveCurrency
+// prefixes it with the currency code and hands it back as a 400 — and it
+// shipped once saying less than the gate enforces: "a positive number" is a
+// true description of +Inf, so an infinite rate was refused with a sentence
+// describing a rate the user had got right.
+//
+// A literal, not a reference to the var: comparing errRateInvalid to itself
+// would pass through any rewording, which is the exact drift this guards.
+func TestErrRateInvalid_DescribesTheWholeGate(t *testing.T) {
+	const want = "rate must be a positive, finite number"
+	if got := errRateInvalid.Error(); got != want {
+		t.Errorf("errRateInvalid = %q, want %q — the message must name both halves of the gate, "+
+			"because zero, negative and infinite rates all arrive here", got, want)
+	}
+}
+
 // TestConvertForeignMoney_AcceptsEveryUsableRate is the forward guard for the
 // gate above: it must refuse the unusable class only. A `rate < 1` or a
 // `rate != 1` slip would sail through the table's LBP case and break every
 // EUR-shaped row (0.92) and every rate below one.
 func TestConvertForeignMoney_AcceptsEveryUsableRate(t *testing.T) {
 	for _, tc := range []struct {
-		rate      float64
+		rate float64
+		// wantErr says the pair is refused for the AMOUNT it produces. It is a
+		// field of its own rather than a wantCents of 0, because "no cents" is
+		// a legitimate-looking answer and a reader cannot tell an intended
+		// refusal from a forgotten expectation by looking at a zero.
+		wantErr   bool
 		wantCents int64
 	}{
-		{1, 10_000},                      // the base-currency rate
-		{0.92, 10_870},                   // EUR, a rate below one
-		{89_000, 0},                      // LBP: 100 / 89,000 rounds to nothing
-		{2, 5_000},                       // an exact halving, no rounding involved
-		{math.SmallestNonzeroFloat64, 0}, // finite, positive, and far out of range
+		{rate: 1, wantCents: 10_000},                       // the base-currency rate
+		{rate: 0.92, wantCents: 10_870},                    // EUR, a rate below one
+		{rate: 89_000, wantErr: true},                      // LBP: 100 / 89,000 rounds to nothing
+		{rate: 2, wantCents: 5_000},                        // an exact halving, no rounding involved
+		{rate: math.SmallestNonzeroFloat64, wantErr: true}, // finite, positive, and far out of range
 	} {
 		got, err := convertForeignMoney(100, tc.rate)
-		switch tc.wantCents {
-		case 0:
+		switch {
+		case tc.wantErr:
 			// Refused, but for the AMOUNT it produces — never as an unusable rate.
 			if errors.Is(err, errRateInvalid) {
 				t.Errorf("rate %v was refused as invalid; it is usable — the amount is what is wrong", tc.rate)
