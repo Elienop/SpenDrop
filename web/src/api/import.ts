@@ -1,4 +1,5 @@
 import { api } from './client';
+import { trimTrailingSlashes } from '@/lib/url';
 import type {
   CollisionGroup,
   ImportFieldError,
@@ -14,13 +15,16 @@ import type {
  * logic in `client.ts`. Extracted so the two `fetch`-direct endpoints
  * below (`getImportSession`, `confirmImport`) share exactly one
  * resolver — this prevents dev-vs-prod URL drift between them and the
- * rest of the ApiClient callsites. If `client.ts` ever starts doing
- * additional normalization (trailing-slash handling, CORS fallbacks,
- * version prefixes), update this helper to match rather than bypassing.
+ * rest of the ApiClient callsites. The normalization itself is no longer
+ * duplicated: trailing-slash trimming is the shared `trimTrailingSlashes`
+ * that `client.ts` and `useLiveUpdates.ts` also call, so the three bases
+ * cannot drift apart. If `client.ts` ever adds FURTHER normalization (CORS
+ * fallbacks, version prefixes), update this helper to match rather than
+ * bypassing.
  */
 function apiBaseURL(): string {
   const base = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api';
-  return base.replace(/\/+$/, '');
+  return trimTrailingSlashes(base);
 }
 
 /**

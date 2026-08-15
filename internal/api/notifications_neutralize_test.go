@@ -35,13 +35,13 @@ func TestNeutralizeForPushBody_RemovesEveryForgingClass(t *testing.T) {
 		{"NUL", "Milk\x00forged", "Milk forged"},
 		{"ESC, which would open an ANSI sequence", "Milk\x1b[31mforged", "Milk [31mforged"},
 		{"DEL", "Milk\x7fforged", "Milk forged"},
-		{"C1", "Milkforged", "Milk forged"},
-		{"U+2028 LINE SEPARATOR — not Cc, so IsControl alone misses it", "Milk forged", "Milk forged"},
-		{"U+2029 PARAGRAPH SEPARATOR", "Milk forged", "Milk forged"},
-		{"RLO override, which would reverse the rest of the body", "Milk‮forged", "Milk forged"},
-		{"LRE embedding", "Milk‪forged", "Milk forged"},
-		{"RLI isolate", "Milk⁦forged", "Milk forged"},
-		{"PDI isolate", "Milk⁩forged", "Milk forged"},
+		{"C1", "Milk\u0085forged", "Milk forged"},
+		{"U+2028 LINE SEPARATOR — not Cc, so IsControl alone misses it", "Milk\u2028forged", "Milk forged"},
+		{"U+2029 PARAGRAPH SEPARATOR", "Milk\u2029forged", "Milk forged"},
+		{"RLO override, which would reverse the rest of the body", "Milk\u202Eforged", "Milk forged"},
+		{"LRE embedding", "Milk\u202Aforged", "Milk forged"},
+		{"RLI isolate", "Milk\u2066forged", "Milk forged"},
+		{"PDI isolate", "Milk\u2069forged", "Milk forged"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,13 +71,13 @@ func TestNeutralizeForPushBody_LeavesLegitimateTextAlone(t *testing.T) {
 	}{
 		{"Arabic", "علي كرم added $12.34 in البقالة — حليب"},
 		{"mixed Arabic and Latin", "علي Karam added $12.34 in Groceries — Milk"},
-		{"Arabic letter mark, a bidi MARK and not an override", "؜علي added $1.00 in X — Y"},
-		{"LRM and RLM, marks that open no scope", "Ali‎Karam‏ added $1.00 in X — Y"},
+		{"Arabic letter mark, a bidi MARK and not an override", "\u061Cعلي added $1.00 in X — Y"},
+		{"LRM and RLM, marks that open no scope", "Ali\u200EKaram\u200F added $1.00 in X — Y"},
 		{"French accents and the em dash the body itself uses", "Élodie added $12,34 in Épicerie — Café"},
-		{"ZWJ family emoji", "Zenobia \U0001F468‍\U0001F469‍\U0001F467 added $1.00 in X — Y"},
-		{"ZWNJ, required by Persian orthography", "می‌رود added $1.00 in X — Y"},
+		{"ZWJ family emoji", "Zenobia \U0001F468\u200D\U0001F469\u200D\U0001F467 added $1.00 in X — Y"},
+		{"ZWNJ, required by Persian orthography", "می\u200Cرود added $1.00 in X — Y"},
 		{"astral emoji", "\U0001F600 added $1.00 in X — Y"},
-		{"NBSP, which French typography puts before punctuation", "Ali ! added $1.00 in X — Y"},
+		{"NBSP, which French typography puts before punctuation", "Ali\u00A0! added $1.00 in X — Y"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

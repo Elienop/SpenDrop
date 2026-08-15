@@ -120,11 +120,11 @@ function buildActiveChips(
   if (filters.amountMin || filters.amountMax) {
     let label: string;
     if (filters.amountMin && filters.amountMax) {
-      label = `${formatCurrency(parseFloat(filters.amountMin), baseCurrency)} - ${formatCurrency(parseFloat(filters.amountMax), baseCurrency)}`;
+      label = `${formatCurrency(Number.parseFloat(filters.amountMin), baseCurrency)} - ${formatCurrency(Number.parseFloat(filters.amountMax), baseCurrency)}`;
     } else if (filters.amountMin) {
-      label = `Min ${formatCurrency(parseFloat(filters.amountMin), baseCurrency)}`;
+      label = `Min ${formatCurrency(Number.parseFloat(filters.amountMin), baseCurrency)}`;
     } else {
-      label = `Max ${formatCurrency(parseFloat(filters.amountMax), baseCurrency)}`;
+      label = `Max ${formatCurrency(Number.parseFloat(filters.amountMax), baseCurrency)}`;
     }
     chips.push({
       key: 'amount',

@@ -19,4 +19,29 @@ describe('urlBase64ToUint8Array', () => {
     const bytes = urlBase64ToUint8Array('-_8'); // 0xFB 0xFF
     expect(Array.from(bytes)).toEqual([0xfb, 0xff]);
   });
+
+  // Byte-for-byte pin. The literal below is the independent decode of
+  // PUBLIC_KEY (`Buffer.from(key, 'base64url')`), so any change to the
+  // charset / code-unit half of the conversion shows up as a concrete byte
+  // diff rather than a length that still looks plausible. (The `padding`
+  // line is NOT pinned by anything: WHATWG forgiving-base64 decodes unpadded
+  // input identically, so its only observable effect is the DOMException
+  // message on a length % 4 == 1 input — invalid either way.)
+  test('decodes the whole key to the exact expected bytes', () => {
+    expect(Array.from(urlBase64ToUint8Array(PUBLIC_KEY))).toEqual([
+      4, 73, 122, 218, 37, 24, 129, 72, 175, 196, 137, 47, 235, 220, 149, 136,
+      75, 162, 4, 134, 190, 33, 191, 126, 74, 75, 204, 120, 11, 64, 220, 177,
+      96, 15, 57, 43, 197, 146, 99, 74, 4, 167, 125, 201, 35, 4, 155, 129, 146,
+      189, 234, 5, 70, 8, 28, 20, 5, 45, 118, 41, 228, 217, 44, 135, 195,
+    ]);
+  });
+
+  test('keeps bytes at and above 0x80 intact', () => {
+    // 'AH-A__4' is base64url for 00 7F 80 FF FE — the high half of the byte
+    // range, where a 7-bit-safe read (or a charset slip on '-' / '_') would
+    // corrupt the value instead of shortening the array.
+    expect(Array.from(urlBase64ToUint8Array('AH-A__4'))).toEqual([
+      0x00, 0x7f, 0x80, 0xff, 0xfe,
+    ]);
+  });
 });

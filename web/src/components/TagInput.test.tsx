@@ -520,3 +520,95 @@ describe('TagInput — key propagation contract', () => {
     expect(input.value).toBe('');
   });
 });
+
+// The outer box is styled to look like the control but is not one: it draws
+// the border, lays the pills out and forwards a stray click to the `<input>`.
+// It carries `role="presentation"` to say so — which is also what clears Sonar
+// typescript:S1082 / S6848 (this repo has no `eslint-plugin-jsx-a11y`; those
+// are Sonar's own ports of `click-events-have-key-events` and
+// `no-static-element-interactions`, and the escape hatch is in both). These pin
+// the things that must stay true of it, because "presentation" is a claim
+// about behaviour, not a scanner annotation, and the cheapest way to satisfy
+// the rule — a key handler on the div — would break the first of them.
+describe('TagInput — the field box is presentational, not a control', () => {
+  /** The clickable outer box: the input's nearest ancestor with the border. */
+  function fieldBox(): HTMLElement {
+    const box = screen
+      .getByRole('combobox')
+      .closest<HTMLElement>('div.rounded-md');
+    if (!box) throw new Error('TagInput rendered no field box');
+    return box;
+  }
+
+  test('clicking the box whitespace focuses the input', () => {
+    render(<ControlledTagInput initial="alpha" />);
+    const input = screen.getByRole('combobox');
+    // Start somewhere else, so "already focused" cannot pass this vacuously.
+    (document.activeElement as HTMLElement | null)?.blur();
+    expect(input).not.toHaveFocus();
+
+    fireEvent.click(fieldBox());
+
+    expect(input).toHaveFocus();
+  });
+
+  test('the box is not a tab stop and is not announced as a control', () => {
+    render(<ControlledTagInput initial="alpha" />);
+    const box = fieldBox();
+
+    // `presentation`, not an interactive role: it must not be reachable or
+    // readable as a widget in its own right. The input beside it is both.
+    expect(box).toHaveAttribute('role', 'presentation');
+    expect(box).not.toHaveAttribute('tabindex');
+    // ARIA drops a presentation role from an element carrying a global aria-*
+    // attribute, which would put the div back in the tree as a `generic` with
+    // a name — so the absence is part of the claim, not incidental.
+    expect(box.getAttributeNames().filter((n) => n.startsWith('aria-'))).toEqual(
+      [],
+    );
+    expect(screen.getByRole('combobox')).toHaveAccessibleName('Add tag');
+  });
+
+  test('typing in the input is not intercepted by the box', async () => {
+    // The tempting way to satisfy the scanner is `onKeyDown` on the div, and
+    // any handler there fires on EVERY character typed into the input, because
+    // keystrokes bubble. This types a whole word and asserts the buffer, the
+    // focus and the absence of a commit survive it.
+    //
+    // Scoped honestly: it does NOT prove the box has no key handler — a no-op
+    // one would pass, and is undetectable from the DOM because React attaches
+    // at the root. What it pins is the behaviour, which is the part that
+    // matters; the handler that would satisfy the rule is a FOCUS-STEALING or
+    // event-consuming one, and that is what dies here (it took eighteen tests
+    // in this file down when tried). A no-op handler would not clear S6848
+    // anyway — that rule counts interactive props, so adding one makes it
+    // worse, not better.
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ControlledTagInput onChange={onChange} />);
+    const input = screen.getByRole('combobox') as HTMLInputElement;
+
+    await user.click(input);
+    await user.keyboard('groceries');
+
+    expect(input.value).toBe('groceries');
+    expect(input).toHaveFocus();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('a tag pill\'s remove button still removes only that tag', async () => {
+    // `role="presentation"` is not inherited: the pills and their buttons keep
+    // their own semantics, and the button\'s `stopPropagation` still keeps the
+    // box\'s click handler from stealing focus mid-removal.
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ControlledTagInput initial="alpha, beta" onChange={onChange} />);
+
+    await user.click(screen.getByRole('button', { name: 'Remove tag alpha' }));
+
+    expect(onChange).toHaveBeenCalledWith('beta');
+    expect(
+      screen.getByRole('button', { name: 'Remove tag beta' }),
+    ).toBeInTheDocument();
+  });
+});

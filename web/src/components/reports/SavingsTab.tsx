@@ -114,17 +114,21 @@ export function SavingsTab() {
     // the year-end figure reflects reality (e.g. Excel shows $17,216 when
     // two earlier months were in the red — clamping would have inflated
     // the total to $25,528 by silently dropping the losses).
+    //
+    // Built with an explicit loop rather than `.reduce()`: the accumulator was
+    // only ever the running total, the reduce's RETURN VALUE was discarded and
+    // the array came from a `push` into an outer `const` (Sonar
+    // typescript:S2201). `running += e.net` is the identical addition in the
+    // identical order, so the curve — negative months included — is unchanged.
     const result: { name: string; savings: number }[] = [];
-    incExp.data
-      .filter((e) => e.year === year)
-      .reduce((acc, e) => {
-        const total = acc + e.net;
-        result.push({
-          name: MONTH_NAMES_SHORT[e.month - 1],
-          savings: total,
-        });
-        return total;
-      }, 0);
+    let running = 0;
+    for (const e of incExp.data.filter((entry) => entry.year === year)) {
+      running += e.net;
+      result.push({
+        name: MONTH_NAMES_SHORT[e.month - 1],
+        savings: running,
+      });
+    }
     return result;
   }, [incExp.data, year]);
 

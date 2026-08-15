@@ -2,7 +2,6 @@ import { useMemo, useState } from 'react';
 import {
   BarChart,
   Bar,
-  Cell,
   LabelList,
   LineChart,
   Line,
@@ -153,7 +152,20 @@ export function SpendingTab() {
     () =>
       [...catBreakdown.data]
         .sort((a, b) => b.total - a.total)
-        .map((c) => ({ ...c, configKey: `cat-${c.id}` })),
+        // `fill` is read by recharts: `computeBarRectangles` spreads each data
+        // entry into the rect item it builds, ahead of the `<Bar>`'s own
+        // presentation props, so a per-entry `fill` paints that one bar. This
+        // replaced a `<Cell>` child per category (deprecated in recharts 3.10,
+        // removed in 4.0). The value is the CSS variable `ChartContainer`
+        // emits from `breakdownConfig` above — NOT `getCategoryColorVar`
+        // directly: the two resolve to the same colour, but the config
+        // indirection is what keeps the legend, the trend lines and these bars
+        // reading one definition.
+        .map((c) => ({
+          ...c,
+          configKey: `cat-${c.id}`,
+          fill: `var(--color-cat-${c.id})`,
+        })),
     [catBreakdown.data],
   );
 
@@ -360,12 +372,6 @@ export function SpendingTab() {
                         typeof value === 'number' ? fmt(value) : ''
                       }
                     />
-                    {breakdownSorted.map((entry) => (
-                      <Cell
-                        key={entry.id}
-                        fill={`var(--color-cat-${entry.id})`}
-                      />
-                    ))}
                   </Bar>
                 </BarChart>
               </ChartContainer>

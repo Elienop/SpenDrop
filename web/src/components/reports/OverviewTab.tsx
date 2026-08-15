@@ -115,16 +115,22 @@ export function OverviewTab() {
     [incExp.data],
   );
 
+  // A running cumulative, built with an explicit loop rather than `.reduce()`.
+  // The reduce here was a loop in disguise: its accumulator carried the running
+  // total but its RETURN VALUE was thrown away, the array being built by a
+  // `push` into an outer `const` (Sonar typescript:S2201). Same elements, same
+  // order, same arithmetic — `running += entry.net` is the identical addition
+  // in the identical sequence, so the plotted series is unchanged.
   const cashFlowData = useMemo(() => {
     const result: { date: string; cumulative: number }[] = [];
-    incExp.data.reduce((acc, entry) => {
-      const total = acc + entry.net;
+    let running = 0;
+    for (const entry of incExp.data) {
+      running += entry.net;
       result.push({
         date: `${entry.year}-${String(entry.month).padStart(2, '0')}-01`,
-        cumulative: total,
+        cumulative: running,
       });
-      return total;
-    }, 0);
+    }
     return result;
   }, [incExp.data]);
 

@@ -5,8 +5,9 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Cell,
   ReferenceLine,
+  Rectangle,
+  type BarShapeProps,
 } from 'recharts';
 import {
   ChartContainer,
@@ -601,14 +602,44 @@ export function PatternsTab() {
                 {/* Symmetric radius, not [0, 4, 4, 0]: the array form rounds
                     the RIGHT end only, so a leftward bar came out rounded at
                     the zero line and square at its own tip. */}
-                <Bar dataKey="total" radius={4}>
-                  {tags.data.map((_, i) => (
-                    <Cell
-                      key={i}
-                      fill={`hsl(var(--chart-${(i % 20) + 1}))`}
+                {/* One colour per tag, cycling the 20 chart slots. This was a
+                    `<Cell>` child per bar until recharts deprecated `Cell` in
+                    3.10 (removed in 4.0); `shape` is the replacement recharts
+                    documents. `{...props}` forwards the whole rect — geometry,
+                    `radius`, active state and the animation frame props — so
+                    only the fill is ours.
+
+                    `originalDataIndex` is the row's position in `tags.data` —
+                    the same index the `<Cell>` children were mapped over, so
+                    every tag keeps the colour it had. (`index` would read the
+                    same today: with a custom `shape` recharts filters no rect
+                    out — see the cost below — so the two never diverge; the
+                    original index is simply the one that names the row.)
+
+                    SpendingTab's category chart deliberately does NOT use this
+                    mechanism; see the note on `breakdownSorted` there for the
+                    LabelList reason.
+
+                    The one measured cost of `shape` here: it flips recharts'
+                    `hasCustomShape`, which stops it discarding zero-DIMENSION
+                    rects — so a tag whose refunds exactly cancel its spending
+                    now leaves an EMPTY `<g class="recharts-bar-rectangle">` in
+                    the SVG. It paints nothing (`Rectangle` returns null at
+                    width 0), has no geometry and so no hit area, and this Bar
+                    has no `<LabelList>` to put a "$0.00" beside it — which is
+                    exactly why the trade is affordable on THIS chart and not on
+                    Spending's. Do not go looking for a bug if a DOM diff turns
+                    that group up. */}
+                <Bar
+                  dataKey="total"
+                  radius={4}
+                  shape={(props: BarShapeProps) => (
+                    <Rectangle
+                      {...props}
+                      fill={`hsl(var(--chart-${(props.originalDataIndex % 20) + 1}))`}
                     />
-                  ))}
-                </Bar>
+                  )}
+                />
               </BarChart>
             </ChartContainer>
           )}

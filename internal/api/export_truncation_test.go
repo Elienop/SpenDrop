@@ -356,7 +356,7 @@ func TestExportTruncations_MarkerIsCountedAgainstTheCap(t *testing.T) {
 			}
 			// The result must still be valid UTF-8: truncateUTF16 cuts on a rune
 			// boundary, so no astral rune is left half-written.
-			if strings.ContainsRune(got, '�') {
+			if strings.ContainsRune(got, '\uFFFD') {
 				t.Fatal("truncation split a rune: the cell contains U+FFFD")
 			}
 		})

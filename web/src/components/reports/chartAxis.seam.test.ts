@@ -315,14 +315,54 @@ describe('every bar chart can be read in both directions', () => {
     }
   });
 
+  test('no chart still colours its bars with the deprecated <Cell>', () => {
+    // `Cell` is deprecated in recharts 3.10 and REMOVED in 4.0, so on that bump
+    // it stops being an import and starts being a build failure. Two charts
+    // used it to give each bar its own fill and were migrated off it; this pin
+    // is what stops it coming back on the next chart someone adds.
+    //
+    // The replacements are deliberately NOT the same in the two files, and the
+    // difference is measured, not stylistic:
+    //
+    //   * PatternsTab uses the `shape` prop — the mechanism recharts documents.
+    //   * SpendingTab carries `fill` on each row of its data instead, which is
+    //     the merge `<Cell>` itself performed (recharts spreads a cell's props
+    //     into the same rect item it spreads the data entry into). It cannot
+    //     use `shape`, because a custom shape flips recharts' `hasCustomShape`
+    //     and it then stops discarding zero-DIMENSION bars — and that chart has
+    //     a `<LabelList>`, so a category whose refunds exactly cancel its
+    //     spending would gain a "$0.00" label it does not draw today.
+    //
+    // Measured by rendering both charts against a fixture holding one zero
+    // total and diffing the emitted SVG: with `shape`, SpendingTab gained that
+    // label; with the data `fill`, PatternsTab's tooltip swatch — which paints
+    // nothing today — took the bar's colour, because `ChartTooltipContent`
+    // reads `item.payload.fill`. Each file uses the mechanism that changes
+    // nothing on ITS chart.
+    for (const [name, source] of CHART_OWNERS) {
+      expect(`${name}: ${stripComments(source).match(/<Cell\b/g)?.length ?? 0}`)
+        .toBe(`${name}: 0`);
+    }
+    // Positive control on the fixture: the two migrated charts still deliver a
+    // per-bar fill by SOME mechanism, so the absence above is not vacuous over
+    // charts that simply stopped colouring their bars.
+    expect(stripComments(patternsSource)).toContain(
+      'fill={`hsl(var(--chart-${(props.originalDataIndex % 20) + 1}))`}',
+    );
+    expect(stripComments(spendingSource)).toContain(
+      'fill: `var(--color-cat-${c.id})`',
+    );
+  });
+
   test('no bar rounds one end only', () => {
     // `radius={[4, 4, 0, 0]}` rounds the visual TOP, which leaves a bar
     // growing downward glued to the axis with square corners at its own tip;
     // `[0, 4, 4, 0]` is the same defect rotated for a horizontal chart. Both
     // shipped here. The array FORM is what is banned — a symmetric `radius={4}`
     // is correct in both directions — and the check is over the whole file
-    // rather than per-Bar because `<Bar>` is not always self-closing (the ones
-    // in SpendingTab and PatternsTab wrap `<Cell>` and `<LabelList>`).
+    // rather than per-Bar because `<Bar>` is not always self-closing
+    // (SpendingTab's category bar wraps a `<LabelList>`, and PatternsTab's
+    // carries a multi-line `shape` prop).
     for (const [, source] of CHART_OWNERS) {
       expect(stripComments(source)).not.toMatch(/radius=\{\[/);
     }

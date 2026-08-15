@@ -283,7 +283,38 @@ export function TagInput({
   );
 
   return (
+    /*
+      The field's OUTER BOX. It looks like the control, but it is not one: the
+      control is the `<input>` below, which carries the combobox role and the
+      accessible name. This div only draws the border, lays the tag pills out
+      and forwards a click on its whitespace to that input — the affordance a
+      user expects from anything shaped like a text field.
+
+      `role="presentation"` is that statement, and it is what stops SonarQube's
+      typescript:S1082 / S6848 from reporting the handler. Those are the rules
+      that flag it here — `eslint-plugin-jsx-a11y` is NOT installed in this
+      repo, so `npx eslint` says nothing about this line either way; S1082 and
+      S6848 are Sonar's ports of jsx-a11y's `click-events-have-key-events` and
+      `no-static-element-interactions`, and both of those return early on a
+      presentation role, because — quoting the second one's own source —
+      "presentation is an intentional signal from the author that this element
+      is not meant to be perceivable".
+
+      What the rules guard against is functionality reachable ONLY by pointer,
+      and there is none here: keyboard users Tab straight to the input, which
+      is where the click sends focus anyway. Adding a key listener instead
+      would be actively wrong — keystrokes typed INTO the input bubble to this
+      div, so the handler would fire on every character.
+
+      The role changes nothing in the accessibility tree: a plain div is
+      already `generic`, i.e. already not announced. It is not inherited, so
+      the tag pills and their remove buttons keep their own semantics, and with
+      no `tabindex` and no global `aria-*` attribute here the box stays out of
+      the tab order (and the role stays honoured — ARIA drops `presentation` on
+      an element that is focusable or carries a global ARIA attribute).
+    */
     <div
+      role="presentation"
       className={cn(
         'flex flex-wrap items-center gap-1 min-h-10 rounded-md border border-input bg-background px-2 py-1 cursor-text transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring',
         className,

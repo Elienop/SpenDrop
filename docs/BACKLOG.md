@@ -247,6 +247,20 @@ sits at 7 sites, so a success token is a palette decision, not a one-line edit. 
 attention pair, then sweep the sites. No single colour can meet 4.5:1 on both surfaces (light needs
 relative luminance ≤ 0.1833, dark ≥ 0.2115 — disjoint). **Effort:** small.
 
+### B55 — the Patterns tag chart's tooltip has an invisible swatch and an unformatted amount
+**Verified: read** (2026-08-15, UX review of the Sonar baseline branch). `ChartTooltipContent`
+derives its indicator from `color || item.payload.fill || item.color`; the Patterns `<Bar>` has no
+`fill` prop and (deliberately, see the Sonar entry in Closed) keeps its per-bar colour on the
+`shape` prop, so the swatch is a transparent 10px indent, and the value reads `22.49` rather than
+`$22.49` (no formatter; the X axis is unformatted too). Spending's data-`fill` mechanism would
+colour the swatch for free, but that is a visible change and belongs on its own branch with the
+formatter. **Effort:** small.
+
+### B56 — the tag chip's `×` remove button is far below the touch floor
+**Verified: read** (2026-08-15, same review). `TagInput.tsx` `p-0 text-sm leading-none` on the
+remove button gives roughly a 10×14px target on phone; Backspace-removes-last is the only
+fallback. Same 44px `coarse:` floor discipline as the B9 batch. **Effort:** small.
+
 ## Queued stages
 
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
@@ -256,8 +270,8 @@ PR #139 and released as v0.44.0 — see Closed.*
   (`bf500ca`, v0.44.2) from `fix/phone-residue-sheets-url-budgets-switches` — see Closed.
   Carried the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision
   records as riders.
-- ~~Import per-row rate~~ — **BUILT 2026-08-15** on `feat/import-per-row-rate` (squash hash
-  joins the Closed entry at merge) — see Closed.
+- ~~Import per-row rate~~ — **MERGED 2026-08-15** as PR #144 (`ef0ef4a`, v0.46.0) from
+  `feat/import-per-row-rate` — see Closed.
 - **Re-price older rows at a new rate** (owner asked 2026-08-15: "if I want to apply a new rate
   for older data can I do that?" — today: no; the freeze-on-edit is one-way and the only escape
   is the undiscoverable two-save trick). Now honest to build because every manual row records
@@ -293,6 +307,24 @@ PR #139 and released as v0.44.0 — see Closed.*
   (asked 2026-08-02, reaction was pending since). Trash purge clears them, and tombstoned rows
   are excluded from every aggregate by the soft-delete invariant, so the only cost is Trash
   clutter.
+- **SonarQube: how hard should the Go cognitive-complexity rule bite?** (asked 2026-08-15, on
+  the Sonar baseline branch.) The default "Sonar way" Go profile keeps `go:S3776` at threshold
+  15; the baseline scan counts **131** existing violations, almost all handlers, and the gate
+  is "0 new issues", so every new handler above 15 (a bulk endpoint, the re-price stage's
+  filter path) will turn the gate red until it is split. Options: (a) keep the default and
+  treat a red gate as pressure to split (the default; nothing to do), or (b) copy the Go
+  profile to a "SpenDrop way" like the TypeScript one and raise the threshold to 25 for this
+  project. Not decided; the TS profile decision (three rules off) is recorded in Closed.
+- **SonarQube: two exclusions in `sonar-project.properties` hide real code** (deep review of the
+  Sonar baseline branch, 2026-08-15). `web/src/components/ui/**` (5,211 lines / 42 files) is
+  treated as vendored shadcn primitives, but it also holds local forks (`chart.tsx`,
+  `select.tsx`, `dropdown-menu.tsx`) and `password-input.tsx`, bespoke code for a credential
+  field — 10 of those files have their own test suites; a future edit to a fork gets no
+  new-code gate. `.github/**` hides the four workflows from the GitHub-Actions rules. Sonar
+  globs have no negation, so the honest options are: keep as-is; drop the `ui/**` exclusion
+  and eat the primitives' noise (S6759 is already off); or list the pristine primitives one by
+  one. Un-excluding either will surface pre-existing issues as *new* on the first scan after
+  (issue dates = analysis date), so do it in a quiet moment, not on a feature PR. Owner's call.
 
 ---
 
@@ -342,8 +374,71 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **SonarQube baseline — the first scan, read, triaged, and cleared** (2026-08-15, on
+  `chore/sonar-baseline`; squash hash joins this entry at merge). The owner stood up a local
+  SonarQube (Community Build 26.8, "Sonar way" profiles, default gate) and scanned `main` at
+  `ef0ef4a`: gate OK only because a first analysis has zero new lines; underneath, 4
+  "vulnerabilities" (Security C), 5 bugs (Reliability D), 44 reliability + 450 maintainability
+  issues, coverage 0.0% (no report fed — the Zero Coverage Sensor), duplication 1.3%, 0
+  hotspots. Read off the server via its API, not the log. **Three log-level facts:** the version
+  was stamped `v0.44.2` because the wrapper reads `git describe` and the local clone had never
+  fetched the CI-cut tags (fixed: the wrapper now fetches tags first); coverage was not being
+  produced (fixed: `make coverage` → `coverage.out` + `web/coverage/lcov.info` with repo-root
+  paths, `sonar-project.properties` points at both and is now versioned — it holds no secrets —
+  and the wrapper runs the target before every upload; without it the default gate's
+  `new_coverage < 80%` fails every PR — and, on the owner's friend's tip the next day, the
+  SEPARATE test-execution channel: `go test -json` → `sonar.go.tests.reportPaths` and
+  `vitest-sonar-reporter` XML → `sonar.testExecutionReportPaths`, so the dashboard's Unit Tests
+  count / pass density / duration exist at all — verified on the throwaway project: tests 4,655,
+  success density 100%); a `WARN Invalid character` at
+  `export_truncation_test.go:359` was a literal U+FFFD (valid UTF-8; the Go lexer cannot tell it
+  from a decode failure) — spelled `'\uFFFD'`, and the neutralizer test's raw bidi/C1/zero-width
+  fixtures became `\u` escapes (`4ccae75`), so no source file carries an invisible character.
+  **Triage:** *fixed* — `reduce` used as a side-effecting loop in Overview/Savings, IndexedDB
+  rejections that could be `null` (and a blocked-open arm that read `req.error` while pending —
+  the getter throws, so the arm could only hang; found by the review of the fix), the trailing-slash
+  regex triplicated across `client.ts`/`import.ts`/`useLiveUpdates.ts` (one linear
+  `trimTrailingSlashes`), the prefs rollback made legible, `parseInt`/`parseFloat` →
+  `Number.*`, `replaceAll`/`codePointAt` in vapid, `FormEvent` → `SubmitEvent`, recharts
+  `<Cell>` (deprecated, gone in 4.0) → `shape` in Patterns and per-entry data `fill` in Spending
+  — two mechanisms on purpose, each measured against a byte-copy of the old file: `shape` flips
+  recharts' `hasCustomShape` and paints a `$0.00` LabelList label on a zero-total category in
+  Spending; data-`fill` colours shadcn's tooltip swatch in Patterns; either alone is a visible
+  change (residue: one empty non-painting `<g>` per zero-total tag in Patterns), JSX "ambiguous
+  spacing" disambiguated WITHOUT `{' '}` (which would have added a space — JSX collapses the
+  newline, so no space renders today; rendered text pinned byte-identical), TagInput's
+  click-to-focus box marked `role="presentation"` (chips, remove buttons and the input's label
+  untouched; no tab stop — under the DEFAULT profile that role trips `S6819`, which answers "use
+  `<img alt>`" for a div: the third exhibit for switching that rule off). *Deliberate, accepted server-side with rationale* — the Math.random
+  fallback in `client-key.ts` (Web Crypto first; per-user idempotency scope), `.sort()` on ISO
+  `YYYY-MM` keys, `e.returnValue = ''` beside `preventDefault()` in beforeunload, keyboard
+  shortcuts on `<form onKeyDown>` / the row wrapper. *Profile* — TypeScript "SpenDrop way" =
+  Sonar way minus `S6822` (redundant role: `role="list"` restores list semantics Tailwind's
+  preflight strips under VoiceOver, documented at `TransactionCardList.tsx:89`), `S6819`
+  (prefer tag over role: `role="status"`/`role="group"` are standard ARIA; `<output>`/
+  `<fieldset>` carry the wrong semantics), `S6759` (read-only props: 67 sites, a wrapper the
+  project does not use); assigned to `spendrop` only, never the server default. *Not chased* —
+  131 Go cognitive-complexity, 37 nested ternaries, 30 duplicated Go literals, 19
+  assertion-style: debt the new-code gate holds the line on; the Go threshold is an open owner
+  decision above. **Verification:** every change behaviour-preserving by construction and by
+  test — 22 mutants watched to die across the two builders (plus 11 re-verified independently by the reviewers);
+  the new chart and spacing pins PASS against the OLD sources (true invariant pins); reviewers
+  fuzzed `trimTrailingSlashes` vs the regex (200k inputs, 0 mismatches) and vapid old-vs-new
+  (50k); charts pixel-diffed before/after on the rebuilt `:3535` in both themes (0 px on
+  spending-light, ≤15 px at delta 1/255 elsewhere, all inside the sidebar theme toggle);
+  `tsc -b --force`, eslint 0 errors, vitest 2236/2236. Commits: `4ccae75`, `f042263`, `4a526da`,
+  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above), `80fa965` (test-execution reports), `ad37b62` (its review: setting `reporters` had silently dropped vitest's auto `github-actions` reporter — CI PR annotations — now re-created via std-env's `isAgent` exactly as vitest picks them; `go test -json > file` hid a failing Go test from the terminal — gotestsum, pinned, writes the same stream and keeps the human output; re-scanned identical: tests 4,655). Filed: B55, B56, and the Go
+  threshold decision. **Branch scanned into a throwaway project** (`spendrop-branchcheck`, so `main`'s analysis
+  stayed untouched — Community Build has no branch analysis): 0 analysis warnings, coverage
+  **86.0%** (both reports resolved), every targeted rule at 0, and the residue is exactly the
+  deliberate set (S2245, S2871, S6822×12, S6847×2, S6848×1, S1874×2 `returnValue`, plus the
+  S6819 above). Not verified: the server-side profile/marking POSTs were blocked from the
+  session by the permission classifier, so they ship as `sonar-server-setup.sh` for the owner
+  to run; the throwaway project is to be deleted after.
+
 - **Import per-row rate — a `Rate` column is the source of a foreign row's USD** (2026-08-15, on
-  `feat/import-per-row-rate`; squash hash joins this entry at merge). **Corrected premise first:**
+  `feat/import-per-row-rate`; merged the same day as PR #144, squash `ef0ef4a`, released
+  **v0.46.0**). **Corrected premise first:**
   at `804dbc2` the import performed NO currency conversion — it required the USD `Amount` column,
   stored `Original Amount`/`Original Currency` verbatim as labels, never read the currencies
   table, and left `booked_rate` NULL; the 2026-08-14 "import-day rate fallback" wording assumed a

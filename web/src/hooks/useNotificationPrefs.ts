@@ -60,7 +60,12 @@ export function useNotificationPrefs(): UseNotificationPrefs {
       // 403, so don't fire it. The disabled UI already blocks this path;
       // this is the belt to that suspenders.
       if (!canEdit || !settings) return;
-      const next: NotificationSettings = { ...settings, ...partial };
+      // Capture the pre-optimistic value before mutating state, so the
+      // rollback below restores THAT snapshot rather than reading the state
+      // variable back inside the catch (the closure would still hold the right
+      // value, but only by reasoning a reader has to reconstruct).
+      const previous: NotificationSettings = settings;
+      const next: NotificationSettings = { ...previous, ...partial };
       setSettings(next); // optimistic
       try {
         const echo = await api.put<NotificationSettings>(
@@ -69,7 +74,7 @@ export function useNotificationPrefs(): UseNotificationPrefs {
         );
         setSettings(echo); // reconcile to server truth
       } catch (err) {
-        setSettings(settings); // roll back on failure
+        setSettings(previous); // roll back to the pre-optimistic snapshot
         throw err instanceof Error
           ? err
           : new Error('Failed to update preferences');
