@@ -287,15 +287,14 @@ func TestExport_RateColumn_TopLevelAndMonthly(t *testing.T) {
 	}
 
 	// The tombstone, checked BEFORE any cell assertion: a leaked soft-deleted
-	// row shifts every row below it, so the cell assertions would fire first and
-	// report a value mismatch for a workbook whose real defect is that it
-	// contains a deleted transaction. Neither the sentinel rate nor the
-	// description may appear anywhere in the sheet. Fatal, not Errorf — once a
-	// deleted row is in the workbook, what the other cells say is noise.
-	if len(rows) != 3 {
-		t.Fatalf("Transactions rows = %d, want 3 (header + 2 live): a soft-deleted row "+
-			"reached the export: %v", len(rows), rows)
-	}
+	// row shifts every row below it, so the cell assertions would otherwise fire
+	// first and report a value mismatch for a workbook whose real defect is that
+	// it contains a deleted transaction.
+	//
+	// The sentinel SCAN comes before the row count, and that order is the point:
+	// both detect the same leak, but only the scan can name what leaked. Fatal,
+	// not Errorf — once a deleted row is in the workbook, what the other cells
+	// say is noise.
 	for r, row := range rows {
 		for c, cell := range row {
 			if cell == "999999" || cell == "TOMBSTONED ROW" {
@@ -303,6 +302,11 @@ func TestExport_RateColumn_TopLevelAndMonthly(t *testing.T) {
 					"and it brought its booked rate with it", r+1, c+1, cell)
 			}
 		}
+	}
+	// The count is the residue: an extra row carrying neither marker is still a
+	// row that should not be in this workbook.
+	if len(rows) != 3 {
+		t.Fatalf("Transactions rows = %d, want 3 (header + 2 live): %v", len(rows), rows)
 	}
 
 	// The converted row carries the divisor that produced its stored amount.
