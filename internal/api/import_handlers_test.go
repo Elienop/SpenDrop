@@ -3455,3 +3455,195 @@ func TestProcessImportRows_AuditRollsBackWithData(t *testing.T) {
 		t.Errorf("expected 0 audit rows after rollback, got %d", auditCount)
 	}
 }
+
+// --- PATCH rate (the editable preview cell) ---
+
+// rateSheet is one row in shape #5: a foreign original with no rate, which is
+// exactly the row the rate cell exists to fix.
+func rateSheet(t *testing.T) []byte {
+	t.Helper()
+	return createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", ""},
+		})
+}
+
+// TestHandleImportPatchRow_RateClearsRateMissing is the whole point of making
+// the rate editable: a back-dated foreign row arrives with no rate, the user
+// types the one it was booked at, and the row resolves — with THAT rate, not
+// today's, which is what the stored booked_rate has to record.
+func TestHandleImportPatchRow_RateClearsRateMissing(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "ratepatcher", "admin")
+
+	preview, importID := uploadImportSheet(t, h, user, rateSheet(t))
+	if _, flagged := fieldErrorsByRow(t, preview)[0][importFieldRate]; !flagged {
+		t.Fatalf("upload did not flag the rate-less row: %v", preview["field_errors"])
+	}
+
+	rec := patchImportRow(t, h, user, importID, 0, "rate", "89000")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch rate: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+
+	if errs := fieldErrorsByRow(t, patched); len(errs) != 0 {
+		t.Errorf("field_errors = %v, want none once the rate is supplied", errs)
+	}
+	rows := previewRows(t, patched)
+	if got := rows[0]["amount"]; got != 16.85 {
+		t.Errorf("amount = %v, want 16.85 (1,500,000 ÷ 89,000)", got)
+	}
+	if got := rows[0]["amount_derived"]; got != true {
+		t.Errorf("amount_derived = %v, want true", got)
+	}
+	if got := rows[0]["rate"]; got != 89000.0 {
+		t.Errorf("rate = %v, want 89000", got)
+	}
+}
+
+// TestHandleImportPatchRow_RateEmptyStringRestoresFlag pins the clear path.
+// An empty value is not an error — it returns the row to whatever its other
+// cells say it is, which here is #5 again — because a user who types a rate by
+// mistake needs a way back out that is not "re-upload the file".
+func TestHandleImportPatchRow_RateEmptyStringRestoresFlag(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "rateclearer", "admin")
+
+	_, importID := uploadImportSheet(t, h, user, rateSheet(t))
+
+	if rec := patchImportRow(t, h, user, importID, 0, "rate", "89000"); rec.Code != http.StatusOK {
+		t.Fatalf("patch rate: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	rec := patchImportRow(t, h, user, importID, 0, "rate", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear rate: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var cleared map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &cleared); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+
+	if _, flagged := fieldErrorsByRow(t, cleared)[0][importFieldRate]; !flagged {
+		t.Errorf("clearing the rate did not restore the rate_missing flag: %v", cleared["field_errors"])
+	}
+	rows := previewRows(t, cleared)
+	if _, present := rows[0]["rate"]; present {
+		t.Errorf("row still carries a rate after it was cleared: %v", rows[0])
+	}
+	if _, present := rows[0]["amount_derived"]; present {
+		t.Errorf("row still reports a derived amount after the rate was cleared: %v", rows[0])
+	}
+}
+
+// TestHandleImportPatchRow_RateInvalidReturns400 pins the one thing an empty
+// value is NOT. A rate of zero or below cannot divide — and a negative one
+// would flip a purchase into a refund — so the edit is REFUSED rather than
+// applied and flagged afterwards, and the session is left exactly as it was.
+//
+// The 400 carries the same sentence the preview flag would, because the user
+// can meet this condition from either direction and one condition must not
+// read two ways.
+func TestHandleImportPatchRow_RateInvalidReturns400(t *testing.T) {
+	for _, value := range []string{"0", "-5", "abc", "0.0"} {
+		t.Run(value, func(t *testing.T) {
+			clearImportStore()
+			q, db := setupTestDB(t)
+			h := NewHandler(q, db)
+			user := seedTestUser(t, q, "ratereject", "admin")
+
+			_, importID := uploadImportSheet(t, h, user, rateSheet(t))
+
+			rec := patchImportRow(t, h, user, importID, 0, "rate", value)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("patch rate %q: expected 400, got %d; body: %s", value, rec.Code, rec.Body.String())
+			}
+			var body map[string]any
+			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+				t.Fatalf("unmarshal 400 body: %v", err)
+			}
+			if body["code"] != "INVALID_RATE" {
+				t.Errorf("code = %v, want INVALID_RATE", body["code"])
+			}
+			if body["field"] != importFieldRate {
+				t.Errorf("field = %v, want %q", body["field"], importFieldRate)
+			}
+			if body["message"] != importRateInvalidMessage() {
+				t.Errorf("message = %v\nwant       = %q", body["message"], importRateInvalidMessage())
+			}
+
+			// The session must be untouched: a refused edit that half-applied
+			// would leave the row carrying a rate the user was just told was
+			// unusable.
+			getRec := getImportSession(t, h, user, importID)
+			if getRec.Code != http.StatusOK {
+				t.Fatalf("get: expected 200, got %d; body: %s", getRec.Code, getRec.Body.String())
+			}
+			var resumed map[string]any
+			if err := json.Unmarshal(getRec.Body.Bytes(), &resumed); err != nil {
+				t.Fatalf("unmarshal resume: %v", err)
+			}
+			rows := previewRows(t, resumed)
+			if _, present := rows[0]["rate"]; present {
+				t.Errorf("session took the rejected rate anyway: %v", rows[0])
+			}
+			if _, flagged := fieldErrorsByRow(t, resumed)[0][importFieldRate]; !flagged {
+				t.Errorf("session lost its rate_missing flag after a rejected edit: %v", resumed["field_errors"])
+			}
+		})
+	}
+}
+
+// TestHandleImportPatchRow_RateOnBaseFlags covers the other half of the edit:
+// a rate that PARSES is accepted by the field validator and then judged by the
+// resolver, which is where "this rate cannot apply to this row" lives. A rate
+// against the base currency converts nothing, so the row comes back flagged
+// rather than silently restated.
+func TestHandleImportPatchRow_RateOnBaseFlags(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "rateonbase", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Corner shop", "42.50", "Food", "USD", ""},
+		})
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if errs := fieldErrorsByRow(t, preview); len(errs) != 0 {
+		t.Fatalf("the base-currency row was flagged before any rate was set: %v", errs)
+	}
+
+	rec := patchImportRow(t, h, user, importID, 0, "rate", "2")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch rate: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+
+	got, flagged := fieldErrorsByRow(t, patched)[0][importFieldRate]
+	if !flagged {
+		t.Fatalf("a rate on the base currency was accepted silently: %v", patched["field_errors"])
+	}
+	want := "USD is the base currency, so a rate does nothing here. Clear the rate, or name the currency this row was really in."
+	if got != want {
+		t.Errorf("message = %q\nwant     = %q", got, want)
+	}
+	// The amount is the sheet's own, untouched — the rate converted nothing.
+	rows := previewRows(t, patched)
+	if amount := rows[0]["amount"]; amount != 42.5 {
+		t.Errorf("amount = %v, want the sheet's own 42.5", amount)
+	}
+}

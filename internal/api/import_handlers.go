@@ -416,6 +416,20 @@ func buildCollisionGroups(
 //	      editing. Returning 400 forces the frontend to surface an inline
 //	      error so the user knows the edit did not take effect.
 //
+//	rate: the sheet's exchange rate for this row, as a string. An EMPTY
+//	      string is legal and CLEARS the rate — it is the way back out of a
+//	      rate typed by mistake, and the row returns to whatever its other
+//	      cells say it is (#2 or #5). Anything else must parse as a finite
+//	      POSITIVE number (parseImportRate); zero cannot divide and a
+//	      negative would flip a purchase into a refund, so both are refused
+//	      with INVALID_RATE rather than applied and flagged afterwards.
+//	      The message is the same string the preview's rate flag carries, so
+//	      the condition reads identically whichever direction the user met
+//	      it from. A rate that parses but cannot APPLY — on the base
+//	      currency, or with nothing to convert — is accepted here and judged
+//	      by resolveImportMoney on the response, because that is a fact
+//	      about the row rather than about the value.
+//
 //	skip: strict bool. Any non-bool JSON value → INVALID_FIELD. No
 //	      normalization — the value is passed through untouched.
 //
@@ -423,6 +437,15 @@ func buildCollisionGroups(
 // This is the only path that returns INVALID_FIELD; every other failure
 // has a field-specific code so the frontend can color-code the originating
 // cell without parsing the message.
+// importRateValue is validateImportField's normalized form for the rate field.
+// A rate is two things at once on a row — the divisor and the cell it came
+// from — and returning them as one value is what stops a caller assigning
+// half of it. See importRow.RawRate.
+type importRateValue struct {
+	Rate float64
+	Raw  string
+}
+
 func validateImportField(field string, value any) (normalized any, errCode string, message string) {
 	switch field {
 	case "date":
@@ -473,6 +496,21 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		// that parseImportAmount accepts (it already rejects magnitudes above
 		// MaxTransactionAmount and NaN/Inf).
 		return float64(cents) / 100.0, "", ""
+
+	case importFieldRate:
+		str, ok := value.(string)
+		if !ok {
+			return nil, "INVALID_RATE", "rate must be a string"
+		}
+		parsed, err := parseImportRate(str)
+		if err != nil {
+			return nil, "INVALID_RATE", importRateInvalidMessage()
+		}
+		// Both halves travel together so the row cannot end up saying one
+		// thing with its parsed rate and another with its raw cell — the pair
+		// is what tells "no rate here" apart from "the rate here is wrong".
+		// An empty string arrives as (0, ""), which is the cleared state.
+		return importRateValue{Rate: parsed, Raw: strings.TrimSpace(str)}, "", ""
 
 	case "skip":
 		b, ok := value.(bool)
@@ -1940,10 +1978,15 @@ func (h *Handler) handleImportCancel(w http.ResponseWriter, r *http.Request) {
 }
 
 // patchImportRowRequest is the JSON body shape for PATCH /api/import/{importID}/rows/{rowID}.
-// Field is one of "date", "description", "amount", "skip" — validated by
-// validateImportField. Value is typed as any so the JSON decoder accepts
-// both string (for date/description/amount) and bool (for skip) without
+// Field is one of "date", "description", "amount", "rate", "skip" — validated
+// by validateImportField. Value is typed as any so the JSON decoder accepts
+// both string (for date/description/amount/rate) and bool (for skip) without
 // a second layer of per-field request structs.
+//
+// original_amount and original_currency are deliberately NOT patchable. A
+// row's foreign money is a fact about the spreadsheet, and an unknown currency
+// is resolved in Settings — outside this session entirely — which is why the
+// rate is the only money cell the preview can edit.
 type patchImportRowRequest struct {
 	Field string `json:"field"`
 	Value any    `json:"value"`
@@ -1951,8 +1994,8 @@ type patchImportRowRequest struct {
 
 // patchImportRowErrorBody is the 400 response shape. Code is a stable
 // machine-readable constant (INVALID_DATE, INVALID_DESCRIPTION,
-// INVALID_AMOUNT, INVALID_FIELD) so the frontend can color-code the
-// originating cell without parsing the message. Field echoes back the
+// INVALID_AMOUNT, INVALID_RATE, INVALID_FIELD) so the frontend can color-code
+// the originating cell without parsing the message. Field echoes back the
 // request field so the frontend cellErrors map can key on row_id:field
 // without a second round-trip.
 type patchImportRowErrorBody struct {
@@ -2068,6 +2111,10 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		row.Description = normalized.(string)
 	case "amount":
 		row.Amount = normalized.(float64)
+	case importFieldRate:
+		rate := normalized.(importRateValue)
+		row.Rate = rate.Rate
+		row.RawRate = rate.Raw
 	case "skip":
 		row.Skip = normalized.(bool)
 	}
