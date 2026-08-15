@@ -579,38 +579,49 @@ describe('offline-queue — IndexedDB failures reject with an Error', () => {
     // `new Error(String(err))` wrap would flatten it to 'Error'.
     expect(failure).toBeInstanceOf(Error);
     expect(failure).toBeInstanceOf(DOMException);
-    expect((failure as DOMException).name).toBe('VersionError');
+    // Narrowed by a real type guard rather than a cast — `expect` does not
+    // narrow, and a wrapped Error would leave `named` null and still fail.
+    const named = failure instanceof DOMException ? failure : null;
+    expect(named?.name).toBe('VersionError');
   });
 
-  test('a blocked open with a null error still rejects with an Error', async () => {
-    // `onblocked` fires when another connection holds the old version open —
-    // nothing has failed yet, so the spec leaves `request.error` null. Driven
-    // through the same stubbed-open pattern the latch-recovery test uses,
-    // because a blocked open needs a version upgrade the module never asks for
-    // (DB_VERSION is pinned at 1).
+  test('a blocked open settles with an Error without reading req.error', async () => {
+    // `onblocked` fires when another connection still holds the old version
+    // open. It fires MID-FLIGHT: readyState is 'pending', and IDBRequest.error
+    // is a getter that throws InvalidStateError until the request is done — so
+    // a handler that reads it throws inside the event callback, never reaches
+    // `reject`, and leaves this open promise pending forever.
+    //
+    // The stub is therefore the REAL request class, not an object literal with
+    // an invented `error: null`: `new IDBOpenDBRequest()` starts in 'pending'
+    // and carries the genuine throwing getter (fake-indexeddb is spec-faithful
+    // here), so the assertion below is that the promise SETTLES at all. The
+    // stubbed open is needed because a blocked open requires a version upgrade
+    // the module never asks for (DB_VERSION is pinned at 1).
     const BLOCKED = 98;
+    const req = new IDBOpenDBRequest();
     const spy = vi.spyOn(indexedDB, 'open').mockImplementationOnce(() => {
-      const req = {
-        onsuccess: null as (() => void) | null,
-        onerror: null as (() => void) | null,
-        onupgradeneeded: null as (() => void) | null,
-        onblocked: null as (() => void) | null,
-        error: null,
-        result: null,
-      } as unknown as IDBOpenDBRequest;
-      queueMicrotask(() => req.onblocked?.(new Event('blocked') as never));
+      queueMicrotask(() =>
+        req.onblocked?.(
+          new IDBVersionChangeEvent('blocked', { oldVersion: 1, newVersion: 2 }),
+        ),
+      );
       return req;
     });
 
-    const failure = await countQueued(BLOCKED).then(
-      () => null,
-      (err: unknown) => err,
-    );
+    const outcome = await Promise.race([
+      countQueued(BLOCKED).then(
+        () => 'resolved',
+        (err: unknown) => err,
+      ),
+      new Promise((settle) => setTimeout(() => settle('never settled'), 250)),
+    ]);
 
-    // Rejecting with the raw null `error` would hand the caller `null`, and
-    // every `err.message` / `err instanceof` in the drain path would break.
-    expect(failure).toBeInstanceOf(Error);
-    expect((failure as Error).message).toContain('spendrop-offline-98');
+    // 'never settled' is the shape of the bug: the caller waits forever.
+    expect(outcome).not.toBe('never settled');
+    expect(outcome).toBeInstanceOf(Error);
+    const failure = outcome instanceof Error ? outcome : null;
+    expect(failure?.message).toContain('spendrop-offline-98');
 
     spy.mockRestore();
   });

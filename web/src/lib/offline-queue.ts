@@ -96,9 +96,13 @@ export interface QueuedTransaction {
  * `interface DOMException extends Error`), so it is handed back untouched:
  * re-wrapping it would discard `.name` ('QuotaExceededError', 'AbortError',
  * 'VersionError', …), which is the only part of an IndexedDB failure worth
- * branching on. A fresh Error is constructed ONLY for the null cases the spec
- * allows: an open request blocked by another tab (nothing has failed yet, so
- * `error` is null) and a transaction ended by an explicit `abort()`.
+ * branching on. A fresh Error is constructed only for the null case the spec
+ * really has: a transaction ended by an explicit `abort()`, where
+ * `IDBTransaction.error` is a plain attribute that abort() leaves null.
+ *
+ * Only ever call this on a request that is already DONE. `IDBRequest.error` is
+ * a getter that THROWS InvalidStateError while the request is pending, so the
+ * `blocked` arm below — which fires mid-flight — must not go through here.
  */
 function idbFailure(error: DOMException | null, context: string): Error {
   return error ?? new Error(context);
@@ -130,9 +134,16 @@ function openDB(userId: number): Promise<IDBDatabase> {
       dbPromises.delete(name);
       reject(idbFailure(req.error, `IndexedDB open failed: ${name}`));
     };
+    // Deliberately does NOT read req.error: `blocked` fires while readyState is
+    // still 'pending', and the error getter throws InvalidStateError until the
+    // request is done. Reading it here would throw inside the event callback,
+    // so `reject` would never run and every caller awaiting this open would
+    // hang forever — the precise failure the cache eviction above exists to
+    // avoid. A blocked open has no browser-supplied error to preserve anyway:
+    // nothing has failed, another connection is merely holding the old version.
     req.onblocked = () => {
       dbPromises.delete(name);
-      reject(idbFailure(req.error, `IndexedDB open blocked: ${name}`));
+      reject(new Error(`IndexedDB open blocked: ${name}`));
     };
   });
   dbPromises.set(name, p);
