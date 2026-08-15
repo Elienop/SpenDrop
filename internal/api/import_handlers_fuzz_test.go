@@ -101,10 +101,14 @@ var amountSeeds = []string{
 	// Currency and locale variations.
 	"1,234.56",     // US thousands
 	"$1,234.56",    // US with symbol
-	"€42,50",       // European notation; stripCurrencyFormat treats the comma as a US thousands separator and this parses as 4250, not 42.50
+	"€42,50",       // European notation; the comma is not in grouping position, so this is REFUSED rather than read as 4250
 	"(42.50)",      // accounting negative
 	"-$15.00",      // explicit negative with symbol
-	"1.234.567,89", // European thousands — ParseFloat will fail cleanly
+	"1.234.567,89", // European thousands — refused, both by the comma rule and by ParseFloat
+	"0,92",         // a decimal comma: refused, not read as 92
+	"1,5",          // likewise
+	"1,00,000",     // mis-grouped
+	"1,500,000.50", // the accepted shape: groups of exactly three, comma-free fraction
 
 	// Whitespace / empty / newline.
 	"",
@@ -186,6 +190,10 @@ var rateSeeds = []string{
 	"NaN", "Inf", "1e999", "1e400",
 	"0x1p10", "1_000", "١٢٣", "89%",
 	"5e-324", "1e-7", "1e300",
+	// The comma rule: grouping position only. "0,92" is a decimal comma to
+	// half the world and was read as 92 — a hundredfold error booked onto
+	// the row for good.
+	"0,92", "1,5", "1,00,000", "1,500,000.50", "1.234,56", ",92", "1,",
 }
 
 // FuzzParseImportRate feeds rateSeeds (plus mutations) into the rate parser.

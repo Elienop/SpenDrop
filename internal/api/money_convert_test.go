@@ -71,6 +71,22 @@ func TestConvertForeignMoney_AgreesWithResolveCurrency(t *testing.T) {
 			wantErr:  "original_amount must not be zero",
 		},
 		{
+			// The original is rounded to cents BEFORE the division, so the
+			// amount is a function of the value that will be STORED — not of
+			// a figure the ledger is about to forget. 100.005 stores as
+			// 10001 cents, and 100.01 ÷ 0.92 is 108.71, not the 108.70 the
+			// raw value gives.
+			//
+			// Without the pre-round, a row like this cannot survive its own
+			// export: the file states the rounded original, and re-importing
+			// it computes an amount one cent away from the stored one — so
+			// the row does not dedupe and imports a second time.
+			name:      "a sub-cent original is rounded before it is divided",
+			original:  100.005,
+			rate:      0.92,
+			wantCents: 10871,
+		},
+		{
 			name:     "an in-range original the rate carries out of range",
 			original: MaxTransactionAmount,
 			rate:     0.5,

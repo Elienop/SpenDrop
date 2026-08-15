@@ -347,8 +347,13 @@ func importRateIsUsable(rate float64) bool {
 // "89,000" parses — but note that accounting parentheses make a rate NEGATIVE
 // and therefore invalid, which is correct: a negative rate would flip a
 // purchase into a refund.
+// Commas are accepted only in thousands-grouping position — see
+// cleanImportNumber. "0,92" is refused rather than read as 92.
 func parseImportRate(s string) (float64, error) {
-	cleaned := stripCurrencyFormat(s)
+	cleaned, err := cleanImportNumber(s)
+	if err != nil {
+		return 0, err
+	}
 	if cleaned == "" {
 		return 0, nil
 	}
@@ -365,9 +370,9 @@ func parseImportRate(s string) (float64, error) {
 	if !importRateGrammar.MatchString(cleaned) {
 		return 0, fmt.Errorf("rate is not a decimal number: %q", s)
 	}
-	parsed, err := strconv.ParseFloat(cleaned, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse rate %q: %w", s, err)
+	parsed, parseErr := strconv.ParseFloat(cleaned, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse rate %q: %w", s, parseErr)
 	}
 	if !importRateIsUsable(parsed) {
 		return 0, fmt.Errorf("rate must be a finite positive number: %q", s)

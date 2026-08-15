@@ -14,6 +14,7 @@ import (
 	"log"
 	"math"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1935,6 +1936,16 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// Loaded on qtx, inside the transaction the rows commit in, so every row
 	// in the batch is resolved against one view of the currencies table — the
 	// same view the inserts land against.
+	//
+	// The qtx is not a preference here, it is the only option: the pool is
+	// capped at one connection (SetMaxOpenConns(1), cmd/spendrop/db.go, and
+	// the test harness mirrors it), so a read issued on h.queries while this
+	// transaction holds that connection waits for a connection the
+	// transaction will not release until it commits — a deadlock, not a
+	// staleness bug. That is also why passing the gate's snapshot down here
+	// instead would go unnoticed by every test: it produces the same answer
+	// whenever the table has not changed, and the case where it does not is
+	// the one no test can open a second connection to create.
 	insertCurrencies, err := loadImportCurrencies(r.Context(), qtx)
 	if err != nil {
 		log.Printf("import confirm: load currencies in tx: %v", err)
@@ -2660,18 +2671,71 @@ func preMoneySkipReason(row importRow) (time.Time, importSkipReason, bool) {
 	return date, "", false
 }
 
-// stripCurrencyFormat removes currency symbols ($, €, £), commas, and
-// whitespace so the string can be parsed as a float. It also converts
-// accounting-format negatives like (42.50) to -42.50.
-func stripCurrencyFormat(s string) string {
+// stripCurrencySymbols removes currency symbols ($, €, £) and surrounding
+// whitespace, and converts accounting-format negatives like (42.50) to -42.50.
+// It leaves digits, commas and the decimal point alone, so a caller can still
+// see where the commas were.
+func stripCurrencySymbols(s string) string {
 	s = strings.TrimSpace(s)
-	s = strings.NewReplacer("$", "", "€", "", "£", "", ",", "").Replace(s)
+	s = strings.NewReplacer("$", "", "€", "", "£", "").Replace(s)
 	s = strings.TrimSpace(s)
 	// Convert accounting-format negatives: (42.50) → -42.50
 	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
 		s = "-" + s[1:len(s)-1]
 	}
 	return s
+}
+
+// stripCurrencyFormat removes currency symbols, commas and whitespace so the
+// string can be parsed as a float, and converts accounting negatives.
+//
+// It deletes commas UNCONDITIONALLY and is therefore not safe to parse with on
+// its own — see cleanImportNumber, which is what the parsers call. This is
+// kept as the display-level stripper it has always been.
+func stripCurrencyFormat(s string) string {
+	return strings.ReplaceAll(stripCurrencySymbols(s), ",", "")
+}
+
+// importGroupedInteger matches an integer part whose commas are all thousands
+// separators: one to three digits, then groups of exactly three.
+var importGroupedInteger = regexp.MustCompile(`^\d{1,3}(,\d{3})+$`)
+
+// cleanImportNumber prepares an imported money cell for strconv, and refuses
+// any comma that is not a thousands separator.
+//
+// This is the one reading a comma may take, and the rule is positional
+// because no other rule is available. Half the world writes 0,92 for what the
+// other half writes 0.92; a bare spreadsheet cell carries no locale, and
+// "1,500" is one thousand five hundred to one reader and one and a half to
+// another. Deleting every comma — which is what stripCurrencyFormat does, and
+// what these parsers used to do — resolves that ambiguity by silently picking
+// the reading that is a HUNDREDFOLD error when it is wrong: "0,92" became 92.
+// On a rate that is worse than wrong, because a booked rate is frozen onto
+// the row: 100 EUR at a "0,92" rate stored $1.09 and a booked rate of 92,
+// with nothing flagged, on precisely the foreign-only sheet the Rate column
+// exists to import.
+//
+// So: commas in grouping position are stripped (89,000 and 1,500,000.50 are
+// ordinary household figures), and anything else — a decimal comma, a
+// mis-grouped one, one after the decimal point — is an error the caller
+// reports rather than a number it guesses at.
+func cleanImportNumber(s string) (string, error) {
+	cleaned := stripCurrencySymbols(s)
+	if !strings.Contains(cleaned, ",") {
+		return cleaned, nil
+	}
+
+	body := strings.TrimPrefix(strings.TrimPrefix(cleaned, "-"), "+")
+	intPart, frac := body, ""
+	if dot := strings.IndexByte(body, '.'); dot >= 0 {
+		intPart, frac = body[:dot], body[dot:]
+	}
+	// A comma after the decimal point is never a separator, and neither is
+	// one in a group that is not exactly three digits long.
+	if strings.Contains(frac, ",") || !importGroupedInteger.MatchString(intPart) {
+		return "", fmt.Errorf("a comma is only a thousands separator: %q", s)
+	}
+	return strings.ReplaceAll(cleaned, ",", ""), nil
 }
 
 // parseImportAmount converts a string from an imported xlsx Amount cell
@@ -2713,13 +2777,16 @@ func stripCurrencyFormat(s string) string {
 // The bound below is magnitude-symmetric on purpose: ±MaxTransactionAmount,
 // not "> Max" on a stripped value. FuzzParseImportAmount pins both ends.
 func parseImportAmount(s string) (int64, error) {
-	cleaned := stripCurrencyFormat(s)
+	cleaned, err := cleanImportNumber(s)
+	if err != nil {
+		return 0, err
+	}
 	if cleaned == "" {
 		return 0, fmt.Errorf("empty amount")
 	}
-	parsed, err := strconv.ParseFloat(cleaned, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parse amount %q: %w", s, err)
+	parsed, parseErr := strconv.ParseFloat(cleaned, 64)
+	if parseErr != nil {
+		return 0, fmt.Errorf("parse amount %q: %w", s, parseErr)
 	}
 	if math.IsNaN(parsed) || math.IsInf(parsed, 0) {
 		return 0, fmt.Errorf("non-finite amount: %q", s)

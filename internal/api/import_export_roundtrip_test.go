@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/xuri/excelize/v2"
+
+	"github.com/elienop/spendrop/internal/database"
 )
 
 // TestExportThenImport_PreservesBookedRate closes the loop the whole stage was
@@ -182,6 +184,95 @@ func TestExportThenImport_PreservesBookedRate(t *testing.T) {
 	if !got.BookedRate.Valid || got.BookedRate.Float64 != 89000 {
 		t.Errorf("booked_rate = %+v, want 89000 — without it the re-imported row has lost the rate it was booked at",
 			got.BookedRate)
+	}
+}
+
+// TestExportThenImport_SubCentOriginalStillDedupes is the round trip for the
+// row that used to break it.
+//
+// A foreign original with a fraction of a cent — 100.005 EUR — stores as
+// 10001 cents, and the export writes THAT. If the stored amount was derived
+// from the raw 100.005 instead, the exported file describes a row the importer
+// prices one cent differently: the preview reports the sheet's own amount as
+// disagreeing with its rate, no db_match is found, and taking the offered
+// computed amount inserts a second copy of a transaction the ledger already
+// holds. A duplicate created by exporting and re-importing is the one outcome
+// the Rate column was added to prevent.
+func TestExportThenImport_SubCentOriginalStillDedupes(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "subcent", "admin")
+	ctx := context.Background()
+
+	if err := q.UpsertCurrency(ctx, database.UpsertCurrencyParams{
+		Code: "EUR", Name: "Euro", Symbol: "€", RateToBase: 0.92, IsBase: false,
+	}); err != nil {
+		t.Fatalf("UpsertCurrency: %v", err)
+	}
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	var foodID int64
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+
+	createBody, _ := json.Marshal(map[string]any{
+		"date":              "2026-05-01",
+		"amount":            0,
+		"original_amount":   100.005,
+		"original_currency": "EUR",
+		"description":       "Paris lunch",
+		"category_id":       foodID,
+	})
+	createRec := httptest.NewRecorder()
+	createReq := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(createBody)), user)
+	createReq.Header.Set("Content-Type", "application/json")
+	h.handleCreateTransaction(createRec, createReq)
+	if createRec.Code != http.StatusCreated && createRec.Code != http.StatusOK {
+		t.Fatalf("create: status %d: %s", createRec.Code, createRec.Body.String())
+	}
+	var created struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(createRec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode created row: %v", err)
+	}
+	stored := readRoundTripRow(t, db, created.ID)
+	if !stored.OriginalCents.Valid || stored.OriginalCents.Int64 != 10001 {
+		t.Fatalf("original_amount_cents = %+v, want 10001 — the fixture is not the row this test is about", stored.OriginalCents)
+	}
+
+	exportRec := httptest.NewRecorder()
+	h.handleExportTransactions(exportRec,
+		withUser(httptest.NewRequest(http.MethodGet, "/api/export/transactions", nil), user))
+	if exportRec.Code != http.StatusOK {
+		t.Fatalf("export: status %d: %s", exportRec.Code, exportRec.Body.String())
+	}
+
+	preview, importID := uploadImportSheet(t, h, user, exportRec.Body.Bytes())
+	if errs := fieldErrorsByRow(t, preview); len(errs) != 0 {
+		t.Fatalf("the export of a sub-cent row flags itself on re-import: %v", errs)
+	}
+	groups, _ := preview["collision_groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("collision_groups = %v, want one db_match — a re-imported export must recognise its own row",
+			preview["collision_groups"])
+	}
+	if reason := groups[0].(map[string]any)["reason"]; reason != "db_match" {
+		t.Errorf("group reason = %v, want db_match", reason)
+	}
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409 (the row is already here), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 1 {
+		t.Errorf("live rows = %d, want 1 — exporting and re-importing must not double a row", n)
 	}
 }
 

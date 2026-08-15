@@ -35,6 +35,10 @@ var errRateInvalid = errors.New("rate must be a positive, finite number")
 // selected, whether the wire amount agrees in sign, and capturing the rate onto
 // the stored row (resolveCurrency's BookedRate).
 //
+// The original is rounded to the cents grid before the division, so the
+// returned value is a function of what the ledger will STORE rather than of
+// what the caller happened to type. See the comment at the rounding.
+//
 // It returns, in order:
 //   - the original's own validateMoneyAmount error, if the foreign figure is
 //     not a storable amount to begin with;
@@ -56,6 +60,30 @@ func convertForeignMoney(originalAmount, rate float64) (float64, error) {
 	if math.IsNaN(rate) || math.IsInf(rate, 0) || rate <= 0 {
 		return 0, errRateInvalid
 	}
+
+	// Divide the STORED original, not the one that was typed. amount_cents and
+	// original_amount_cents are both written from this call, and the ledger
+	// keeps the original on the cents grid — so deriving the amount from a
+	// figure with a fraction of a cent in it produces a pair that does not
+	// describe itself: 100.005 EUR at 0.92 stored 10001 cents beside an amount
+	// of 10870, when 100.01 ÷ 0.92 is 108.71.
+	//
+	// A pair that disagrees by a cent is not a rounding curiosity, it is a
+	// row that cannot survive its own export. The export writes the STORED
+	// original (100.01) and the rate; re-importing that file computes 108.71,
+	// which is not the 108.70 on the row, so the import reports a
+	// disagreement, finds no duplicate, and — if the user takes the computed
+	// amount it offers — inserts a second copy of a transaction the household
+	// already has. Rounding here makes the stored triple internally
+	// consistent, and the round trip an identity.
+	//
+	// It goes through dollarsToCents, the same chokepoint the storage edge
+	// uses, so "the value that will be stored" is not a second opinion about
+	// what that value is. It cannot round to zero (validateMoneyAmount above
+	// has already refused an original that does) and cannot leave the range
+	// (rounding moves the value by less than a cent, and the bound is a whole
+	// number of dollars).
+	originalAmount = centsToDollars(dollarsToCents(originalAmount))
 
 	converted := originalAmount / rate
 

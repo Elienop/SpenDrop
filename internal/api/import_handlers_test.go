@@ -1286,6 +1286,115 @@ func TestStripCurrencyFormat_AccountingNegatives(t *testing.T) {
 	}
 }
 
+// TestParseImportAmount_CommaIsOnlyAThousandsSeparator pins the one reading a
+// money parser may take of a comma.
+//
+// Half the world writes 0,92 for what the other half writes 0.92, and the
+// stripper used to delete every comma before parsing — so "0,92" became 92, a
+// hundredfold error that arrives looking like an ordinary number and is
+// refused by nothing downstream. There is no honest way to tell a decimal
+// comma from a grouping one in a cell that is only ever a bare string
+// (1,500 is one thousand five hundred to one reader and 1.5 to another), so
+// the rule is positional: a comma is accepted only where a thousands
+// separator goes, and anything else is unparseable rather than guessed at.
+func TestParseImportAmount_CommaIsOnlyAThousandsSeparator(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    int64 // cents
+		wantErr bool
+	}{
+		{in: "89,000", want: 8_900_000},
+		{in: "1,500,000.50", want: 150_000_050},
+		{in: "$1,234.56", want: 123456},
+		{in: "(€1,234.56)", want: -123456},
+		{in: "42.50", want: 4250},
+		{in: "1000", want: 100000},
+		// The decimal comma, and every other placement a grouping separator
+		// cannot take.
+		{in: "0,92", wantErr: true},
+		{in: "1,5", wantErr: true},
+		{in: "1,00,000", wantErr: true},
+		{in: "1,0000", wantErr: true},
+		{in: ",92", wantErr: true},
+		{in: "1,", wantErr: true},
+		{in: "1.234,56", wantErr: true},
+		{in: "89,000,", wantErr: true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseImportAmount(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parseImportAmount(%q) = %d, want an error — a comma that is not a thousands separator must not be deleted", tc.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseImportAmount(%q): %v", tc.in, err)
+			}
+			if got != tc.want {
+				t.Errorf("parseImportAmount(%q) = %d cents, want %d", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHandleImportConfirm_DecimalCommaRateIsRefusedNotRead is the end-to-end
+// form of the same defect, on the sheet this whole stage exists for.
+//
+// A text-formatted rate cell reading "0,92" became 92 — so 100 EUR was stored
+// as $1.09 with a permanent booked rate of 92, off by a hundredfold, with
+// nothing flagged. The row that carries a USD amount as well is caught by the
+// disagreement check; the FOREIGN-ONLY row, which is the one the Rate column
+// was added for, had no second opinion to be caught by.
+func TestHandleImportConfirm_DecimalCommaRateIsRefusedNotRead(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "decimalcomma", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Paris lunch", "Food", "100", "EUR", "0,92"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	got, flagged := fieldErrorsByRow(t, preview)[0][importFieldRate]
+	if !flagged {
+		rows := previewRows(t, preview)
+		t.Fatalf("a decimal-comma rate was accepted: row = %v, field_errors = %v", rows[0], preview["field_errors"])
+	}
+	if got != importRateInvalidMessage() {
+		t.Errorf("message = %q, want the unusable-rate sentence", got)
+	}
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed at a rate read a hundredfold wrong", n)
+	}
+
+	// The fix is one edit, and it lands: the same cell written the way the
+	// parser reads numbers.
+	if rec := patchImportRow(t, h, user, importID, 0, "rate", "0.92"); rec.Code != http.StatusOK {
+		t.Fatalf("patch rate: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := confirmImport(t, h, q, user, importID); rec.Code != http.StatusOK {
+		t.Fatalf("confirm after the fix: %d %s", rec.Code, rec.Body.String())
+	}
+	stored := readOnlyStoredRow(t, db)
+	if stored.AmountCents != 10870 {
+		t.Errorf("amount_cents = %d, want 10870 (100 ÷ 0.92)", stored.AmountCents)
+	}
+	if !stored.BookedRate.Valid || stored.BookedRate.Float64 != 0.92 {
+		t.Errorf("booked_rate = %+v, want 0.92", stored.BookedRate)
+	}
+}
+
 // TestParseImportDate pins the semantics of parseImportDate so future changes
 // don't silently alter how the importer interprets Date cells. Covers:
 //   - whitespace and empty input

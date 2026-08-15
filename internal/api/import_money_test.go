@@ -565,6 +565,14 @@ func TestParseImportRate(t *testing.T) {
 		{in: "89000", want: 89000},
 		{in: "89,000", want: 89000},
 		{in: "89,000.5", want: 89000.5},
+		{in: "1,500,000.50", want: 1500000.5},
+		// A comma is a thousands separator or nothing. "0,92" is a decimal
+		// comma to half the world and would otherwise be read as 92 — a
+		// hundredfold error, booked permanently onto the row.
+		{in: "0,92", wantErr: true},
+		{in: "1,5", wantErr: true},
+		{in: "1,00,000", wantErr: true},
+		{in: "1.234,56", wantErr: true},
 		{in: "0.92", want: 0.92},
 		{in: " 1 ", want: 1},
 		{in: "0", wantErr: true},
