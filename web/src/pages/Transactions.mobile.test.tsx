@@ -89,6 +89,7 @@ const defaultTransaction = {
   id: 1,
   user_id: 1,
   created_by: 'Elie',
+  created_by_username: 'elienop',
   date: '2026-04-01',
   amount: 25.5,
   original_amount: null,
@@ -258,6 +259,11 @@ describe('Transactions at phone width — presentation swap', () => {
     // and gets a 403 — it must not retreat into the edit sheet.
     expect(screen.getByText('Entered by').parentElement).toHaveTextContent(
       'Entered by Elie',
+    );
+    // B36: both halves reach the phone, on the surface that has the least
+    // room for them. The display name is the spoofable one.
+    expect(screen.getByText('Entered by').closest('p')!.textContent).toBe(
+      'Entered by Elie @elienop',
     );
   });
 

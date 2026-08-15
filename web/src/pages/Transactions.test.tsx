@@ -47,6 +47,7 @@ const defaultTransaction = {
   id: 1,
   user_id: 1,
   created_by: 'Elie',
+  created_by_username: 'elienop',
   date: '2026-04-01',
   amount: 25.5,
   original_amount: null,
@@ -1469,8 +1470,20 @@ describe('Transactions page', () => {
       mockUseTransactions.mockReturnValue(
         defaultHookReturn({
           transactions: [
-            { ...defaultTransaction, id: 1, description: 'Groceries', created_by: 'Elie' },
-            { ...defaultTransaction, id: 2, description: 'Pharmacy', created_by: 'Partner Name' },
+            {
+              ...defaultTransaction,
+              id: 1,
+              description: 'Groceries',
+              created_by: 'Elie',
+              created_by_username: 'elienop',
+            },
+            {
+              ...defaultTransaction,
+              id: 2,
+              description: 'Pharmacy',
+              created_by: 'Partner Name',
+              created_by_username: 'partner',
+            },
           ],
           total: 2,
         }),
@@ -1486,6 +1499,12 @@ describe('Transactions page', () => {
       // would still satisfy a single-row assertion.
       expect(await screen.findByText('Elie')).toBeInTheDocument();
       expect(screen.getByText('Partner Name')).toBeInTheDocument();
+      // B36. The display name alone cannot attribute a row — a member can
+      // PATCH theirs to the other member's string and the live JOIN relabels
+      // every row they ever entered. The handle is the half they cannot
+      // collide, so each row has to carry its own.
+      expect(screen.getByText('@elienop')).toBeInTheDocument();
+      expect(screen.getByText('@partner')).toBeInTheDocument();
     });
   });
 

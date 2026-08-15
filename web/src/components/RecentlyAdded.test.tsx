@@ -79,6 +79,7 @@ function savedTxn(over: Partial<Transaction> = {}): Transaction {
     id: 5,
     user_id: 1,
     created_by: 'Elie',
+    created_by_username: 'elienop',
     date: '2026-05-27',
     amount: 10,
     original_amount: null,
@@ -511,6 +512,25 @@ describe('RecentlyAdded creator attribution', () => {
     // A bare name in a muted line does not announce what it is; the icon is
     // aria-hidden decoration, so the sr-only prefix carries the meaning.
     expect(creator.closest('p')).toHaveTextContent('Entered by Elie');
+    // B36: the login handle rides beside it. The display name alone is
+    // spoofable — a member can PATCH theirs to the other member's string and
+    // the live JOIN relabels every row they have entered.
+    expect(screen.getByText('@elienop')).toBeInTheDocument();
+    expect(creator.closest('p')!.textContent).toBe('Entered by Elie @elienop');
+  });
+
+  test('a saved row with no handle on the wire renders no bare @', async () => {
+    apiGet.mockResolvedValue({
+      transactions: [savedTxn({ created_by_username: '' })],
+      total: 1,
+      page: 1,
+      per_page: 5,
+    });
+    renderPanel([]);
+
+    const creator = await screen.findByText('Elie');
+    expect(creator.closest('p')!.textContent).toBe('Entered by Elie');
+    expect(creator.closest('p')!.textContent).not.toContain('@');
   });
 
   test('a pending row is not attributed while the saved row beside it is', async () => {
@@ -531,6 +551,10 @@ describe('RecentlyAdded creator attribution', () => {
   test('a saved row renders a neutral fallback when the creator account is gone', async () => {
     // "" is the backend's documented "creator unknown" value (the list query's
     // LEFT JOIN found no user row). It must never surface as a blank line.
+    //
+    // The handle stays at the fixture's 'elienop': on the wire both halves
+    // empty together, so this pair is unreachable there and is the one that
+    // proves the `@` is gated on the NAME too.
     apiGet.mockResolvedValue({
       transactions: [savedTxn({ created_by: '' })],
       total: 1,
@@ -541,5 +565,6 @@ describe('RecentlyAdded creator attribution', () => {
 
     const fallback = await screen.findByText('Unknown');
     expect(fallback.closest('p')).toHaveTextContent('Entered by Unknown');
+    expect(fallback.closest('p')!.textContent).not.toContain('@');
   });
 });

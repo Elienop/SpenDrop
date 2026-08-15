@@ -17,10 +17,11 @@ export interface Transaction {
    * themselves because `GET /users` is admin-only — before this field they
    * learned a row was somebody else's only when Save came back 403.
    *
-   * Carries `users.display_name`, not `users.username`: display_name is what
-   * this app shows wherever it names a person. Render it as a plain name —
-   * NOT in the Sidebar's `@handle` idiom, which is reserved for the login
-   * identifier.
+   * Carries `users.display_name`, not `users.username`. Never render it
+   * alone: a member can PATCH their own display name to any string, including
+   * the admin's, and because this comes from a live JOIN the relabel applies
+   * retroactively to every row they have ever entered. Pair it with
+   * `created_by_username` — `<CreatorLabel>` is the one component that does.
    *
    * Always present on the wire (the backend emits it without `omitempty`),
    * so there is no absent case to distinguish. The empty string means the
@@ -29,6 +30,23 @@ export interface Transaction {
    * Display only: it changes no ownership or authorization semantics.
    */
   created_by: string;
+  /**
+   * The creator's login handle (`users.username`), rendered as `@handle`
+   * beside `created_by`. This is the half of the attribution a member cannot
+   * self-select into a collision: usernames are unique, and the admin sees
+   * them beside display names in Settings. A server-side uniqueness check on
+   * display names was rejected as the fix for B36 — the resulting error would
+   * leak the set of existing display names to a member.
+   *
+   * REQUIRED, not optional, and for the same reason `created_by` is: an
+   * optional field lets a producer (a new endpoint, a test fixture, a mocked
+   * hook) forget it while every consumer still type-checks clean and renders
+   * nothing. The attribution would silently revert to the spoofable half on
+   * exactly the surface that forgot it. Empty string is the "creator's user
+   * row is gone" value — the same LEFT JOIN miss that empties `created_by` —
+   * and suppresses the `@` entirely rather than rendering a bare `@`.
+   */
+  created_by_username: string;
   date: string;
   amount: number;
   original_amount: number | null;
@@ -53,18 +71,21 @@ export interface Transaction {
  * `omitempty` on this field so the recovery surface always shows the
  * exact moment each row was tombstoned, even for the zero-value case.
  *
- * `created_by` is inherited and REQUIRED: `deletedTransactionResponse` is a
- * SEPARATE struct from `transactionResponse` (see the comment above it), and
- * it now emits the attribution field on both list paths — the admin-wide
- * `ListDeletedTransactions` and the member-scoped
- * `ListDeletedTransactionsByUser` — via a `LEFT JOIN users`, without
- * `omitempty`. Until it did, this interface `Omit`-ed the field so Trash code
- * could not read `tx.created_by`, type-check clean, and get `undefined` at
- * runtime — the same shape as the migration-010 money regression. Keep the
- * field required rather than optional: an optional field would restore
- * exactly that hole. As on `Transaction`, the empty string means the
- * creator's user row is gone (the LEFT JOIN found nothing) and must render a
- * neutral fallback, never a blank.
+ * Both attribution fields — `created_by` and `created_by_username` — are
+ * inherited and REQUIRED. `deletedTransactionResponse` is a SEPARATE struct
+ * from `transactionResponse` (see the comment above it), and it emits them on
+ * both list paths — the admin-wide `ListDeletedTransactions` and the
+ * member-scoped `ListDeletedTransactionsByUser` — via the same `LEFT JOIN
+ * users`, without `omitempty`. Until it emitted `created_by`, this interface
+ * `Omit`-ed the field so Trash code could not read `tx.created_by`,
+ * type-check clean, and get `undefined` at runtime — the same shape as the
+ * migration-010 money regression. Keep both required rather than optional: an
+ * optional field would restore exactly that hole, and for the username the
+ * failure is quieter still, because the surface that forgot it keeps
+ * rendering the display name and just drops the half that cannot be spoofed.
+ * As on `Transaction`, the empty string on either means the creator's user row
+ * is gone (the LEFT JOIN found nothing): `created_by` renders a neutral
+ * fallback, never a blank, and an empty username renders no `@` at all.
  */
 export interface DeletedTransaction extends Transaction {
   deleted_at: string;

@@ -6,13 +6,14 @@ import {
   type KeyboardEvent,
 } from 'react';
 import { format, parseISO } from 'date-fns';
-import { MoreHorizontal, User } from 'lucide-react';
+import { MoreHorizontal } from 'lucide-react';
 import type { Transaction, Category } from '../api/types';
 import { AmountDisplay } from './AmountDisplay';
 import { AmountCurrencyInput } from './AmountCurrencyInput';
 import { AmountSignToggle } from './AmountSignToggle';
 import { AutocompleteInput } from './AutocompleteInput';
 import { CategoryBadge } from './CategoryBadge';
+import { CreatorLabel } from './CreatorLabel';
 import { TagInput } from './TagInput';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -388,15 +389,10 @@ export function TransactionRow({
         <div className="truncate font-medium" title={transaction.description}>
           {transaction.description}
         </div>
-        <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-          <User className="size-3.5 shrink-0" aria-hidden="true" />
-          <span className="min-w-0 truncate">
-            {/* A bare name in a muted line does not announce what it IS, and
-                the icon is aria-hidden decoration. */}
-            <span className="sr-only">Entered by </span>
-            {transaction.created_by || 'Unknown'}
-          </span>
-        </p>
+        <CreatorLabel
+          createdBy={transaction.created_by}
+          createdByUsername={transaction.created_by_username}
+        />
       </TableCell>
       <TableCell>
         <CategoryBadge

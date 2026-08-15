@@ -39,6 +39,7 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     id: 1,
     user_id: 1,
     created_by: 'Elie',
+    created_by_username: 'elienop',
     date: '2026-04-01',
     amount: 25.5,
     original_amount: null,
@@ -135,22 +136,44 @@ describe('TransactionRow tags display', () => {
 // phone is the primary surface).
 describe('TransactionRow creator attribution', () => {
   it('shows who entered the row without any interaction', () => {
-    // created_by carries display_name, so it renders as a plain name — the
-    // Sidebar's "@handle" form belongs to the login identifier, not this.
-    renderRow(makeTx({ created_by: 'Partner Name' }));
+    // B36: display name AND login handle. created_by is a display name read
+    // through a live JOIN and a member can PATCH theirs to the other member's
+    // string, so the name alone attributes nothing — the handle is the half
+    // they cannot collide.
+    renderRow(
+      makeTx({ created_by: 'Partner Name', created_by_username: 'partner' }),
+    );
     const creator = screen.getByText('Partner Name');
     expect(creator).toBeInTheDocument();
+    expect(screen.getByText('@partner')).toBeInTheDocument();
     // A bare name in a muted line does not announce what it is.
     expect(creator.closest('p')).toHaveTextContent('Entered by Partner Name');
+  });
+
+  it('renders the name alone when the wire carries no handle', () => {
+    // A bare `@` with nothing after it is a bug. Asserted on the whole line's
+    // text, because "no `@` anywhere on this row" is the actual rule.
+    renderRow(
+      makeTx({ created_by: 'Partner Name', created_by_username: '' }),
+    );
+    const creator = screen.getByText('Partner Name');
+    expect(creator.closest('p')).toHaveTextContent('Entered by Partner Name');
+    expect(creator.closest('p')!.textContent).not.toContain('@');
   });
 
   it('renders a neutral fallback when the creator account is gone', () => {
     // "" is the backend's documented "creator unknown" value (the list query's
     // LEFT JOIN found no user row). It must never surface as a blank.
+    //
+    // The handle is left at the fixture's 'elienop' on purpose: an orphaned
+    // row empties both halves on the wire, so this pair is unreachable there —
+    // which makes it the one that proves the `@` is gated on the NAME too.
+    // 'Unknown @elienop' names the person the line just said it cannot name.
     renderRow(makeTx({ created_by: '' }));
     const fallback = screen.getByText('Unknown');
     expect(fallback).toBeInTheDocument();
     expect(fallback.closest('p')).toHaveTextContent('Entered by Unknown');
+    expect(fallback.closest('p')!.textContent).not.toContain('@');
   });
 
   it('keeps the description readable alongside the attribution', () => {
@@ -162,6 +185,17 @@ describe('TransactionRow creator attribution', () => {
     const desc = screen.getByTitle(long);
     expect(desc).toHaveClass('truncate');
     expect(screen.getByText('Elie')).toBeInTheDocument();
+    // The handle is longer text on the same line, but it is NOT the part that
+    // gives ground: it is `shrink-0` beside the name's truncating span, so a
+    // 64-character display name clips and the identifier survives. The line
+    // still cannot widen the cell past its own max-w-md — the shrink lives on
+    // the name, one level down.
+    const handle = screen.getByText('@elienop');
+    expect(handle).toHaveClass('shrink-0');
+    expect(screen.getByText('Entered by').parentElement).toHaveClass(
+      'min-w-0',
+      'truncate',
+    );
   });
 });
 

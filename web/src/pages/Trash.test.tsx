@@ -71,6 +71,7 @@ const defaultDeletedList: DeletedTransactionList = {
       id: 101,
       user_id: 1,
       created_by: 'Alice',
+      created_by_username: 'alice',
       date: '2026-04-10',
       amount: 25.5,
       original_amount: null,
@@ -89,6 +90,7 @@ const defaultDeletedList: DeletedTransactionList = {
       id: 102,
       user_id: 2,
       created_by: 'Bob',
+      created_by_username: 'bob',
       date: '2026-04-05',
       amount: 2500,
       original_amount: null,
@@ -118,6 +120,7 @@ const memberOwnDeletedList: DeletedTransactionList = {
       id: 201,
       user_id: 2,
       created_by: 'Bob',
+      created_by_username: 'bob',
       description: 'Bus pass',
     },
   ],
@@ -130,13 +133,35 @@ const memberOwnDeletedList: DeletedTransactionList = {
 // gone" value — the LEFT JOIN in ListDeletedTransactions found nothing,
 // e.g. after a restored backup dropped the user. It is the ONLY case the
 // 'Unknown' fallback exists for; the key itself is always present.
+// `created_by_username` is emptied with it because both halves come from
+// that same LEFT JOIN: an orphaned row has no name AND no handle, so the
+// row must render 'Unknown' with no `@` at all.
 const orphanedCreatorDeletedList: DeletedTransactionList = {
   transactions: [
     {
       ...defaultDeletedList.transactions[0],
       id: 301,
       created_by: '',
+      created_by_username: '',
       description: 'Row from a restored backup',
+    },
+  ],
+  total: 1,
+  page: 1,
+  per_page: 20,
+};
+
+// A named creator with no handle. Not a wire shape either — the two halves
+// come from one LEFT JOIN — but it is the half of the B36 suppression the
+// orphan fixture above cannot reach: a bare `@` with nothing after it.
+const handlelessCreatorDeletedList: DeletedTransactionList = {
+  transactions: [
+    {
+      ...defaultDeletedList.transactions[0],
+      id: 401,
+      created_by: 'Bob',
+      created_by_username: '',
+      description: 'Row with no handle',
     },
   ],
   total: 1,
@@ -434,6 +459,27 @@ describe('Trash', () => {
       expect(within(salaryRow!).getByText('Bob').closest('p')).toHaveTextContent(
         'Entered by Bob',
       );
+
+      // B36. The display name is spoofable: a member can PATCH theirs to the
+      // admin's exact string and the live JOIN relabels every row they have
+      // entered. The login handle is the half they cannot collide, and it is
+      // per-row for the same reason the name is.
+      expect(within(groceriesRow!).getByText('@alice')).toBeInTheDocument();
+      expect(within(salaryRow!).getByText('@bob')).toBeInTheDocument();
+      expect(
+        within(salaryRow!).getByText('Bob').closest('p')!.textContent,
+      ).toBe('Entered by Bob @bob');
+    });
+
+    test('renders no bare @ when the row carries a name but no handle', async () => {
+      mockedApi.get.mockResolvedValue(handlelessCreatorDeletedList);
+      renderTrash();
+      const row = (await screen.findByText('Row with no handle')).closest('tr');
+      expect(row).not.toBeNull();
+
+      const attribution = within(row!).getByText('Bob').closest('p');
+      expect(attribution!.textContent).toBe('Entered by Bob');
+      expect(attribution!.textContent).not.toContain('@');
     });
 
     test('description cell is width-bounded and keeps the full text on hover', async () => {
@@ -472,6 +518,10 @@ describe('Trash', () => {
       expect(
         within(row!).getByText('Unknown').closest('p'),
       ).toHaveTextContent('Entered by Unknown');
+      // No handle to hang off a name the line has just said it cannot give.
+      expect(
+        within(row!).getByText('Unknown').closest('p')!.textContent,
+      ).not.toContain('@');
     });
 
     test('renders the empty state when the trash list is empty', async () => {
@@ -1428,6 +1478,21 @@ describe('Trash', () => {
         expect(
           within(salary!).getByText('Bob').closest('p'),
         ).toHaveTextContent('Entered by Bob');
+
+        // B36, per card for the same reason the name is per card.
+        expect(within(groceries!).getByText('@alice')).toBeInTheDocument();
+        expect(within(salary!).getByText('@bob')).toBeInTheDocument();
+      });
+
+      test('a card with a name but no handle renders no bare @', async () => {
+        mockedApi.get.mockResolvedValue(handlelessCreatorDeletedList);
+        const list = await renderCardList();
+        const card = within(list)
+          .getByText('Row with no handle')
+          .closest('li');
+        const attribution = within(card!).getByText('Bob').closest('p');
+        expect(attribution!.textContent).toBe('Entered by Bob');
+        expect(attribution!.textContent).not.toContain('@');
       });
 
       test('a card whose creator row is gone reads "Unknown", not a blank line', async () => {
@@ -1443,6 +1508,9 @@ describe('Trash', () => {
         expect(
           within(card!).getByText('Unknown').closest('p'),
         ).toHaveTextContent('Entered by Unknown');
+        expect(
+          within(card!).getByText('Unknown').closest('p')!.textContent,
+        ).not.toContain('@');
       });
 
       test('the card carries the transaction date and how long ago it was deleted', async () => {

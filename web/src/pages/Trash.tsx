@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { differenceInCalendarDays, format, parseISO } from 'date-fns';
 import { formatDistanceToNowStrict } from 'date-fns';
 import { toast } from 'sonner';
-import { AlertCircle, RotateCcw, Trash2, User } from 'lucide-react';
+import { AlertCircle, RotateCcw, Trash2 } from 'lucide-react';
 import { api } from '../api/client';
 import type {
   DeletedTransaction,
@@ -37,6 +37,7 @@ import { AmountDisplay } from '@/components/AmountDisplay';
 import { AmountSignNote } from '@/components/AmountSignNote';
 import { PaginationBar } from '@/components/PaginationBar';
 import { CategoryBadge } from '@/components/CategoryBadge';
+import { CreatorLabel } from '@/components/CreatorLabel';
 import { displayAmount, formatSignedCurrency } from '@/lib/format';
 import { isAdmin } from '@/lib/roles';
 import { TOUCH_TARGET_CHECKBOX } from '@/lib/touch-target';
@@ -256,16 +257,10 @@ function TrashCard({
               className="shrink-0"
             />
           </div>
-          <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <User className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="min-w-0 truncate">
-              {/* A bare name in a muted line does not announce
-                  what it IS, and the icon is aria-hidden
-                  decoration. */}
-              <span className="sr-only">Entered by </span>
-              {row.created_by || 'Unknown'}
-            </span>
-          </p>
+          <CreatorLabel
+            createdBy={row.created_by}
+            createdByUsername={row.created_by_username}
+          />
           <div className="flex flex-wrap items-center gap-1">
             <CategoryBadge
               category={{ id: row.category_id, name: row.category_name }}
@@ -1182,16 +1177,10 @@ export function Trash() {
                           </span>
                         )}
                       </div>
-                      <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                        <User className="size-3.5 shrink-0" aria-hidden="true" />
-                        <span className="min-w-0 truncate">
-                          {/* A bare name in a muted line does not announce
-                              what it IS, and the icon is aria-hidden
-                              decoration. */}
-                          <span className="sr-only">Entered by </span>
-                          {row.created_by || 'Unknown'}
-                        </span>
-                      </p>
+                      <CreatorLabel
+                        createdBy={row.created_by}
+                        createdByUsername={row.created_by_username}
+                      />
                     </TableCell>
                     <TableCell>
                       <CategoryBadge
