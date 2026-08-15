@@ -427,7 +427,7 @@ condition *and* move the predicate, believing one was safe because the other was
   (50k); charts pixel-diffed before/after on the rebuilt `:3535` in both themes (0 px on
   spending-light, ≤15 px at delta 1/255 elsewhere, all inside the sidebar theme toggle);
   `tsc -b --force`, eslint 0 errors, vitest 2236/2236. Commits: `4ccae75`, `f042263`, `4a526da`,
-  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above), `80fa965` (test-execution reports). Filed: B55, B56, and the Go
+  `fde8182`, `88fbdd8`, `160f197`, `cc82d36`, `f853929`, `0cdeeff`, `ee3941b`, `885ba17` (deep-review minors: 4 closed, the exclusion question filed above), `80fa965` (test-execution reports), `ad37b62` (its review: setting `reporters` had silently dropped vitest's auto `github-actions` reporter — CI PR annotations — now re-created via std-env's `isAgent` exactly as vitest picks them; `go test -json > file` hid a failing Go test from the terminal — gotestsum, pinned, writes the same stream and keeps the human output; re-scanned identical: tests 4,655). Filed: B55, B56, and the Go
   threshold decision. **Branch scanned into a throwaway project** (`spendrop-branchcheck`, so `main`'s analysis
   stayed untouched — Community Build has no branch analysis): 0 analysis warnings, coverage
   **86.0%** (both reports resolved), every targeted rule at 0, and the residue is exactly the
