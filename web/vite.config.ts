@@ -81,9 +81,11 @@ export default defineConfig({
       provider: 'v8',
       // lcov paths are written relative to the REPO root (`web/src/...`),
       // which is the scanner's base dir, so every SF: line resolves.
+      // `lcovonly`, not `lcov`: the latter also emits an HTML report whose
+      // bundled scripts eslint would then lint.
       reporter: [
         'text-summary',
-        ['lcov', { projectRoot: path.resolve(__dirname, '..') }],
+        ['lcovonly', { projectRoot: path.resolve(__dirname, '..') }],
       ],
       reportsDirectory: './coverage',
       include: ['src/**/*.{ts,tsx}'],
