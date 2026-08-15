@@ -3647,3 +3647,410 @@ func TestHandleImportPatchRow_RateOnBaseFlags(t *testing.T) {
 		t.Errorf("amount = %v, want the sheet's own 42.5", amount)
 	}
 }
+
+// --- confirm: the money gate and what a resolved row stores ---
+
+// storedRow reads the money columns of the single live transaction, which is
+// the only place the outcome of a matrix row can actually be observed: the
+// confirm response counts rows, it does not describe them.
+type storedRow struct {
+	AmountCents      int64
+	OriginalCents    sql.NullInt64
+	OriginalCurrency sql.NullString
+	BookedRate       sql.NullFloat64
+}
+
+func readOnlyStoredRow(t *testing.T, db *sql.DB) storedRow {
+	t.Helper()
+	var got storedRow
+	if err := db.QueryRow(`
+		SELECT amount_cents, original_amount_cents, original_currency, booked_rate
+		FROM transactions WHERE deleted_at IS NULL`,
+	).Scan(&got.AmountCents, &got.OriginalCents, &got.OriginalCurrency, &got.BookedRate); err != nil {
+		t.Fatalf("read stored row: %v", err)
+	}
+	return got
+}
+
+// TestHandleImportConfirm_MoneyErrors_Returns409 is the gate. The preview
+// flags a row it cannot resolve; confirm must refuse the batch rather than
+// insert around it, and must leave the session intact so the user can fix the
+// row and try again.
+//
+// The code is its own — MONEY_ERRORS, a sibling of FIELD_TOO_LONG — because
+// the two families have different remedies and the frontend renders them
+// apart.
+func TestHandleImportConfirm_MoneyErrors_Returns409(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "moneygate", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", ""},
+			{"2026-01-16", "Bakery", "12.00", "Food", "", "", ""},
+		})
+	_, importID := uploadImportSheet(t, h, user, xlsxData)
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 409: %v", err)
+	}
+	if body["code"] != "MONEY_ERRORS" {
+		t.Errorf("code = %v, want MONEY_ERRORS", body["code"])
+	}
+	errs, ok := body["field_errors"].([]any)
+	if !ok || len(errs) != 1 {
+		t.Fatalf("field_errors = %v, want exactly one entry", body["field_errors"])
+	}
+	entry := errs[0].(map[string]any)
+	if entry["field"] != importFieldRate || int(entry["row_id"].(float64)) != 0 {
+		t.Errorf("field_errors[0] = %v, want the rate on row 0", entry)
+	}
+
+	// Nothing inserted — not even the clean second row. The batch is
+	// all-or-nothing, like every other confirm gate.
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed despite the 409; the gate must refuse the whole batch", n)
+	}
+
+	// The session survives, so the user can supply the rate and confirm again.
+	getRec := getImportSession(t, h, user, importID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("session gone after the 409: %d %s", getRec.Code, getRec.Body.String())
+	}
+
+	// And that is exactly what happens: one PATCH, and the same confirm lands.
+	if rec := patchImportRow(t, h, user, importID, 0, "rate", "89000"); rec.Code != http.StatusOK {
+		t.Fatalf("patch rate: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := confirmImport(t, h, q, user, importID); rec.Code != http.StatusOK {
+		t.Fatalf("confirm after the fix: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 2 {
+		t.Errorf("%d rows landed after the fix, want 2", n)
+	}
+}
+
+// TestHandleImportConfirm_StoresDerivedMoney is the end of the whole stage:
+// a sheet that states its money in LBP and the rate it was booked at lands as
+// a row whose USD was COMPUTED from that rate, with the original, the
+// canonical currency code and the rate itself all recorded.
+//
+// The currency cell says "lbp" on purpose. The stored code must be "LBP" —
+// store.go's freeze-on-edit predicate compares it exactly, so a row stored in
+// the sheet's spelling could never freeze its rate on a later edit.
+func TestHandleImportConfirm_StoresDerivedMoney(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "derivedstore", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "lbp", "89000"},
+		})
+	resp := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Fatalf("imported = %d, want 1; response %v", got, resp)
+	}
+
+	got := readOnlyStoredRow(t, db)
+	if got.AmountCents != 1685 {
+		t.Errorf("amount_cents = %d, want 1685 (1,500,000 ÷ 89,000)", got.AmountCents)
+	}
+	if !got.OriginalCents.Valid || got.OriginalCents.Int64 != 150000000 {
+		t.Errorf("original_amount_cents = %+v, want 150000000", got.OriginalCents)
+	}
+	if !got.OriginalCurrency.Valid || got.OriginalCurrency.String != "LBP" {
+		t.Errorf("original_currency = %+v, want the canonical %q", got.OriginalCurrency, "LBP")
+	}
+	if !got.BookedRate.Valid || got.BookedRate.Float64 != 89000 {
+		t.Errorf("booked_rate = %+v, want 89000 — the rate the SHEET quoted", got.BookedRate)
+	}
+}
+
+// TestHandleImportConfirm_LabelRowKeepsNullBookedRate is the control for the
+// test above, and the reason booked_rate cannot simply be derived from the
+// stored pair. A sheet that states both halves but quotes NO rate is a label:
+// dividing one by the other would manufacture a rate the user never quoted,
+// and a booked rate is one-way (freeze-on-edit), so a manufactured one is
+// permanent.
+func TestHandleImportConfirm_LabelRowKeepsNullBookedRate(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "labelrow", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			{"2026-01-15", "Souk run", "16.85", "Food", "1500000", "LBP"},
+		})
+	resp := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Fatalf("imported = %d, want 1; response %v", got, resp)
+	}
+
+	got := readOnlyStoredRow(t, db)
+	if got.AmountCents != 1685 {
+		t.Errorf("amount_cents = %d, want the sheet's own 1685", got.AmountCents)
+	}
+	if !got.OriginalCents.Valid || got.OriginalCents.Int64 != 150000000 {
+		t.Errorf("original_amount_cents = %+v, want 150000000", got.OriginalCents)
+	}
+	if !got.OriginalCurrency.Valid || got.OriginalCurrency.String != "LBP" {
+		t.Errorf("original_currency = %+v, want LBP", got.OriginalCurrency)
+	}
+	if got.BookedRate.Valid {
+		t.Errorf("booked_rate = %+v, want NULL — no rate was quoted, so none was booked", got.BookedRate)
+	}
+}
+
+// TestHandleImportConfirm_BaseCurrencyLabelCollapses pins the deliberate
+// parity change. A row whose "original currency" IS the base currency has no
+// foreign side to record, so it stores none — the same branch resolveCurrency
+// takes for a manual entry in USD. Storing the label verbatim (as import used
+// to) made every base row look converted.
+func TestHandleImportConfirm_BaseCurrencyLabelCollapses(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "baselabel", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			{"2026-01-15", "Corner shop", "42.50", "Food", "42.50", "usd"},
+		})
+	resp := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Fatalf("imported = %d, want 1; response %v", got, resp)
+	}
+
+	got := readOnlyStoredRow(t, db)
+	if got.AmountCents != 4250 {
+		t.Errorf("amount_cents = %d, want 4250", got.AmountCents)
+	}
+	if got.OriginalCents.Valid {
+		t.Errorf("original_amount_cents = %+v, want NULL for a base-currency row", got.OriginalCents)
+	}
+	if got.OriginalCurrency.Valid {
+		t.Errorf("original_currency = %+v, want NULL for a base-currency row", got.OriginalCurrency)
+	}
+	if got.BookedRate.Valid {
+		t.Errorf("booked_rate = %+v, want NULL", got.BookedRate)
+	}
+}
+
+// TestHandleImportConfirm_SameSheetReimportDedupes pins the dedupe identity of
+// a DERIVED row: re-importing the same sheet must recognise every row as one
+// SpenDrop already has.
+//
+// The second confirm is refused as a collision rather than counted as a
+// duplicate skip, and that is the confirm gate's long-standing shape, not
+// something this stage chose: the preview predicts the db_match, so the batch
+// is stopped before the insert loop — which is where the `duplicate` label
+// lives — ever runs. What matters here is that the identity survived: a row
+// whose cents were computed from a rate hashes to the same value the second
+// time round.
+func TestHandleImportConfirm_SameSheetReimportDedupes(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "resheet", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", "89000"},
+			{"2026-01-16", "Bakery", "", "Food", "890000", "LBP", "89000"},
+		})
+
+	first := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(first["imported"].(float64)); got != 2 {
+		t.Fatalf("first import: imported = %d, want 2; %v", got, first)
+	}
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	groups, _ := preview["collision_groups"].([]any)
+	if len(groups) != 2 {
+		t.Fatalf("second upload: collision_groups = %v, want one per row", preview["collision_groups"])
+	}
+	for _, g := range groups {
+		if reason := g.(map[string]any)["reason"]; reason != "db_match" {
+			t.Errorf("group reason = %v, want db_match", reason)
+		}
+	}
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("second confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 2 {
+		t.Errorf("live rows = %d, want 2 — a re-import must not double the ledger", n)
+	}
+}
+
+// TestHandleImportConfirm_ManualRowAtSameRateDedupes and its sibling below are
+// the pair that decides whether the hash formula needed to change. It did not:
+// the derived cents ARE the identity, so the same money entered by hand and
+// imported from a sheet is one row, while the same original quoted at a
+// different rate is a different booking — which is correct, because it is
+// different money.
+func TestHandleImportConfirm_ManualRowAtSameRateDedupes(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "manualsame", "admin")
+
+	seedManualForeignRow(t, h, user, "2026-02-01", "Souk run", 1500000)
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-02-01", "Souk run", "", "Food", "1500000", "LBP", "89000"},
+		})
+	_, importID := uploadImportSheet(t, h, user, xlsxData)
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409 (the row is already in the ledger), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "UNRESOLVED_COLLISIONS" {
+		t.Errorf("code = %q, want UNRESOLVED_COLLISIONS", code)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 1 {
+		t.Errorf("live rows = %d, want 1 — the hand-typed row and the sheet row are one transaction", n)
+	}
+}
+
+func TestHandleImportConfirm_ManualRowAtOtherRateInserts(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "manualother", "admin")
+
+	seedManualForeignRow(t, h, user, "2026-02-01", "Souk run", 1500000)
+
+	// 89,500 instead of the household's 89,000: 1,500,000 LBP is 16.76, not
+	// 16.85. Same evening, same shop, a different booking.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-02-01", "Souk run", "", "Food", "1500000", "LBP", "89500"},
+		})
+	resp := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Fatalf("imported = %d, want 1; %v", got, resp)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 2 {
+		t.Errorf("live rows = %d, want 2", n)
+	}
+
+	var cents int64
+	var rate sql.NullFloat64
+	if err := db.QueryRow(`
+		SELECT amount_cents, booked_rate FROM transactions
+		WHERE deleted_at IS NULL AND booked_rate = 89500`).Scan(&cents, &rate); err != nil {
+		t.Fatalf("read the imported row: %v", err)
+	}
+	if cents != 1676 {
+		t.Errorf("amount_cents = %d, want 1676 (1,500,000 ÷ 89,500)", cents)
+	}
+}
+
+// TestHandleImportConfirm_GateOrder_MoneyBeforeCategories pins the position of
+// the new gate. A session can fail two gates at once, and the order decides
+// which one the user is sent to fix first. Money comes before categories
+// because a category decision cannot change whether a row's money resolves,
+// while the reverse is not true of the collision view further down.
+func TestHandleImportConfirm_GateOrder_MoneyBeforeCategories(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "gateorder", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			// A money problem…
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", ""},
+			// …and a category nothing in the household matches.
+			{"2026-01-16", "Bakery", "12.00", "Grocries", "", "", ""},
+		})
+	_, importID := uploadImportSheet(t, h, user, xlsxData)
+
+	// Confirm with an empty category map so the second row is genuinely
+	// undecided: both gates would fire.
+	body, _ := json.Marshal(map[string]any{
+		"import_id":           importID,
+		"default_category_id": 0,
+	})
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/import/confirm", bytes.NewReader(body)), user)
+	rec := httptest.NewRecorder()
+	h.handleImportConfirm(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "MONEY_ERRORS" {
+		t.Errorf("code = %q, want MONEY_ERRORS to be reported before UNRESOLVED_CATEGORIES", code)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed despite the 409", n)
+	}
+}
+
+// seedManualForeignRow creates a foreign-currency transaction through the real
+// API, so its cents, its hash and its booked rate are produced by the write
+// path rather than by a fixture that could agree with the importer only by
+// coincidence.
+func seedManualForeignRow(t *testing.T, h *Handler, user database.User, date, desc string, originalAmount float64) {
+	t.Helper()
+	cats, err := h.queries.ListAllCategories(context.Background())
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	var foodID int64
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+	if foodID == 0 {
+		t.Fatal("expected a seeded Food category")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"date":              date,
+		"amount":            0,
+		"original_amount":   originalAmount,
+		"original_currency": "LBP",
+		"description":       desc,
+		"category_id":       foodID,
+	})
+	req := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(body)), user)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.handleCreateTransaction(rec, req)
+	if rec.Code != http.StatusCreated && rec.Code != http.StatusOK {
+		t.Fatalf("manual create: status %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func decodedCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	code, _ := body["code"].(string)
+	return code
+}

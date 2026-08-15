@@ -1724,6 +1724,35 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The money gate, and the same argument as the length gate above it: the
+	// preview is a courtesy, a client can POST straight here, and a session
+	// can have been edited since it was last read. Without this, a row the
+	// preview refused to resolve would reach the insert loop and be dropped
+	// there as one of the last-ditch money reasons — a row silently missing
+	// from a "47 imported, 3 skipped" count instead of a refusal naming the
+	// three rows and what is wrong with each.
+	//
+	// It sits AFTER length and BEFORE the category gates. Length keeps its
+	// place for the reason it always has. Money comes next because it is the
+	// other family whose remedy is an edit to the row itself, and because
+	// nothing further down can change the answer: a category decision cannot
+	// make a rate appear, while the collision view below is a FUNCTION of the
+	// resolved money — a row whose cents cannot be computed has no identity to
+	// collide with.
+	//
+	// MONEY_ERRORS rather than reusing FIELD_TOO_LONG: the two families share
+	// the field_errors array shape but not their remedies, and the frontend
+	// counts and renders them apart. FIELD_TOO_LONG's body stays byte
+	// identical for the condition it has always named.
+	if moneyErrors := importMoneyFieldErrors(entry.Rows, gateCurrencies); len(moneyErrors) > 0 {
+		entry.mu.Unlock()
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"code":         "MONEY_ERRORS",
+			"field_errors": moneyErrors,
+		})
+		return
+	}
+
 	// An id the categories table does not have cannot be a choice the user
 	// made. Left alone, every row it covers lands in processImportRows'
 	// Errored bucket and is folded into `skipped` with nothing saying why —
