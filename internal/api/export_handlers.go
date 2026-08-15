@@ -470,8 +470,14 @@ type exportTxnRow struct {
 	amountCents  int64
 	origAmtCents sql.NullInt64
 	origCur      sql.NullString
-	tags         sql.NullString
-	notes        sql.NullString
+	// bookedRate is the divisor that produced amountCents from
+	// origAmtCents, and is NULL for a row that was never converted (and for
+	// every row booked before migration 019 recorded it). It rides the
+	// export so a re-import can restore the row at the rate it was BOOKED
+	// at rather than at whatever today's rate happens to be.
+	bookedRate sql.NullFloat64
+	tags       sql.NullString
+	notes      sql.NullString
 }
 
 // drainExportTxnRows runs the transactions export query and fully consumes the
@@ -487,7 +493,7 @@ func (h *Handler) drainExportTxnRows(ctx context.Context, query string, args ...
 	for rows.Next() {
 		var t exportTxnRow
 		if err := rows.Scan(&t.date, &t.desc, &t.catName, &t.catType, &t.amountCents,
-			&t.origAmtCents, &t.origCur, &t.tags, &t.notes); err != nil {
+			&t.origAmtCents, &t.origCur, &t.bookedRate, &t.tags, &t.notes); err != nil {
 			return nil, err
 		}
 		out = append(out, t)
@@ -611,17 +617,18 @@ func (h *Handler) drainMonthlyTotals(ctx context.Context, query string, args ...
 func exportTxnHeaders(baseCurrency string) []any {
 	return []any{"Date", "Description", "Category", "Type",
 		fmt.Sprintf("Amount (%s)", baseCurrency), "Original Amount",
-		"Original Currency", "Tags", "Notes"}
+		"Original Currency", "Rate", "Tags", "Notes"}
 }
 
 // writeExportTxnRows renders drained rows onto a sheet starting at startRow.
 // The column layout matches exportTxnHeaders.
 //
-// One SetRow call per transaction rather than nine SetCellValue calls: the
-// stream writer serialises the row straight to its spill buffer, so the
+// One SetRow call per transaction rather than one SetCellValue call per column:
+// the stream writer serialises the row straight to its spill buffer, so the
 // workbook never holds a cell tree for 50,000 rows (see handleExportTransactions
 // for the measured effect). nil entries leave a cell absent, which is how the
-// NULL currency/tags/notes columns were already rendered.
+// NULL currency/rate/tags/notes columns are rendered — and for Rate that absence
+// is load-bearing: a 0 would state a booked rate of zero.
 func writeExportTxnRows(sw *excelize.StreamWriter, sheet string, startRow int, txns []exportTxnRow, x *exportTruncations) error {
 	row := startRow
 	// Reused across iterations: SetRow consumes the slice synchronously
@@ -629,12 +636,12 @@ func writeExportTxnRows(sw *excelize.StreamWriter, sheet string, startRow int, t
 	// no row can retain a reference to it.
 	//
 	// Sized from the header row and cleared IN FULL each iteration, both
-	// deliberately. The previous version made this []any{} nine long by hand and
-	// reset only vals[5..8] — the four nullable columns — as an index literal.
-	// That was correct and completely unguarded: deleting the reset left the
-	// whole internal/api suite green while a bare row silently inherited the
+	// deliberately. An earlier version made this []any{} nine long by hand and
+	// reset only vals[5..8] — the four nullable columns of the day — as an index
+	// literal. That was correct and completely unguarded: deleting the reset left
+	// the whole internal/api suite green while a bare row silently inherited the
 	// previous transaction's currency, tags and notes, with its own date and
-	// amount intact so the workbook still reconciled. Adding a tenth header
+	// amount intact so the workbook still reconciled. Adding a header column
 	// likewise stayed green, with the header row one column wider than the data.
 	//
 	// Neither drift is possible now: the width follows exportTxnHeaders, and a
@@ -657,11 +664,18 @@ func writeExportTxnRows(sw *excelize.StreamWriter, sheet string, startRow int, t
 		if t.origCur.Valid {
 			vals[6] = t.origCur.String
 		}
+		if t.bookedRate.Valid {
+			// A number, unrounded. The rate is whatever divisor produced the
+			// stored cents (an LBP rate runs to 89000, a EUR rate to 1.08),
+			// and rounding it here would make the export state a conversion
+			// the ledger never performed.
+			vals[7] = t.bookedRate.Float64
+		}
 		if t.tags.Valid {
-			vals[7] = x.text(sheet, "Tags", 8, row, t.tags.String)
+			vals[8] = x.text(sheet, "Tags", 9, row, t.tags.String)
 		}
 		if t.notes.Valid {
-			vals[8] = x.text(sheet, "Notes", 9, row, t.notes.String)
+			vals[9] = x.text(sheet, "Notes", 10, row, t.notes.String)
 		}
 		if err := sw.SetRow(cellAt(1, row), vals); err != nil {
 			return fmt.Errorf("write transactions row %d: %w", row, err)
@@ -690,7 +704,7 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	// step from the SQL side (legacy REAL) to the Go side (int64 ->
 	// float64 via centsToDollars).
 	query := `SELECT t.date, t.description, c.name AS category_name, c.type AS category_type,
-		t.amount_cents, t.original_amount_cents, t.original_currency, t.tags, t.notes
+		t.amount_cents, t.original_amount_cents, t.original_currency, t.booked_rate, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id` + liveClause + ` ORDER BY t.date DESC, t.id DESC LIMIT ?`
 	args = append(args, MaxExportRows)
@@ -843,7 +857,7 @@ func (h *Handler) handleExportMonthly(w http.ResponseWriter, r *http.Request) {
 
 	// Phase 3.1a: same cents->float conversion as handleExportTransactions.
 	txnQuery := `SELECT t.date, t.description, c.name, c.type, t.amount_cents,
-		t.original_amount_cents, t.original_currency, t.tags, t.notes
+		t.original_amount_cents, t.original_currency, t.booked_rate, t.tags, t.notes
 		FROM transactions t
 		JOIN categories c ON t.category_id = c.id
 		WHERE t.deleted_at IS NULL AND date(t.date) >= ? AND date(t.date) <= ?

@@ -152,12 +152,12 @@ func TestHandleExportTransactions_MarksOverLongCells(t *testing.T) {
 			"value must not cost the row", len(rows))
 	}
 	data := rows[1]
-	if len(data) < 9 {
-		t.Fatalf("data row has %d cells, want 9: %q", len(data), data)
+	if want := len(exportTxnHeaders("USD")); len(data) < want {
+		t.Fatalf("data row has %d cells, want %d: %q", len(data), want, data)
 	}
 	assertMarkedCell(t, data[1], "DESC-", "Description")
-	assertMarkedCell(t, data[7], "TAGS-", "Tags")
-	assertMarkedCell(t, data[8], "NOTES-", "Notes")
+	assertMarkedCell(t, data[8], "TAGS-", "Tags")
+	assertMarkedCell(t, data[9], "NOTES-", "Notes")
 
 	// The row's other fields must be untouched — the marking is per cell.
 	if data[0] != "2026-03-15" {

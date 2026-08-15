@@ -271,7 +271,7 @@ func TestMeasureExportMemory(t *testing.T) {
 	measureExport(t, "drain only", func(w http.ResponseWriter) {
 		got, err := h.drainExportTxnRows(context.Background(),
 			`SELECT t.date, t.description, c.name, c.type, t.amount_cents,
-				t.original_amount_cents, t.original_currency, t.tags, t.notes
+				t.original_amount_cents, t.original_currency, t.booked_rate, t.tags, t.notes
 			FROM transactions t JOIN categories c ON t.category_id = c.id
 			WHERE t.deleted_at IS NULL ORDER BY t.date DESC, t.id DESC LIMIT ?`, rows)
 		if err != nil {
