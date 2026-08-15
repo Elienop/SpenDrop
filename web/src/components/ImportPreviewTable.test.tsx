@@ -864,6 +864,10 @@ const SERVER_MONEY_MESSAGES = {
   amountDisagrees: '16.00 ≠ 1,500,000 ÷ 89,000 = 16.85',
   rateInvalid:
     'That is not a rate SpenDrop can use. Enter the rate this row was booked at, or clear the cell.',
+  rateOnBase:
+    'USD is the base currency, so a rate does nothing here. Clear the rate, or name the currency this row was really in.',
+  rateWithoutCurrency:
+    'A rate on its own has nothing to convert. Add the original amount and its currency, or clear the rate.',
 } as const;
 
 /** The currencies table as the preview reports it. */
@@ -1498,6 +1502,156 @@ describe('ImportPreviewTable — money', () => {
     expect(within(amountCell).queryByText('—')).toBeNull();
   });
 
+  it('offers to clear the rate on the rows whose rate cell is the problem', async () => {
+    // The legacy sheet: a `Rate` column that means something else — an
+    // interest rate, 4.5 on every row, with no Original Amount beside
+    // it. Every row is flagged `rate_without_currency`, and those rows
+    // have nothing to convert, so the apply-today's-rate offer correctly
+    // skips them. Without this the only bulk action left is "Skip these
+    // N", which imports nothing.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onPatchRow = vi.fn().mockResolvedValue(undefined);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [0, 1, 2].map((row_id) => ({
+        row_id,
+        field: 'rate' as const,
+        message: SERVER_MONEY_MESSAGES.rateWithoutCurrency,
+      })),
+    });
+    for (const row of preview.rows) row.rate = 4.5;
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    // Nothing to apply a rate to, so that offer is absent — this bar's
+    // one automated fix is the clear.
+    expect(screen.queryByRole('button', { name: /Apply today's/ })).toBeNull();
+    await user.click(
+      screen.getByRole('button', { name: 'Clear the rate on 3 rows' }),
+    );
+
+    expect(onPatchRow).toHaveBeenCalledTimes(3);
+    for (const rowID of [0, 1, 2]) {
+      expect(onPatchRow).toHaveBeenCalledWith(rowID, 'rate', '');
+    }
+  });
+
+  it('does not count a row with no rate into the clear', async () => {
+    // Clearing an empty cell is a PATCH that changes nothing, and a
+    // count larger than the number of rows the click can fix is a promise
+    // the button does not keep.
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateMissing },
+        {
+          row_id: 1,
+          field: 'rate',
+          message: SERVER_MONEY_MESSAGES.rateWithoutCurrency,
+        },
+      ],
+    });
+    preview.rows[0].original_amount = 1500000;
+    preview.rows[0].original_currency = 'LBP';
+    preview.rows[1].rate = 4.5;
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    expect(
+      screen.getByRole('button', { name: 'Clear the rate on 1 row' }),
+    ).toBeInTheDocument();
+    // Row 0 has no rate to clear; it is the one the rate OFFER is for.
+    expect(
+      screen.getByRole('button', { name: "Apply today's 89,000 LBP to 1 row" }),
+    ).toBeInTheDocument();
+  });
+
+  it('keeps clearing after a refused row', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onPatchRow = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Import session not found'))
+      .mockResolvedValue(undefined);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [0, 1].map((row_id) => ({
+        row_id,
+        field: 'rate' as const,
+        message: SERVER_MONEY_MESSAGES.rateWithoutCurrency,
+      })),
+    });
+    for (const row of preview.rows) row.rate = 4.5;
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: 'Clear the rate on 2 rows' }),
+    );
+
+    expect(onPatchRow).toHaveBeenCalledTimes(2);
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'rate', '');
+  });
+
+  it('offers no rate for a row whose currency IS the base', () => {
+    // `Amount 10.00 | Original 500 | USD | Rate 2` — flagged
+    // `rate_on_base`, and it carries an original, so only the base check
+    // stops an "Apply today's 1 USD to 1 row" button that would re-state
+    // the rate the row already has. The remedy the server names is
+    // clearing the rate, and that is the button it gets.
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateOnBase },
+      ],
+    });
+    preview.rows[0].amount = 10;
+    preview.rows[0].original_amount = 500;
+    preview.rows[0].original_currency = 'USD';
+    preview.rows[0].rate = 2;
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    expect(screen.queryByRole('button', { name: /Apply today's/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: 'Clear the rate on 1 row' }),
+    ).toBeInTheDocument();
+  });
+
+  it('offers no rate for a currency configured without one', () => {
+    // A currency row with `rate_to_base: 0` has no rate to apply, and
+    // "Apply today's 0 XXX" would PATCH a divisor the server refuses.
+    const preview = makePreview({
+      currencies: [
+        ...PREVIEW_CURRENCIES,
+        { code: 'XXX', rate_to_base: 0, is_base: false },
+      ],
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateMissing },
+      ],
+    });
+    preview.rows[0].original_amount = 500;
+    preview.rows[0].original_currency = 'XXX';
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    expect(screen.queryByRole('button', { name: /Apply today's/ })).toBeNull();
+  });
+
   it('always offers a skip, even when nothing else on the bar can be automated', async () => {
     // A bar of unknown-currency rows has no rate to apply and no amount
     // to accept — every remedy is somewhere else. The status line still
@@ -1981,16 +2135,28 @@ describe('ImportPreviewTable — money', () => {
     // class, an attribute, a cell, the status line — fails here rather
     // than being noticed in a browser later.
     //
-    // PROVENANCE. The baseline began as the component's own output from
-    // before this feature existed, and has been re-blessed twice since,
-    // each time by applying the INTENDED difference and letting the test
-    // prove it was the only one: the singular "Ready to import 1 row",
-    // and (a3e8327) the scroll container collapsing into the table's own
-    // wrapper so the sticky header has something that scrolls — two
-    // opening divs merged into one carrying both sets of classes, one
-    // closing tag removed. It is not a snapshot of whatever the
-    // component happens to render today; re-blessing it means diffing it
-    // and being able to name every line that moved.
+    // PROVENANCE, exactly. The file was captured from this component
+    // BEFORE the Rate column was written — at the end of Task 7, which
+    // for a clean row renders identically to the pre-branch component
+    // (`git diff 4ca0891 04804e6 -- ImportPreviewTable.tsx` is a
+    // function rename and nothing else). It has been re-blessed THREE
+    // times since, each time by applying the intended difference and
+    // letting the test prove it was the only one. Versus a pre-branch
+    // render, the deliberate differences now in the file are:
+    //
+    //   1. `Ready to import 1 rows` → `1 row`            (f995810)
+    //   2. the scroll container's `tabindex="-1"` and its three
+    //      focus-visible classes — focus chain link 4     (3996711)
+    //   3. that container merged into the table's own wrapper, so the
+    //      sticky header has a box that scrolls: two opening divs become
+    //      one carrying both sets of classes, one closing tag goes
+    //                                                     (a3e8327)
+    //
+    // The first capture carried NONE of them — `git show
+    // 0389474:…/import-preview-clean.html` has no tabindex on that div.
+    // The rule is what matters: this is not a snapshot of whatever the
+    // component renders today, and re-blessing it means diffing it and
+    // being able to name every byte that moved.
     const { container } = render(
       <ImportPreviewTable
         preview={{

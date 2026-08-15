@@ -168,6 +168,18 @@ type AggregateBarUnit =
       rowIDs: number[];
       rateOffers: RateOffer[];
       computedAmounts: ComputedAmount[];
+      /**
+       * Rows whose Rate cell HOLDS something that is stopping them — a
+       * rate on a base-currency row, a rate with nothing to convert, a
+       * cell the parser rejected. Emptying it is the remedy for all
+       * three, and the server's own message says so for two of them.
+       *
+       * Rows flagged on `rate` because they have NONE are deliberately
+       * absent: clearing an empty cell is a PATCH that changes nothing,
+       * and counting them would put a number on the button larger than
+       * the number of rows it can fix.
+       */
+      clearableRateRowIDs: number[];
     };
 
 function isAggregateBar(unit: RenderUnit): unit is AggregateBarUnit {
@@ -440,6 +452,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
     // stays blocked, because what it is missing is an amount.
     const offersByCode = new Map<string, RateOffer>();
     const computedAmounts: ComputedAmount[] = [];
+    const clearableRateRowIDs: number[] = [];
     // Every burst fires in the PREVIEW's row order, not the order the
     // server happened to list its flags in — the same rule the bulk skip
     // above follows, so what the user sees happening matches the order
@@ -452,6 +465,10 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
       const row = byRowId.get(fe.row_id);
       if (!row) continue;
       if (fe.field === 'rate') {
+        // Independent of the offer below: a row can be clearable and not
+        // offerable (a rate on a base-currency row has nothing to apply
+        // today's rate TO) and the other way round.
+        if (row.rate || row.rate_raw) clearableRateRowIDs.push(fe.row_id);
         if (row.original_amount == null) continue;
         const currency = findCurrency(preview.currencies, row.original_currency);
         if (!currency || currency.is_base || !(currency.rate_to_base > 0)) {
@@ -486,6 +503,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
       computedAmounts: [...computedAmounts].sort((a, b) =>
         byRowOrder(a.rowID, b.rowID),
       ),
+      clearableRateRowIDs: [...clearableRateRowIDs].sort(byRowOrder),
     });
   }
 
@@ -802,6 +820,34 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
           await onPatchRow(target.rowID, 'amount', target.amount.toFixed(2));
         } catch {
           /* surfaced on that row's amount cell by onPatchRow */
+        }
+      }
+      focusAfterBurst(MONEY_BAR_KEY);
+    },
+    [onPatchRow, focusAfterBurst],
+  );
+
+  /**
+   * "Clear the rate" for the rows whose Rate cell is the thing stopping
+   * them — an empty-string PATCH each, which is the wire's "no rate".
+   *
+   * IT IS THE ONLY ONE-CLICK WAY BACK for a legacy sheet whose `Rate`
+   * column means something else. A column of interest rates, with no
+   * Original Amount beside it, flags every row `rate_without_currency`;
+   * those rows have nothing to convert, so the apply-today's-rate offer
+   * correctly skips them, and without this the bar's only bulk action is
+   * "Skip these N rows" — which imports nothing at all. The per-row
+   * remedy (clear the cell, N times, by hand) is not a remedy for a
+   * 400-row sheet.
+   */
+  const clearRateOnRows = useCallback(
+    async (rowIDs: number[]) => {
+      for (const rowID of rowIDs) {
+        // Contained per row, like every other burst here.
+        try {
+          await onPatchRow(rowID, 'rate', '');
+        } catch {
+          /* surfaced on that row's rate cell by onPatchRow */
         }
       }
       focusAfterBurst(MONEY_BAR_KEY);
@@ -1217,6 +1263,23 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                               {unit.computedAmounts.length === 1
                                 ? `Use the computed ${formatAmount(unit.computedAmounts[0].amount)} for this row`
                                 : `Use the computed amounts for ${unit.computedAmounts.length} rows`}
+                            </Button>
+                          )}
+                          {unit.clearableRateRowIDs.length > 0 && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              className="shrink-0"
+                              aria-describedby={MONEY_BAR_HEADING_ID}
+                              disabled={bulkDisabled}
+                              onClick={() =>
+                                void clearRateOnRows(unit.clearableRateRowIDs)
+                              }
+                            >
+                              {unit.clearableRateRowIDs.length === 1
+                                ? 'Clear the rate on 1 row'
+                                : `Clear the rate on ${unit.clearableRateRowIDs.length} rows`}
                             </Button>
                           )}
                           {/*

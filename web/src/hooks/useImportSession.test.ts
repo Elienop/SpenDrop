@@ -1166,6 +1166,43 @@ describe('useImportSession', () => {
       });
     });
 
+    it('applyRateToRows keeps going when one row is refused', async () => {
+      // The third bulk burst, and the only one whose containment lived in
+      // another file from its tests: the table's two have "keeps going
+      // when one row is refused", this one had none, and deleting its
+      // try/catch passed the whole suite. A rejected row must not take
+      // the rows after it with it — `patchRow` has already recorded that
+      // row's message against its rate cell, and stopping the burst would
+      // leave the rest silently untouched.
+      const fetchMock = installFetchQueue([
+        { body: bodyWithMoneyErrors([{ row_id: 0, field: 'rate' }]) },
+        { ok: false, status: 400, body: { code: 'INVALID_RATE', field: 'rate', message: SERVER_MONEY_MESSAGES.rateInvalid } },
+        { body: bodyWithMoneyErrors([]) },
+      ]);
+      const { result } = renderHook(() =>
+        useImportSession(NO_CATEGORY_DECISIONS),
+      );
+      await act(async () => {
+        await result.current.uploadFile(new File(['x'], 'test.xlsx'));
+      });
+
+      // Resolves rather than rejecting: the caller is a bulk button, and
+      // one refused row is not a failed click.
+      await act(async () => {
+        await expect(
+          result.current.applyRateToRows([0, 1], 89000),
+        ).resolves.toBeUndefined();
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+      expect(String(fetchMock.mock.calls[1][0])).toContain('/rows/0');
+      expect(String(fetchMock.mock.calls[2][0])).toContain('/rows/1');
+      // And the refused row says why, on its own cell.
+      expect(result.current.cellErrors['0:rate']?.message).toBe(
+        SERVER_MONEY_MESSAGES.rateInvalid,
+      );
+    });
+
     it('re-reads the session once when the currencies table changes', async () => {
       const cleared = {
         ...bodyWithMoneyErrors([]),
