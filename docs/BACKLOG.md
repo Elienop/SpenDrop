@@ -237,6 +237,16 @@ broker after the commit (`sse.Client` already carries `userID`) so a wipe drops 
 streams. **Effort:** small.
 ---
 
+### B54 — the import preview's READY state is `text-emerald-500` on white (2.54:1)
+**Verified: computed** (2026-08-15, found while fixing the amber status line on the import-rate
+branch). `ATTENTION_TEXT_CLASS` (`text-amber-700 dark:text-amber-500`, `web/src/lib/attention.ts`)
+now carries the computed ratios; the other branch of the same ternary in `ImportPreviewTable.tsx`
+is `text-emerald-500` — 2.54:1 on the light card, 7.12:1 on the dark one — and `text-emerald-500`
+sits at 7 sites, so a success token is a palette decision, not a one-line edit. Symmetric fix: a
+`SUCCESS_TEXT_CLASS` pair `text-emerald-700 dark:text-emerald-500` (5.48:1 / 7.12:1) beside the
+attention pair, then sweep the sites. No single colour can meet 4.5:1 on both surfaces (light needs
+relative luminance ≤ 0.1833, dark ≥ 0.2115 — disjoint). **Effort:** small.
+
 ## Queued stages
 
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
@@ -246,17 +256,8 @@ PR #139 and released as v0.44.0 — see Closed.*
   (`bf500ca`, v0.44.2) from `fix/phone-residue-sheets-url-budgets-switches` — see Closed.
   Carried the `2bea69f` stamp and the B43 / native-Android / import-rate / ⌘Z decision
   records as riders.
-- **Import per-row rate** (redesigned 2026-08-15 — IN PROGRESS on `feat/import-per-row-rate`).
-  **Corrected premise:** at `804dbc2` the import performs NO currency conversion — it requires
-  the USD `Amount` column, stores `Original Amount`/`Original Currency` verbatim as labels,
-  never reads the currencies table, and leaves `booked_rate` NULL. There is no "import-day
-  rate" to fall back to; the 2026-08-14 wording assumed one. Owner chose **option A**: a `Rate`
-  column is the SOURCE of the USD (`amount = original ÷ rate`, `booked_rate` recorded, same
-  divisor as manual entry); a foreign row with no rate and no USD is a preview blocker with an
-  explicit "enter one / apply today's N" fix — never a silent fallback (which would break same-
-  sheet re-import dedupe, since the hash keys on USD cents); an unknown currency blocks with
-  "add it under Settings → Currencies"; export gains a `Rate` column so a SpenDrop export
-  re-imports losslessly. Hash formula and schema unchanged.
+- ~~Import per-row rate~~ — **BUILT 2026-08-15** on `feat/import-per-row-rate` (squash hash
+  joins the Closed entry at merge) — see Closed.
 - **Re-price older rows at a new rate** (owner asked 2026-08-15: "if I want to apply a new rate
   for older data can I do that?" — today: no; the freeze-on-edit is one-way and the only escape
   is the undiscoverable two-save trick). Now honest to build because every manual row records
@@ -341,6 +342,75 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **Import per-row rate — a `Rate` column is the source of a foreign row's USD** (2026-08-15, on
+  `feat/import-per-row-rate`; squash hash joins this entry at merge). **Corrected premise first:**
+  at `804dbc2` the import performed NO currency conversion — it required the USD `Amount` column,
+  stored `Original Amount`/`Original Currency` verbatim as labels, never read the currencies
+  table, and left `booked_rate` NULL; the 2026-08-14 "import-day rate fallback" wording assumed a
+  conversion that did not exist. Owner chose **option A**. What shipped: a `Rate` column
+  (aliases `rate` / `exchange rate` / `fx rate`; foreign units per USD) makes
+  `amount = original ÷ rate` through the ONE divisor manual entry uses (`convertForeignMoney`,
+  extracted from `resolveCurrency`; the original is rounded to cents BEFORE dividing on both
+  doors, so the stored triple is self-consistent), records `booked_rate`, stores the canonical
+  currency code (`lbp` → `LBP`, which is what lets the freeze-on-edit predicate match an imported
+  row later), collapses a base-named or bare-currency label to no original, and a sheet may state
+  its money in the foreign column only (header discovery accepts `original amount` as the money
+  column). Seven money conditions BLOCK the preview on every surface and 409 `MONEY_ERRORS`
+  (sibling of the byte-identical `FIELD_TOO_LONG`; gate order length → money → categories →
+  collisions): rate missing / invalid / on base / without anything to convert, unknown currency
+  ("add it under Settings → Currencies" — the session refetches when currencies change, so no
+  re-upload), USD disagreeing with the quoted rate to the cent, and a derived value outside the
+  bounds. **No silent fallback rate anywhere** — a rate-less foreign row is offered "apply today's
+  N" as an explicit click that records the rate the user saw. Money flags are withheld from rows
+  that will not import anyway (unparseable date, empty description, sign mismatch — matching the
+  category family) and dropped where a length error already sits on the same cell. Collisions
+  hash the derived cents, so a hand-typed LBP row at 89,000 and a sheet row `1,500,000 LBP @
+  89000` with an empty USD are one identity; the hash formula and the schema are unchanged (only
+  migration 019's comment gained a dated addendum; SCHEMA.md regenerated byte-identical). Export
+  gains a `Rate` column after `Original Currency` (Tags/Notes shift H→I / I→J for positional
+  readers) so a SpenDrop export re-imports losslessly — proved by round-trip tests incl. a
+  sub-cent original. Numbers accept a comma ONLY as a thousands separator (`0,92` is refused,
+  never read as 92 — a text-formatted decimal-comma rate would otherwise have booked a permanent
+  100× rate; the same rule now guards amounts, which had the identical class). Preview UI:
+  "Rate to base" editable cell (`inputMode="decimal"`; shows the sheet's raw text via `rate_raw`
+  when the cell is unusable, so "clear the cell" is a real affordance), a second money line
+  `1,500,000.00 LBP @ 89,000`, `—` instead of `0.00` for a rate-less row, blockers on the
+  existing rail with server-authored sentences on both routes (the client-wide `apiErrorFrom`
+  now reads `error` → `message` → `HTTP n`, closing a pre-existing bug where every rejected
+  import PATCH rendered "HTTP 400" over the good flag), bulk "Apply today's 89,000 LBP to N rows"
+  / "Use the computed 16.85 for this row" / "Clear the rate on N rows" / "Skip these N rows"
+  (never an actionless bar; per-row containment on every burst; deliberate focus placement
+  after a burst — bar heading, else another bar, else the enabled Import button, else the
+  scroll container), category choices survive the Settings → Currencies round trip
+  (`lib/import-decisions.ts`, keyed by `import_id`, cleared on all four exits), the aggregate
+  bars hoisted above the scroll container (they were in a `colSpan` cell of the horizontally
+  scrolling table — the second button sat off-screen at 360px and both bars scrolled away),
+  the sticky column headers now actually stick (`ui/table.tsx` gained `containerProps` so the
+  height cap and the scroller are one element — the header had NEVER stuck: the sticky's nearest
+  scrolling ancestor was shadcn's own wrapper), and a shared `ATTENTION_TEXT_CLASS`
+  (`text-amber-700 dark:text-amber-500`, computed 5.02:1 / 8.41:1 on the two card surfaces;
+  amber-600 is 3.19:1, so the pair is forced — no single colour meets 4.5:1 on both themes).
+  **Decisions the owner can veto:** no fallback rate; unknown currency blocks even with a USD
+  amount (parity with manual entry); a base-named or bare-currency label collapses; a comma is
+  never a decimal separator; a legacy sheet whose `Rate` column means something else now blocks
+  (escape: bulk clear; README names the column); the Rate column renders on every preview
+  (stable layout over data-dependent shape); rows already rejected before their money carry no
+  money flag. **Verification:** SDD ledger with every ruling; four builders with disjoint
+  ownership; per-task reviews (code, security APPROVED, data-correctness, UX, design) → 5 fix
+  rounds on the frontend, 3 on the import backend, 1 each on the helper and export; controller
+  gates (gofmt/vet/full Go suite/`-race`/SCHEMA regen byte-identical/`tsc -b`/2211 vitest/
+  eslint); isolated deep review at `66befa6` (44 mutants, 39 killed; the two survivors that were
+  real gaps became the decimal-comma and sub-cent fixes; the core money invariant survived every
+  adversarial construction); browser passes on the rebuilt `:3535` at 1288 and 360 in both
+  themes with a 10-row matrix workbook — every shape, both bulk fixes, the Currencies round trip
+  with the manual mapping retained. **Filed, not fixed:** the READY-state `text-emerald-500`
+  (2.54:1 on white; a `SUCCESS_TEXT_CLASS` pair `emerald-700 dark:emerald-500` is the symmetric
+  fix); the import preview table has no phone fork (six columns scroll inside the card at 360;
+  editable cells are dblclick-only — the bulk actions are the phone's remedies); the two-snapshot
+  window at confirm is documented, structurally forced by `SetMaxOpenConns(1)`; case-folded
+  duplicate currency codes are unreachable through the API; `parseImportAmount` still accepts
+  Go's hex-float/underscore literals (pre-existing; the rate parser refuses them); the ~3×
+  resolver cost per preview at household scale.
 - **B20 + B36 — role integrity at the DB layer, and `@username` attribution** (2026-08-15, on
   `fix/role-guard-and-username-attribution`; merged via PR #143, squash `804dbc2`, released
   **v0.45.0**). Three
