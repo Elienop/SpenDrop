@@ -149,17 +149,6 @@ a demotion leaves admin-capable cookies alive and still returns 200; untestable 
 a fault-injection seam.
 **Effort:** small — a migration adding the CHECK, plus an error check.
 
-### B21 — display_name has no charset gate, and it reaches push-notification bodies
-**Verified: read** (B9 security audit 2026-08-08; PRE-EXISTING — B18 only made renames
-routine). Unlike `username` (which has a charset gate), `display_name` is length-bounded
-only, at both write sites (register and the admin PUT): control characters, newlines, and
-bidi overrides are accepted. Every render site is safe (JSX text nodes; no export path
-carries it). The one non-text sink: Web Push — `internal/api/notifications.go:79` interpolates
-the actor's display name into the body via `fmt.Sprintf`, so a `\n` in a name forges extra
-notification lines. Fix in ONE pass: sanitize at both write sites; consider the notification
-builder too.
-**Effort:** small.
-
 ### B23 — offline-capture hold filing on identity change is untested
 **Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
 files the queued-capture hold when the session identity changes. The race tests assert it is
@@ -355,9 +344,28 @@ condition *and* move the predicate, believing one was safe because the other was
 
 *(Move items here with their commit hash rather than deleting them.)*
 
+- **B21 — display_name charset gate** — **already shipped in PR #137 (`a8c484f`, 2026-08-14)**
+  and closed here on 2026-08-15 when the stage-3 scout found the entry stale. The fix is exactly
+  the "one pass" the entry asked for: `internal/api/display_name.go`'s `validateDisplayName` is
+  the single gate every writer of the column calls (`handleRegister`, `handleCreateUser`,
+  `handleUpdateUser`, `handleUpdateMe`), refusing Cc controls, U+2028/2029, the bidi
+  embeddings/overrides/isolates, and allowing the bidi MARKS the household's Arabic/French names
+  legitimately carry (per-codepoint reasoning at the site); `notifications.go` carries the
+  sink-side half of the same invariant. Tests: `display_name_test.go`. Original finding, kept
+  for the record — *B21 — display_name has no charset gate, and it reaches push-notification
+  bodies.* **Verified: read** (B9 security audit 2026-08-08; PRE-EXISTING — B18 only made renames
+  routine). Unlike `username` (which has a charset gate), `display_name` is length-bounded
+  only, at both write sites (register and the admin PUT): control characters, newlines, and
+  bidi overrides are accepted. Every render site is safe (JSX text nodes; no export path
+  carries it). The one non-text sink: Web Push — `internal/api/notifications.go:79` interpolates
+  the actor's display name into the body via `fmt.Sprintf`, so a `\n` in a name forges extra
+  notification lines. Fix in ONE pass: sanitize at both write sites; consider the notification
+  builder too.
+  **Effort:** small.
+
 - **B49 + B50 + B46 + B47 — keypad hints, Toaster order, stale counts, ModeToggle containing
-  block** (2026-08-15, on `fix/phone-inputmode-toaster-order`; squash hash joins this entry at
-  merge). Two parallel builders with disjoint file ownership; 0 Critical / 0 Important from the
+  block** (2026-08-15, on `fix/phone-inputmode-toaster-order`; **merged as PR #142, squash
+  `048e8e4`**). Two parallel builders with disjoint file ownership; 0 Critical / 0 Important from the
   code / UX / design battery, every Minor fixed. Per item:
   **B49** — every real `type="number"` `<Input>` now pairs with an `inputMode` (12 added: 10
   `decimal` for money/rates incl. AmountCurrencyInput — the wrapper all four amount surfaces
