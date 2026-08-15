@@ -5,8 +5,9 @@ import {
   XAxis,
   YAxis,
   CartesianGrid,
-  Cell,
   ReferenceLine,
+  Rectangle,
+  type BarShapeProps,
 } from 'recharts';
 import {
   ChartContainer,
@@ -601,14 +602,32 @@ export function PatternsTab() {
                 {/* Symmetric radius, not [0, 4, 4, 0]: the array form rounds
                     the RIGHT end only, so a leftward bar came out rounded at
                     the zero line and square at its own tip. */}
-                <Bar dataKey="total" radius={4}>
-                  {tags.data.map((_, i) => (
-                    <Cell
-                      key={i}
-                      fill={`hsl(var(--chart-${(i % 20) + 1}))`}
+                {/* One colour per tag, cycling the 20 chart slots. This was a
+                    `<Cell>` child per bar until recharts deprecated `Cell` in
+                    3.10 (removed in 4.0); `shape` is the replacement recharts
+                    documents. `{...props}` forwards the whole rect — geometry,
+                    `radius`, active state and the animation frame props — so
+                    only the fill is ours.
+
+                    `originalDataIndex`, NOT `index`: `index` is the position
+                    among the rects that survived filtering, while
+                    `originalDataIndex` is the row's position in `tags.data` —
+                    the same index the `<Cell>` children were mapped over, so
+                    every tag keeps the colour it had.
+
+                    SpendingTab's category chart deliberately does NOT use this
+                    mechanism; see the note on `breakdownSorted` there for the
+                    LabelList reason. */}
+                <Bar
+                  dataKey="total"
+                  radius={4}
+                  shape={(props: BarShapeProps) => (
+                    <Rectangle
+                      {...props}
+                      fill={`hsl(var(--chart-${(props.originalDataIndex % 20) + 1}))`}
                     />
-                  ))}
-                </Bar>
+                  )}
+                />
               </BarChart>
             </ChartContainer>
           )}

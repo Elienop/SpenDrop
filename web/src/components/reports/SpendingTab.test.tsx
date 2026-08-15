@@ -248,15 +248,19 @@ describe('SpendingTab renders real recharts output', () => {
     ).toEqual(['Groceries', 'Transport', 'Utilities']);
   });
 
-  test('Category Breakdown paints one <Cell> per category, keyed to its colour var', async () => {
+  test('Category Breakdown paints one bar per category, keyed to its colour var', async () => {
     const { container } = render(<SpendingTab />);
     const breakdown = card(container, 'category-breakdown-heading');
     await waitForCount(breakdown, '.recharts-bar .recharts-rectangle', 3);
 
     // Real <Rectangle> paths from recharts' Bar, not a stub div. The `fill`
-    // comes from SpendingTab's `<Cell fill={`var(--color-cat-${id})`} />`, so
-    // this pins the category -> colour-slot mapping AND the descending order
-    // in one assertion.
+    // is carried on each row of `breakdownSorted` — it used to be a `<Cell>`
+    // child per category, which recharts deprecated in 3.10 and removes in
+    // 4.0. The assertion is deliberately unchanged in substance across that
+    // migration: it reads the paths recharts actually painted, so it pins the
+    // category -> colour-slot mapping AND the descending order whichever way
+    // the colour is delivered. It is what proves the migration repainted every
+    // bar identically.
     expect(
       Array.from(
         breakdown.querySelectorAll('.recharts-bar .recharts-rectangle'),
@@ -267,6 +271,7 @@ describe('SpendingTab renders real recharts output', () => {
       'var(--color-cat-4)',
     ]);
   });
+
 
   test('Category Breakdown bar labels are currency-formatted by the LabelList formatter', async () => {
     // recharts 3 retyped `LabelList`'s formatter argument as `RenderableText`

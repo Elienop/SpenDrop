@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, cleanup, within } from '@testing-library/react';
+import { render, screen, cleanup, within, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import React from 'react';
 
@@ -79,6 +79,66 @@ async function pickPeriod(
   await user.click(screen.getByRole('combobox', { name: /time period/i }));
   const listbox = await screen.findByRole('listbox');
   await user.click(within(listbox).getByRole('option', { name }));
+}
+
+/**
+ * The formatted labels of a chart's Y axis, in document order.
+ *
+ * recharts 3 hoists tick LABELS out of `.recharts-yAxis` into their own
+ * z-index layer, so `.recharts-yAxis .recharts-cartesian-axis-tick-value`
+ * matches nothing on this version — which reads as "the axis rendered no
+ * labels" rather than as a failure. Query the label group by its own class.
+ */
+function axisTickLabels(scope: Element): string[] {
+  const labels = scope.querySelector('.recharts-yAxis-tick-labels');
+  if (!labels) throw new Error('chart rendered no y-axis labels');
+  return Array.from(
+    labels.querySelectorAll('.recharts-cartesian-axis-tick-value'),
+  ).map((el) => el.textContent?.trim() ?? '');
+}
+
+/**
+ * The dollar values an `<Area>` actually plotted, recovered from the chart's
+ * own Y axis.
+ *
+ * A `type="monotone"` curve is emitted as `M x,y` followed by one cubic
+ * `C cx1,cy1,cx2,cy2,x,y` per subsequent point, so each segment's LAST
+ * coordinate pair is a data vertex. The pixel `y` means nothing on its own, so
+ * it is mapped back into dollars through the linear scale the rendered ticks
+ * define (every tick `<text>` carries both its pixel `y` and its formatted
+ * label). Reading the axis rather than hard-coding a plot size keeps the
+ * assertion in the units the reader thinks in, and keeps it valid if the chart
+ * is ever resized.
+ */
+function plottedAreaValues(scope: Element): number[] {
+  const ticks = Array.from(
+    scope.querySelectorAll(
+      '.recharts-yAxis-tick-labels .recharts-cartesian-axis-tick-value',
+    ),
+  ).map((el) => ({
+    px: Number(el.getAttribute('y')),
+    // `en-US` currency, so a negative tick is "-$300.00": strip everything
+    // that is not a digit, a decimal point or the leading sign.
+    value: Number((el.textContent ?? '').replace(/[^0-9.-]/g, '')),
+  }));
+  if (ticks.length < 2) throw new Error('y axis rendered fewer than two ticks');
+
+  const lo = ticks[0];
+  const hi = ticks[ticks.length - 1];
+  const dollarsPerPx = (hi.value - lo.value) / (hi.px - lo.px);
+
+  const curve = scope.querySelector('.recharts-area-curve');
+  if (!curve) throw new Error('area chart rendered no curve');
+  const d = curve.getAttribute('d') ?? '';
+
+  return d
+    .split(/(?=[MC])/)
+    .filter((segment) => segment.length > 1)
+    .map((segment) => {
+      const nums = segment.slice(1).split(',').map(Number);
+      const y = nums[nums.length - 1];
+      return lo.value + (y - lo.px) * dollarsPerPx;
+    });
 }
 
 /** Months the tab most recently asked `useIncomeExpenses` for. */
@@ -481,5 +541,80 @@ describe('OverviewTab phone width', () => {
     for (const card of cards) {
       expect(card).toHaveClass('min-w-0');
     }
+  });
+});
+
+// The Net Cash Flow series is a RUNNING TOTAL, and nothing in this file pinned
+// it: every fixture above either leaves `useIncomeExpenses` empty or gives each
+// month `net: 1`, where a cumulative series and a per-month one differ only in
+// the axis domain no assertion reads. Replacing the accumulation with
+// `cumulative: entry.net` left the whole suite green.
+describe('OverviewTab Net Cash Flow accumulation', () => {
+  // Three months whose signed nets make the two candidate series DISAGREE in
+  // shape, not just in scale: cumulative runs 1000 -> 700 -> 1200 (dipping,
+  // then finishing highest), while a non-accumulating series would run
+  // 1000 -> -300 -> 500 (finishing BELOW its start, and crossing zero). The
+  // negative month is the point — a loss must pull the curve down without
+  // erasing the total that came before it.
+  const NETS = [1000, -300, 500];
+  const CUMULATIVE = [1000, 700, 1200];
+
+  beforeEach(() => {
+    useReportYears.mockReturnValue(yearsResult);
+    useIncomeExpenses.mockReturnValue({
+      data: NETS.map((net, i) => ({
+        year: CURRENT_YEAR,
+        month: i + 1,
+        income: net > 0 ? net : 0,
+        expenses: net > 0 ? 0 : -net,
+        net,
+      })),
+      loading: false,
+      fetching: false,
+      error: '',
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+  });
+
+  test('plots the running total of monthly net, not each month on its own', async () => {
+    const { container } = render(<OverviewTab />);
+    const card = container.querySelector(
+      '[aria-labelledby="net-cash-flow-heading"]',
+    );
+    if (!card) throw new Error('Net Cash Flow card did not render');
+
+    // The `<Area>` mounts before its geometry does — the curve `<path>` arrives
+    // on the first animation frame — so wait for it rather than reading an
+    // empty chart and calling the series correct.
+    await waitFor(() => {
+      expect(card.querySelector('.recharts-area-curve')).not.toBeNull();
+    });
+
+    expect(plottedAreaValues(card)).toEqual(
+      CUMULATIVE.map((v) => expect.closeTo(v, 4)),
+    );
+  });
+
+  test('the Y axis is domained by the running total, so no month reads as a loss', () => {
+    // The axis is the same claim in the units a reader actually sees. The
+    // cumulative series never goes below zero here, so every tick is positive;
+    // the non-accumulating series dips to -300 and the axis would say so.
+    const { container } = render(<OverviewTab />);
+    const card = container.querySelector(
+      '[aria-labelledby="net-cash-flow-heading"]',
+    );
+    if (!card) throw new Error('Net Cash Flow card did not render');
+
+    expect(axisTickLabels(card)).toEqual([
+      '$0.00',
+      '$300.00',
+      '$600.00',
+      '$900.00',
+      '$1,200.00',
+    ]);
   });
 });
