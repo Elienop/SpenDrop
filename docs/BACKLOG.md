@@ -393,7 +393,16 @@ condition *and* move the predicate, believing one was safe because the other was
   `password-input.tsx`, is itself `absolute`); structural pin walks from the `absolute` Moon to
   its first positioned ancestor and asserts it is the trigger, with an anti-vacuity guard on
   the glyph. `size-11` from MobileNav survives the merge (pinned).
-  Suites 2090 → 2108. Browser pass on `:3535`: pending at the time of writing — see the PR.
+  Suites 2090 → 2108. Browser pass on the rebuilt `:3535` (SW unregistered, caches cleared;
+  deployment fingerprinted by the Notifications region being the shell's first child): cold
+  loads of `/settings?tab=savings` (1280) and `?tab=budgets` (360×780) both render the
+  forwarding toast with its Open action; `/quick`'s wrapper section is first and 0px tall,
+  Tap-mode amount is `decimal`; the Transactions entry row, Filters min/max, all 29 Budgets
+  inputs, the three Settings rate fields, Savings target are `decimal`, Savings Year and
+  export Year `numeric`; the export Year clears to "" and retypes; and with the 360×640
+  drawer scrolled its full 15px in dark mode the Moon glyph moved the same 15px as its button
+  (inside it before and after). Not exercised live: the ImportPreviewTable amount cell
+  (needs an import; test-pinned both directions) and the S24 minus key.
 
 - **B28 + B30 + B44 + B45 — the phone-residue batch** (2026-08-15, on
   `fix/phone-residue-sheets-url-budgets-switches`, commits `6a16776..d324b12`; **merged as
