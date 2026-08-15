@@ -298,12 +298,20 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
     // against copy that is free to be reworded, and it would break the
     // moment it was.
     //
-    // "Waiting on a rate" is therefore: flagged on `rate`, quoting a
-    // currency the household actually has, and that currency is not the
-    // base. A row flagged on `amount` already has a rate — offering to
-    // overwrite it would re-price money the sheet had decided — and a
-    // row whose currency is unknown has no rate to offer, which is
-    // precisely what its own flag says.
+    // "Waiting on a rate" is therefore: flagged on `rate`, carrying an
+    // original amount to convert, quoting a currency the household
+    // actually has, and that currency is not the base. A row flagged on
+    // `amount` already has a rate — offering to overwrite it would
+    // re-price money the sheet had decided — and a row whose currency is
+    // unknown has no rate to offer, which is precisely what its own flag
+    // says.
+    //
+    // The ORIGINAL AMOUNT is a condition in its own right, not an
+    // implication of the others: matrix #10 is a row with a currency and
+    // a rate and nothing to apply them to, and it is flagged on `rate`
+    // like the rest. Counting it into "apply today's rate to 3 rows"
+    // promises a fix that cannot land — the PATCH succeeds and the row
+    // stays blocked, because what it is missing is an amount.
     const offersByCode = new Map<string, RateOffer>();
     const computedAmounts: ComputedAmount[] = [];
     // Every burst fires in the PREVIEW's row order, not the order the
@@ -318,6 +326,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
       const row = byRowId.get(fe.row_id);
       if (!row) continue;
       if (fe.field === 'rate') {
+        if (row.original_amount == null) continue;
         const currency = findCurrency(preview.currencies, row.original_currency);
         if (!currency || currency.is_base || !(currency.rate_to_base > 0)) {
           continue;
@@ -540,7 +549,18 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
       // cross-row PATCHes, but awaiting here keeps the fire order stable
       // and makes the button's pending count settle predictably.
       for (const rowID of rowIDs) {
-        await onPatchRow(rowID, 'skip', true);
+        // A rejected row does NOT abort the burst, and the rejection does
+        // not escape into a `void`-ed promise. `onPatchRow` re-throws
+        // after recording the message against that row's cell, so a
+        // session that expired mid-burst — or one row the server refuses
+        // — would otherwise leave every row AFTER it silently untouched,
+        // with nothing on screen saying which ones the click reached.
+        // Same policy as `applyRateToRows` in useImportSession.
+        try {
+          await onPatchRow(rowID, 'skip', true);
+        } catch {
+          /* surfaced on that row's cell by onPatchRow */
+        }
       }
     },
     [onPatchRow],
@@ -570,7 +590,16 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   const applyComputedAmounts = useCallback(
     async (targets: ComputedAmount[]) => {
       for (const target of targets) {
-        await onPatchRow(target.rowID, 'amount', target.amount.toFixed(2));
+        // Contained per row for the reason `skipAllRows` above is, and
+        // this burst is the one that reaches it in normal use: a matrix
+        // #12 row whose derived value is out of range comes back 400, and
+        // an uncaught rejection here would drop every later row on the
+        // floor along with the message explaining the first.
+        try {
+          await onPatchRow(target.rowID, 'amount', target.amount.toFixed(2));
+        } catch {
+          /* surfaced on that row's amount cell by onPatchRow */
+        }
       }
     },
     [onPatchRow],

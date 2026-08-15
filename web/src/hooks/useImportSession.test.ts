@@ -929,9 +929,14 @@ describe('useImportSession', () => {
       original_currency:
         "`LBX` isn't set up — add it under Settings → Currencies",
       amount: '16.00 ≠ 1,500,000 ÷ 89,000 = 16.85',
+      rateInvalid: 'A rate must be a positive number.',
     } as const;
 
-    type MoneyField = keyof typeof SERVER_MONEY_MESSAGES;
+    // Spelled out rather than derived from the record above: that record
+    // also holds the PATCH-400 sentence, which is not a field name, and a
+    // fixture must not be able to flag a row on something the wire has no
+    // field for.
+    type MoneyField = 'rate' | 'original_currency' | 'amount';
 
     /**
      * The 2-row fixture with money flags attached. Rows carry the foreign
@@ -1049,13 +1054,22 @@ describe('useImportSession', () => {
       expect(result.current.canImport).toBe(false);
     });
 
-    it('a rejected rate PATCH lands on the rate cell', async () => {
+    it('a rejected rate PATCH puts the SERVER’s sentence on the rate cell', async () => {
+      // The REAL wire body: `{code, field, message}` and no `error` key.
+      // A fixture that added one would test a response the backend cannot
+      // produce — and it was that phantom key which hid the client reading
+      // only `error`, so the cell showed the literal "HTTP 400" on top of a
+      // correct preview flag.
       installFetchQueue([
         { body: freshPreviewBody('money-2') },
         {
           ok: false,
           status: 400,
-          body: { code: 'INVALID_RATE', field: 'rate', error: 'INVALID_RATE' },
+          body: {
+            code: 'INVALID_RATE',
+            field: 'rate',
+            message: SERVER_MONEY_MESSAGES.rateInvalid,
+          },
         },
       ]);
       const { result } = renderHook(() =>
@@ -1073,8 +1087,14 @@ describe('useImportSession', () => {
         }
       });
 
-      expect(result.current.cellErrors['0:rate']).toBeDefined();
       expect(result.current.cellErrors['0:rate']?.field).toBe('rate');
+      // The words, not the status code — and the same words the preview
+      // flag would have carried, because the server emits one string for
+      // both routes.
+      expect(result.current.cellErrors['0:rate']?.message).toBe(
+        SERVER_MONEY_MESSAGES.rateInvalid,
+      );
+      expect(result.current.cellErrors['0:rate']?.message).not.toMatch(/^HTTP /);
     });
 
     it('applyRateToRows fires one string-valued rate PATCH per row, in order', async () => {

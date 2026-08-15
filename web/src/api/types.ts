@@ -379,6 +379,13 @@ export interface ImportFieldError {
    * `validateImportField`). Any wording written on this side would match
    * only by coincidence, and only until either copy was edited.
    *
+   * The PATCH half is only true because of `apiErrorFrom` in
+   * `api/client.ts`: the rejection body is `{code, field, message}` with
+   * no `error` key, and while the client read `error` alone the cell got
+   * the string "HTTP 400" instead of any of this. Stated here because
+   * "the server owns the wording" is a claim about the whole route, and
+   * this is the link in it that is easy to shorten by accident.
+   *
    * It is also why this side holds no length constants: the sentence
    * arrives with the number already in it, correct by construction.
    *

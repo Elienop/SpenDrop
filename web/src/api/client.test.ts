@@ -143,6 +143,53 @@ describe('ApiClient.request', () => {
     expect((err as ApiError).status).toBe(400);
     expect((err as ApiError).message).toBe('password too short');
   });
+
+  it('falls back to the body’s `message` when there is no `error` key', async () => {
+    // The import preview's per-field rejection: `{code, field, message}`,
+    // no `error`. Reading only `error` put the literal "HTTP 400" in the
+    // cell the user was typing in, on top of the correct server flag.
+    mockFetch({
+      ok: false,
+      status: 400,
+      json: () =>
+        Promise.resolve({
+          code: 'INVALID_RATE',
+          field: 'rate',
+          message: 'Rate must be a positive number.',
+        }),
+    });
+
+    const err = await api.patch('import/abc/rows/0', {}).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect((err as ApiError).message).toBe('Rate must be a positive number.');
+    expect((err as ApiError).status).toBe(400);
+  });
+
+  it('prefers `error` over `message` when a body carries both', async () => {
+    // Order, not merely presence: every existing endpoint answers with
+    // `error`, and a body that happened to carry both must keep reading
+    // the way it did before `message` was consulted at all.
+    mockFetch({
+      ok: false,
+      status: 422,
+      json: () =>
+        Promise.resolve({ error: 'the real one', message: 'the other one' }),
+    });
+
+    const err = await api.post('test', {}).then(
+      () => {
+        throw new Error('expected rejection');
+      },
+      (e: unknown) => e,
+    );
+
+    expect((err as ApiError).message).toBe('the real one');
+  });
 });
 
 // An unanswered request must never present as an authenticated "no". Every

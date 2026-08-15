@@ -115,6 +115,37 @@ function timeoutSignal(ms: number): AbortSignal | undefined {
     : undefined;
 }
 
+/**
+ * The `ApiError` for a non-OK response, carrying the server's own sentence
+ * whenever it sent one.
+ *
+ * KEY ORDER IS THE CONTRACT: `error`, then `message`, then the bare status.
+ * Most of the API answers a 4xx with `{"error": "..."}` (helpers.go's
+ * `writeError`), and that stays first so nothing about existing endpoints
+ * moves. The import preview's per-field rejections answer with
+ * `{code, field, message}` instead — the same sentence the preview shows as a
+ * row flag, which the client routes to one cell — and reading only `error`
+ * put the string "HTTP 400" in that cell, on top of a correct flag. A status
+ * code is the one thing a validation message must never be.
+ *
+ * Widened HERE rather than by hand-rolling that one endpoint's `fetch` in
+ * `api/import.ts`: the 20s deadline, the NetworkError conversion and the 401
+ * mapping all live in `request`, and each is a guarantee (documented above)
+ * that a fetch-direct copy would quietly drop for that endpoint. The wider
+ * blast radius is one-directional and small — a body carrying `message` and
+ * no `error` now shows the server's words instead of a status code.
+ *
+ * Shared by `request` and `upload` because they had the same block twice, and
+ * two copies of an extraction rule is how one of them ends up a key behind.
+ */
+async function apiErrorFrom(response: Response): Promise<ApiError> {
+  const fallback = `HTTP ${response.status}`;
+  const body = (await response.json().catch(() => null)) as
+    | { error?: string; message?: string }
+    | null;
+  return new ApiError(body?.error || body?.message || fallback, response.status);
+}
+
 class ApiClient {
   private async request<T>(
     path: string,
@@ -142,14 +173,7 @@ class ApiClient {
     }
 
     if (!response.ok) {
-      const fallback = `HTTP ${response.status}`;
-      const error = await response
-        .json()
-        .catch(() => null);
-      throw new ApiError(
-        (error as { error?: string } | null)?.error || fallback,
-        response.status,
-      );
+      throw await apiErrorFrom(response);
     }
 
     // 204 No Content carries no body — `response.json()` would reject with a
@@ -224,14 +248,7 @@ class ApiClient {
     }
 
     if (!response.ok) {
-      const fallback = `HTTP ${response.status}`;
-      const error = await response
-        .json()
-        .catch(() => null);
-      throw new ApiError(
-        (error as { error?: string } | null)?.error || fallback,
-        response.status,
-      );
+      throw await apiErrorFrom(response);
     }
 
     // 204 No Content carries no body (see `request` above) — short-circuit.

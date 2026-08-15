@@ -386,7 +386,11 @@ export function useImportSession(
    * Both halves carry the SERVER's sentence. That is the whole point of
    * the merge being uninteresting: whichever way the user reached the
    * error, they read the same words, because the backend emits one
-   * string for the flag and for `validateImportField`'s PATCH 400.
+   * string for the flag and for `validateImportField`'s PATCH 400 — and
+   * because `apiErrorFrom` (api/client.ts) reads `message` off that 400.
+   * It did not, once: the PATCH half arrived as the literal "HTTP 400"
+   * and, since a live PATCH error wins the merge below, it OVERWROTE the
+   * server's correct flag on the cell the user was typing in.
    *
    * A live PATCH error still wins on a collision: it describes the
    * value the user just typed, while the derived flag describes the

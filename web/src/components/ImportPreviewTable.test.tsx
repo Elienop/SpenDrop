@@ -1199,6 +1199,23 @@ describe('ImportPreviewTable — money', () => {
       row.original_currency = 'LBP';
     }
     preview.rows[2].rate = 89000;
+    // Matrix #10 — a currency and a rate with NOTHING to apply them to —
+    // is flagged on `rate` like the rows above, and a rate cannot fix it.
+    preview.rows.push({
+      row_id: 3,
+      skip: false,
+      content_hash: 'h3',
+      date: '2025-01-10',
+      description: 'Blank row',
+      amount: 0,
+      category: 'Food',
+      original_currency: 'LBP',
+      rate: 89000,
+    });
+    preview.field_errors = [
+      ...(preview.field_errors ?? []),
+      { row_id: 3, field: 'rate', message: SERVER_MONEY_MESSAGES.rateMissing },
+    ];
     render(
       <ImportPreviewTable
         preview={preview}
@@ -1214,11 +1231,15 @@ describe('ImportPreviewTable — money', () => {
     await user.click(
       screen.getByRole('button', { name: "Apply today's 89,000 to 2 rows" }),
     );
+    // The count on the button is the count of rows it can actually fix.
+
 
     expect(onApplyRate).toHaveBeenCalledTimes(1);
     // Row 2's problem is a disagreeing amount, not a missing rate:
     // overwriting the rate it already quoted would re-price money the
-    // sheet had already decided.
+    // sheet had already decided. Row 3 has no original amount, so the
+    // rate has nothing to convert — including it would promise a fix
+    // that lands as a successful PATCH against a row that stays blocked.
     expect(onApplyRate).toHaveBeenCalledWith([0, 1], 89000);
   });
 
@@ -1317,6 +1338,84 @@ describe('ImportPreviewTable — money', () => {
     // value the server stores is the value the button promised.
     expect(onPatchRow).toHaveBeenCalledTimes(1);
     expect(onPatchRow).toHaveBeenCalledWith(0, 'amount', '16.85');
+  });
+
+  it('keeps going when one row of a computed-amount burst is refused', async () => {
+    // The out-of-range case (matrix #12) comes back 400, and `onPatchRow`
+    // re-throws after recording it. An unguarded `await` in the loop would
+    // drop every LATER row silently — the user would see one message and
+    // have no way to know which rows the click reached — and leak the
+    // rejection out of a `void`-ed promise on the way.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onPatchRow = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Amount is out of range.'))
+      .mockResolvedValue(undefined);
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        {
+          row_id: 0,
+          field: 'amount',
+          message: SERVER_MONEY_MESSAGES.amountDisagrees,
+        },
+        {
+          row_id: 1,
+          field: 'amount',
+          message: SERVER_MONEY_MESSAGES.amountDisagrees,
+        },
+      ],
+    });
+    for (const row of preview.rows) {
+      row.original_amount = 1500000;
+      row.original_currency = 'LBP';
+      row.rate = 89000;
+    }
+    render(
+      <ImportPreviewTable
+        preview={preview}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(
+      screen.getByRole('button', {
+        name: 'Use the computed amounts for 2 rows',
+      }),
+    );
+
+    expect(onPatchRow).toHaveBeenCalledTimes(2);
+    expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'amount', '16.85');
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 1, 'amount', '16.85');
+  });
+
+  it('keeps going when one row of a skip burst is refused', async () => {
+    // Same policy on the other burst: a session that expires mid-skip
+    // must not leave the rows after the first failure untouched and
+    // unexplained.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const onPatchRow = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('Import session not found'))
+      .mockResolvedValue(undefined);
+    render(
+      <ImportPreviewTable
+        preview={makePreview({
+          field_errors: [fieldError(0, 'description'), fieldError(2, 'notes')],
+        })}
+        {...noopProps}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Skip these 2 rows' }));
+
+    expect(onPatchRow).toHaveBeenCalledTimes(2);
+    expect(onPatchRow).toHaveBeenNthCalledWith(1, 0, 'skip', true);
+    expect(onPatchRow).toHaveBeenNthCalledWith(2, 2, 'skip', true);
   });
 
   it('leaves a preview with no money problems exactly as it was', async () => {
