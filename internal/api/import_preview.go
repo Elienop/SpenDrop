@@ -220,26 +220,52 @@ func importMoneyFieldErrors(rows []importRow, cur importCurrencies) []importFiel
 // import goes on being refused, with no row left to fix), and a flag the gate
 // keeps quiet about is a refusal the user never saw coming.
 //
-// Two exemptions, for two different reasons:
-//
-//   - The user SKIPPED the row. Skipping is the remedy the flag offers, so a
-//     skipped row must not go on blocking the confirm it was skipped to
-//     unblock. Same rule the length family has always had.
-//   - The row is already rejected for a reason decided BEFORE its money —
-//     see preMoneySkipReason.
-//
 // The resolved money comes back either way, so a preview can still show what
 // an exempt row would be worth.
 func importRowMoney(row importRow, cur importCurrencies) (importMoney, *importFieldError) {
 	money, moneyErr, _ := resolveImportMoney(row, cur)
-	if moneyErr == nil {
-		return money, nil
-	}
-	if row.Skip {
-		return money, nil
-	}
-	if _, _, blocked := preMoneySkipReason(row); blocked {
+	if moneyErr == nil || importRowExemptFromMoneyFlags(row) {
 		return money, nil
 	}
 	return money, moneyErr
+}
+
+// importRowExemptFromMoneyFlags reports whether a row's money must not be
+// flagged, whatever the resolver makes of it.
+//
+// The rule: a money flag is for a row that would OTHERWISE import. Every
+// exemption below is a row that is not going to land no matter what its
+// currency cell says, so flagging it would demand a fix — or a Skip tick, per
+// row — on rows the import was always going to leave behind. It is the same
+// position unresolvedImportCategories has always taken for the category gate.
+//
+//   - The user SKIPPED it. Skipping is the remedy the flag offers, so a
+//     skipped row must not go on blocking the confirm it was skipped to
+//     unblock. Same rule the length family has always had.
+//   - It is rejected before its money is looked at — no parseable date, no
+//     description. The archetype is the trailing "TOTAL 5,000,000 LBP" line.
+//   - Its two money halves point opposite ways. That is a SKIP at confirm
+//     (skipReasonSignMismatch), not a blocker: the file is the only evidence
+//     of what the user meant and the importer will not pick a side, so the row
+//     leaves the batch either way.
+//
+// field_too_long is deliberately NOT exempt, and the difference is not the
+// order the checks run in — it is that a length error BLOCKS the confirm
+// rather than skipping the row, and both problems are fixable in the preview.
+// A row that is going to be refused anyway should surface everything the user
+// has to fix in one pass, not send them round again.
+//
+// The sign check is asked HERE rather than inside preMoneySkipReason because
+// preCategorySkipReason's order decides which reason WINS on a row with
+// several defects, and it has always reported field_too_long ahead of
+// sign_mismatch. Moving the sign check earlier to share it would silently
+// relabel those rows. One predicate, one caller: no drift, no relabelling.
+func importRowExemptFromMoneyFlags(row importRow) bool {
+	if row.Skip {
+		return true
+	}
+	if _, _, blocked := preMoneySkipReason(row); blocked {
+		return true
+	}
+	return moneySignsDisagree(row.Amount, row.OriginalAmount)
 }

@@ -876,6 +876,74 @@ func TestBuildImportPreview_FieldErrorOrderWithinARow(t *testing.T) {
 	}
 }
 
+// TestBuildImportPreview_SignMismatchedRowCarriesNoMoneyFlag completes the
+// exemption: money flags are for rows that would OTHERWISE import.
+//
+// A row whose base amount and foreign original point opposite ways is a
+// contradiction the importer will not reconcile — it skips at confirm as
+// sign_mismatch whatever its currency cell says. Flagging its money would
+// demand a fix on a row that is not going to land, which is the same
+// objection that exempts a dateless footer line, and it is how the category
+// family has always behaved: any pre-money rejection exempts.
+//
+// Length rows are the deliberate exception on the other side: they BLOCK
+// rather than skip, and both problems are fixable in the preview.
+func TestBuildImportPreview_SignMismatchedRowCarriesNoMoneyFlag(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "signexempt", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			// +10.00 against -1,000: the two halves disagree, and the currency
+			// is one the household does not have.
+			{"2026-01-15", "Contradiction", "10.00", "Food", "-1000", "LBX"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if flags, flagged := fieldErrorsByRow(t, preview)[0]; flagged {
+		t.Errorf("a sign-mismatched row was flagged on its money: %v", flags)
+	}
+
+	// The gate has to take the same view, or the preview clears a row confirm
+	// still refuses. The row skips at insert as sign_mismatch, so the import
+	// completes with nothing stored.
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200 (the row skips as sign_mismatch), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var result map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatalf("unmarshal confirm result: %v", err)
+	}
+	reasons, _ := result["skipped_reasons"].(map[string]any)
+	if got := reasons[string(skipReasonSignMismatch)]; got != 1.0 {
+		t.Errorf("skipped_reasons = %v, want one sign_mismatch — the row must skip by name, not be flagged", reasons)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed from a contradictory pair", n)
+	}
+
+	// The exemption is a statement about the row's CURRENT state. Agree the
+	// signs and the row becomes one that WOULD import — so its unknown
+	// currency is flagged, on the next surface that recomputes.
+	preview2, importID2 := uploadImportSheet(t, h, user, xlsxData)
+	_ = preview2
+	if rec := patchImportRow(t, h, user, importID2, 0, "amount", "-10.00"); rec.Code != http.StatusOK {
+		t.Fatalf("patch amount: %d %s", rec.Code, rec.Body.String())
+	}
+	getRec := getImportSession(t, h, user, importID2)
+	var resumed map[string]any
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("unmarshal resume: %v", err)
+	}
+	if _, flagged := fieldErrorsByRow(t, resumed)[0][importFieldOriginalCurrency]; !flagged {
+		t.Errorf("the row kept its exemption after its signs were agreed: %v", resumed["field_errors"])
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.
