@@ -118,7 +118,7 @@ Tabbed settings page covering account and system configuration. The section you 
 - **Currencies** -- Manage currencies with exchange rates (LBP, EUR to USD base)
 - **Users** -- Admin user management (create, edit roles, delete, and reset a member's password)
 - **API tokens** -- Mint, list, and revoke long-lived bearer tokens scoped to your user account. Tokens are show-once on creation (you will never see the plaintext again) and are revoked automatically when you change your password. Use them to authenticate any script, dashboard, or third-party integration against SpenDrop without a browser session — see [Using API tokens](#using-api-tokens) for curl and Homepage examples.
-- **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount), mark rows to skip, map any category name that does not match one of yours, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads. Importing is **admin only**; export is available to every member, so a member sees this tab titled just **Export**, holding the export controls alone. `?tab=data` resolves for both roles.
+- **Import / Export** -- Upload Excel files, preview and edit rows inline (date / description / amount / exchange rate), mark rows to skip, map any category name that does not match one of yours, resolve duplicate-content collisions before confirming; export transactions or monthly/yearly reports. Sessions persist for 60 minutes and survive browser reloads. Importing is **admin only**; export is available to every member, so a member sees this tab titled just **Export**, holding the export controls alone. `?tab=data` resolves for both roles.
 
 ![Settings](docs/screenshots/08-settings.png)
 
@@ -1094,6 +1094,8 @@ See the [Homepage integration](#homepage-integration) section below for the `ser
 | GET | `/api/export/monthly/{year}/{month}` | Export monthly report |
 | GET | `/api/export/yearly/{year}` | Export yearly report |
 
+The transactions sheet carries a **Rate** column after **Original Currency**, holding the rate a converted row was booked at and left empty for a row that was never converted. It is what makes a SpenDrop export re-import losslessly: the file states the original, the currency and the rate, so the import recomputes the same amount to the cent and recognises the row as one you already have rather than adding a second copy.
+
 Exports are open to every member and capped at 50,000 rows. They are built by streaming each row straight into the file rather than assembling the whole workbook in memory, which keeps a full-size export around 83 MiB of peak memory instead of 250 MiB — worth knowing because export is the largest memory consumer in the app and, unlike import, anyone can trigger it and two people can trigger it at once. A test enforces that ceiling on every build.
 
 **An export tells you when it is not a faithful copy.** A spreadsheet cell cannot hold more than 32,767 characters, and the parser silently trims anything longer without reporting an error — so a ledger row carrying more (possible only from an old import, before field lengths were checked) used to export as a value that looked complete. Any shortened cell now ends with a visible `[TRUNCATED BY SPENDROP: ...]` marker naming the true length, the workbook gains an **Export Warnings** sheet listing every affected cell, and that sheet is the one the file opens on. The response also carries `X-Export-Truncated-Cells` for scripts that never open a spreadsheet tab. The download is never refused over this: export is your only way to get your data out, and one historic row should not cost you access to the other 49,999.
@@ -1109,15 +1111,35 @@ An uploaded workbook is also bounded by its shape, not only by `MAX_UPLOAD_BYTES
 
 **Imported rows never land in a category you did not choose.** A category name in the spreadsheet either matches one of yours, or you map it explicitly — a chosen default does *not* absorb it. That default still fills rows whose category cell is **empty**, where there is no name to decide about. Previously an unrecognised name was quietly filed under your default (or, with no default set, the row was dropped and counted in a single "N skipped" sentence), so a run that mis-filed or discarded most of a file looked exactly like a clean one. Now the preview lists each unmatched name with its own control, the import stays blocked until every one is resolved, and `/confirm` refuses with 409 `UNRESOLVED_CATEGORIES` if it is reached anyway. Accepting the default for everything left over is one click — **"Use *Food* for the remaining 3"** — which writes real mappings rather than leaving it implicit. A file whose categories all match needs no extra clicks at all. Rows that would be dropped anyway (unparseable date, missing description, over-long field, zero amount, amount signs that disagree, or skipped by you) never demand a category decision, so a trailing `TOTAL` row does not block a good file.
 
+**Columns SpenDrop reads.** Header matching is case-insensitive and ignores surrounding spaces; anything not listed is ignored, and column order does not matter.
+
+| Column | Aliases | Notes |
+|--------|---------|-------|
+| Date | `transaction date` | Excel date cells, or text as `2026-01-15`, `2026/01/15`, `01/02/2026` (month first), `02-Jan-2026`; 1900–2100 |
+| Description | — | Required; capped at 500 characters |
+| Amount | `amount (usd)` | In your base currency. Negative (or `(42.50)`) imports as a refund |
+| Category | — | Matched against your categories by name, or mapped in the preview |
+| Original Amount | — | The figure as the receipt states it, in a foreign currency |
+| Original Currency | — | A currency code you have set up under Settings → Currencies |
+| Rate | `exchange rate`, `fx rate` | Foreign units per unit of your base currency — `89000` for LBP |
+| Tags | — | Capped at 500 characters |
+| Notes | — | Capped at 2,000 characters |
+
+A file needs **Date**, **Description** and money — either an **Amount** column or an **Original Amount** column.
+
+**A row's `Rate` is the source of its amount.** When a row carries an original amount, a currency and a rate, SpenDrop computes `Amount = Original Amount ÷ Rate` and records that rate against the row, so a back-dated statement is valued at the rate it was actually booked at rather than at today's. A sheet may state its money in the foreign columns **only** — no `Amount` column at all — which is what a bank statement in another currency looks like. Where a row states both, the two must agree to the cent.
+
+**Money a preview cannot resolve blocks the import, with the fix named.** A foreign row with no rate asks for one and offers today's ("enter the rate this row was booked at, or apply today's 89,000") — it is never applied silently, because a booked rate is permanent and a guessed one would be too. A currency you have not set up points at Settings → Currencies, and adding it there clears the flag on the next refresh without re-uploading. An `Amount` that disagrees with `Original Amount ÷ Rate` shows the arithmetic and leaves the three cells to you. `/confirm` refuses with 409 `MONEY_ERRORS` if it is reached anyway. Naming your base currency as a row's original currency is not an error: the row is base money, and no original or rate is stored for it.
+
 **Negative amounts import as refunds.** A negative amount cell — including accounting format, `(42.50)` — lands in the ledger with its sign preserved and nets against its category, exactly as a refund entered by hand would. A row whose amount and original amount carry opposite signs is skipped as `sign_mismatch` rather than guessed at. One consequence for old files: imports that ran before signed amounts existed stored negative rows with the sign stripped, under a different duplicate-detection identity — so re-importing such a file re-adds its negative rows as refunds instead of skipping them as duplicates.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | POST | `/api/import/upload` | Upload Excel file and open a preview session (returns `import_id`, parsed rows, any content-hash collision groups, and any `field_errors`) |
 | GET | `/api/import/{importID}` | Resume an existing preview session (used by the frontend after a reload to restore the in-progress import, including its collision groups and `field_errors`) |
-| PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `skip`) on a preview row; backend recomputes collisions and field-length errors, and returns the full session snapshot |
+| PATCH | `/api/import/{importID}/rows/{rowID}` | Edit a single field (`date` / `description` / `amount` / `rate` / `skip`) on a preview row; an empty `rate` clears it. Backend recomputes collisions, field-length errors and money errors, and returns the full session snapshot |
 | DELETE | `/api/import/{importID}` | Cancel the preview session and free the server-side slot |
-| POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active, or 409 `FIELD_TOO_LONG` if any row you have not skipped has a field over its limit) |
+| POST | `/api/import/confirm` | Confirm and import the previewed rows (rejected with 409 `UNRESOLVED_COLLISIONS` if any content-hash conflict is still active, 409 `FIELD_TOO_LONG` if any row you have not skipped has a field over its limit, or 409 `MONEY_ERRORS` if any such row quotes money that cannot be resolved) |
 
 Every preview response — upload, resume and edit alike — carries `field_errors` as `[{row_id, field, message}]`, recomputed from the current rows. The `message` is generated server-side so that the same problem reads identically whether you meet it on upload, after an edit, after a page refresh, or at confirm.
 
