@@ -34,6 +34,17 @@ export interface CreatorLabelProps {
  * two are set by the same LEFT JOIN and empty together, but this component is
  * the place that must not depend on that.
  *
+ * The two emptiness checks below are deliberately the SAME test. `name` falls
+ * back on truthiness (`createdBy || 'Unknown'`), so `showHandle` uses
+ * truthiness too rather than `!== ''`. The pair disagrees only off-type — but
+ * off-type is reachable: a producer that omits the field (an un-annotated
+ * fixture, a hand-built mock, a stale endpoint) delivers `undefined`, which is
+ * `!== ''` and therefore passed the strict version. Measured output of the
+ * mismatched pair: `Entered by Elie @undefined`, and `Unknown @elienop` —
+ * the second being exactly the "names the person it just said it cannot name"
+ * case the gate exists to prevent. Whatever makes `name` fall back must also
+ * suppress the handle, in one step, or the two rules drift apart at the edges.
+ *
  * **The DISPLAY NAME clips and the handle survives.** This is the whole point
  * of the two-span layout, and it is not the obvious arrangement: with both
  * strings in one truncating span, the tail ellipsis eats `@handle` FIRST and
@@ -79,10 +90,11 @@ export interface CreatorLabelProps {
  * synthesized baseline is a subtlety with no payoff; `items-center` matches the
  * wrapping `<p>` so the whole line aligns by one rule.
  *
- * `title` carries the untruncated "Name @handle" for the desktop `max-w-md`
- * cells, mirroring the description's own `title` one line up. Dead on touch —
- * which is exactly why the clipping order above matters and the tooltip is a
- * bonus rather than the fix.
+ * `title` carries the untruncated "Name @handle" for the desktop tables, where
+ * this line shares the description cell — the slack column (`w-full max-w-0`),
+ * so it clips rather than widening the table. Mirrors the description's own
+ * `title` one line up. Dead on touch — which is exactly why the clipping order
+ * above matters and the tooltip is a bonus rather than the fix.
  *
  * Shared rather than copied into the six surfaces that render it (the ledger
  * table row, the phone card, the heatmap day sheet, Trash's card and table,
@@ -94,7 +106,7 @@ export function CreatorLabel({
   createdByUsername,
 }: CreatorLabelProps) {
   const name = createdBy || 'Unknown';
-  const showHandle = createdBy !== '' && createdByUsername !== '';
+  const showHandle = Boolean(createdBy) && Boolean(createdByUsername);
   return (
     <p
       className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground"

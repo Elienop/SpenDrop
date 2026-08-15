@@ -69,6 +69,49 @@ describe('CreatorLabel', () => {
     expect(line().textContent).not.toContain('@');
   });
 
+  // Off-type, on purpose. The wire contract makes both fields REQUIRED, so
+  // `undefined` cannot arrive from a well-typed producer — but it reaches this
+  // component the moment one is badly typed: an un-annotated test fixture, a
+  // hand-built mock, an endpoint that has not been regenerated. TypeScript
+  // stops none of those at THIS boundary, because the hole is upstream.
+  //
+  // `@ts-expect-error` rather than a cast: a cast would quietly launder the
+  // violation, whereas this asserts the call does not type-check and FAILS the
+  // build if it ever starts to — which would mean somebody made the field
+  // optional, the one thing `types.ts` says not to do. It is the honest way to
+  // say "this input is illegal and the component survives it anyway".
+  test('suppresses the handle when the username is undefined, not just empty', () => {
+    render(
+      <CreatorLabel
+        createdBy="Elie"
+        // @ts-expect-error deliberately off-type: the wire contract forbids
+        // undefined here, and this pins that a producer violating it still
+        // cannot render the string "@undefined" at a household member.
+        createdByUsername={undefined}
+      />,
+    );
+
+    expect(line().textContent).toBe('Entered by Elie');
+    expect(line().textContent).not.toContain('@');
+    expect(line().textContent).not.toContain('undefined');
+  });
+
+  test('suppresses the handle when the display name is undefined, not just empty', () => {
+    render(
+      <CreatorLabel
+        // @ts-expect-error deliberately off-type: pins that the Unknown
+        // fallback and the handle gate agree, so this cannot render
+        // "Unknown @elienop" — a line naming who it just said it cannot name.
+        createdBy={undefined}
+        createdByUsername="elienop"
+      />,
+    );
+
+    expect(screen.getByText('Unknown')).toBeInTheDocument();
+    expect(line().textContent).toBe('Entered by Unknown');
+    expect(line().textContent).not.toContain('@');
+  });
+
   test('keeps the metadata register the six surfaces relied on', () => {
     // Byte-exact class pins, because this component was extracted from six
     // copies of this exact markup and the extraction is only lossless if the

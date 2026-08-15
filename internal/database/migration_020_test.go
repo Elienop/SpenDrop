@@ -196,20 +196,194 @@ func TestMigration020_RejectsOutOfSetRole_RawSQL(t *testing.T) {
 	}
 }
 
+// userEdgeCanary describes ONE inbound foreign key into `users`, the row this
+// suite seeds on it, and the probe that must still return 1 after migration
+// 020 has run.
+//
+// It is a single list on purpose: the fixture, the pre-migration vacuity
+// check, the post-migration assertions and the completeness check below all
+// read from it, so adding an edge means adding one entry rather than
+// remembering four places. Order is significant — the seeds run top to bottom
+// and transaction_audit's row refers to the transaction seeded above it.
+type userEdgeCanary struct {
+	// table and column identify the edge, and are what the completeness
+	// check matches against the live schema.
+	table    string
+	column   string
+	onDelete string
+	// why states what a household actually loses if this edge is cascaded,
+	// so a failure reads as a consequence rather than as a number.
+	why string
+	// seed inserts exactly one row on this edge.
+	seed string
+	// probe must return 1 both before and after the migration. For a CASCADE
+	// edge that is the row count. For SET NULL it must interrogate the COLUMN,
+	// because the row survives and only the actor is blanked — a row count is
+	// blind to exactly the damage that edge does.
+	probe string
+}
+
+// userEdgeCanaries must name EVERY inbound edge into users.
+// TestMigration020_EveryInboundUserEdgeHasACanary is what enforces that
+// against the live schema, so this list cannot quietly fall behind a new
+// migration that adds a table referencing users.
+var userEdgeCanaries = []userEdgeCanary{
+	{
+		table: "sessions", column: "user_id", onDelete: "CASCADE",
+		why: "every household member is logged out",
+		seed: `INSERT INTO sessions (token, user_id, expires_at)
+		       VALUES ('hash-of-a-cookie', 2, '2030-01-01T00:00:00Z')`,
+		probe: `SELECT COUNT(*) FROM sessions`,
+	},
+	{
+		// The ledger row itself — the thing the whole design decision is
+		// about. Migration 001 seeds the default categories, so category_id 1
+		// resolves under the foreign keys this fixture turns ON.
+		table: "transactions", column: "user_id", onDelete: "CASCADE",
+		why: "a users rebuild hard-deletes the ledger, with no tombstone, no Trash entry and no restore path",
+		seed: `INSERT INTO transactions (id, user_id, date, description, category_id, amount_cents)
+		       VALUES (1, 2, '2026-08-01', 'groceries', 1, 4200)`,
+		probe: `SELECT COUNT(*) FROM transactions`,
+	},
+	{
+		// SET NULL, not CASCADE: a rebuild KEEPS this row and blanks its
+		// actor. Hence the probe on the column. Seeded after transactions
+		// because it names that row.
+		table: "transaction_audit", column: "actor_user_id", onDelete: "SET NULL",
+		why: "the audit trail survives but forgets who did it",
+		seed: `INSERT INTO transaction_audit (transaction_id, action, actor_user_id)
+		       VALUES (1, 'insert', 2)`,
+		probe: `SELECT COUNT(*) FROM transaction_audit WHERE actor_user_id IS NOT NULL`,
+	},
+	{
+		// api_tokens carries two CHECKs that a lazy fixture trips silently —
+		// token_hash must be exactly 64 chars and token_prefix exactly 15 —
+		// and a rejected insert would leave this canary asserting 0 == 0
+		// forever. The pre-migration probe below is what catches that.
+		table: "api_tokens", column: "user_id", onDelete: "CASCADE",
+		why: "every integration's token is destroyed and cannot be reissued to the same value",
+		seed: `INSERT INTO api_tokens (user_id, name, token_hash, token_prefix)
+		       VALUES (1, 'cli', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'spdr_abcdefghij')`,
+		probe: `SELECT COUNT(*) FROM api_tokens`,
+	},
+	{
+		table: "balance_checkpoints", column: "user_id", onDelete: "CASCADE",
+		why: "hand-entered bank-statement anchors have no restore path",
+		seed: `INSERT INTO balance_checkpoints (user_id, scope_type, date, expected_amount_cents)
+		       VALUES (1, 'total', '2026-08-01', 500000)`,
+		probe: `SELECT COUNT(*) FROM balance_checkpoints`,
+	},
+	{
+		table: "push_subscriptions", column: "user_id", onDelete: "CASCADE",
+		why: "notifications stop until each device re-subscribes",
+		seed: `INSERT INTO push_subscriptions (user_id, endpoint, p256dh, auth)
+		       VALUES (2, 'https://push.example/endpoint', 'p256dh-key', 'auth-secret')`,
+		probe: `SELECT COUNT(*) FROM push_subscriptions`,
+	},
+	{
+		table: "saved_filters", column: "user_id", onDelete: "CASCADE",
+		why: "saved views are lost",
+		seed: `INSERT INTO saved_filters (user_id, name, filter_json)
+		       VALUES (2, 'Groceries this year', '{}')`,
+		probe: `SELECT COUNT(*) FROM saved_filters`,
+	},
+}
+
+// inboundUserEdges reads every foreign key in the live schema whose parent is
+// `users`, keyed "<table>.<column> ON DELETE <action>". It asks the DATABASE,
+// not the migration files: 002 and 010 both changed edges that 001 declared,
+// so the files are a history and only the built schema is the answer.
+func inboundUserEdges(t *testing.T, db *sql.DB) map[string]bool {
+	t.Helper()
+	rows, err := db.Query(`
+		SELECT m.name, f."from", f.on_delete
+		FROM sqlite_master m
+		JOIN pragma_foreign_key_list(m.name) f
+		WHERE m.type = 'table' AND f."table" = 'users'`)
+	if err != nil {
+		t.Fatalf("enumerate inbound user edges: %v", err)
+	}
+	defer rows.Close()
+	edges := map[string]bool{}
+	for rows.Next() {
+		var table, column, onDelete string
+		if err := rows.Scan(&table, &column, &onDelete); err != nil {
+			t.Fatalf("scan inbound user edge: %v", err)
+		}
+		edges[table+"."+column+" ON DELETE "+onDelete] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate inbound user edges: %v", err)
+	}
+	return edges
+}
+
+// TestMigration020_EveryInboundUserEdgeHasACanary keeps the canary list honest
+// as the schema grows.
+//
+// The list below it is a hand-written enumeration, and a hand-written
+// enumeration of a thing the schema also declares is a duplicate that rots.
+// The failure mode is silent and specific: someone adds a table with
+// `user_id REFERENCES users(id) ON DELETE CASCADE`, the upgrade test still
+// passes on its seven older canaries, and the one table that would have been
+// emptied by a future rebuild of `users` is the one nobody is watching.
+//
+// So the schema is asked directly. The comparison runs BOTH ways: an edge with
+// no canary is the case above, and a canary naming an edge the schema no
+// longer has means the list is describing a database that does not exist —
+// its seed would fail, or worse, silently stop meaning anything.
+//
+// This is deliberately a sibling of the upgrade test rather than a block
+// inside it: it is a claim about the FIXTURE, it needs no migration run of its
+// own, and when it fails the thing to fix is the list, not the migration.
+func TestMigration020_EveryInboundUserEdgeHasACanary(t *testing.T) {
+	db, dbPath := openTestDB(t)
+	db.SetMaxOpenConns(1)
+	if err := RunMigrations(db, defaultMigrationOptions(t, dbPath)); err != nil {
+		t.Fatalf("run migrations: %v", err)
+	}
+
+	schemaEdges := inboundUserEdges(t, db)
+	if len(schemaEdges) == 0 {
+		t.Fatal("found no foreign keys pointing at users — the enumeration is broken, and every assertion below would be vacuous")
+	}
+
+	canaried := map[string]bool{}
+	for _, c := range userEdgeCanaries {
+		canaried[c.table+"."+c.column+" ON DELETE "+c.onDelete] = true
+	}
+
+	for edge := range schemaEdges {
+		if !canaried[edge] {
+			t.Errorf("%s has no canary in userEdgeCanaries — a future rebuild of `users` would empty that table and TestMigration020_AppliesOverExistingUsersOfBothRoles would not notice. Add an entry that seeds one row on it and probes it.", edge)
+		}
+	}
+	for edge := range canaried {
+		if !schemaEdges[edge] {
+			t.Errorf("userEdgeCanaries claims %s but the live schema has no such foreign key — the entry is stale; correct or remove it.", edge)
+		}
+	}
+}
+
 // TestMigration020_AppliesOverExistingUsersOfBothRoles is the upgrade case:
 // the migration runs on a database that already holds real accounts, and must
 // reject none of them.
 //
-// It is a users-row fingerprint PLUS child-table canaries, not a whole-schema
-// fingerprint. The canaries are the point of the test, not decoration: this
-// migration exists in trigger form precisely BECAUSE the rebuild that a CHECK
-// constraint would require empties every table hanging off users (the header
-// carries the measurement). One row is seeded on each of the two edge
-// BEHAVIOURS — transactions and sessions for ON DELETE CASCADE, and
-// transaction_audit for ON DELETE SET NULL, which loses no row but silently
-// anonymises the one it keeps. If anyone ever "improves" this file into a
-// rebuild of users, the ledger row is what disappears, so the ledger row is
-// what has to be asserted.
+// It is a users-row fingerprint PLUS one child-table canary per inbound
+// foreign key, not a whole-schema fingerprint. The canaries are the point of
+// the test, not decoration: this migration exists in trigger form precisely
+// BECAUSE the rebuild that a CHECK constraint would require empties every
+// table hanging off users (the header carries the measurement). The list is
+// userEdgeCanaries above, and TestMigration020_EveryInboundUserEdgeHasACanary
+// proves it still covers the whole schema — a regression here is not a thing
+// that happens to one table, and partial coverage means a good chance the
+// canary in place is not the one that would have caught it.
+//
+// Both edge behaviours are represented, and each carries its own probe. Six
+// are ON DELETE CASCADE, where the row vanishes. transaction_audit is ON
+// DELETE SET NULL, where the row SURVIVES and is silently anonymised — so its
+// probe interrogates the actor column, which is the only place that damage is
+// visible.
 //
 // It also pins that the guard is live AFTER the upgrade, not only on a
 // database created fresh — a migration that applied but installed nothing
@@ -222,18 +396,17 @@ func TestMigration020_AppliesOverExistingUsersOfBothRoles(t *testing.T) {
 		VALUES (1, 'elie', '$2a$10$fake', 'Elie', 'admin', '2026-01-01T10:00:00Z', '2026-02-02T11:00:00Z')`)
 	mustExec(t, db, `INSERT INTO users (id, username, password_hash, display_name, role, created_at, updated_at)
 		VALUES (2, 'wife', '$2a$10$fake', 'Wife', 'member', '2026-01-03T10:00:00Z', '2026-02-04T11:00:00Z')`)
-	mustExec(t, db, `INSERT INTO sessions (token, user_id, expires_at)
-		VALUES ('hash-of-a-cookie', 2, '2030-01-01T00:00:00Z')`)
-	// The ledger row itself — the thing the whole design decision is about.
-	// Migration 001 seeds the default categories, so category_id 1 resolves
-	// under the foreign keys this fixture turns ON.
-	mustExec(t, db, `INSERT INTO transactions (id, user_id, date, description, category_id, amount_cents)
-		VALUES (1, 2, '2026-08-01', 'groceries', 1, 4200)`)
-	// transaction_audit.actor_user_id is ON DELETE SET NULL, not CASCADE: a
-	// rebuild would keep this row and blank its actor. A count-only assertion
-	// is blind to that, so the actor is asserted separately below.
-	mustExec(t, db, `INSERT INTO transaction_audit (transaction_id, action, actor_user_id)
-		VALUES (1, 'insert', 2)`)
+
+	for _, c := range userEdgeCanaries {
+		mustExec(t, db, c.seed)
+		// Every seed must LAND, or its post-migration assertion is 0 == 0 and
+		// passes against the very rebuild this test exists to catch. Checked
+		// per row, immediately, so the message names the seed that failed.
+		if n := countRows(t, db, c.probe); n != 1 {
+			t.Fatalf("fixture: probe for the %s edge returns %d before the migration, want 1 — the seed did not land, and this canary would be vacuous",
+				c.table, n)
+		}
+	}
 
 	before := userFingerprints020(t, db)
 
@@ -253,17 +426,19 @@ func TestMigration020_AppliesOverExistingUsersOfBothRoles(t *testing.T) {
 			t.Errorf("user id=%d changed across the migration:\n before=%s\n  after=%s", id, want, got)
 		}
 	}
-	if n := countRows(t, db, `SELECT COUNT(*) FROM sessions`); n != 1 {
-		t.Errorf("sessions = %d after the migration, want 1 — a users rebuild would cascade these away", n)
+
+	for _, c := range userEdgeCanaries {
+		if n := countRows(t, db, c.probe); n != 1 {
+			t.Errorf("the %s.%s canary is gone after the migration (probe returned %d, want 1) — that edge is ON DELETE %s, so a rebuild of `users` reaches it: %s",
+				c.table, c.column, n, c.onDelete, c.why)
+		}
 	}
-	if n := countRows(t, db, `SELECT COUNT(*) FROM transactions`); n != 1 {
-		t.Errorf("transactions = %d after the migration, want 1 — a users rebuild hard-deletes the ledger, with no tombstone and no Trash entry", n)
-	}
+	// The SET NULL edge keeps its row and loses only the actor, so its probe
+	// above looks at the column. Assert the row itself separately: if it were
+	// ever to vanish, both probes would read 0 and the message above would
+	// misdescribe what happened.
 	if n := countRows(t, db, `SELECT COUNT(*) FROM transaction_audit`); n != 1 {
-		t.Errorf("transaction_audit rows = %d after the migration, want 1", n)
-	}
-	if n := countRows(t, db, `SELECT COUNT(*) FROM transaction_audit WHERE actor_user_id IS NOT NULL`); n != 1 {
-		t.Errorf("audit rows with an actor = %d after the migration, want 1 — ON DELETE SET NULL keeps the row and anonymises it, which a row count cannot see", n)
+		t.Errorf("transaction_audit rows = %d after the migration, want 1 — the audit row itself must survive, not merely keep its actor", n)
 	}
 
 	// The guard is installed and live on the upgraded database.

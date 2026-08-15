@@ -9,6 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { UseDashboardResult } from '../hooks/useDashboard';
+import type { Transaction } from '../api/types';
 
 /**
  * Phone-width behaviour of the Dashboard's Recent Transactions panel.
@@ -31,7 +32,7 @@ const DESKTOP_WIDTH = 1024;
 const LONG_DESCRIPTION =
   'Weekly shop at the big supermarket on the coast road including household goods, cleaning supplies and a very long tail of items that the import path never trimmed because validateImportField only runs on the per-row edit route';
 
-const transactions = [
+const transactions: Transaction[] = [
   {
     id: 1,
     user_id: 1,

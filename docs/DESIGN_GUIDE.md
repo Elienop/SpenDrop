@@ -357,7 +357,7 @@ Use for: every surface that names a row's creator — the ledger table row and p
 
 Props: `createdBy: string`, `createdByUsername: string`. **There is no `className` prop, and that is a decision, not an oversight** — `AmountDisplay` and `AmountSignNote` both expose one, because a caller legitimately needs to align a figure against its neighbours. This line has no such need and a worse failure mode: six hand-copied versions of this markup existed before the component did, and the escape hatch is how they drift apart again. Worse, the classes a caller would most want to reach for (`truncate`, `shrink`, `max-w-*`) are the exact ones the clipping order depends on. A surface needing different spacing takes a wrapper, not a prop.
 
-`title` carries the untruncated "Name @handle" for the desktop `max-w-md` cells, mirroring the description's own `title` one line up. It is dead on touch — which is why the clipping order above is the fix and the tooltip is a bonus.
+`title` carries the untruncated "Name @handle" for the desktop tables, where this line shares the description cell — the slack column (`w-full max-w-0`), so it clips rather than widening the table. Mirrors the description's own `title` one line up. It is dead on touch — which is why the clipping order above is the fix and the tooltip is a bonus.
 
 ```tsx
 <CreatorLabel

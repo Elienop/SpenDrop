@@ -43,7 +43,7 @@ const defaultFilters = {
   search: '',
 };
 
-const defaultTransaction = {
+const defaultTransaction: Transaction = {
   id: 1,
   user_id: 1,
   created_by: 'Elie',
@@ -139,6 +139,7 @@ vi.mock('../components/TransactionEntryRow', () => ({
 
 import { Transactions } from './Transactions';
 import { api } from '../api/client';
+import type { Transaction } from '../api/types';
 
 const mockSetPage = vi.fn();
 const mockSetPerPage = vi.fn();
