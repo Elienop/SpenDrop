@@ -55,6 +55,7 @@ function tx(over: Partial<Transaction>): Transaction {
     id: 0,
     user_id: 1,
     created_by: 'Elie',
+    created_by_username: 'elienop',
     date: '2026-05-27',
     amount: 1,
     original_amount: null,

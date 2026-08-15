@@ -8,6 +8,7 @@ function makeTx(overrides: Partial<Transaction> = {}): Transaction {
     id: 1,
     user_id: 1,
     created_by: 'Elie',
+    created_by_username: 'elienop',
     date: '2026-04-01',
     amount: 25.5,
     original_amount: null,
@@ -95,11 +96,49 @@ describe('TransactionCard anatomy', () => {
     expect(icon).toHaveClass('size-3.5', 'shrink-0');
   });
 
+  // B36. The display name is spoofable — a member can PATCH theirs to the
+  // other member's string and the live JOIN relabels every row they entered —
+  // so the card carries the login handle beside it. Inside the same bound
+  // span, because 360px is the phone this card exists for: the longer string
+  // has to clip, not pan the row.
+  it('carries the creator handle beside the display name', () => {
+    renderCard();
+
+    // The handle is `shrink-0` and sits BESIDE the name's truncating span, not
+    // inside it. 360px is the width this card exists for, and inside the name
+    // span the tail ellipsis would eat the handle before a single character of
+    // the spoofable display name — see CreatorLabel.test.tsx for the full
+    // derivation. Pinned here too because this is the surface the reviewer
+    // measured it on.
+    const handle = screen.getByText('@elienop');
+    expect(handle).toHaveClass('shrink-0');
+    const nameSpan = screen.getByText('Entered by').parentElement;
+    expect(nameSpan).toHaveAttribute('class', 'min-w-0 truncate');
+    expect(nameSpan).not.toContainElement(handle);
+
+    expect(screen.getByText('Entered by').closest('p')!.textContent).toBe(
+      'Entered by Elie @elienop',
+    );
+  });
+
+  it('renders no bare @ when the wire carries no handle', () => {
+    renderCard({ transaction: makeTx({ created_by_username: '' }) });
+    const line = screen.getByText('Entered by').closest('p');
+    expect(line).toHaveTextContent('Entered by Elie');
+    expect(line!.textContent).not.toContain('@');
+  });
+
   it('names a deleted account holder rather than showing a blank line', () => {
+    // Handle left non-empty: on the wire both halves empty together, so this
+    // pair is unreachable there and is the one that proves the `@` is gated on
+    // the NAME too — 'Unknown @elienop' names who the line cannot name.
     renderCard({ transaction: makeTx({ created_by: '' }) });
     expect(screen.getByText('Entered by').parentElement).toHaveTextContent(
       'Entered by Unknown',
     );
+    expect(
+      screen.getByText('Entered by').closest('p')!.textContent,
+    ).not.toContain('@');
   });
 
   it('renders the dual-currency amount block unchanged', () => {

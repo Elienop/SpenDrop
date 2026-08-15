@@ -43,10 +43,11 @@ const defaultFilters = {
   search: '',
 };
 
-const defaultTransaction = {
+const defaultTransaction: Transaction = {
   id: 1,
   user_id: 1,
   created_by: 'Elie',
+  created_by_username: 'elienop',
   date: '2026-04-01',
   amount: 25.5,
   original_amount: null,
@@ -138,6 +139,7 @@ vi.mock('../components/TransactionEntryRow', () => ({
 
 import { Transactions } from './Transactions';
 import { api } from '../api/client';
+import type { Transaction } from '../api/types';
 
 const mockSetPage = vi.fn();
 const mockSetPerPage = vi.fn();
@@ -525,6 +527,67 @@ describe('Transactions page', () => {
       const headers = screen.getAllByRole('columnheader');
       const tagsHeader = headers.find((h) => h.textContent?.includes('Tags'));
       expect(tagsHeader).toBeDefined();
+    });
+  });
+
+  // The ledger table is six fixed-content columns plus one that gives
+  // ground (seven in all). happy-dom lays nothing out, so what is pinned here is the
+  // structure that keeps the table inside its scroller; the widths behind each
+  // assertion were measured in Chrome on the built app (see the cell's comment
+  // in TransactionRow.tsx). Before this, one imported 40-character description
+  // on page 1 put a 1063px table inside a 951px scroller at a 1288px window
+  // (985px at 1130 with the sidebar collapsed) and the Actions column was off
+  // the right edge.
+  describe('table width', () => {
+    /** Class tokens of an element. Exact tokens, never substrings. */
+    const tokens = (el: Element) => el.className.split(/\s+/).filter(Boolean);
+
+    it('leaves the table on auto layout, which the shrink depends on', () => {
+      render(<Transactions />);
+      const table = screen.getByRole('table');
+
+      // `table-fixed` INVERTS the mechanism: under fixed layout the first
+      // row's declared widths are the column widths, so the description cell's
+      // `max-w-0` would give it a zero-width column while every other column
+      // took an equal share of the table regardless of its content. Measured
+      // with fixed layout: all seven columns at 97px at 768, Date / Amount /
+      // Actions all spilling out of their cells.
+      expect(tokens(table)).not.toContain('table-fixed');
+    });
+
+    it('leaves the description header unclamped, so the column has a floor', () => {
+      render(<Transactions />);
+      const header = screen
+        .getAllByRole('columnheader')
+        .find((th) => th.textContent?.includes('Description'));
+      expect(header).toBeDefined();
+
+      // The header is what stops the column collapsing: the body cell can
+      // shrink to nothing, so this sort button's own width is the floor.
+      // Clamping the header too measured a 32px column with a header reading
+      // nothing at 768.
+      expect(tokens(header!).filter((t) => t.startsWith('max-w-'))).toEqual([]);
+      expect(tokens(header!)).not.toContain('w-full');
+    });
+
+    it('routes the slack to the description cell of every row', () => {
+      render(<Transactions />);
+      // Through the page rather than the row component, because the page owns
+      // the header/body column agreement: a row rendering the slack cell in a
+      // different position from the header would be invisible to the row's own
+      // tests.
+      const cell = screen.getByTitle('Groceries').closest('td');
+      expect(cell).not.toBeNull();
+      expect(tokens(cell!)).toContain('w-full');
+      expect(tokens(cell!)).toContain('max-w-0');
+
+      const row = cell!.closest('tr');
+      expect(row).not.toBeNull();
+      // Third column, under the Description header — the slack has to land in
+      // the column the header names.
+      expect([...row!.children].indexOf(cell!)).toBe(2);
+      const headers = screen.getAllByRole('columnheader');
+      expect(headers[2].textContent).toContain('Description');
     });
   });
 
@@ -1469,8 +1532,20 @@ describe('Transactions page', () => {
       mockUseTransactions.mockReturnValue(
         defaultHookReturn({
           transactions: [
-            { ...defaultTransaction, id: 1, description: 'Groceries', created_by: 'Elie' },
-            { ...defaultTransaction, id: 2, description: 'Pharmacy', created_by: 'Partner Name' },
+            {
+              ...defaultTransaction,
+              id: 1,
+              description: 'Groceries',
+              created_by: 'Elie',
+              created_by_username: 'elienop',
+            },
+            {
+              ...defaultTransaction,
+              id: 2,
+              description: 'Pharmacy',
+              created_by: 'Partner Name',
+              created_by_username: 'partner',
+            },
           ],
           total: 2,
         }),
@@ -1486,6 +1561,12 @@ describe('Transactions page', () => {
       // would still satisfy a single-row assertion.
       expect(await screen.findByText('Elie')).toBeInTheDocument();
       expect(screen.getByText('Partner Name')).toBeInTheDocument();
+      // B36. The display name alone cannot attribute a row — a member can
+      // PATCH theirs to the other member's string and the live JOIN relabels
+      // every row they ever entered. The handle is the half they cannot
+      // collide, so each row has to carry its own.
+      expect(screen.getByText('@elienop')).toBeInTheDocument();
+      expect(screen.getByText('@partner')).toBeInTheDocument();
     });
   });
 

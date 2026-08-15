@@ -983,7 +983,7 @@ Tokens are also revoked atomically when you change your password — if the pass
 ### Transactions
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/transactions` | List transactions (supports search, pagination, sorting, date/category filters) |
+| GET | `/api/transactions` | List transactions (supports search, pagination, sorting, date/category filters). Every row names who entered it: `created_by` (display name) and `created_by_username` — the app renders both as "Name @username", because display names are self-service and two members can share one, while usernames are unique and immutable. Both are `""` when the creator's account is gone. |
 | POST | `/api/transactions` | Create a transaction. The body may carry an optional `client_key`: 16–64 characters of `A-Z a-z 0-9 _ . : -`, minted fresh for each submission attempt (the app sends a UUID). If a create bearing a key you have already used arrives — a retry after a lost response — the server creates nothing and returns your original row, indistinguishable from a fresh success. **Script authors: never reuse a structured constant like `import-run-1` across submissions** — the second one is treated as a retry of the first and is silently not stored. The namespace is per-user, so two members may hold the same key value and each replays only against their own row. Keys identify the *submission*, not the content: two entries with identical fields and different keys both insert (two household members entering the same lunch is normal data, not a duplicate). Requests without a key behave exactly as before. |
 | POST | `/api/transactions/batch` | Batch create transactions |
 | POST | `/api/transactions/batch-delete` | Batch delete transactions by ID list |
@@ -1020,7 +1020,7 @@ All require an admin session.
 |--------|----------|-------------|
 | GET | `/api/users` | List household users |
 | POST | `/api/users` | Create a user |
-| PUT | `/api/users/{id}` | Update a user's display name or role |
+| PUT | `/api/users/{id}` | Update a user's display name or role. A role change and the wipe of that user's sessions commit together — if the wipe fails the change rolls back and the call 500s, so `updated` always means the old sessions are gone. `users.role` is also guarded at the database by triggers (migration 020): only `admin` and `member` can ever be written. |
 | DELETE | `/api/users/{id}` | Delete a user. Returns **409** if the user still has transactions (live *or* in the trash) or any balance checkpoints — both columns are `ON DELETE CASCADE`, so deleting the row would permanently destroy their ledger and their reconciliation anchors with no tombstone, audit row, or restore path; reassign or purge them first. A successful delete still cascades their **sessions**, **API tokens**, **saved filters** and **push subscriptions**, and NULLs `transaction_audit.actor_user_id` for every row they authored — no history is destroyed, but edits they made to other members' rows lose their attribution. |
 | POST | `/api/users/{id}/reset-password` | Reset another user's password. Body `{"new_password"}`. No current-password check (admin authority); revokes that user's tokens and deletes their sessions. Admins cannot reset their *own* password here — they use `/api/auth/password`. |
 

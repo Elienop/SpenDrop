@@ -347,6 +347,25 @@ Props: `amount: number`, `originalAmount: number | null`, `originalCurrency: str
 />
 ```
 
+### CreatorLabel (`components/CreatorLabel.tsx`)
+
+The one way to name who entered a transaction. Renders the whole attribution line: an aria-hidden `User` icon beside a `flex min-w-0 flex-1 items-center` row holding two spans — a `min-w-0 truncate` span with the `sr-only` "Entered by " prefix and the creator's display name, then a `shrink-0` span with the creator's ` @username`. The register comes from the wrapping `<p>` (`mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground`) and nothing restates it — the line is already the metadata register, and there is no lighter step that clears the contrast floor. **The `mt-0.5` is part of the contract, not a call-site concern:** a wrapper can add spacing around this line but cannot take the baked margin away, so placing it first in a block is a known 2px, not a surprise.
+
+Three details are load-bearing, and none of them are cosmetic. **The handle is attribution, not decoration:** `display_name` has been self-service since `PATCH /api/auth/me` shipped (any role, and it is the only writable field there), so a member can set theirs to another member's exact string — and because `created_by` comes from a live JOIN, the relabel applies retroactively to every row they have ever entered and reverts on rename-back. A display name is a label, not an identity; `created_by_username` is the half nobody can collide, which is why the wire carries both and why neither is rendered alone. **The display name clips and the handle survives:** this is why there are two spans instead of one, and it is the opposite of what the obvious markup does. With both strings in a single truncating span the tail ellipsis eats `@elienop` FIRST and leaves the spoofable half standing alone — and with `MaxDisplayNameLength` at 64 against a 360px card, that is the common case, not a corner. So the name carries `min-w-0 truncate` and absorbs the shortfall, the handle is `shrink-0` and keeps its width, and `max-w-[50%]` stops the reverse starvation (`MaxUsernameLength` is 32). The percentage needs a definite basis, which is what `flex-1` on the inner row is for — a content-sized container makes the cap cyclic and clips the handle even when there is room. **The separator is a rendered space character, never `ml-*`:** a margin does not separate words for a screen reader, so a gap-only version announces "Elie@elienop" — one token, and one that reads as an email address. The space lives in the handle's own text and `whitespace-pre` is what keeps it, because a flex item is block-level and a block's leading white space is otherwise collapsed away. Either half empty suppresses the handle entirely — `""` is the wire's "the creator's user row is gone" value, a bare `@` with nothing after it is a bug, and `Unknown @elienop` names the person the line has just said it cannot name. An empty display name still renders `Unknown`, never a blank.
+
+Use for: every surface that names a row's creator — the ledger table row and phone card, the heatmap day sheet, Trash's table and card, the QuickAdd recents panel. Not for the signed-in user: the sidebar and phone-nav footers stack `display_name` over `@username` in their own idiom.
+
+Props: `createdBy: string`, `createdByUsername: string`. **There is no `className` prop, and that is a decision, not an oversight** — `AmountDisplay` and `AmountSignNote` both expose one, because a caller legitimately needs to align a figure against its neighbours. This line has no such need and a worse failure mode: six hand-copied versions of this markup existed before the component did, and the escape hatch is how they drift apart again. Worse, the classes a caller would most want to reach for (`truncate`, `shrink`, `max-w-*`) are the exact ones the clipping order depends on. A surface needing different spacing takes a wrapper, not a prop.
+
+`title` carries the untruncated "Name @handle" for the desktop tables, where this line shares the description cell — the slack column (`w-full max-w-0`), so it clips rather than widening the table. Mirrors the description's own `title` one line up. It is dead on touch — which is why the clipping order above is the fix and the tooltip is a bonus.
+
+```tsx
+<CreatorLabel
+  createdBy={transaction.created_by}
+  createdByUsername={transaction.created_by_username}
+/>
+```
+
 ---
 
 ## Layout
@@ -642,6 +661,11 @@ The confirm AlertDialog (all-matching scope only) uses the **default primary** p
 - Use `gap-3` between cards, `gap-6` between sections
 - Use neutral colors (`--primary`, `--muted-foreground`) for non-category charts
 - Use `getCategoryColorVar()` for category-specific colors
+- Name a row's creator with `<CreatorLabel>`, never a bare `created_by`. Display names are
+  self-service, so one member can wear another's; only the `@username` beside it identifies
+  who entered the row. Never hand-roll the line — the DISPLAY NAME is the half that clips
+  and the handle is `shrink-0` so it survives, and the separator is a rendered space (a
+  margin announces "Elie@elienop")
 - Pair every `type="number"` `<Input>` with an `inputMode` — `decimal` for money and rates,
   `numeric` for integer years and counts. `type` says what the value is, `inputMode` says which
   soft keypad opens for it, and Android does not reliably infer one from the other (checked on

@@ -138,6 +138,7 @@ function transaction(over: Partial<Transaction>): Transaction {
     id: 1,
     user_id: 1,
     created_by: 'Elie',
+    created_by_username: 'elienop',
     date: '2026-03-04',
     amount: 42.5,
     original_amount: null,
@@ -1248,6 +1249,10 @@ describe('tapping a day', () => {
   });
 
   test('a row with no creator on the wire still names someone', async () => {
+    // The handle is left at the fixture's 'elienop': on the wire both halves
+    // empty together, so this pair is unreachable there and is the one that
+    // proves the `@` is gated on the NAME too. 'Unknown @elienop' would name
+    // the person the line has just said it cannot name.
     apiGet.mockResolvedValue(
       page([transaction({ id: 9, description: 'Orphan', created_by: '' })]),
     );
@@ -1257,6 +1262,57 @@ describe('tapping a day', () => {
 
     const dialog = await screen.findByRole('dialog');
     expect(await within(dialog).findByText('Unknown')).toBeInTheDocument();
+    const line = within(dialog).getByText('Entered by').closest('p');
+    expect(line!.textContent).toBe('Entered by Unknown');
+  });
+
+  // B36. The sheet lists a day's rows across the household, so the same
+  // spoofable-display-name problem the ledger has reaches it: a member can
+  // PATCH their display name to the other member's and the live JOIN relabels
+  // every row. The handle rides beside the name here too.
+  test('a row names its creator by handle as well as display name', async () => {
+    apiGet.mockResolvedValue(
+      page([
+        transaction({
+          id: 11,
+          description: 'Butcher',
+          created_by: 'Partner Name',
+          created_by_username: 'partner',
+        }),
+      ]),
+    );
+    const user = setup();
+    const grid = renderMonthGrid();
+    await user.click(cell(grid, '2026-03-04'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Partner Name')).toBeInTheDocument();
+    expect(within(dialog).getByText('@partner')).toBeInTheDocument();
+    expect(
+      within(dialog).getByText('Entered by').closest('p')!.textContent,
+    ).toBe('Entered by Partner Name @partner');
+  });
+
+  test('a row with a name but no handle renders no bare @', async () => {
+    apiGet.mockResolvedValue(
+      page([
+        transaction({
+          id: 12,
+          description: 'Butcher',
+          created_by: 'Partner Name',
+          created_by_username: '',
+        }),
+      ]),
+    );
+    const user = setup();
+    const grid = renderMonthGrid();
+    await user.click(cell(grid, '2026-03-04'));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(await within(dialog).findByText('Partner Name')).toBeInTheDocument();
+    const line = within(dialog).getByText('Entered by').closest('p');
+    expect(line!.textContent).toBe('Entered by Partner Name');
+    expect(line!.textContent).not.toContain('@');
   });
 
   test('a day with more rows than one page says so', async () => {

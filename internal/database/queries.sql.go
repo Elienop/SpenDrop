@@ -1199,7 +1199,7 @@ func (q *Queries) ListCurrencies(ctx context.Context) ([]Currency, error) {
 }
 
 const listDeletedTransactions = `-- name: ListDeletedTransactions :many
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by, u.username AS created_by_username
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 LEFT JOIN users u ON t.user_id = u.id
@@ -1235,6 +1235,17 @@ type ListDeletedTransactionsRow struct {
 	// is gone (a restored backup, or a connection that lost _foreign_keys=on),
 	// and the trash view must still show the row.
 	CreatedBy sql.NullString `json:"created_by"`
+	// CreatedByUsername is users.username for UserID, off the SAME LEFT JOIN —
+	// the @handle the trash view renders beside CreatedBy, because two members
+	// can hold one display_name (B36). Nullable for the join's sake only
+	// (username is NOT NULL and UNIQUE on users), and NULL exactly when
+	// CreatedBy is: one join, one missing partner, both columns empty.
+	//
+	// LAST in the projection of both queries. Keep it there — this struct's
+	// field order is the Scan order in two hand-maintained blocks below, and a
+	// column inserted mid-list silently shifts every value after it into the
+	// wrong field.
+	CreatedByUsername sql.NullString `json:"created_by_username"`
 }
 
 func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTransactionsParams) ([]ListDeletedTransactionsRow, error) {
@@ -1263,6 +1274,7 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 			&i.CategoryName,
 			&i.CategoryType,
 			&i.CreatedBy,
+			&i.CreatedByUsername,
 		); err != nil {
 			return nil, err
 		}
@@ -1278,7 +1290,7 @@ func (q *Queries) ListDeletedTransactions(ctx context.Context, arg ListDeletedTr
 }
 
 const listDeletedTransactionsByUser = `-- name: ListDeletedTransactionsByUser :many
-SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
+SELECT t.id, t.user_id, t.date, t.original_currency, t.description, t.category_id, t.tags, t.notes, t.created_at, t.updated_at, t.deleted_at, t.amount_cents, t.original_amount_cents, c.name AS category_name, c.type AS category_type, u.display_name AS created_by, u.username AS created_by_username
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 LEFT JOIN users u ON t.user_id = u.id
@@ -1296,7 +1308,7 @@ type ListDeletedTransactionsByUserParams struct {
 // ListDeletedTransactionsByUser is the member-scoped twin of
 // ListDeletedTransactions. It reuses ListDeletedTransactionsRow instead of
 // the ...ByUserRow twin sqlc would emit: this file is hand-maintained
-// (codegen is broken) and a twin struct would only duplicate the same 16
+// (codegen is broken) and a twin struct would only duplicate the same 17
 // fields, forcing the trash handler to carry two identical mapping loops.
 // Both queries must stay projection-identical — the member and admin trash
 // views are compared field-by-field by
@@ -1327,6 +1339,7 @@ func (q *Queries) ListDeletedTransactionsByUser(ctx context.Context, arg ListDel
 			&i.CategoryName,
 			&i.CategoryType,
 			&i.CreatedBy,
+			&i.CreatedByUsername,
 		); err != nil {
 			return nil, err
 		}

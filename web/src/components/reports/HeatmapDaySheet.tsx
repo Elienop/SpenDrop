@@ -1,7 +1,8 @@
 import { useState, type ReactNode } from 'react';
 import { format as formatDate, parseISO } from 'date-fns';
-import { AlertCircle, User } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { CategoryBadge } from '@/components/CategoryBadge';
+import { CreatorLabel } from '@/components/CreatorLabel';
 import { TransactionDescription } from '@/components/TransactionDescription';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -277,13 +278,10 @@ function DayExpenseList({
                 {/* Creator attribution, same idiom as TransactionCard: the
                     ledger is household-wide, and an empty `created_by` means
                     the creator's user row is gone — never render a blank. */}
-                <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                  <User className="size-3.5 shrink-0" aria-hidden="true" />
-                  <span className="min-w-0 truncate">
-                    <span className="sr-only">Entered by </span>
-                    {tx.created_by || 'Unknown'}
-                  </span>
-                </p>
+                <CreatorLabel
+                  createdBy={tx.created_by}
+                  createdByUsername={tx.created_by_username}
+                />
               </div>
               <span className="flex shrink-0 flex-col items-end font-mono text-sm tabular-nums">
                 {/* NOT the injected formatter, and this is the one place that

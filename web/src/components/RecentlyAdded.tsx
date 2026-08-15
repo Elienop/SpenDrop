@@ -1,12 +1,13 @@
 import { useRef } from 'react';
 import { toast } from 'sonner';
-import { Trash2, User, WifiOff } from 'lucide-react';
+import { Trash2, WifiOff } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { api } from '@/api/client';
 import { cn } from '@/lib/utils';
 import { displayAmount, formatSignedCurrency } from '@/lib/format';
 import { AmountSignNote } from '@/components/AmountSignNote';
+import { CreatorLabel } from '@/components/CreatorLabel';
 import {
   enqueue,
   removeQueued,
@@ -41,6 +42,14 @@ interface RecentRow {
    * branches on `kind` — never on this being truthy.
    */
   createdBy?: string;
+  /**
+   * The same row's `Transaction.created_by_username` — the creator's login
+   * handle, the half of the attribution a member cannot self-select into a
+   * collision (B36). Absent on pending rows for the same reason `createdBy`
+   * is, and the empty string is the wire's orphaned-creator value; the shared
+   * <CreatorLabel> suppresses the `@` for both.
+   */
+  createdByUsername?: string;
   /** Present on pending rows so Undo re-queues the exact captured payload. */
   payload?: CreateTransactionInput;
 }
@@ -121,6 +130,7 @@ export function RecentlyAdded({
     categoryName: t.category_name,
     type: t.category_type,
     createdBy: t.created_by,
+    createdByUsername: t.created_by_username,
   }));
 
   const rows = [...pendingRows, ...savedRows].slice(0, MAX_ROWS);
@@ -263,13 +273,10 @@ export function RecentlyAdded({
                     "" is the wire's orphaned-creator value and must still
                     render the fallback. */}
                 {row.kind === 'saved' && (
-                  <p className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <User className="size-3.5 shrink-0" aria-hidden="true" />
-                    <span className="min-w-0 truncate">
-                      <span className="sr-only">Entered by </span>
-                      {row.createdBy || 'Unknown'}
-                    </span>
-                  </p>
+                  <CreatorLabel
+                    createdBy={row.createdBy ?? ''}
+                    createdByUsername={row.createdByUsername ?? ''}
+                  />
                 )}
               </div>
               <Button

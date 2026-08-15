@@ -377,13 +377,19 @@ DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 -- hand-maintained (despite its DO-NOT-EDIT header) and both queries execute
 -- an explicit 13-column projection of transactions that OMITS content_hash,
 -- idempotency_key and booked_rate, plus the two category columns and the
--- creator's display name — 16 fields, matching ListDeletedTransactionsRow and
--- the two Scan calls in queries.sql.go.
+-- creator's display name AND username — 17 fields, matching
+-- ListDeletedTransactionsRow and the two Scan calls in queries.sql.go.
 -- If codegen is ever repaired and regenerated literally from this file,
 -- t.* expands to 16 transaction columns and both Scan blocks break on a
 -- field-count mismatch (and the three extra columns would start reaching the
 -- trash handler). Narrow these to the explicit column list at the same time
 -- as regenerating, or expect trash_handlers.go to need updating with it.
+--
+-- Both creator columns come off that ONE users join — display_name for the
+-- label the trash view renders, username for the @handle beside it (B36: two
+-- members can hold the same display_name, and GET /api/users is admin-only so
+-- a member cannot resolve user_id client-side). Never add a second join or a
+-- per-row lookup for the second column.
 --
 -- users is LEFT joined in both, never inner joined: transactions.user_id is
 -- NOT NULL REFERENCES users(id) ON DELETE CASCADE, so a row whose creator is
@@ -392,7 +398,7 @@ DELETE FROM transactions WHERE id = ? AND deleted_at IS NOT NULL;
 -- rationale as the live list's join (transaction_handlers.go).
 
 -- name: ListDeletedTransactions :many
-SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
+SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by, u.username AS created_by_username
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 LEFT JOIN users u ON t.user_id = u.id
@@ -404,7 +410,7 @@ LIMIT ? OFFSET ?;
 SELECT COUNT(*) FROM transactions WHERE deleted_at IS NOT NULL;
 
 -- name: ListDeletedTransactionsByUser :many
-SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by
+SELECT t.*, c.name AS category_name, c.type AS category_type, u.display_name AS created_by, u.username AS created_by_username
 FROM transactions t
 JOIN categories c ON t.category_id = c.id
 LEFT JOIN users u ON t.user_id = u.id

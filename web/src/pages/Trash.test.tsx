@@ -71,6 +71,7 @@ const defaultDeletedList: DeletedTransactionList = {
       id: 101,
       user_id: 1,
       created_by: 'Alice',
+      created_by_username: 'alice',
       date: '2026-04-10',
       amount: 25.5,
       original_amount: null,
@@ -89,6 +90,7 @@ const defaultDeletedList: DeletedTransactionList = {
       id: 102,
       user_id: 2,
       created_by: 'Bob',
+      created_by_username: 'bob',
       date: '2026-04-05',
       amount: 2500,
       original_amount: null,
@@ -118,6 +120,7 @@ const memberOwnDeletedList: DeletedTransactionList = {
       id: 201,
       user_id: 2,
       created_by: 'Bob',
+      created_by_username: 'bob',
       description: 'Bus pass',
     },
   ],
@@ -130,13 +133,35 @@ const memberOwnDeletedList: DeletedTransactionList = {
 // gone" value — the LEFT JOIN in ListDeletedTransactions found nothing,
 // e.g. after a restored backup dropped the user. It is the ONLY case the
 // 'Unknown' fallback exists for; the key itself is always present.
+// `created_by_username` is emptied with it because both halves come from
+// that same LEFT JOIN: an orphaned row has no name AND no handle, so the
+// row must render 'Unknown' with no `@` at all.
 const orphanedCreatorDeletedList: DeletedTransactionList = {
   transactions: [
     {
       ...defaultDeletedList.transactions[0],
       id: 301,
       created_by: '',
+      created_by_username: '',
       description: 'Row from a restored backup',
+    },
+  ],
+  total: 1,
+  page: 1,
+  per_page: 20,
+};
+
+// A named creator with no handle. Not a wire shape either — the two halves
+// come from one LEFT JOIN — but it is the half of the B36 suppression the
+// orphan fixture above cannot reach: a bare `@` with nothing after it.
+const handlelessCreatorDeletedList: DeletedTransactionList = {
+  transactions: [
+    {
+      ...defaultDeletedList.transactions[0],
+      id: 401,
+      created_by: 'Bob',
+      created_by_username: '',
+      description: 'Row with no handle',
     },
   ],
   total: 1,
@@ -434,6 +459,27 @@ describe('Trash', () => {
       expect(within(salaryRow!).getByText('Bob').closest('p')).toHaveTextContent(
         'Entered by Bob',
       );
+
+      // B36. The display name is spoofable: a member can PATCH theirs to the
+      // admin's exact string and the live JOIN relabels every row they have
+      // entered. The login handle is the half they cannot collide, and it is
+      // per-row for the same reason the name is.
+      expect(within(groceriesRow!).getByText('@alice')).toBeInTheDocument();
+      expect(within(salaryRow!).getByText('@bob')).toBeInTheDocument();
+      expect(
+        within(salaryRow!).getByText('Bob').closest('p')!.textContent,
+      ).toBe('Entered by Bob @bob');
+    });
+
+    test('renders no bare @ when the row carries a name but no handle', async () => {
+      mockedApi.get.mockResolvedValue(handlelessCreatorDeletedList);
+      renderTrash();
+      const row = (await screen.findByText('Row with no handle')).closest('tr');
+      expect(row).not.toBeNull();
+
+      const attribution = within(row!).getByText('Bob').closest('p');
+      expect(attribution!.textContent).toBe('Entered by Bob');
+      expect(attribution!.textContent).not.toContain('@');
     });
 
     test('description cell is width-bounded and keeps the full text on hover', async () => {
@@ -449,13 +495,90 @@ describe('Trash', () => {
 
       // Exact tokens, not substrings — `expect(className).toContain('truncate')`
       // also passes for `truncate-none` or any longer token containing it.
-      // Both halves are load-bearing and neither works alone: max-w-md bounds
-      // the cell, truncate clips inside it.
-      expect(description.className.split(/\s+/)).toContain('truncate');
-      expect(description.className.split(/\s+/)).toContain('font-medium');
+      // Both halves are load-bearing and neither works alone: the cell's
+      // `max-w-0` (below) lets the column shrink, truncate clips inside it.
+      expect(classes(description)).toContain('truncate');
+      expect(classes(description)).toContain('font-medium');
       const cell = description.closest('td');
       expect(cell).not.toBeNull();
-      expect(cell!.className.split(/\s+/)).toContain('max-w-md');
+      expect(classes(cell!)).toContain('max-w-0');
+    });
+
+    // WHY CLASS PINS. happy-dom lays nothing out, so the invariant — this
+    // eight-column table never renders wider than its scroller, so Restore and
+    // Purge are never off the right edge — is not observable here. What is
+    // observable is the structure that makes it true, measured in Chrome on
+    // the built app first (numbers in the cell's comment in Trash.tsx).
+    test('the description column is the one that gives ground', async () => {
+      renderTrash();
+      const description = await screen.findByText('Weekly groceries');
+      const cell = description.closest('td');
+      expect(cell).not.toBeNull();
+
+      // `max-w-0` makes the column shrinkable at all: `truncate` sets
+      // `white-space: nowrap`, so unclamped this cell hands the column its
+      // full text width as min-content.
+      expect(classes(cell!)).toContain('max-w-0');
+      // `w-full` routes the freed width HERE rather than fattening the other
+      // seven columns.
+      expect(classes(cell!)).toContain('w-full');
+
+      // The cap this cell used to carry — and any replacement for it. Chrome's
+      // auto table layout sizes this column from max-content capped by
+      // max-width, so ANY `max-w-*` other than 0 becomes the width a long
+      // description always gets: `max-w-md` measured 1153px of table inside a
+      // 1000px scroller at 1130.
+      const caps = classes(cell!).filter(
+        (t) => t.startsWith('max-w-') && t !== 'max-w-0',
+      );
+      expect(caps).toEqual([]);
+
+      // EXACTLY ONE slack column, and no cap anywhere else on the row: two
+      // cells asking for 100% split the surplus, and a capped Deleted / Date /
+      // Amount cell would clip its own content rather than bounding the table.
+      const row = cell!.closest('tr');
+      expect(row).not.toBeNull();
+      const slack = [...row!.children].filter((td) =>
+        classes(td).includes('w-full'),
+      );
+      expect(slack).toHaveLength(1);
+      expect(slack[0]).toBe(cell);
+      const capped = [...row!.children].filter((td) =>
+        classes(td).some((t) => t.startsWith('max-w-')),
+      );
+      expect(capped).toHaveLength(1);
+      expect(capped[0]).toBe(cell);
+    });
+
+    test('the table is left on auto layout, which the shrink depends on', async () => {
+      renderTrash();
+      const table = await screen.findByRole('table');
+
+      // `table-fixed` would INVERT the mechanism: under fixed layout the first
+      // row's declared widths are the column widths, so `max-w-0` would give
+      // the description a zero-width column and every other column an equal
+      // share regardless of its content. Measured with fixed layout and no
+      // explicit widths: all eight columns at 85px at 768, with Date, Amount
+      // and both action buttons spilling out of their cells.
+      expect(classes(table)).not.toContain('table-fixed');
+    });
+
+    test('the description header stays unclamped, so the column has a floor', async () => {
+      renderTrash();
+      await screen.findByText('Weekly groceries');
+
+      // The body cell can now shrink to nothing, so this header is the
+      // column's floor and the only thing stopping the label itself from being
+      // clipped. Clamping it too measured a 32px column and a header reading
+      // nothing at 768.
+      const header = screen
+        .getAllByRole('columnheader')
+        .find((th) => th.textContent?.trim() === 'Description');
+      expect(header).toBeDefined();
+      expect(classes(header!).filter((t) => t.startsWith('max-w-'))).toEqual(
+        [],
+      );
+      expect(classes(header!)).not.toContain('w-full');
     });
 
     test('renders "Unknown" when the creator\'s user row is gone', async () => {
@@ -472,6 +595,10 @@ describe('Trash', () => {
       expect(
         within(row!).getByText('Unknown').closest('p'),
       ).toHaveTextContent('Entered by Unknown');
+      // No handle to hang off a name the line has just said it cannot give.
+      expect(
+        within(row!).getByText('Unknown').closest('p')!.textContent,
+      ).not.toContain('@');
     });
 
     test('renders the empty state when the trash list is empty', async () => {
@@ -1428,6 +1555,21 @@ describe('Trash', () => {
         expect(
           within(salary!).getByText('Bob').closest('p'),
         ).toHaveTextContent('Entered by Bob');
+
+        // B36, per card for the same reason the name is per card.
+        expect(within(groceries!).getByText('@alice')).toBeInTheDocument();
+        expect(within(salary!).getByText('@bob')).toBeInTheDocument();
+      });
+
+      test('a card with a name but no handle renders no bare @', async () => {
+        mockedApi.get.mockResolvedValue(handlelessCreatorDeletedList);
+        const list = await renderCardList();
+        const card = within(list)
+          .getByText('Row with no handle')
+          .closest('li');
+        const attribution = within(card!).getByText('Bob').closest('p');
+        expect(attribution!.textContent).toBe('Entered by Bob');
+        expect(attribution!.textContent).not.toContain('@');
       });
 
       test('a card whose creator row is gone reads "Unknown", not a blank line', async () => {
@@ -1443,6 +1585,9 @@ describe('Trash', () => {
         expect(
           within(card!).getByText('Unknown').closest('p'),
         ).toHaveTextContent('Entered by Unknown');
+        expect(
+          within(card!).getByText('Unknown').closest('p')!.textContent,
+        ).not.toContain('@');
       });
 
       test('the card carries the transaction date and how long ago it was deleted', async () => {

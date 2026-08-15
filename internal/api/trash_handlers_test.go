@@ -1611,7 +1611,7 @@ func TestHandleListDeletedTransactions_AdminStillSeesAllRows(t *testing.T) {
 
 // The member-scoped and admin-scoped trash lists run two DIFFERENT queries
 // (ListDeletedTransactionsByUser / ListDeletedTransactions) with two
-// separate hand-maintained 15-column Scan blocks in queries.sql.go — sqlc
+// separate hand-maintained 17-column Scan blocks in queries.sql.go — sqlc
 // codegen is broken here, so nothing regenerates them together. A field
 // dropped or reordered in one Scan block but not the other would leave the
 // two roles disagreeing about the same row, and every other test in this
@@ -1720,6 +1720,13 @@ func TestHandleListDeletedTransactions_MemberAndAdminViewsAgreeOnEveryField(t *t
 		t.Errorf("CreatedBy=%q, want the creator's display name %q (their username is %q)",
 			memberView.CreatedBy, "Member Name", "member")
 	}
+	// ...and its B36 companion, added to both Scan blocks at the same time. The
+	// DeepEqual below catches a field added to ONE side; only this pre-flight
+	// catches it being absent from BOTH, which would compare equal and pass.
+	if memberView.CreatedByUsername != "member" {
+		t.Errorf("CreatedByUsername=%q, want the creator's username %q (their display name is %q)",
+			memberView.CreatedByUsername, "member", "Member Name")
+	}
 
 	// Same row, two queries, two Scan blocks — one DTO.
 	if !reflect.DeepEqual(memberView, adminView) {
@@ -1769,6 +1776,13 @@ func TestHandleListDeletedTransactions_MemberList_DollarFieldNoCentsLeak(t *test
 	if got := createdByOf(t, row); got != "Member Name" {
 		t.Errorf("created_by=%q, want the display name %q (their username is %q)",
 			got, "Member Name", "member")
+	}
+	// created_by_username rides the same rule: ALWAYS present, and it is the
+	// field that makes the attribution unambiguous when two members share a
+	// display name (B36).
+	if got := createdByUsernameOf(t, row); got != "member" {
+		t.Errorf("created_by_username=%q, want the username %q (their display name is %q)",
+			got, "member", "Member Name")
 	}
 	for k := range row {
 		if strings.Contains(k, "_cents") {
@@ -1858,5 +1872,105 @@ func TestHandleListDeletedTransactions_DeletedCreatorRendersEmptyName(t *testing
 	}
 	if got := createdByOf(t, rowByID(t, memberRows, orphan.ID)); got != "" {
 		t.Errorf("member view, orphaned row: created_by=%q, want the empty string", got)
+	}
+}
+
+// TestHandleListDeletedTransactions_CarriesCreatorUsername is the trash half of
+// the B36 attribution contract: every row carries the creator's username beside
+// their display name, because two members can hold the same display_name and a
+// member cannot resolve user_id client-side (GET /api/users is admin-only).
+//
+// It matters more here than on the live list — restore and purge are decisions
+// taken about somebody else's row — and it must be pinned on BOTH queries.
+// ListDeletedTransactions (admin) and ListDeletedTransactionsByUser (member)
+// are separate hand-maintained SQL consts with separate Scan blocks, because
+// sqlc codegen is broken in this repo and nothing regenerates them together.
+//
+// The fixture gives every user a display_name and a username that differ, and
+// differ between users, so a query that selected display_name twice, selected
+// username twice, or swapped the two columns goes red.
+func TestHandleListDeletedTransactions_CarriesCreatorUsername(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedNamedUser(t, q, "elienop", "Elie", RoleAdmin)
+	member := seedNamedUser(t, q, "partner", "Partner Name", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries-"+t.Name())
+
+	adminRow := seedTombstonedTestTransaction(t, q, admin.ID, catID, "2026-04-01", 40, "Admins deleted row")
+	memberRow := seedTombstonedTestTransaction(t, q, member.ID, catID, "2026-04-02", 12, "Members deleted row")
+
+	// Admin view — ListDeletedTransactions, household-wide.
+	adminRows, adminTotal := listDeletedRaw(t, h, admin)
+	if adminTotal != 2 || len(adminRows) != 2 {
+		t.Fatalf("admin view: total=%d rows=%d, want 2 and 2", adminTotal, len(adminRows))
+	}
+	assertAttribution(t, "admin view, admin's row", rowByID(t, adminRows, adminRow.ID), "Elie", "elienop")
+	assertAttribution(t, "admin view, member's row", rowByID(t, adminRows, memberRow.ID), "Partner Name", "partner")
+
+	// Per-row, not per-request: a mutant stamping the reader's own identifier on
+	// every row passes the pair above only if the two rows agree.
+	if createdByUsernameOf(t, rowByID(t, adminRows, adminRow.ID)) ==
+		createdByUsernameOf(t, rowByID(t, adminRows, memberRow.ID)) {
+		t.Error("admin view: both rows report the same creator username; attribution is not per-row")
+	}
+
+	// Member view — ListDeletedTransactionsByUser, the OTHER const and the
+	// OTHER Scan block. A column added to only one of them stops here.
+	memberRows, memberTotal := listDeletedRaw(t, h, member)
+	if memberTotal != 1 || len(memberRows) != 1 {
+		t.Fatalf("member view: total=%d rows=%d, want 1 and 1", memberTotal, len(memberRows))
+	}
+	assertAttribution(t, "member view", rowByID(t, memberRows, memberRow.ID), "Partner Name", "partner")
+}
+
+// TestHandleListDeletedTransactions_DeletedCreatorRendersEmptyUsername is the
+// presence half on the trash surface. An orphaned row — creator's user row gone,
+// which needs a restored backup or a connection that lost _foreign_keys=on —
+// must STAY LISTED with both attribution fields empty. The trash view is the
+// only surface that can still recover such a row (see the rationale comment
+// above ListDeletedTransactions in queries.sql): dropping it would lose the
+// money from the ledger AND from its one recovery path, with no error raised.
+//
+// Both queries again. The member path filters on t.user_id = <the authenticated
+// user>, so reaching a NULL join partner there requires authenticating AS the
+// ghost — contrived, but it is the only row shape that reaches that query's
+// join, and it rests on the same premise as the fixture (sessions.user_id
+// cascades too, so a session outliving its user already implies foreign keys
+// were off).
+func TestHandleListDeletedTransactions_DeletedCreatorRendersEmptyUsername(t *testing.T) {
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	admin := seedNamedUser(t, q, "elienop", "Elie", RoleAdmin)
+	ghost := seedNamedUser(t, q, "ghost", "Ghost Name", RoleMember)
+	catID := seedExpenseCategory(t, q, "Groceries-"+t.Name())
+
+	orphan := seedTombstonedTestTransaction(t, q, ghost.ID, catID, "2026-04-01", 40, "Legacy deleted row")
+	adminRow := seedTombstonedTestTransaction(t, q, admin.ID, catID, "2026-04-02", 12, "Admins deleted row")
+
+	deleteUserWithoutCascade(t, h, ghost.ID)
+
+	rows, total := listDeletedRaw(t, h, admin)
+	if total != 2 || len(rows) != 2 {
+		t.Fatalf("admin view: the orphaned row must still be listed: total=%d rows=%d, want 2 and 2",
+			total, len(rows))
+	}
+	orphanRow := rowByID(t, rows, orphan.ID)
+	// Empty TOGETHER: one join, one missing partner.
+	if got := createdByUsernameOf(t, orphanRow); got != "" {
+		t.Errorf("admin view, orphaned row: created_by_username=%q, want the empty string", got)
+	}
+	if got := createdByOf(t, orphanRow); got != "" {
+		t.Errorf("admin view, orphaned row: created_by=%q, want the empty string", got)
+	}
+	assertAttribution(t, "admin view, live creator", rowByID(t, rows, adminRow.ID), "Elie", "elienop")
+
+	// Member path — ListDeletedTransactionsByUser, authenticated as the ghost.
+	memberRows, memberTotal := listDeletedRaw(t, h, ghost)
+	if memberTotal != 1 || len(memberRows) != 1 {
+		t.Fatalf("member view: the orphaned row must still be listed: total=%d rows=%d, want 1 and 1",
+			memberTotal, len(memberRows))
+	}
+	if got := createdByUsernameOf(t, rowByID(t, memberRows, orphan.ID)); got != "" {
+		t.Errorf("member view, orphaned row: created_by_username=%q, want the empty string", got)
 	}
 }
