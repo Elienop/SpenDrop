@@ -3036,6 +3036,8 @@ interface ImportPreviewStepProps {
     field: PatchRowRequest['field'],
     value: string | boolean,
   ) => Promise<void>;
+  /** The hook's bulk rate writer — see `applyRateToRows`. */
+  applyRateToRows: (rowIDs: number[], rate: number) => Promise<void>;
   categories: Category[];
   categoryMap: Record<string, string>;
   setCategoryMap: React.Dispatch<React.SetStateAction<Record<string, string>>>;
@@ -3053,6 +3055,7 @@ function ImportPreviewStep({
   canImport,
   pendingPatchCount,
   patchRow,
+  applyRateToRows,
   categories,
   categoryMap,
   setCategoryMap,
@@ -3144,6 +3147,7 @@ function ImportPreviewStep({
         canImport={canImport}
         pendingPatchCount={pendingPatchCount}
         onPatchRow={patchRow}
+        onApplyRate={applyRateToRows}
         onConfirm={onConfirm}
         onCancel={onCancel}
       />
@@ -3477,10 +3481,22 @@ function ImportCard() {
 
         {importStep === 'upload' && (
           <div className="flex flex-col gap-4">
+            {/*
+              The unit is stated, not left to be guessed. A rate column
+              is ambiguous in exactly one way that matters: the same rate
+              can be written in either direction, and the import reads it
+              as `currencies.rate_to_base` — foreign units per base unit.
+              Quoting the reciprocal does not reliably fail; for a
+              currency near parity it divides by a plausible number and
+              imports a plausible wrong amount (20 EUR at 1.087 rather
+              than 0.92 stores 18.40 instead of 21.74). Hence a worked
+              example rather than the word "rate" on its own.
+            */}
             <p className="text-sm text-muted-foreground">
               Upload an Excel file with columns: date, description, amount.
               Optional columns: category, tags, notes, original_amount,
-              original_currency.
+              original_currency, rate — the original currency's units per
+              unit of your base currency, e.g. 89000 for LBP per USD.
             </p>
             <Input
               ref={fileInputRef}
@@ -3546,6 +3562,7 @@ function ImportCard() {
             canImport={importSession.canImport}
             pendingPatchCount={importSession.pendingPatchCount}
             patchRow={importSession.patchRow}
+            applyRateToRows={importSession.applyRateToRows}
             categories={categories}
             categoryMap={categoryMap}
             setCategoryMap={setCategoryMap}

@@ -56,6 +56,32 @@ export function formatPercent(value: number): string {
   return `${value.toFixed(1)}%`;
 }
 
+/**
+ * An exchange rate, grouped and unpadded: "89,000", "0.92", "0.000011".
+ *
+ * A RATE IS NOT MONEY, which is the whole reason this is not
+ * `formatAmount`. Two decimals are wrong for it in both directions: they
+ * pad "89,000" into "89,000.00", where the cents are noise on a figure
+ * nobody quotes to the cent — and, far worse, they render any rate below
+ * half a cent as "0.00", i.e. as a rate of zero. `rate_to_base` is
+ * foreign units per base unit, so that is not a hypothetical: it is what
+ * a currency stronger than the household's base looks like.
+ *
+ * Six fraction digits is the visible precision, chosen to cover those
+ * small rates while stopping well short of printing float noise. It
+ * bounds the DISPLAY only — the number that travels to the server is the
+ * one the caller holds, never this string.
+ */
+export function formatRate(
+  rate: number,
+  locale: string = DEFAULT_LOCALE,
+): string {
+  return rate.toLocaleString(locale, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 6,
+  });
+}
+
 /* ── Signed amounts (B10) ────────────────────────────────────────────────── */
 
 /**

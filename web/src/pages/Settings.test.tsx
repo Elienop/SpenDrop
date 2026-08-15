@@ -1286,6 +1286,21 @@ describe('Settings', () => {
       expect(screen.getByText(/date.*description.*amount/i)).toBeInTheDocument();
     });
 
+    test('names rate among the optional columns, with the direction it is read in', async () => {
+      await goToDataTab();
+
+      const copy = screen.getByText(/Optional columns:/);
+      expect(copy.textContent).toContain('rate');
+      // The number and its direction, not just the word. A rate column
+      // is ambiguous in exactly one way that matters: 89000 LBP per USD
+      // and its reciprocal are the same rate written two ways, and a
+      // sheet quoting the other one imports every foreign row off by
+      // orders of magnitude instead of failing. Copy that named the
+      // column without the unit would leave that to be guessed.
+      expect(copy.textContent).toContain('89000');
+      expect(copy.textContent).toMatch(/LBP per USD/);
+    });
+
     // End-to-end through Settings → ImportCard → ImportPreviewStep →
     // ImportPreviewTable, deliberately not through the hook or the table
     // in isolation. Both of those are gated correctly on their own; what
