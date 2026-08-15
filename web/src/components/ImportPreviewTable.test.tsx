@@ -1667,13 +1667,11 @@ describe('ImportPreviewTable — money', () => {
     });
   });
 
-  it('keeps focus inside the preview when Import is still disabled', async () => {
-    // THE COMPOUND PREVIEW, which is the ordinary one: a collision group
-    // AND over-length rows. Skipping the over-length rows removes their
-    // bar, and `canImport` is still false because the collision is
-    // unresolved — so the Import button is disabled, and a disabled
-    // button swallows `.focus()` without complaint. That is how the
-    // fallback used to end at `document.body`.
+  it('falls to the next bar when the one acted on is gone', async () => {
+    // A preview commonly carries several problems. Skipping the
+    // over-length rows takes their bar with it, and the collision group
+    // is still open — landing there is landing on the next thing to fix,
+    // which beats the end of the page.
     const user = userEvent.setup({ pointerEventsCheck: 0 });
     let settlePatch!: () => void;
     const onPatchRow = vi.fn().mockReturnValue(
@@ -1688,10 +1686,7 @@ describe('ImportPreviewTable — money', () => {
     });
     const { rerender } = render(
       <ImportPreviewTable
-        preview={{
-          ...collisionOnly,
-          field_errors: [fieldError(2, 'notes')],
-        }}
+        preview={{ ...collisionOnly, field_errors: [fieldError(2, 'notes')] }}
         {...noopProps}
         unresolvedCount={1}
         onPatchRow={onPatchRow}
@@ -1700,8 +1695,6 @@ describe('ImportPreviewTable — money', () => {
     );
 
     await user.click(screen.getByRole('button', { name: 'Skip this row' }));
-    // The server's answer: the over-length row is skipped, its bar is
-    // gone, the collision group is not.
     rerender(
       <ImportPreviewTable
         preview={collisionOnly}
@@ -1715,17 +1708,66 @@ describe('ImportPreviewTable — money', () => {
       settlePatch();
     });
 
-    // Asserted on the NEGATIVE first: happy-dom will happily focus things
-    // a browser refuses, so "the intended element has focus" can pass
-    // while the real browser drops to body. What must hold is that focus
-    // went somewhere at all.
+    await waitFor(() => {
+      expect(document.activeElement).not.toBe(document.body);
+    });
+    expect(document.activeElement).toBe(
+      document.querySelector('[data-bulk-heading="group-g1"]'),
+    );
+  });
+
+  it('keeps focus inside the preview when no bar survives and Import is disabled', async () => {
+    // The branch a disabled button used to swallow. Skipping the only
+    // flagged row clears the only bar, and `canImport` is still false
+    // because a category choice is outstanding — so there is no bar to
+    // return to AND no enabled button to move to. Focus has to stay in
+    // the table the user was working in; `.focus()` on a disabled button
+    // is a silent no-op and drops it to `document.body` instead.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let settlePatch!: () => void;
+    const onPatchRow = vi.fn().mockReturnValue(
+      new Promise<void>((resolve) => {
+        settlePatch = () => resolve();
+      }),
+    );
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={makePreview({ field_errors: [fieldError(0, 'notes')] })}
+        {...noopProps}
+        unresolvedCategoryCount={1}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Skip this row' }));
+    rerender(
+      <ImportPreviewTable
+        preview={makePreview()}
+        {...noopProps}
+        unresolvedCategoryCount={1}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+    await act(async () => {
+      settlePatch();
+    });
+
+    // The NEGATIVE first: happy-dom will focus things a browser refuses,
+    // so "the intended element has focus" can pass while the real browser
+    // drops to body. What must hold is that focus went somewhere at all.
     await waitFor(() => {
       expect(document.activeElement).not.toBe(document.body);
     });
     expect(screen.getByRole('button', { name: /^Import 3$/ })).toBeDisabled();
-    // And it is somewhere in the preview the user was working in.
-    const landed = document.activeElement as HTMLElement;
-    expect(landed.closest('[data-collision="true"], table, [tabindex="-1"]')).not.toBeNull();
+    expect(document.querySelector('[data-bulk-heading]')).toBeNull();
+    // And it is inside the preview, not merely somewhere.
+    expect(
+      (document.activeElement as HTMLElement).contains(
+        screen.getByText('Starbucks'),
+      ),
+    ).toBe(true);
   });
 
   it('keeps the Settings link out of the row description it sits beside', () => {
