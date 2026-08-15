@@ -1127,6 +1127,10 @@ An uploaded workbook is also bounded by its shape, not only by `MAX_UPLOAD_BYTES
 
 A file needs **Date**, **Description** and money — either an **Amount** column or an **Original Amount** column.
 
+> A column named **Rate** is read as an exchange rate. If your sheet has a Rate column meaning something else — an interest rate, a mileage rate — rename or remove it before uploading, or every row in the file will be flagged over it.
+
+> Numbers use a period as the decimal separator, and a comma only as a thousands separator: `1,500,000.50` is read, `0,92` is refused rather than read as 92. A cell in the other convention is reported as unparseable instead of being silently misread by a factor of a hundred.
+
 **A row's `Rate` is the source of its amount.** When a row carries an original amount, a currency and a rate, SpenDrop computes `Amount = Original Amount ÷ Rate` and records that rate against the row, so a back-dated statement is valued at the rate it was actually booked at rather than at today's. A sheet may state its money in the foreign columns **only** — no `Amount` column at all — which is what a bank statement in another currency looks like. Where a row states both, the two must agree to the cent.
 
 **Money a preview cannot resolve blocks the import, with the fix named.** A foreign row with no rate asks for one and offers today's ("enter the rate this row was booked at, or apply today's 89,000") — it is never applied silently, because a booked rate is permanent and a guessed one would be too. A currency you have not set up points at Settings → Currencies, and adding it there clears the flag on the next refresh without re-uploading. An `Amount` that disagrees with `Original Amount ÷ Rate` shows the arithmetic and leaves the three cells to you. `/confirm` refuses with 409 `MONEY_ERRORS` if it is reached anyway. Naming your base currency as a row's original currency is not an error: the row is base money, and no original or rate is stored for it.
