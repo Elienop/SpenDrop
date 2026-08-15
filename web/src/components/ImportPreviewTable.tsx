@@ -559,10 +559,13 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
    * "Use the computed amounts": the same burst again, over the amount
    * field, carrying the value each row's own original ÷ rate produces.
    *
-   * `toFixed(2)` rather than the row's raw float, for the same reason the
-   * Amount cell displays it that way — the wire carries a string and the
-   * server parses dollars, so sending `16.850000000000001` would be a
-   * different number from the one on the button.
+   * `toFixed(2)` for the same shape the Amount cell shows, so what is
+   * sent reads as the money it is. It is NOT what makes the value
+   * correct — `derivedAmount` has already rounded to whole cents, and a
+   * cents-derived number stringifies to at most two decimals on its own.
+   * Deliberately noted: a mutation replacing this with `String(...)`
+   * survives the suite, and it survives because the two differ only in a
+   * trailing zero that the server parses identically.
    */
   const applyComputedAmounts = useCallback(
     async (targets: ComputedAmount[]) => {
