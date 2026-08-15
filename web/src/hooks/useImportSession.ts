@@ -26,6 +26,7 @@ import {
   isMoneyField,
 } from '@/lib/import-field-errors';
 import { useCurrencies } from '@/hooks/useCurrencies';
+import { clearImportDecisions } from '@/lib/import-decisions';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 export type ImportStep = 'upload' | 'preview' | 'done';
@@ -323,11 +324,20 @@ export function useImportSession(
         // Always drop the stale importId — whether the session
         // expired (NotFoundError) or something else went wrong, the
         // stored id is no longer actionable.
+        //
+        // And the decisions made about it, which are keyed by that id and
+        // therefore already inert — this is the FOURTH exit from a
+        // session, and the only one with no handler of its own. Cancel,
+        // "import another file" and a completed confirm all clear them in
+        // the import card; a session that expires quietly on the server
+        // does not pass through any of those, and without this its record
+        // would sit in localStorage until the next upload overwrote it.
         try {
           localStorage.removeItem(STORAGE_KEYS.importId);
         } catch {
           /* ignore */
         }
+        clearImportDecisions();
         if (cancelled) return;
         // 404 (NotFoundError) is the expected outcome after a
         // 60-minute idle — silently drop back to the upload step

@@ -7,6 +7,10 @@ import {
   type ImportCategoryDecisions,
 } from './useImportSession';
 import type { Currency } from '@/api/types';
+import {
+  loadImportDecisions,
+  saveImportDecisions,
+} from '@/lib/import-decisions';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 
 const originalFetch = globalThis.fetch;
@@ -242,6 +246,34 @@ describe('useImportSession', () => {
     expect(result.current.error).toBeNull();
     expect(result.current.importStep).toBe('upload');
     expect(result.current.preview).toBeNull();
+  });
+
+  it('takes the category decisions with it when the session has expired', async () => {
+    // The FOURTH exit from a session, and the only one with no handler in
+    // the import card: cancel, "import another file" and a completed
+    // confirm all clear these, but a session that quietly expires on the
+    // server passes through none of them. The record is keyed by
+    // import_id so a leftover is inert — this is about not leaving one in
+    // the browser until the next upload happens to overwrite it.
+    localStorage.setItem(STORAGE_KEYS.importId, 'expired-id');
+    saveImportDecisions('expired-id', {
+      categoryMap: { Grocries: '2' },
+      defaultCategoryId: 7,
+    });
+    installFetchQueue([
+      {
+        ok: false,
+        status: 404,
+        body: { error: 'session not found or expired' },
+      },
+    ]);
+
+    renderHook(() => useImportSession(NO_CATEGORY_DECISIONS));
+
+    await waitFor(() => {
+      expect(localStorage.getItem(STORAGE_KEYS.importId)).toBeNull();
+    });
+    expect(loadImportDecisions('expired-id')).toBeNull();
   });
 
   it('patchRow serializes cross-row PATCHes through a single queue', async () => {

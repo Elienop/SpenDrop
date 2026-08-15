@@ -658,22 +658,47 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
    *
    * Deferred to rAF for the same reason the scroll effect is: the parent
    * re-renders from the last PATCH response, and this has to read the DOM
-   * that results, not the one that fired the click. The bar's heading is
-   * the first choice — the user is still in the context they acted on,
-   * and it announces what is left to do; the Import button is the
-   * fallback, because a bar that has vanished means the work it described
-   * is done and Import is what to do next.
+   * that results, not the one that fired the click.
+   *
+   * FOUR CANDIDATES, IN ORDER, each earlier one preferred because it
+   * leaves the user nearer to what they just did:
+   *
+   *   1. the bar they acted on, if it survived — same context, and its
+   *      heading says what is left of the problem;
+   *   2. ANY surviving bar, because a preview commonly carries several (a
+   *      collision group and a set of over-length rows), and the next
+   *      thing to fix is a better landing place than the end of the page;
+   *   3. the Import button — but ONLY when it is enabled. A disabled
+   *      button silently swallows `.focus()`, and `canImport` is false
+   *      while ANY blocker remains, so on the ordinary compound preview
+   *      this branch was a no-op and focus fell to `document.body`: the
+   *      exact failure this helper exists to prevent, fixed for the
+   *      single-blocker case only;
+   *   4. the scroll container, which is a `tabIndex={-1}` anchor for no
+   *      other reason than this. It is the last thing that is still the
+   *      preview — the user lands in the table they were working in
+   *      rather than at the top of the document.
+   *
+   * The `aria-live` status line is not on the list at any position — see
+   * the bar constants above.
    */
   const focusAfterBurst = useCallback((headingKey: string) => {
     requestAnimationFrame(() => {
-      const heading = scrollContainerRef.current?.querySelector<HTMLElement>(
-        `[data-bulk-heading="${headingKey}"]`,
-      );
+      const container = scrollContainerRef.current;
+      const heading =
+        container?.querySelector<HTMLElement>(
+          `[data-bulk-heading="${headingKey}"]`,
+        ) ?? container?.querySelector<HTMLElement>('[data-bulk-heading]');
       if (heading) {
         heading.focus();
         return;
       }
-      importButtonRef.current?.focus();
+      const importButton = importButtonRef.current;
+      if (importButton && !importButton.disabled) {
+        importButton.focus();
+        return;
+      }
+      container?.focus();
     });
   }, []);
 
@@ -1045,7 +1070,13 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     <div className="flex flex-col gap-3">
       <div
         ref={scrollContainerRef}
-        className="max-h-[480px] overflow-auto rounded-md border"
+        // A focus ANCHOR, not a tab stop, and the last resort of
+        // `focusAfterBurst`: when a burst leaves no bar standing and
+        // Import is still disabled, this is the nearest thing to "where
+        // the user was". Also what a scrollable region needs to be
+        // reachable by keyboard at all.
+        tabIndex={-1}
+        className="max-h-[480px] overflow-auto rounded-md border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
       >
         <Table>
           <TableHeader>

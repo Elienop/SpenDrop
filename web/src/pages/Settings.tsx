@@ -3440,6 +3440,12 @@ function ImportCard() {
     }
     if (lastAutoMappedImportIdRef.current === preview.import_id) return;
     const stored = loadImportDecisions(preview.import_id);
+    // The map MERGES and the default is ASSIGNED, which is not an
+    // inconsistency: the auto-map contributes real entries for names that
+    // matched, so a stored decision has to land on top of them, while
+    // there is no automatic default to preserve — the record's value
+    // (including a deliberate `null`) is the whole truth about it, and
+    // only when there IS a record.
     setCategoryMap({
       ...autoMapCategories(preview, categories),
       ...(stored?.categoryMap ?? {}),
@@ -3458,13 +3464,14 @@ function ImportCard() {
   // the first write would put the empty initial map over the very record
   // just read.
   //
-  // WHAT IT DOES NOT DO, stated because a mutation removing it survives
-  // the suite: the clobber it prevents is transient. The restored state
-  // lands one render later and this effect writes it straight back, so
-  // nothing a test can observe changes either way, and the round-trip
-  // test passes without it. The window is real but it is one tick wide —
-  // a tab closed inside it loses the decisions — and closing it costs
-  // four lines, so it stays. Do not read it as load-bearing.
+  // THE CLOBBER IS TRANSIENT, WHICH IS NOT THE SAME AS HARMLESS. The
+  // restored state lands one render later and this effect writes it
+  // straight back, so the stored VALUE recovers on its own and a test
+  // that reads it passes either way. The write SEQUENCE does not: a test
+  // watching `saveImportDecisions` sees the empty map go out, and that is
+  // what pins this branch (Settings.test.tsx, "a manual mapping survives
+  // a trip to another Settings section"). The window it closes is one
+  // tick wide, and a tab shut inside it loses the decisions.
   const savedDecisionsForRef = useRef<string | null>(null);
   useEffect(() => {
     const importID = preview?.import_id;

@@ -1667,6 +1667,67 @@ describe('ImportPreviewTable — money', () => {
     });
   });
 
+  it('keeps focus inside the preview when Import is still disabled', async () => {
+    // THE COMPOUND PREVIEW, which is the ordinary one: a collision group
+    // AND over-length rows. Skipping the over-length rows removes their
+    // bar, and `canImport` is still false because the collision is
+    // unresolved — so the Import button is disabled, and a disabled
+    // button swallows `.focus()` without complaint. That is how the
+    // fallback used to end at `document.body`.
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    let settlePatch!: () => void;
+    const onPatchRow = vi.fn().mockReturnValue(
+      new Promise<void>((resolve) => {
+        settlePatch = () => resolve();
+      }),
+    );
+    const collisionOnly = makePreview({
+      collision_groups: [
+        { group_id: 'g1', reason: 'intra_file', member_row_ids: [0, 1] },
+      ],
+    });
+    const { rerender } = render(
+      <ImportPreviewTable
+        preview={{
+          ...collisionOnly,
+          field_errors: [fieldError(2, 'notes')],
+        }}
+        {...noopProps}
+        unresolvedCount={1}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Skip this row' }));
+    // The server's answer: the over-length row is skipped, its bar is
+    // gone, the collision group is not.
+    rerender(
+      <ImportPreviewTable
+        preview={collisionOnly}
+        {...noopProps}
+        unresolvedCount={1}
+        onPatchRow={onPatchRow}
+        canImport={false}
+      />,
+    );
+    await act(async () => {
+      settlePatch();
+    });
+
+    // Asserted on the NEGATIVE first: happy-dom will happily focus things
+    // a browser refuses, so "the intended element has focus" can pass
+    // while the real browser drops to body. What must hold is that focus
+    // went somewhere at all.
+    await waitFor(() => {
+      expect(document.activeElement).not.toBe(document.body);
+    });
+    expect(screen.getByRole('button', { name: /^Import 3$/ })).toBeDisabled();
+    // And it is somewhere in the preview the user was working in.
+    const landed = document.activeElement as HTMLElement;
+    expect(landed.closest('[data-collision="true"], table, [tabindex="-1"]')).not.toBeNull();
+  });
+
   it('keeps the Settings link out of the row description it sits beside', () => {
     // Every editable cell in the row points at the detail id, so anything
     // inside it is announced once per cell — four times over for one

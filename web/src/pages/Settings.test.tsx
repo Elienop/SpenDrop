@@ -29,6 +29,16 @@ vi.mock('../api/client', async (importOriginal) => {
   };
 });
 
+// Passes through to the real module and only watches `saveImportDecisions`:
+// what the round-trip test cannot see in the stored VALUE — a write of the
+// empty initial map between the restore and the render that makes it visible
+// — is plain in the write SEQUENCE.
+vi.mock('@/lib/import-decisions', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@/lib/import-decisions')>();
+  return { ...actual, saveImportDecisions: vi.fn(actual.saveImportDecisions) };
+});
+
 vi.mock('sonner', () => ({
   toast: {
     success: vi.fn(),
@@ -42,6 +52,7 @@ import { api, ApiError } from '../api/client';
 import { toast } from 'sonner';
 import { Settings } from './Settings';
 import { MAX_CURRENCY_SYMBOL_LENGTH } from '../lib/constants';
+import { saveImportDecisions } from '@/lib/import-decisions';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
 import type { Category, ImportPreview, ImportResult } from '../api/types';
 
@@ -1897,6 +1908,18 @@ describe('Settings', () => {
             screen.getByRole('combobox', { name: /Map category Grocries/i }),
           ).getByText('Transport'),
         ).toBeInTheDocument();
+
+        // The write SEQUENCE, which is where the first-pass latch is
+        // observable at all. On the remount the restore and the persist
+        // effect run in the same commit, and the state the restore set is
+        // not visible until the next one — so an unlatched persist writes
+        // the empty initial map over the record it was just read from.
+        // The stored value recovers one render later, which is why the
+        // assertions above pass either way; this one does not.
+        expect(vi.mocked(saveImportDecisions)).not.toHaveBeenCalledWith(
+          expect.anything(),
+          { categoryMap: {}, defaultCategoryId: null },
+        );
       });
     });
 
