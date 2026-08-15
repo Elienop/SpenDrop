@@ -68,9 +68,15 @@ export function formatPercent(value: number): string {
  * a currency stronger than the household's base looks like.
  *
  * Six fraction digits is the visible precision, chosen to cover those
- * small rates while stopping well short of printing float noise. It
- * bounds the DISPLAY only — the number that travels to the server is the
- * one the caller holds, never this string.
+ * small rates while stopping well short of printing float noise.
+ *
+ * IT BOUNDS THE DISPLAY ONLY. The number that travels to the server is
+ * the one the caller holds, never this string — the import's "apply
+ * today's rate" button shows `formatRate(rate)` and PATCHes the full
+ * `rate`, so a currency configured to more than six decimals is recorded
+ * at the precision it was configured with, not at the precision it was
+ * shown at. Anything that needs the displayed and the sent value to be
+ * the same number has to round the value itself, not read this back.
  */
 export function formatRate(
   rate: number,

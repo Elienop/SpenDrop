@@ -1298,7 +1298,12 @@ describe('Settings', () => {
       // orders of magnitude instead of failing. Copy that named the
       // column without the unit would leave that to be guessed.
       expect(copy.textContent).toContain('89000');
-      expect(copy.textContent).toMatch(/LBP per USD/);
+      expect(copy.textContent).toContain('LBP');
+      // The BASE half is read from the household's own currencies, not
+      // written into the string: the sentence is a rule about
+      // `rate_to_base`, and it would be false the day the base changed.
+      // The fixture's base is USD (`api.get('currencies')` above).
+      expect(copy.textContent).toMatch(/per one USD/);
     });
 
     // End-to-end through Settings → ImportCard → ImportPreviewStep →

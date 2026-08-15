@@ -105,6 +105,15 @@ const collisionGroupBarKey = (groupID: string) => `group-${groupID}`;
 const CURRENCIES_SETTINGS_PATH = '/settings?tab=currencies';
 
 /**
+ * What the Amount cell shows for a row whose money the backend could not
+ * resolve. The same em dash the read-only budget cells degrade to, for the
+ * same reason: it says "no value here", where a formatted `0.00` says
+ * "this row is worth nothing" — a claim about the user's money that the
+ * import has explicitly refused to make.
+ */
+const UNRESOLVED_AMOUNT = '—';
+
+/**
  * One server sentence about a row, with the field it was written about.
  * The field travels with the message because one of them — the unknown
  * currency — needs a control the others do not.
@@ -152,6 +161,14 @@ type RenderUnit =
       hasFieldError: boolean;
       hasMoneyError: boolean;
       /**
+       * The row is flagged on `rate` AND carries no amount — so the `0.00`
+       * its Amount cell would otherwise render is not this row's value,
+       * it is the absence of one. Decided here, with the flags, rather
+       * than in the cell: the cell can see the number but not why it is
+       * zero.
+       */
+      amountUnresolved: boolean;
+      /**
        * Server-authored explanations for this row's flagged fields that
        * have NO cell of their own (tags, notes, original_currency).
        * Rendered verbatim in a detail row beneath this one. Description,
@@ -182,10 +199,18 @@ function findCurrency(
  * The muted second line under a converted Amount: what the sheet quoted,
  * and the rate it was divided by — `1,500,000.00 LBP @ 89,000`.
  *
- * Same register as the ledger's own foreign line (`AmountDisplay`), and
- * the same formatters, so the row reads the same before and after it is
- * imported. The rate takes `formatRate` rather than the money formatter
- * beside it because a rate is not money — see `formatRate`.
+ * Same muted register as the ledger's own foreign line
+ * (`AmountDisplay`), and the same grouping — but NOT the same formatter,
+ * which is a real difference and not worth papering over: the ledger
+ * signs both of its lines (`formatSignedAmount(displayAmount(...))`),
+ * because it knows the row's category type and therefore which direction
+ * the money went. A preview row has a category NAME and no type, so there
+ * is nothing here to derive a `+` from. This line uses `formatAmount`,
+ * matching the Amount column beside it, and a negative original still
+ * renders its own minus.
+ *
+ * The rate takes `formatRate` rather than the money formatter beside it
+ * because a rate is not money — see `formatRate`.
  *
  * Returns null in the two cases where there is nothing true to say:
  *   - no original at all, which is most rows; and
@@ -319,6 +344,16 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
     rowLevelMessages.set(fe.row_id, existing);
   }
 
+  // Rows whose Amount cell would render a zero that means "unresolved"
+  // rather than "nothing". Built from the same active-flag walk as the
+  // rest, so a skipped row — which is not flagged — shows its amount
+  // again like any other row.
+  const rateFlaggedRowIDs = new Set(
+    active.filter((fe) => fe.field === 'rate').map((fe) => fe.row_id),
+  );
+  const amountUnresolvedFor = (row: ImportPreview['rows'][number]) =>
+    rateFlaggedRowIDs.has(row.row_id) && row.amount === 0;
+
   const emitted = new Set<number>();
   const units: RenderUnit[] = [];
 
@@ -418,6 +453,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
           groupHeaderId: headerId,
           hasFieldError: fieldErrorRowIDs.has(rowID),
           hasMoneyError: moneyErrorRowIDs.has(rowID),
+          amountUnresolved: amountUnresolvedFor(row),
           rowLevelMessages: rowLevelMessages.get(rowID) ?? [],
         });
         emitted.add(rowID);
@@ -433,6 +469,7 @@ function buildRenderPlan(preview: ImportPreview): RenderUnit[] {
         isCollision: false,
         hasFieldError: fieldErrorRowIDs.has(row.row_id),
         hasMoneyError: moneyErrorRowIDs.has(row.row_id),
+        amountUnresolved: amountUnresolvedFor(row),
         rowLevelMessages: rowLevelMessages.get(row.row_id) ?? [],
       });
     }
@@ -773,11 +810,11 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
       e: KeyboardEvent<HTMLTableCellElement>,
       rowID: number,
       field: EditableField,
-      displayValue: string,
+      editValue: string,
     ) => {
       if (e.key === 'Enter' || e.key === 'F2') {
         e.preventDefault();
-        beginEdit(rowID, field, displayValue, e.currentTarget);
+        beginEdit(rowID, field, editValue, e.currentTarget);
       }
     },
     [beginEdit],
@@ -798,8 +835,22 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
      * before this column existed.
      */
     metaLine?: ReactNode,
+    /**
+     * What the EDITOR opens on, when that is not what the cell shows.
+     *
+     * The two are the same for most cells and deliberately not for the
+     * rate: a grouped "89,000" reads as the same quantity as the money
+     * beside it, while the editor has to hold "89000", because the draft
+     * is PATCHed verbatim and the server parses a number. Same principle
+     * as the truncated description below — what is on screen is a
+     * rendering of the value, never the value itself — but carried in a
+     * separate string rather than by CSS, since grouping is not something
+     * an ellipsis can undo.
+     */
+    editValue?: string,
   ) => {
     const isEditing = editing?.rowID === row.row_id && editing.field === field;
+    const seed = editValue ?? displayValue;
     const errKey = `${row.row_id}:${field}`;
     const err = cellErrors[errKey];
     const errorMessageId = err ? `cell-error-${row.row_id}-${field}` : undefined;
@@ -835,13 +886,13 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
         aria-describedby={describedby}
         tabIndex={isEditing ? -1 : 0}
         onDoubleClick={(e) =>
-          beginEdit(row.row_id, field, displayValue, e.currentTarget)
+          beginEdit(row.row_id, field, seed, e.currentTarget)
         }
         onKeyDown={(e) => {
           // Capture the cell element on keyboard-entry so Escape/Enter
           // can restore focus to it — e.currentTarget is the <td> even
           // when the key originates on a descendant span.
-          if (!isEditing) onCellKeyDown(e, row.row_id, field, displayValue);
+          if (!isEditing) onCellKeyDown(e, row.row_id, field, seed);
         }}
       >
         {isEditing ? (
@@ -952,7 +1003,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
       : '';
   const statusText =
     [rowBlockerText, categoryBlocker].filter(Boolean).join('. ') ||
-    `Ready to import ${keepCount} rows`;
+    `Ready to import ${keepCount} ${keepCount === 1 ? 'row' : 'rows'}`;
   const statusColor =
     blockers.length > 0 || unresolvedCategoryCount > 0
       ? 'text-amber-500'
@@ -1262,6 +1313,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                 groupHeaderId,
                 hasFieldError,
                 hasMoneyError,
+                amountUnresolved,
                 rowLevelMessages: rowMessages,
               } = unit;
               // A row can block the import for any of the three reasons,
@@ -1321,26 +1373,45 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                   >
                     {row.category}
                   </TableCell>
+                  {/*
+                    A row whose money the backend could not resolve has no
+                    amount to show, and `0.00` is not "unknown" — it is a
+                    claim that this row is worth nothing, one cell away
+                    from the empty rate that is the actual problem. The
+                    editor still opens on `0.00`, because typing over a
+                    dash is not editing a number.
+                  */}
                   {renderEditableCell(
                     row,
                     'amount',
-                    row.amount.toFixed(2),
+                    amountUnresolved ? UNRESOLVED_AMOUNT : row.amount.toFixed(2),
                     `text-right font-mono tabular-nums ${skipClass}`,
                     rowDescribedby,
                     originalMoneyLine(row, preview.currencies),
+                    row.amount.toFixed(2),
                   )}
                   {/*
-                    The divisor, in the same register as the figure it
-                    produced. Empty when the sheet quoted no rate — not a
-                    dash and not a zero, because this cell is an editor
-                    and whatever it shows is what the editor opens on.
+                    The divisor, grouped like the money it divides —
+                    "89,000", the same string the second line and the bulk
+                    button show, because three renderings of one number
+                    that differ by a comma read as three numbers. The
+                    EDITOR still opens on the raw "89000": the draft is
+                    PATCHed verbatim and the server parses a number.
+
+                    Empty when the sheet quoted no rate — no dash and no
+                    zero here, unlike the Amount beside it. This is the
+                    cell the user TYPES the missing rate into, and a
+                    placeholder in the primary editing target reads as a
+                    value that is already there.
                   */}
                   {renderEditableCell(
                     row,
                     'rate',
-                    row.rate ? String(row.rate) : '',
+                    row.rate ? formatRate(row.rate) : '',
                     `text-right font-mono tabular-nums ${skipClass}`,
                     rowDescribedby,
+                    undefined,
+                    row.rate ? String(row.rate) : '',
                   )}
                   <TableCell>
                     {/*

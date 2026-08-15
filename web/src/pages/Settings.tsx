@@ -45,6 +45,7 @@ import type {
 } from '../api/types';
 import { AppVersion } from '@/components/AppVersion';
 import { ImportPreviewTable } from '@/components/ImportPreviewTable';
+import { useBaseCurrency } from '@/hooks/useBaseCurrency';
 import { useImportSession, type CellError } from '@/hooks/useImportSession';
 import {
   clearImportDecisions,
@@ -3383,6 +3384,10 @@ function ImportCard() {
   // Import wizard state — preview / importStep / result are owned by the
   // hook now; destructure them so the rest of the function reads identically
   // to the old local-state version.
+  // The household's base currency, for the upload copy's worked example.
+  // Shares the one `['currencies']` cache entry the rest of the page (and
+  // the import session hook) reads, so this costs no extra request.
+  const baseCode = useBaseCurrency();
   const [defaultCategoryId, setDefaultCategoryId] = useState<number | null>(
     null,
   );
@@ -3540,12 +3545,16 @@ function ImportCard() {
               imports a plausible wrong amount (20 EUR at 1.087 rather
               than 0.92 stores 18.40 instead of 21.74). Hence a worked
               example rather than the word "rate" on its own.
+
+              The base code is READ, not written: this household's is USD
+              and the example says so, but the sentence is a rule about
+              `rate_to_base` and would be false the day the base changed.
             */}
             <p className="text-sm text-muted-foreground">
               Upload an Excel file with columns: date, description, amount.
               Optional columns: category, tags, notes, original_amount,
               original_currency, rate — the original currency's units per
-              unit of your base currency, e.g. 89000 for LBP per USD.
+              one {baseCode}, e.g. 89000 for LBP.
             </p>
             <Input
               ref={fileInputRef}

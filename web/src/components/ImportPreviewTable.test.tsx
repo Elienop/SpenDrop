@@ -11,7 +11,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactElement } from 'react';
 import { ImportPreviewTable } from './ImportPreviewTable';
-import type { ImportPreview } from '@/api/types';
+import type { ImportCurrencySummary, ImportPreview } from '@/api/types';
 
 /**
  * Every render goes through a router, because the unknown-currency
@@ -865,7 +865,7 @@ const SERVER_MONEY_MESSAGES = {
 } as const;
 
 /** The currencies table as the preview reports it. */
-const PREVIEW_CURRENCIES = [
+const PREVIEW_CURRENCIES: ImportCurrencySummary[] = [
   { code: 'USD', rate_to_base: 1, is_base: true },
   { code: 'LBP', rate_to_base: 89000, is_base: false },
 ];
@@ -904,11 +904,15 @@ describe('ImportPreviewTable — money', () => {
 
     const rated = screen.getByText('Starbucks').closest('tr')!;
     const withoutRate = screen.getByText('Amazon').closest('tr')!;
+    // GROUPED, like the money line and the bulk button show it: three
+    // renderings of one number that differ by a comma read as three
+    // numbers. The editor still opens on the raw digits — see below.
     expect(
       rated.querySelector('[data-import-col="rate"]')!.textContent,
-    ).toBe('89000');
-    // Empty, not "0" and not "—": the cell is an editor, and a
-    // placeholder character would be the value the editor opened on.
+    ).toBe('89,000');
+    // Empty, not "0" and not "—": this is the cell the missing rate gets
+    // TYPED into, and a placeholder in the primary editing target reads
+    // as a value that is already there.
     expect(
       withoutRate.querySelector('[data-import-col="rate"]')!.textContent,
     ).toBe('');
@@ -927,7 +931,10 @@ describe('ImportPreviewTable — money', () => {
       />,
     );
 
-    await user.dblClick(screen.getByText('89000'));
+    await user.dblClick(screen.getByText('89,000'));
+    // The editor opens on the RAW value, not on what the cell shows: the
+    // draft is PATCHed verbatim, so a seeded "89,000" would send the
+    // server a string with a comma in it.
     const editor = await screen.findByDisplayValue('89000');
     // A rate is money-shaped for the keypad's purposes — see the
     // numeric-input rule in the design guide. No test environment
@@ -953,7 +960,7 @@ describe('ImportPreviewTable — money', () => {
       />,
     );
 
-    await user.dblClick(screen.getByText('89000'));
+    await user.dblClick(screen.getByText('89,000'));
     const editor = await screen.findByDisplayValue('89000');
     await user.clear(editor);
     await user.type(editor, '{Enter}');
@@ -1349,6 +1356,64 @@ describe('ImportPreviewTable — money', () => {
     // value the server stores is the value the button promised.
     expect(onPatchRow).toHaveBeenCalledTimes(1);
     expect(onPatchRow).toHaveBeenCalledWith(0, 'amount', '16.85');
+  });
+
+  it('refuses to claim a rate-missing row is worth 0.00', async () => {
+    const user = userEvent.setup({ pointerEventsCheck: 0 });
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        { row_id: 0, field: 'rate', message: SERVER_MONEY_MESSAGES.rateMissing },
+      ],
+    });
+    preview.rows[0].amount = 0;
+    preview.rows[0].original_amount = 1500000;
+    preview.rows[0].original_currency = 'LBP';
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    const row = screen.getByText('Starbucks').closest('tr')!;
+    const amountCell = row.children[3] as HTMLElement;
+    // "0.00" one cell from an empty rate is a statement about the user's
+    // money that the import has explicitly refused to make. Queried by
+    // whole text node, so the original-money line below it ("1,500,000.00
+    // LBP") cannot satisfy the negative half by accident.
+    expect(within(amountCell).getByText('—')).toBeInTheDocument();
+    expect(within(amountCell).queryByText('0.00')).toBeNull();
+
+    // Typing over a dash is not editing a number, so the editor still
+    // opens on the value the cell holds.
+    await user.dblClick(within(amountCell).getByText('—'));
+    expect(await screen.findByDisplayValue('0.00')).toBeInTheDocument();
+  });
+
+  it('shows a real zero as 0.00, flag or no flag', () => {
+    // The negative half: only the ABSENCE of a resolvable amount is a
+    // dash. A row flagged for something else, or a genuine zero, still
+    // renders the number — otherwise the dash would start meaning
+    // "flagged" instead of "unknown".
+    const preview = makePreview({
+      currencies: PREVIEW_CURRENCIES,
+      field_errors: [
+        {
+          row_id: 0,
+          field: 'original_currency',
+          message: SERVER_MONEY_MESSAGES.unknownCurrency,
+        },
+      ],
+    });
+    preview.rows[0].amount = 0;
+    preview.rows[0].original_amount = 1500000;
+    preview.rows[0].original_currency = 'LBX';
+    render(
+      <ImportPreviewTable preview={preview} {...noopProps} canImport={false} />,
+    );
+
+    const amountCell = screen.getByText('Starbucks').closest('tr')!
+      .children[3] as HTMLElement;
+    expect(within(amountCell).getByText('0.00')).toBeInTheDocument();
+    expect(within(amountCell).queryByText('—')).toBeNull();
   });
 
   it('always offers a skip, even when nothing else on the bar can be automated', async () => {
