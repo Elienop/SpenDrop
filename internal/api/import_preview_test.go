@@ -612,6 +612,78 @@ func TestHandleImportUpload_UnusableRateCellTravelsAsRateRaw(t *testing.T) {
 	}
 }
 
+// TestBuildImportPreview_RowRejectedBeforeMoneyCarriesNoFlag pins the
+// exemption that keeps the money gate off rows it cannot help.
+//
+// A trailing "TOTAL 5,000,000 LBP" line has no date. It is going to be skipped
+// as unparseable_date whatever happens to its currency, so flagging its money
+// would demand a Skip tick — on every such line — to unblock an import that
+// row was never going to join. `unresolvedImportCategories` has always taken
+// this position for the category gate; money now matches it.
+//
+// The exemption is narrow on purpose. A row that is merely too long, or whose
+// two money halves disagree, DOES keep its money flag: those are fixable in
+// the preview (shorten the description, edit the amount), so the user can act
+// on both problems in one pass instead of fixing one and meeting the other.
+func TestBuildImportPreview_RowRejectedBeforeMoneyCarriesNoFlag(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "footerrow", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			// row 0 — a footer line: no date, and a currency nothing resolves.
+			{"", "TOTAL", "", "Food", "5000000", "LBX"},
+			// row 1 — no description, same unknown currency.
+			{"2026-01-16", "", "", "Food", "5000000", "LBX"},
+			// row 2 — the positive control: an ordinary row with the same
+			// unknown currency, which MUST still be flagged.
+			{"2026-01-17", "Duty free", "10.00", "Food", "5000000", "LBX"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	errs := fieldErrorsByRow(t, preview)
+	if flags, flagged := errs[0]; flagged {
+		t.Errorf("the dateless footer row was flagged on its money: %v", flags)
+	}
+	if flags, flagged := errs[1]; flagged {
+		t.Errorf("the description-less row was flagged on its money: %v", flags)
+	}
+	if _, flagged := errs[2][importFieldOriginalCurrency]; !flagged {
+		t.Fatalf("the ordinary row lost its unknown-currency flag: %v", preview["field_errors"])
+	}
+
+	// Confirm must take the same view, or the preview clears a row the gate
+	// still refuses — the seam this exemption has to be applied at BOTH ends
+	// of. Row 2 is skipped so only the exempt rows are left to judge.
+	if rec := patchImportRow(t, h, user, importID, 2, "skip", true); rec.Code != http.StatusOK {
+		t.Fatalf("skip row 2: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200 (both remaining rows are exempt), got %d; body: %s", rec.Code, rec.Body.String())
+	}
+
+	// Fixing the date is what surfaces the flag: the exemption is a statement
+	// about the row's CURRENT state, recomputed on every surface, not a
+	// permanent pass.
+	preview2, importID2 := uploadImportSheet(t, h, user, xlsxData)
+	if rec := patchImportRow(t, h, user, importID2, 0, "date", "2026-01-15"); rec.Code != http.StatusOK {
+		t.Fatalf("patch date: %d %s", rec.Code, rec.Body.String())
+	}
+	_ = preview2
+	getRec := getImportSession(t, h, user, importID2)
+	var resumed map[string]any
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("unmarshal resume: %v", err)
+	}
+	if _, flagged := fieldErrorsByRow(t, resumed)[0][importFieldOriginalCurrency]; !flagged {
+		t.Errorf("the footer row kept its exemption after its date was fixed: %v", resumed["field_errors"])
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.

@@ -126,22 +126,17 @@ func (h *Handler) buildImportPreview(
 
 	rows := make([]importPreviewRow, 0, len(entry.Rows))
 	for _, row := range entry.Rows {
-		money, moneyErr, _ := resolveImportMoney(row, currencies)
+		money, moneyErr := importRowMoney(row, currencies)
 		previewRow := importPreviewRow{importRow: row}
 		if raw := strings.TrimSpace(row.RawRate); raw != "" && !importRateIsUsable(row.Rate) {
 			previewRow.RateRaw = raw
 		}
 		switch {
 		case moneyErr != nil:
-			// Skipped rows are exempt, exactly as they are from the length
-			// gate: skipping IS the remedy the flag offers, so a skipped row
-			// must not go on blocking the confirm it was skipped to unblock.
-			// The row still shows the sheet's own amount — a blocked row has
-			// no resolved value to show, and showing a derived one would erase
+			// The row shows the sheet's own amount: a blocked row has no
+			// resolved value to show, and showing a derived one would erase
 			// the disagreement the user has to resolve.
-			if !row.Skip {
-				fieldErrors = append(fieldErrors, *moneyErr)
-			}
+			fieldErrors = append(fieldErrors, *moneyErr)
 		case money.Derived:
 			previewRow.Amount = centsToDollars(money.AmountCents)
 			previewRow.AmountDerived = true
@@ -194,12 +189,43 @@ func (h *Handler) buildImportPreview(
 func importMoneyFieldErrors(rows []importRow, cur importCurrencies) []importFieldError {
 	fieldErrors := []importFieldError{}
 	for _, row := range rows {
-		if row.Skip {
-			continue
-		}
-		if _, moneyErr, _ := resolveImportMoney(row, cur); moneyErr != nil {
+		if _, moneyErr := importRowMoney(row, cur); moneyErr != nil {
 			fieldErrors = append(fieldErrors, *moneyErr)
 		}
 	}
 	return fieldErrors
+}
+
+// importRowMoney resolves one row for a SURFACE: the money to show, and the
+// flag to report — or no flag, when the row is exempt.
+//
+// Both callers go through here, and that is the whole point. The preview and
+// the confirm gate answer the same question from different code, and the two
+// answers have to agree in both directions: a flag the preview clears and the
+// gate keeps is a dead end (the user is told the problem is gone and the
+// import goes on being refused, with no row left to fix), and a flag the gate
+// keeps quiet about is a refusal the user never saw coming.
+//
+// Two exemptions, for two different reasons:
+//
+//   - The user SKIPPED the row. Skipping is the remedy the flag offers, so a
+//     skipped row must not go on blocking the confirm it was skipped to
+//     unblock. Same rule the length family has always had.
+//   - The row is already rejected for a reason decided BEFORE its money —
+//     see preMoneySkipReason.
+//
+// The resolved money comes back either way, so a preview can still show what
+// an exempt row would be worth.
+func importRowMoney(row importRow, cur importCurrencies) (importMoney, *importFieldError) {
+	money, moneyErr, _ := resolveImportMoney(row, cur)
+	if moneyErr == nil {
+		return money, nil
+	}
+	if row.Skip {
+		return money, nil
+	}
+	if _, _, blocked := preMoneySkipReason(row); blocked {
+		return money, nil
+	}
+	return money, moneyErr
 }

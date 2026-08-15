@@ -3726,15 +3726,46 @@ func TestHandleImportConfirm_MoneyErrors_Returns409(t *testing.T) {
 		t.Fatalf("session gone after the 409: %d %s", getRec.Code, getRec.Body.String())
 	}
 
-	// And that is exactly what happens: one PATCH, and the same confirm lands.
-	if rec := patchImportRow(t, h, user, importID, 0, "rate", "89000"); rec.Code != http.StatusOK {
+	// Skipping the row is the OTHER remedy, and confirm has to honour it —
+	// the preview clears the flag when a row is skipped, so a gate that did
+	// not would be a dead end: the user is told the problem is gone and the
+	// import goes on being refused with no row left to fix.
+	if rec := patchImportRow(t, h, user, importID, 0, "skip", true); rec.Code != http.StatusOK {
+		t.Fatalf("skip the flagged row: %d %s", rec.Code, rec.Body.String())
+	}
+	skipRec := confirmImport(t, h, q, user, importID)
+	if skipRec.Code != http.StatusOK {
+		t.Fatalf("confirm with the row skipped: expected 200, got %d; body: %s", skipRec.Code, skipRec.Body.String())
+	}
+	var skipped map[string]any
+	if err := json.Unmarshal(skipRec.Body.Bytes(), &skipped); err != nil {
+		t.Fatalf("unmarshal confirm result: %v", err)
+	}
+	if got := int(skipped["skipped"].(float64)); got != 1 {
+		t.Errorf("skipped = %d, want 1 (the row the user skipped); %v", got, skipped)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 1 {
+		t.Errorf("live rows = %d, want 1 — the clean row lands, the skipped one does not", n)
+	}
+
+	// And the other way out: one PATCH supplies the rate and the same confirm
+	// takes both rows. A fresh sheet with its own dates and descriptions, so
+	// the rows that already landed above cannot collide with these.
+	secondSheet := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-02-15", "Second souk run", "", "Food", "1500000", "LBP", ""},
+			{"2026-02-16", "Second bakery", "12.00", "Food", "", "", ""},
+		})
+	_, secondID := uploadImportSheet(t, h, user, secondSheet)
+	if rec := patchImportRow(t, h, user, secondID, 0, "rate", "89000"); rec.Code != http.StatusOK {
 		t.Fatalf("patch rate: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := confirmImport(t, h, q, user, importID); rec.Code != http.StatusOK {
+	if rec := confirmImport(t, h, q, user, secondID); rec.Code != http.StatusOK {
 		t.Fatalf("confirm after the fix: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
 	}
-	if n := countTransactionsForUser(t, db, user.ID); n != 2 {
-		t.Errorf("%d rows landed after the fix, want 2", n)
+	if n := countTransactionsForUser(t, db, user.ID); n != 3 {
+		t.Errorf("live rows = %d, want 3 (one from the skipped run, two from the fixed one)", n)
 	}
 }
 

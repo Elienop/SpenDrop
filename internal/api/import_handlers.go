@@ -2569,12 +2569,9 @@ func processImportRows(
 //     between gate and commit — skips the row with a name instead of storing
 //     the wrong money. Same role the field_too_long floor plays above it.
 func preCategorySkipReason(row importRow, cur importCurrencies) (time.Time, importMoney, importSkipReason, bool) {
-	date, err := parseImportDate(row.Date)
-	if err != nil {
-		return time.Time{}, importMoney{}, skipReasonUnparseableDate, true
-	}
-	if row.Description == "" {
-		return time.Time{}, importMoney{}, skipReasonEmptyDescription, true
+	date, reason, blocked := preMoneySkipReason(row)
+	if blocked {
+		return time.Time{}, importMoney{}, reason, true
 	}
 	if len(checkImportRowLengths([]importRow{row})) > 0 {
 		return time.Time{}, importMoney{}, skipReasonFieldTooLong, true
@@ -2590,6 +2587,36 @@ func preCategorySkipReason(row importRow, cur importCurrencies) (time.Time, impo
 		return time.Time{}, importMoney{}, skipReasonZeroAmount, true
 	}
 	return date, money, "", false
+}
+
+// preMoneySkipReason reports the two rejections that are decided before a row's
+// money is looked at, and that EXEMPT it from the money flags.
+//
+// It exists to be shared, not to shorten preCategorySkipReason. A row with no
+// parseable date or no description is going to be skipped whatever its
+// currency cell says — the archetype is the trailing "TOTAL 5,000,000 LBP"
+// line on a bank statement — so flagging its money would demand a Skip tick,
+// per footer line, to unblock an import those rows were never going to join.
+// unresolvedImportCategories has always taken exactly this position for the
+// category gate; importRowMoney takes it for the money one.
+//
+// It is deliberately NARROWER than "everything decided before money". A row
+// that is merely too long, or whose two money halves disagree in sign, keeps
+// its money flag: both are fixable in the preview (shorten the description,
+// edit the amount), so the user can see and fix both problems in one pass
+// instead of resolving one and being sent round again for the other.
+//
+// The date travels out because the caller needs it and re-parsing is the
+// classic way two copies of a check drift.
+func preMoneySkipReason(row importRow) (time.Time, importSkipReason, bool) {
+	date, err := parseImportDate(row.Date)
+	if err != nil {
+		return time.Time{}, skipReasonUnparseableDate, true
+	}
+	if row.Description == "" {
+		return time.Time{}, skipReasonEmptyDescription, true
+	}
+	return date, "", false
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
