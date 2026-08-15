@@ -453,8 +453,15 @@ func setExportTruncationHeader(w http.ResponseWriter, x *exportTruncations) {
 // does. Draining first bounds the hold to the read itself.
 //
 // The slice is bounded in ROW COUNT by MaxExportRows, and at household field
-// lengths that is the whole story: 50,000 rows measure 38 MiB. It is NOT bounded
-// in per-row text. description/tags/notes are capped at MaxDescriptionLength /
+// lengths that is the whole story. exportTxnRow is 184 bytes (unsafe.Sizeof), so
+// MaxExportRows costs 8.8 MiB of struct plus the description/tags/notes text the
+// rows point at; TestMeasureExportMemory samples the whole drain at 31-47 MiB of
+// peak heap over MaxExportRows rows. Quote the bytes-per-row, not the sampled
+// peak: repeated runs of the identical workload land on 31.3 or 47.1 MiB
+// depending on where a collection falls, so the sample cannot resolve a change
+// worth less than a few MiB — adding booked_rate, for one, cost 16 bytes a row
+// (0.8 MiB here) and is invisible in the sample. It is NOT bounded in per-row
+// text. description/tags/notes are capped at MaxDescriptionLength /
 // MaxTagsLength / MaxNotesLength on the API, but the spreadsheet importer wrote
 // them unvalidated until recently,
 // so a legacy ledger can hold much longer values and the drain is O(total text)
@@ -744,8 +751,9 @@ func (h *Handler) handleExportTransactions(w http.ResponseWriter, r *http.Reques
 	// ordinary Tuesday, not an attack — and against GOMEMLIMIT=768MiB the old
 	// figure was around 60% of the soft limit for two ordinary requests.
 	//
-	// What remains is roughly half the drained []exportTxnRow slice (38 MiB) and
-	// half excelize's spill buffer. TestExportPeakMemory_StaysWithinBudget is the
+	// What remains is roughly half the drained []exportTxnRow slice and half
+	// excelize's spill buffer (see exportTxnRow for how the drain half is sized,
+	// and why the sampled figure is quoted as a range). TestExportPeakMemory_StaysWithinBudget is the
 	// guard; TestMeasureExportMemory reports the halves separately so a future
 	// change can tell which one moved.
 	var truncations exportTruncations

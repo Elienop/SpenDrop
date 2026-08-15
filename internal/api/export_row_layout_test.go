@@ -125,6 +125,46 @@ func TestExportTxnRows_NullColumnsDoNotLeakAcrossRows(t *testing.T) {
 	}
 }
 
+// TestExportTxnHeaders_LayoutIsPinned states the Transactions column layout as a
+// LITERAL, which is the one assertion in this file that a column REMOVAL cannot
+// satisfy.
+//
+// Everything else here is derived from exportTxnHeaders — the row slice is
+// `make([]any, len(exportTxnHeaders("")))`, the width test compares against it,
+// the truncation test sizes its floor from it. That symmetry is what makes a
+// column addition safe, and it is exactly what makes a column DELETION
+// invisible: drop "Rate" from the header and the row slice shrinks with it, the
+// widths still agree, and the export quietly stops carrying a booked rate. Only
+// a literal notices.
+//
+// It pins ORDER and SPELLING too. The importer maps columns by header name, so
+// "Original Currency" renamed to "Currency" is a silent round-trip break, and
+// a reordering moves every cell reference in this package's tests without
+// changing a single width.
+func TestExportTxnHeaders_LayoutIsPinned(t *testing.T) {
+	want := []any{
+		"Date", "Description", "Category", "Type", "Amount (USD)",
+		"Original Amount", "Original Currency", "Rate", "Tags", "Notes",
+	}
+	got := exportTxnHeaders("USD")
+	if len(got) != len(want) {
+		t.Fatalf("exportTxnHeaders spans %d columns, want %d:\n got %v\nwant %v",
+			len(got), len(want), got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("header[%d] = %v, want %v — a renamed or reordered column breaks "+
+				"the importer, which maps by header NAME", i, got[i], want[i])
+		}
+	}
+
+	// The base currency is interpolated, so the Amount column is the one header
+	// that is not a constant. Pinned separately rather than left out.
+	if got := exportTxnHeaders("LBP")[4]; got != "Amount (LBP)" {
+		t.Errorf("header[4] with base currency LBP = %v, want %q", got, "Amount (LBP)")
+	}
+}
+
 // TestExportTxnRows_DataWidthMatchesHeaderWidth pins that every data row spans
 // exactly the columns the header names.
 //
@@ -176,11 +216,12 @@ func TestExportTxnRows_DataWidthMatchesHeaderWidth(t *testing.T) {
 	}
 }
 
-// TestExportTransactions_RateColumn pins the Rate column on BOTH sheets that
-// carry transactions — the top-level export and the monthly one: its position
-// in the header, the value it carries for a converted row, its EMPTINESS for a
-// row that was never converted, and that a tombstoned row's rate never reaches
-// the workbook.
+// TestExport_RateColumn_TopLevelAndMonthly pins the Rate column on BOTH sheets
+// that carry transactions — the top-level export and the monthly one: its
+// position in the header, the value it carries for a converted row, its
+// EMPTINESS for a row that was never converted, and that a tombstoned row's rate
+// never reaches the workbook. The name says "and monthly" because deleting the
+// monthly half is otherwise a silent subtraction.
 //
 // Position is asserted, not just presence. The import maps columns by header
 // name, so a Rate column that landed in the wrong place would still re-import —
@@ -192,7 +233,7 @@ func TestExportTxnRows_DataWidthMatchesHeaderWidth(t *testing.T) {
 // The empty cell is read by ABSOLUTE REFERENCE (see the file header): a base
 // row has no tags and no notes either, so GetRows trims its tail and cannot
 // tell "the rate cell is blank" from "the row is only seven columns wide".
-func TestExportTransactions_RateColumn(t *testing.T) {
+func TestExport_RateColumn_TopLevelAndMonthly(t *testing.T) {
 	h := setupHandler(t)
 	user := seedTestUser(t, h.queries, "ratecolumn", "member")
 	cat := seedExpenseCategory(t, h.queries, "Groceries")
@@ -245,6 +286,25 @@ func TestExportTransactions_RateColumn(t *testing.T) {
 			"misplaced cannot round-trip a converted row", rateIdx, rows[0][rateIdx], "Rate")
 	}
 
+	// The tombstone, checked BEFORE any cell assertion: a leaked soft-deleted
+	// row shifts every row below it, so the cell assertions would fire first and
+	// report a value mismatch for a workbook whose real defect is that it
+	// contains a deleted transaction. Neither the sentinel rate nor the
+	// description may appear anywhere in the sheet. Fatal, not Errorf — once a
+	// deleted row is in the workbook, what the other cells say is noise.
+	if len(rows) != 3 {
+		t.Fatalf("Transactions rows = %d, want 3 (header + 2 live): a soft-deleted row "+
+			"reached the export: %v", len(rows), rows)
+	}
+	for r, row := range rows {
+		for c, cell := range row {
+			if cell == "999999" || cell == "TOMBSTONED ROW" {
+				t.Fatalf("row %d column %d = %q: a soft-deleted row reached the export, "+
+					"and it brought its booked rate with it", r+1, c+1, cell)
+			}
+		}
+	}
+
 	// The converted row carries the divisor that produced its stored amount.
 	if got := get("G2"); got != "LBP" {
 		t.Fatalf("G2 = %q, want %q: the layout moved, so the H-column assertions below "+
@@ -264,20 +324,6 @@ func TestExportTransactions_RateColumn(t *testing.T) {
 	if got := get("B3"); got != "BASE ROW" {
 		t.Fatalf("B3 = %q, want %q: row 3 is not the base row, so the H3 assertion above "+
 			"checked the wrong row", got, "BASE ROW")
-	}
-
-	// The tombstone: neither its description nor its sentinel rate may appear
-	// anywhere in the workbook.
-	if len(rows) != 3 {
-		t.Fatalf("Transactions rows = %d, want 3 (header + 2 live): %v", len(rows), rows)
-	}
-	for r, row := range rows {
-		for c, cell := range row {
-			if cell == "999999" || cell == "TOMBSTONED ROW" {
-				t.Errorf("row %d column %d = %q: a soft-deleted row reached the export, "+
-					"and it brought its booked rate with it", r+1, c+1, cell)
-			}
-		}
 	}
 
 	// The monthly export writes the SAME Transactions sheet through the same

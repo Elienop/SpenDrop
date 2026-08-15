@@ -167,21 +167,36 @@ func TestHandleExportTransactions_MarksOverLongCells(t *testing.T) {
 		t.Errorf("Amount = %q, want 777", data[4])
 	}
 
-	// The warnings sheet names every affected cell.
+	// The warnings sheet names every affected cell — and names it by its REAL
+	// address. The cell reference is the only part of a warning row a reader can
+	// act on: "Tags, 40000 characters" tells them nothing about where to look.
+	// The column numbers passed to exportTruncations.text are hand-written and
+	// shift whenever a column is inserted, and findWarningRow matches on the
+	// column NAME, so without this assertion a stale reference points the reader
+	// at a neighbouring column and every test stays green.
 	warn, err := f.GetRows(exportWarningsSheet)
 	if err != nil || len(warn) == 0 {
 		t.Fatalf("no %q sheet in an abridged export (err %v): the user has no way to "+
 			"discover the truncation without scanning every row", exportWarningsSheet, err)
 	}
-	for _, column := range []string{"Description", "Tags", "Notes"} {
-		row := findWarningRow(warn, "Transactions", column)
+	for _, want := range []struct{ column, cell string }{
+		{"Description", "B2"},
+		{"Tags", "I2"},
+		{"Notes", "J2"},
+	} {
+		row := findWarningRow(warn, "Transactions", want.column)
 		if row == nil {
 			t.Errorf("%q sheet does not list the truncated %s cell; rows = %v",
-				exportWarningsSheet, column, warn)
+				exportWarningsSheet, want.column, warn)
 			continue
 		}
+		if row[1] != want.cell {
+			t.Errorf("%s warning points at cell %q, but the value was written to %q: "+
+				"the reader opens the wrong column and finds an untruncated value there",
+				want.column, row[1], want.cell)
+		}
 		if row[3] != "40000" {
-			t.Errorf("%s warning reports %q characters, want 40000", column, row[3])
+			t.Errorf("%s warning reports %q characters, want 40000", want.column, row[3])
 		}
 	}
 

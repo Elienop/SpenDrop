@@ -68,7 +68,8 @@ func (d *discardResponseWriter) WriteHeader(code int) { d.code = code }
 // seedBulkTransactions inserts n transactions in a single SQL transaction,
 // bypassing the sqlc layer for speed. Descriptions, tags and notes are sized
 // to plausible household values so the string cost is realistic rather than
-// degenerate.
+// degenerate, and every row carries a currency and a booked rate so the
+// measured figures cover the populated path, not the cheap NULL one.
 func seedBulkTransactions(t *testing.T, db *sql.DB, userID, categoryID int64, n int) {
 	t.Helper()
 	tx, err := db.Begin()
@@ -79,8 +80,8 @@ func seedBulkTransactions(t *testing.T, db *sql.DB, userID, categoryID int64, n 
 
 	stmt, err := tx.Prepare(`INSERT INTO transactions
 		(user_id, category_id, date, amount_cents, description, tags, notes,
-		 original_amount_cents, original_currency)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		 original_amount_cents, original_currency, booked_rate)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		t.Fatalf("prepare bulk seed: %v", err)
 	}
@@ -92,8 +93,11 @@ func seedBulkTransactions(t *testing.T, db *sql.DB, userID, categoryID int64, n 
 		desc := "Grocery run at the corner shop #" + strconv.Itoa(i)
 		tags := "groceries,household,weekly"
 		notes := "Paid by card; receipt filed under " + strconv.Itoa(i%500)
+		// Every seeded row is a foreign row, so booked_rate is populated too:
+		// the drained slice pays for the field either way, but a NULL-only
+		// fixture would never exercise the write path that renders it.
 		if _, err := stmt.Exec(userID, categoryID, date, int64(1000+i%90000),
-			desc, tags, notes, int64(1500000+i), "LBP"); err != nil {
+			desc, tags, notes, int64(1500000+i), "LBP", 89000.0+float64(i%100)/4); err != nil {
 			t.Fatalf("bulk seed row %d: %v", i, err)
 		}
 	}
