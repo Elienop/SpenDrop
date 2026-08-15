@@ -712,7 +712,7 @@ func TestUnresolvedImportCategories_GroupsByExactNameInFirstSeenOrder(t *testing
 		{RowID: 2, Date: "2026-01-15", Description: "c", Amount: 1, Category: "Zed"},
 		{RowID: 3, Date: "2026-01-15", Description: "d", Amount: 1, Category: "Food"},
 	}
-	got := unresolvedImportCategories(rows, nil, map[string]int64{"food": 7}, 0)
+	got := unresolvedImportCategories(rows, nil, map[string]int64{"food": 7}, 0, testImportCurrencies())
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2; %+v", len(got), got)
 	}

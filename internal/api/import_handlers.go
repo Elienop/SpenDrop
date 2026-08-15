@@ -58,7 +58,18 @@ type importRow struct {
 	Notes            string  `json:"notes,omitempty"`
 	OriginalAmount   float64 `json:"original_amount,omitempty"`
 	OriginalCurrency string  `json:"original_currency,omitempty"`
-	Skip             bool    `json:"skip"`
+	// Rate is the sheet's own exchange rate for this row, in the units of
+	// currencies.rate_to_base (foreign units per base unit, so LBP 89000 is
+	// 89,000 LBP to the dollar). Zero means the sheet quoted no rate.
+	Rate float64 `json:"rate,omitempty"`
+	// RawRate is the Rate cell exactly as it arrived, kept so the resolver can
+	// tell an ABSENT rate from an unparseable one — #5 (rate_missing) and #9
+	// (rate_invalid) are different faults with different fixes, and Rate alone
+	// is 0 for both. It never leaves the server: the wire carries the parsed
+	// number or nothing, and a client that saw the raw string would be tempted
+	// to re-parse it.
+	RawRate string `json:"-"`
+	Skip    bool   `json:"skip"`
 }
 
 // dbMatchPreview carries the displayable fields of a live DB row that
@@ -109,10 +120,22 @@ type importFieldError struct {
 // Field names as they appear in importFieldError.Field and in the PATCH
 // endpoint's request body, so a frontend can route an error straight to the
 // control that edits it.
+//
+// Two families share the union, and the split decides where a flag is SHOWN.
+// The length family (description, tags, notes) says a value is longer than the
+// ledger stores. The money family (rate, original_currency, amount) says the
+// row quotes money that cannot be resolved into a stored value — no rate for a
+// foreign original, a currency the household has not set up, or an Amount cell
+// that contradicts original ÷ rate. Only description, rate and amount name a
+// cell the preview can edit; the rest are fixed in Settings or in the source
+// spreadsheet, and every message says which.
 const (
-	importFieldDescription = "description"
-	importFieldTags        = "tags"
-	importFieldNotes       = "notes"
+	importFieldDescription      = "description"
+	importFieldTags             = "tags"
+	importFieldNotes            = "notes"
+	importFieldRate             = "rate"
+	importFieldOriginalCurrency = "original_currency"
+	importFieldAmount           = "amount"
 )
 
 // importFieldLengthMessage is the single source of the explanation for a field
@@ -502,6 +525,12 @@ var columnMapping = map[string]string{
 	"notes":             "notes",
 	"original amount":   "original_amount",
 	"original currency": "original_currency",
+	// The per-row exchange rate, in currencies.rate_to_base units. "Rate" is
+	// what SpenDrop's own export writes, so an export re-imports losslessly;
+	// the two aliases are what a hand-kept household sheet tends to call it.
+	"rate":          "rate",
+	"exchange rate": "rate",
+	"fx rate":       "rate",
 }
 
 // dateFormats lists the date formats tried when parsing imported dates.
@@ -1300,6 +1329,18 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 					}
 				case "original_currency":
 					ir.OriginalCurrency = val
+				case "rate":
+					// Both halves are kept. Rate is the usable divisor (0 when
+					// the cell is empty OR unparseable); RawRate is what the
+					// cell held, which is the only thing that tells the two
+					// apart downstream. Unlike the amount cells, an
+					// unparseable rate does NOT vanish into a silent zero —
+					// resolveImportMoney flags it, because a rate the user
+					// typed and got wrong is a fault worth reporting.
+					ir.RawRate = val
+					if parsed, err := parseImportRate(val); err == nil {
+						ir.Rate = parsed
+					}
 				}
 			}
 			// Skip rows where no mapped cell had any value
@@ -1381,6 +1422,17 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
+	// One snapshot of the currencies table for this whole pass — see
+	// importCurrencies. Every row's money is resolved against it, and the
+	// preview reports it so the "apply today's rate" offer and the rate the
+	// import would record are the same number.
+	currencies, err := loadImportCurrencies(r.Context(), h.queries)
+	if err != nil {
+		log.Printf("import upload: load currencies: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load currencies")
+		return
+	}
+
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -1414,7 +1466,7 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		// marks each entry resolved against its own local choices, which
 		// is how its gate stays the same shape as the confirm gate
 		// without reimplementing which rows are eligible.
-		"unresolved_categories": unresolvedImportCategories(parsedRows, nil, catNameToID, 0),
+		"unresolved_categories": unresolvedImportCategories(parsedRows, nil, catNameToID, 0, currencies),
 	})
 }
 
@@ -1456,6 +1508,28 @@ const (
 	// evidence of what the user meant, and picking a side would silently turn
 	// a refund into a purchase.
 	skipReasonSignMismatch importSkipReason = "sign_mismatch"
+
+	// The money family. Every one of these is a LAST-DITCH label: each
+	// condition blocks on all four preview surfaces and refuses confirm with
+	// a 409 MONEY_ERRORS long before processImportRows sees the row, exactly
+	// as field_too_long does. They exist so that a session which reaches the
+	// insert with a stale flag — a currency deleted between the gate and the
+	// commit, a client that never read the preview — skips the row with a
+	// name on it instead of storing money the preview could not resolve.
+	//
+	// They are separate reasons rather than one "money" bucket because they
+	// carry different fixes: a missing rate is typed into the preview, an
+	// invalid one is corrected there, an unknown currency is added in
+	// Settings, and a disagreeing amount is decided in the spreadsheet. A
+	// single label would tell an operator reading skipped_reasons that
+	// something about money went wrong and nothing about what.
+	skipReasonRateMissing         importSkipReason = "rate_missing"
+	skipReasonRateInvalid         importSkipReason = "rate_invalid"
+	skipReasonRateOnBase          importSkipReason = "rate_on_base"
+	skipReasonRateWithoutCurrency importSkipReason = "rate_without_currency"
+	skipReasonUnknownCurrency     importSkipReason = "unknown_currency"
+	skipReasonAmountDisagrees     importSkipReason = "amount_disagrees"
+	skipReasonAmountInvalid       importSkipReason = "amount_invalid"
 )
 
 // importInserted records a row that made it into the transactions table.
@@ -1536,6 +1610,12 @@ type importProcessInput struct {
 	DefaultCategoryID int64
 	CatNameToID       map[string]int64
 	CatIDToName       map[int64]string
+	// Currencies is the snapshot every row's money is resolved against. It is
+	// taken ONCE, by the handler, inside the insert transaction — so a rate
+	// edited midway through a large import cannot split the batch across two
+	// views of the table, and the snapshot the rows commit against is the one
+	// the transaction can see.
+	Currencies importCurrencies
 }
 
 // handleImportConfirm inserts all rows from a previously uploaded import
@@ -1598,6 +1678,21 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// the mutex only until we've computed groups and the filtered copy;
 	// the SQL transaction that follows runs on the local filteredRows
 	// slice, so there is no need to keep entry locked during DB inserts.
+	// The gate's view of the currencies table. It is deliberately a DIFFERENT
+	// snapshot from the one the insert loop uses: this one answers "is the
+	// preview still resolvable?" before any transaction is open, and the
+	// insert takes its own inside the tx. If an admin edits or deletes a
+	// currency between the two, the gate passes and the affected rows are
+	// skipped by name at insert — which is exactly what the last-ditch money
+	// reasons exist for. Sharing one snapshot across both would instead let
+	// the batch commit against a table state its own transaction never saw.
+	gateCurrencies, err := loadImportCurrencies(r.Context(), h.queries)
+	if err != nil {
+		log.Printf("import confirm: load currencies: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load currencies")
+		return
+	}
+
 	entry.mu.Lock()
 
 	// Field lengths are re-checked here, ahead of the collision rebuild,
@@ -1658,7 +1753,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// categories the user has not chosen would name rows that stop
 	// colliding once the mapping lands, and stay silent about rows that
 	// start. The user would resolve a collision that was never real.
-	if unresolved := unresolvedImportCategories(entry.Rows, req.CategoryMap, catNameToID, req.DefaultCategoryID); len(unresolved) > 0 {
+	if unresolved := unresolvedImportCategories(entry.Rows, req.CategoryMap, catNameToID, req.DefaultCategoryID, gateCurrencies); len(unresolved) > 0 {
 		entry.mu.Unlock()
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"code":                  "UNRESOLVED_CATEGORIES",
@@ -1737,6 +1832,16 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 	// owns auth, JSON, store lookup, category loading, and the SQL
 	// transaction lifecycle — processImportRows only runs the policy
 	// loop.
+	// Loaded on qtx, inside the transaction the rows commit in, so every row
+	// in the batch is resolved against one view of the currencies table — the
+	// same view the inserts land against.
+	insertCurrencies, err := loadImportCurrencies(r.Context(), qtx)
+	if err != nil {
+		log.Printf("import confirm: load currencies in tx: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load currencies")
+		return
+	}
+
 	result, minImportDate := processImportRows(r.Context(), qtx, tx, h.txnStore, importProcessInput{
 		UserID:            entry.UserID,
 		Rows:              filteredRows,
@@ -1744,6 +1849,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		DefaultCategoryID: req.DefaultCategoryID,
 		CatNameToID:       catNameToID,
 		CatIDToName:       catIDToName,
+		Currencies:        insertCurrencies,
 	})
 
 	if err := tx.Commit(); err != nil {
@@ -2017,6 +2123,13 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
+	currencies, curErr := loadImportCurrencies(r.Context(), h.queries)
+	if curErr != nil {
+		log.Printf("import patch: load currencies: %v", curErr)
+		writeError(w, http.StatusInternalServerError, "failed to load currencies")
+		return
+	}
+
 	groups, groupErr := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -2057,7 +2170,7 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		// category entry: skipped rows are excluded, so skipping the
 		// last row carrying an undecided name drops the entry, and the
 		// frontend's gate clears with no client-side bookkeeping.
-		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0, currencies),
 	})
 }
 
@@ -2125,6 +2238,13 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		catIDToName[c.ID] = c.Name
 	}
 
+	currencies, err := loadImportCurrencies(r.Context(), h.queries)
+	if err != nil {
+		log.Printf("import get: load currencies: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to load currencies")
+		return
+	}
+
 	groups, err := buildCollisionGroups(
 		r.Context(),
 		h.queries,
@@ -2158,7 +2278,7 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		// Present on the resume path for the same reason field_errors is:
 		// without it, reloading the page during an import clears every
 		// flag the preview was asking the user to act on.
-		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0),
+		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0, currencies),
 	})
 }
 
@@ -2214,7 +2334,7 @@ func processImportRows(
 		// order matters and why it is shared rather than inlined here.
 		// The parsed date travels out of the check so the hash formula
 		// below does not re-parse what was just validated.
-		date, reason, blocked := preCategorySkipReason(row)
+		date, money, reason, blocked := preCategorySkipReason(row, in.Currencies)
 		if blocked {
 			result.Skipped = append(result.Skipped, importSkipped{
 				RowIndex: i,
@@ -2268,8 +2388,15 @@ func processImportRows(
 		// Nothing in stored data distinguishes "was entered as +42.50"
 		// from "was flipped from -42.50", so no backfill can tell them
 		// apart — this is documented for the owner rather than fixed.
+		// The hash is taken over money.AmountCents — the cents that will be
+		// STORED — which for a rate row is the derived value, not the sheet's
+		// (possibly empty) USD cell. buildCollisionGroups hashes the same
+		// quantity from the same resolver, so a hand-typed row at 89,000 and a
+		// sheet row at 89,000 are one identity, while the same row quoted at
+		// 89,500 is a different booking, which is correct: it is different
+		// money.
 		description := row.Description
-		amountCents := dollarsToCents(row.Amount)
+		amountCents := money.AmountCents
 		hash := database.ComputeContentHash(date, amountCents, description, canonicalCategoryName)
 
 		// Ordinary path: look up the hash and skip on a hit. The
@@ -2295,9 +2422,9 @@ func processImportRows(
 			continue
 		}
 
-		// Build params. Amount is expected to already be in base currency
-		// (the Excel "Amount (USD)" column). Original amount/currency are
-		// stored as-is for reference; no conversion is applied during import.
+		// Build params. Every money field comes from resolveImportMoney — one
+		// function, one matrix, the same one the preview showed the user — so
+		// nothing about what this row stores is decided here.
 		//
 		// Phase 3.1b: the legacy REAL amount column was dropped in migration
 		// 010; only amount_cents is written. The cents value is derived from
@@ -2316,32 +2443,35 @@ func processImportRows(
 		// retry-double-post problem content_hash cannot solve. See migration
 		// 017 and handleCreateTransaction.
 		//
-		// B10: booked_rate stays NULL too, and for the reason stated above —
-		// import applies no conversion, so no rate was ever booked. Dividing
-		// the file's own amount/original pair would manufacture a rate the
-		// user never quoted, and a booked rate is one-way (freeze-on-edit),
-		// so a manufactured one is permanent. NULL means "no rate involved",
-		// which is the truth for every imported row.
+		// booked_rate is NULL for exactly three shapes, and populated for the
+		// rest. It stays NULL when the row is plain base money (#1), when the
+		// row names the base currency (#7), and when the sheet stated a
+		// foreign pair but quoted NO rate (#2) — that pair is a label, and
+		// dividing one half by the other would manufacture a rate the user
+		// never quoted. It is POPULATED, with the sheet's own Rate cell, for
+		// every row whose base amount was derived from it (#3, and #4 once
+		// the sheet's own USD is shown to agree). That is the whole point of
+		// the column: a back-dated row is worth what it was worth on the day,
+		// and a booked rate is one-way (freeze-on-edit), so it must be the
+		// rate the row was actually quoted at — never today's.
+		//
+		// The values are assigned across from importMoney rather than
+		// re-derived: the original is already signed in lockstep with
+		// amount_cents (a foreign refund is negative on both sides, which
+		// keeps the implied rate positive), and the currency is already the
+		// household's canonical code rather than the sheet's spelling.
 		params := database.CreateTransactionParams{
-			UserID:      in.UserID,
-			Date:        date,
-			AmountCents: amountCents,
-			Description: description,
-			CategoryID:  categoryID,
-			Tags:        toNullString(row.Tags),
-			Notes:       toNullString(row.Notes),
-			ContentHash: sql.NullString{String: hash, Valid: true},
-		}
-		if row.OriginalAmount != 0 {
-			// Signed, in lockstep with amount_cents above: a foreign-currency
-			// refund is negative on BOTH sides, which keeps the implied rate
-			// (base/original) positive. preCategorySkipReason has already
-			// rejected the rows where the two signs disagree, so a
-			// contradictory pair cannot reach the insert.
-			params.OriginalAmountCents = sql.NullInt64{Int64: dollarsToCents(row.OriginalAmount), Valid: true}
-		}
-		if row.OriginalCurrency != "" {
-			params.OriginalCurrency = sql.NullString{String: row.OriginalCurrency, Valid: true}
+			UserID:              in.UserID,
+			Date:                date,
+			AmountCents:         amountCents,
+			OriginalAmountCents: money.OriginalAmountCents,
+			OriginalCurrency:    money.OriginalCurrency,
+			BookedRate:          money.BookedRate,
+			Description:         description,
+			CategoryID:          categoryID,
+			Tags:                toNullString(row.Tags),
+			Notes:               toNullString(row.Notes),
+			ContentHash:         sql.NullString{String: hash, Valid: true},
 		}
 
 		// Route the insert through the TransactionStore on the caller's
@@ -2385,12 +2515,11 @@ func processImportRows(
 //
 // Description is compared to "" not whitespace: the parsing path already runs
 // strings.TrimSpace before a row lands here, so an all-whitespace cell arrives
-// as "". Amount uses math.Abs to test MAGNITUDE, not to strip a sign: the
-// comparison is against zero, so it rejects the same rows with or without the
-// Abs, and the sign itself survives untouched to the ledger. (row.Amount is
-// always on the cents grid by the time it arrives — both the upload parse and
-// validateImportField round through parseImportAmount — so "zero dollars" and
-// "zero cents" are the same rejection here.)
+// as "". The zero-amount test is against the RESOLVED cents rather than the
+// sheet's USD cell, which is what lets a row that carries only a foreign
+// original and a rate through — it has money, the sheet just stated it in
+// another currency. The sign survives untouched to the ledger either way; what
+// is rejected is a row worth nothing at all.
 //
 // The policy, since B10: sign carries meaning WITHIN a category. A category is
 // still expense or income, but a negative amount on an expense row is a refund
@@ -2418,24 +2547,50 @@ func processImportRows(
 // category. Two copies of this list would drift, and the drift would show up
 // as a file the preview refuses to import for a decision that could not
 // change its outcome.
-func preCategorySkipReason(row importRow) (time.Time, importSkipReason, bool) {
+//
+// The resolved money travels out alongside the date, for the same reason the
+// date does: every caller needs it (the hash is taken over the cents that will
+// be stored, and the insert assigns all four money fields from it), and
+// resolving it twice would be two chances to resolve it differently.
+//
+// Money resolution is LAST, and every step of that order is load-bearing:
+//
+//   - The sign gate stays ahead of it. A row whose base and foreign halves
+//     point opposite ways is a contradiction about the row, and reporting the
+//     amount instead would name the consequence rather than the cause.
+//   - zero_amount is now read off the RESOLVED money rather than off the
+//     sheet's USD cell. That is the design's "no usd AND no (orig+rate)" rule
+//     stated once: a row with an original and a rate resolves to real cents
+//     and is not zero, while a row with nothing at all still is. It cannot be
+//     asked before the resolver, because before the resolver there is no
+//     amount to test.
+//   - The money flags are last-ditch. Every one of them has already blocked
+//     the preview and refused confirm with a 409; this floor exists so a
+//     session that reaches the insert with a stale flag — a currency deleted
+//     between gate and commit — skips the row with a name instead of storing
+//     the wrong money. Same role the field_too_long floor plays above it.
+func preCategorySkipReason(row importRow, cur importCurrencies) (time.Time, importMoney, importSkipReason, bool) {
 	date, err := parseImportDate(row.Date)
 	if err != nil {
-		return time.Time{}, skipReasonUnparseableDate, true
+		return time.Time{}, importMoney{}, skipReasonUnparseableDate, true
 	}
 	if row.Description == "" {
-		return time.Time{}, skipReasonEmptyDescription, true
+		return time.Time{}, importMoney{}, skipReasonEmptyDescription, true
 	}
 	if len(checkImportRowLengths([]importRow{row})) > 0 {
-		return time.Time{}, skipReasonFieldTooLong, true
-	}
-	if math.Abs(row.Amount) == 0 {
-		return time.Time{}, skipReasonZeroAmount, true
+		return time.Time{}, importMoney{}, skipReasonFieldTooLong, true
 	}
 	if moneySignsDisagree(row.Amount, row.OriginalAmount) {
-		return time.Time{}, skipReasonSignMismatch, true
+		return time.Time{}, importMoney{}, skipReasonSignMismatch, true
 	}
-	return date, "", false
+	money, _, moneyReason := resolveImportMoney(row, cur)
+	if moneyReason != "" {
+		return time.Time{}, importMoney{}, moneyReason, true
+	}
+	if money.AmountCents == 0 {
+		return time.Time{}, importMoney{}, skipReasonZeroAmount, true
+	}
+	return date, money, "", false
 }
 
 // stripCurrencyFormat removes currency symbols ($, €, £), commas, and
@@ -2707,6 +2862,7 @@ func unresolvedImportCategories(
 	categoryMap map[string]int64,
 	catNameToID map[string]int64,
 	defaultCategoryID int64,
+	cur importCurrencies,
 ) []unresolvedCategory {
 	byName := make(map[string]*unresolvedCategory)
 	order := make([]*unresolvedCategory, 0, 4)
@@ -2715,7 +2871,7 @@ func unresolvedImportCategories(
 		if row.Skip {
 			continue
 		}
-		if _, _, blocked := preCategorySkipReason(row); blocked {
+		if _, _, _, blocked := preCategorySkipReason(row, cur); blocked {
 			continue
 		}
 		if resolveCategoryID(row.Category, categoryMap, catNameToID, defaultCategoryID) != 0 {

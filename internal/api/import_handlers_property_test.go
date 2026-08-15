@@ -66,6 +66,12 @@ type propertyFixture struct {
 	catNameToID map[string]int64
 	catIDToName map[int64]string
 	knownCats   []string
+	// currencies is the household's real table (USD base, LBP 89000, EUR
+	// 0.92 — migration 001's seed), loaded once. Every sampled row's money is
+	// resolved against it, so a foreign shape the generator draws resolves
+	// the same way it would in a real import rather than being flagged as an
+	// unknown currency by an empty snapshot.
+	currencies importCurrencies
 }
 
 // newPropertyFixture sets up the per-property-test fixture: migrated
@@ -93,6 +99,11 @@ func newPropertyFixture(t *testing.T) *propertyFixture {
 		knownCats = append(knownCats, c.Name)
 	}
 
+	currencies, err := loadImportCurrencies(context.Background(), q)
+	if err != nil {
+		t.Fatalf("loadImportCurrencies: %v", err)
+	}
+
 	return &propertyFixture{
 		db:          db,
 		q:           q,
@@ -100,6 +111,7 @@ func newPropertyFixture(t *testing.T) *propertyFixture {
 		catNameToID: nameToID,
 		catIDToName: idToName,
 		knownCats:   knownCats,
+		currencies:  currencies,
 	}
 }
 
@@ -130,6 +142,7 @@ func (f *propertyFixture) runProcess(t *rapid.T, rows []importRow) importResult 
 		DefaultCategoryID: 0,
 		CatNameToID:       f.catNameToID,
 		CatIDToName:       f.catIDToName,
+		Currencies:        f.currencies,
 	})
 	return result
 }
@@ -565,6 +578,7 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 		defer tx.Rollback()
 		in.UserID = fix.userID
+		in.Currencies = fix.currencies
 		store := database.NewTransactionStore(fix.db, fix.q)
 		result, _ := processImportRows(ctx, fix.q.WithTx(tx), tx, store, in)
 		return result
