@@ -1272,11 +1272,26 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scan for the header row: find the first row that contains at least
-	// the three required column names (date, description, amount).
+	// Scan for the header row: find the first row that names a date, a
+	// description, and MONEY.
+	//
+	// Money is satisfied by `amount` OR `original amount`, and the OR is the
+	// whole reason a back-dated foreign statement can be imported at all. Such
+	// a sheet states its money in LBP and quotes the rate it was booked at; it
+	// has no USD column, because the USD figure is what SpenDrop is being
+	// asked to work out. Demanding `amount` refused that file at the door —
+	// before any row reached the resolver that exists to price it — and the
+	// user's only way in was to add a column of numbers they would have had to
+	// compute themselves, at which point the rate would have been decorative.
+	//
+	// It stays a REQUIREMENT rather than becoming optional: a file with no
+	// money column at all is a file this endpoint cannot do anything with, and
+	// saying so once about the sheet beats saying it per row about every row
+	// in it. A row with no money inside an otherwise fine sheet is a different
+	// thing, and is answered per row by the matrix.
 	headerIdx := -1
 	for i, row := range rows {
-		hasDate, hasDesc, hasAmount := false, false, false
+		hasDate, hasDesc, hasMoney := false, false, false
 		for _, cell := range row {
 			normalized := strings.ToLower(strings.TrimSpace(cell))
 			if field, found := columnMapping[normalized]; found {
@@ -1285,19 +1300,21 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 					hasDate = true
 				case "description":
 					hasDesc = true
-				case "amount":
-					hasAmount = true
+				case "amount", "original_amount":
+					hasMoney = true
 				}
 			}
 		}
-		if hasDate && hasDesc && hasAmount {
+		if hasDate && hasDesc && hasMoney {
 			headerIdx = i
 			break
 		}
 	}
 
 	if headerIdx == -1 {
-		writeError(w, http.StatusBadRequest, "missing required columns: date, description, amount")
+		// Both acceptable spellings are named. "missing amount" would send the
+		// owner of a foreign-only sheet off to add a column they do not need.
+		writeError(w, http.StatusBadRequest, "missing required columns: date, description, and either amount or original amount")
 		return
 	}
 

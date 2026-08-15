@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -745,6 +746,97 @@ func countFieldErrorsFor(t *testing.T, preview map[string]any, rowID int) int {
 		}
 	}
 	return n
+}
+
+// TestHandleImportUpload_ForeignOnlySheetIsAccepted is the flagship sheet of
+// this whole stage, and until now it was refused at the door.
+//
+// A back-dated Lebanese bank statement states its money in LBP and quotes the
+// rate it was booked at. It has no USD column at all — that is the point, and
+// the reason the rate is on the row. Header discovery demanded an `amount`
+// column, so the file never reached the resolver that exists to price it.
+//
+// The required money column is now satisfied by EITHER header. A row that
+// carries no money at all is still nothing: it resolves per the matrix and is
+// skipped or flagged there, where the reason can be named per row rather than
+// refusing the whole file for its shape.
+func TestHandleImportUpload_ForeignOnlySheetIsAccepted(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "foreignonly", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "Food", "1500000", "LBP", "89000"},
+			{"2026-01-16", "Bakery", "Food", "890000", "LBP", "89000"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if errs := fieldErrorsByRow(t, preview); len(errs) != 0 {
+		t.Fatalf("the sheet was flagged: %v", errs)
+	}
+	rows := previewRows(t, preview)
+	if len(rows) != 2 {
+		t.Fatalf("preview has %d rows, want 2", len(rows))
+	}
+	for i, want := range []float64{16.85, 10} {
+		if got := rows[i]["amount"]; got != want {
+			t.Errorf("row %d amount = %v, want %v (derived from the rate)", i, got, want)
+		}
+		if got := rows[i]["amount_derived"]; got != true {
+			t.Errorf("row %d amount_derived = %v, want true", i, got)
+		}
+	}
+
+	if rec := confirmImport(t, h, q, user, importID); rec.Code != http.StatusOK {
+		t.Fatalf("confirm: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var cents int64
+	var rate sql.NullFloat64
+	if err := db.QueryRow(`
+		SELECT amount_cents, booked_rate FROM transactions
+		WHERE deleted_at IS NULL AND description = 'Souk run'`).Scan(&cents, &rate); err != nil {
+		t.Fatalf("read the imported row: %v", err)
+	}
+	if cents != 1685 {
+		t.Errorf("amount_cents = %d, want 1685", cents)
+	}
+	if !rate.Valid || rate.Float64 != 89000 {
+		t.Errorf("booked_rate = %+v, want 89000", rate)
+	}
+}
+
+// TestHandleImportUpload_SheetWithNoMoneyColumnNamesBothHeaders is the control
+// for the test above. Widening the requirement must not mean accepting a file
+// with no money in it at all — and the refusal has to name BOTH headers now,
+// or a user with a foreign-only sheet reads "missing amount" and goes off to
+// add a column they do not need.
+func TestHandleImportUpload_SheetWithNoMoneyColumnNamesBothHeaders(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "nomoney", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Category", "Notes"},
+		[][]string{{"2026-01-15", "Souk run", "Food", "no money here"}})
+
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("upload: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	for _, want := range []string{"date", "description", "amount", "original amount"} {
+		if !strings.Contains(body, want) {
+			t.Errorf("the refusal does not name %q: %s", want, body)
+		}
+	}
 }
 
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
