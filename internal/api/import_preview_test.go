@@ -839,6 +839,43 @@ func TestHandleImportUpload_SheetWithNoMoneyColumnNamesBothHeaders(t *testing.T)
 	}
 }
 
+// TestBuildImportPreview_FieldErrorOrderWithinARow pins what the builder's
+// comment claims: within one row, the length family comes first and the money
+// condition after it.
+//
+// The order is not decoration. The frontend scrolls to the first blocker and
+// renders the errors in the order they arrive, so it decides which sentence a
+// user meets first on a row that has two problems — and a stable sort by
+// row_id alone leaves the within-row order to whatever the builder happens to
+// append, which is exactly the kind of thing that changes silently.
+func TestBuildImportPreview_FieldErrorOrderWithinARow(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "flagorder", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			// One row, two problems, on two different cells.
+			{"2026-01-15", strings.Repeat("d", MaxDescriptionLength+1), "10.00", "Food", "1500000", "LBX"},
+		})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+	list, _ := preview["field_errors"].([]any)
+	if len(list) != 2 {
+		t.Fatalf("field_errors = %v, want two entries on the one row", preview["field_errors"])
+	}
+	got := []string{
+		list[0].(map[string]any)["field"].(string),
+		list[1].(map[string]any)["field"].(string),
+	}
+	want := []string{importFieldDescription, importFieldOriginalCurrency}
+	if got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("field order = %v, want %v (length family first, then the money condition)", got, want)
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.

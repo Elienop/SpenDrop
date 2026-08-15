@@ -4164,6 +4164,164 @@ func TestHandleImportConfirm_GateOrder_MoneyBeforeCategories(t *testing.T) {
 	}
 }
 
+// TestHandleImportConfirm_RateChangeMidSessionMovesOnlyTheOffer is the
+// currencies-snapshot test from the design's test list, and the property it
+// pins is what a per-row rate is FOR: a row that quoted its own rate is not
+// repriced by anything that happens to the table afterwards.
+//
+// The admin edits LBP mid-session. The row with a rate keeps its value and
+// will book the rate it quoted; the row without one has its OFFER move, because
+// that offer is "today's rate" and today's rate changed.
+func TestHandleImportConfirm_RateChangeMidSessionMovesOnlyTheOffer(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "ratechange", "admin")
+	ctx := context.Background()
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", "89000"},
+			{"2026-01-16", "Bakery", "", "Food", "1500000", "LBP", ""},
+		})
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if got := fieldErrorsByRow(t, preview)[1][importFieldRate]; got != "No rate for 1,500,000 LBP — enter the rate this row was booked at, or apply today's 89,000." {
+		t.Fatalf("row 1's opening offer is not the seeded rate: %q", got)
+	}
+
+	if err := q.UpsertCurrency(ctx, database.UpsertCurrencyParams{
+		Code: "LBP", Name: "Lebanese Pound", Symbol: "LL", RateToBase: 50, IsBase: false,
+	}); err != nil {
+		t.Fatalf("UpsertCurrency: %v", err)
+	}
+
+	getRec := getImportSession(t, h, user, importID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: %d %s", getRec.Code, getRec.Body.String())
+	}
+	var resumed map[string]any
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("unmarshal resume: %v", err)
+	}
+
+	rows := previewRows(t, resumed)
+	if got := rows[0]["amount"]; got != 16.85 {
+		t.Errorf("row 0 amount = %v, want 16.85 — a row that quoted its own rate must not move", got)
+	}
+	if got := rows[0]["amount_derived"]; got != true {
+		t.Errorf("row 0 amount_derived = %v, want true", got)
+	}
+	want := "No rate for 1,500,000 LBP — enter the rate this row was booked at, or apply today's 50."
+	if got := fieldErrorsByRow(t, resumed)[1][importFieldRate]; got != want {
+		t.Errorf("row 1 offer = %q\nwant       = %q", got, want)
+	}
+
+	// Skip the rate-less row and confirm: the row that quoted 89,000 books
+	// 89,000, not the 50 the table now says.
+	if rec := patchImportRow(t, h, user, importID, 1, "skip", true); rec.Code != http.StatusOK {
+		t.Fatalf("skip row 1: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := confirmImport(t, h, q, user, importID); rec.Code != http.StatusOK {
+		t.Fatalf("confirm: %d %s", rec.Code, rec.Body.String())
+	}
+	got := readOnlyStoredRow(t, db)
+	if got.AmountCents != 1685 {
+		t.Errorf("amount_cents = %d, want 1685 — the sheet's rate, not the table's", got.AmountCents)
+	}
+	if !got.BookedRate.Valid || got.BookedRate.Float64 != 89000 {
+		t.Errorf("booked_rate = %+v, want 89000", got.BookedRate)
+	}
+}
+
+// TestHandleImportConfirm_CurrencyDeletedBetweenPreviewAndConfirm covers the
+// window the two currency snapshots exist for. The preview resolved a row
+// against a currency the household had; by the time confirm runs, it is gone.
+//
+// What the user gets is a 409 naming the row — never a 500, and never money
+// resolved against a currency that no longer exists. The insert loop's own
+// answer for the same row is asserted below it, directly, because the gate
+// stops the batch before the loop can be reached: that arm is the floor that
+// catches the narrower race the gate cannot (a delete landing BETWEEN the
+// gate's snapshot and the transaction's).
+func TestHandleImportConfirm_CurrencyDeletedBetweenPreviewAndConfirm(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "curdeleted", "admin")
+	ctx := context.Background()
+
+	if err := q.UpsertCurrency(ctx, database.UpsertCurrencyParams{
+		Code: "LBX", Name: "Test Coin", Symbol: "X", RateToBase: 50, IsBase: false,
+	}); err != nil {
+		t.Fatalf("UpsertCurrency: %v", err)
+	}
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-03-01", "Airport", "", "Food", "1000", "LBX", "50"},
+		})
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if errs := fieldErrorsByRow(t, preview); len(errs) != 0 {
+		t.Fatalf("the preview flagged a row it should have resolved: %v", errs)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM currencies WHERE code = 'LBX'`); err != nil {
+		t.Fatalf("delete the currency: %v", err)
+	}
+
+	rec := confirmImport(t, h, q, user, importID)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("confirm: expected 409, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	if code := decodedCode(t, rec); code != "MONEY_ERRORS" {
+		t.Errorf("code = %q, want MONEY_ERRORS", code)
+	}
+	if n := countTransactionsForUser(t, db, user.ID); n != 0 {
+		t.Errorf("%d rows landed against a currency that no longer exists", n)
+	}
+
+	// The floor, reached directly: a batch whose snapshot has lost the
+	// currency skips the row BY NAME rather than inserting wrong money. This
+	// is the answer to the race the gate cannot see, and it is unreachable
+	// over HTTP precisely because the gate above got there first.
+	stale, err := loadImportCurrencies(ctx, q)
+	if err != nil {
+		t.Fatalf("load currencies: %v", err)
+	}
+	// Every pool read happens BEFORE the transaction opens: the test pool is
+	// capped at one connection, exactly like production, so a query issued on
+	// the pool while a tx holds that connection waits forever.
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	catIDToName := map[int64]string{}
+	catNameToID := map[string]int64{}
+	for _, c := range cats {
+		catIDToName[c.ID] = c.Name
+		catNameToID[strings.ToLower(c.Name)] = c.ID
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	defer tx.Rollback()
+	result, _ := processImportRows(ctx, q.WithTx(tx), tx, database.NewTransactionStore(db, q), importProcessInput{
+		UserID: user.ID,
+		Rows: []importRow{{
+			Date: "2026-03-01", Description: "Airport", Category: "Food",
+			OriginalAmount: 1000, RawOriginalAmount: "1000", OriginalCurrency: "LBX",
+			Rate: 50, RawRate: "50",
+		}},
+		CatNameToID: catNameToID,
+		CatIDToName: catIDToName,
+		Currencies:  stale,
+	})
+	assertSingleSkip(t, result, skipReasonUnknownCurrency)
+}
+
 // seedManualForeignRow creates a foreign-currency transaction through the real
 // API, so its cents, its hash and its booked rate are produced by the write
 // path rather than by a fixture that could agree with the importer only by

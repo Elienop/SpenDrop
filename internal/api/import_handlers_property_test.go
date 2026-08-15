@@ -816,6 +816,43 @@ func TestProcessImportRows_AllReasonsReachable(t *testing.T) {
 		}
 	})
 
+	t.Run("duplicate_in_batch_derived_row", func(t *testing.T) {
+		// The same identity, twice, on a row whose cents were COMPUTED. The
+		// non-derived arm above cannot see this: dedupe hashes the cents that
+		// will be stored, so a build that hashed the sheet's own (empty)
+		// Amount cell would hash zero for both rows and still call the second
+		// one a duplicate — for the wrong reason, and while merging every
+		// rate row in the file into one identity.
+		row := validBase
+		row.Amount = 0
+		row.OriginalAmount = 1_500_000
+		row.OriginalCurrency = "LBP"
+		row.Rate = 89_000
+		row.RawRate = "89000"
+		other := row
+		other.OriginalAmount = 890_000 // a different sum at the same rate
+
+		result := run(t, importProcessInput{
+			Rows:        []importRow{row, row, other},
+			CatNameToID: fix.catNameToID,
+			CatIDToName: fix.catIDToName,
+		})
+		if len(result.Inserted) != 2 {
+			t.Fatalf("expected 2 inserted (the first occurrence and the distinct sum), got %d: %+v",
+				len(result.Inserted), result.Inserted)
+		}
+		if len(result.Skipped) != 1 || result.Skipped[0].Reason != skipReasonDuplicate {
+			t.Fatalf("expected exactly one duplicate skip, got %+v", result.Skipped)
+		}
+		if result.Skipped[0].RowIndex != 1 {
+			t.Errorf("skipped RowIndex = %d, want 1 (the second occurrence)", result.Skipped[0].RowIndex)
+		}
+		if result.Inserted[0].AmountCents != 1685 || result.Inserted[1].AmountCents != 1000 {
+			t.Errorf("inserted cents = %d, %d; want 1685 and 1000 — the derived values, not the sheet's empty Amount cell",
+				result.Inserted[0].AmountCents, result.Inserted[1].AmountCents)
+		}
+	})
+
 	t.Run("errored_unknown_category_id", func(t *testing.T) {
 		// Wire a catNameToID that resolves the spreadsheet category
 		// to ID 9999, but leave catIDToName empty. resolveCategoryID
