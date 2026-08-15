@@ -3587,11 +3587,18 @@ function DataSection({ admin }: DataSectionProps) {
   // The numeric keypad this field now asks for makes clear-and-retype the
   // normal way to change a year, so the trap got easier to hit.
   //
-  // `Number(yearInput)` reproduces the old coercion EXACTLY, including
-  // `Number('') === 0`, so every export URL this section builds is unchanged
-  // for every input — the fix is confined to what the box displays. (An empty
-  // field still exports year 0; that is pre-existing and deliberately left
-  // alone here rather than folded into a typing fix.)
+  // `Number(yearInput)` is the old coercion for any given field value,
+  // including `Number('') === 0`, so a typed year exports exactly what it
+  // did. What DID change is which values are reachable: the numeric state
+  // round-tripped every keystroke through `String(Number(v))`, and a
+  // `type="number"` input reports '' for a bad-input intermediate like a lone
+  // `-` or `1e`, so those keystrokes collapsed the field to 0 before the next
+  // one landed. The string state keeps what the browser hands back, so
+  // `-5` now exports `/monthly/-5/{m}` where it used to export `/monthly/5/{m}`
+  // — both rejected 400 by the handler's `[MinDataYear, MaxDataYear]` check
+  // (measured by driving both implementations through a keystroke matrix,
+  // deep review 2026-08-15). An empty field still exports year 0; that and
+  // the out-of-range cases are B52, deliberately not folded into a typing fix.
   const [yearInput, setYearInput] = useState(String(now.getFullYear()));
   const year = Number(yearInput);
   const [month, setMonth] = useState(now.getMonth() + 1);

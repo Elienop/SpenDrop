@@ -83,4 +83,19 @@ describe('AppShell toaster mount order (B50)', () => {
       await screen.findByText('cold-load probe'),
     ).toBeInTheDocument();
   });
+
+  // The functional invariant is only "before the routed content" (a Toaster
+  // after Sidebar/MobileNav would still catch every page's mount toast), but
+  // the a11y note at the site — Notifications is the FIRST landmark and a
+  // visible toast the first Tab stop — is true of the LITERAL first child, so
+  // pin the literal position; a move to third child is a comment lie even
+  // though the test above stays green.
+  test('the Toaster is the literal first child of the shell root', () => {
+    const { container } = renderShell();
+    const root = container.firstElementChild;
+    expect(root).not.toBeNull();
+    const first = root!.firstElementChild;
+    expect(first?.tagName).toBe('SECTION');
+    expect(first?.getAttribute('aria-label')).toBe('Notifications alt+T');
+  });
 });

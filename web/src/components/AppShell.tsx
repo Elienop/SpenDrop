@@ -71,7 +71,11 @@ export function AppShell() {
     <div className="min-h-screen bg-background text-foreground">
       {/*
         FIRST child, and that ordering is load-bearing — do not move it back
-        below <main> for tidiness (B50, 2026-08-15).
+        below <main> for tidiness (B50, 2026-08-15). Strictly, the functional
+        invariant is "before the routed content" (Sidebar and MobileNav toast
+        nothing today, so a Toaster after them would still work); it sits
+        literally first so the a11y consequence written below stays exactly
+        true, and AppShell.toaster.test.tsx pins the literal position.
 
         sonner's Toaster subscribes to the toast bus from a passive effect over
         state that starts empty (`useState([])`), and `Observer.addToast`

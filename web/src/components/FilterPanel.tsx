@@ -204,10 +204,11 @@ export function FilterPanel({
 
               `inputMode="decimal"` opens the phone's decimal keypad — see
               `<MonthlyBudgetCard>` in `pages/Budgets.tsx` for the reasoning and
-              the S24 evidence. Caveat unique to this pair, since these two
-              bounds are the only place in the app where a typed minus is
-              meant: the spec leaves a minus key up to the device for BOTH
-              `decimal` and `numeric`, so neither hint guarantees one.
+              the S24 evidence. Caveat for the two places a typed minus is
+              meant — these bounds and the import preview's amount cell
+              (`ImportPreviewTable`, whose parser is sign-preserving): the
+              spec leaves a minus key up to the device for BOTH `decimal` and
+              `numeric`, so neither hint guarantees one.
 
               WHAT TO DO IF THE S24 KEYPAD HIDES THE MINUS — the reflex ("drop
               the hint") is probably wrong, so the order matters:
@@ -221,8 +222,9 @@ export function FilterPanel({
                  where the hint genuinely does remove a minus is iOS (bare
                  `type=number` gives the numbers-and-punctuation pad, which has
                  `-`; `decimal` gives one without). This household is Android.
-              2. The durable fix is a sign affordance in this tab — a "refunds
-                 only" / sign chip beside the bounds — NOT a markup change.
+              2. The durable fix is a sign affordance — a "refunds only" /
+                 sign chip beside these bounds, and the same thought for the
+                 import preview cell — NOT a markup change (B51).
                  Worth doing regardless: nothing on screen currently tells a
                  user that a negative bound is how you find refunds.
               3. NOT `inputMode="text"`. That serves the rare negative bound by

@@ -245,9 +245,9 @@ mock" (fix) from "pragmatic partial of a huge generic" (document). **Effort:** s
 
 ### B51 — nothing in the UI says a negative Amount bound is how you find refunds
 **Verified: read** (2026-08-15, UX review of the B49 sweep). Since B10 made refunds negative,
-the Filters → Amount min/max pair is the only place a typed minus is meant, and that fact lives
-in a code comment (`FilterPanel.tsx`, the Amount-tab block) — no label, placeholder or chip says
-it. The durable fix is a sign affordance ("refunds only" switch or a sign chip) rather than any
+the Filters → Amount min/max pair and the import preview's amount cell (`ImportPreviewTable`,
+sign-preserving parser) are the two places a typed minus is meant, and that fact lives in code
+comments (`FilterPanel.tsx`'s Amount-tab block) — no label, placeholder or chip says it. The durable fix is a sign affordance ("refunds only" switch or a sign chip) rather than any
 keypad-hint change: on Android/Chromium a bare `type="number"` and `inputMode="decimal"` are
 REPORTED to map to the same unsigned IME class (unverified — device only), and iOS is the one
 platform where `decimal` itself removes the minus. If the S24 keypad hides `-`, compare against a
@@ -258,8 +258,11 @@ bare `type="number"` field first; then build the affordance. **Effort:** small-m
 `DataSection` derives `year = Number(yearInput)`, so an empty field is `0` and Export builds
 `/api/export/monthly/0/{m}` — pre-existing behaviour, deliberately preserved when the state moved
 from number to string (a fallback or clamp would change export semantics, which that fix ruled
-out). Wants a decision: disable Export while the field is empty/out of range, or fall back to the
-current year. **Effort:** small.
+out). The string state also lets a lone `-` survive mid-typing, so `-5` now reaches the URL where
+the numeric state used to collapse it to 5; the handler 400s anything outside
+`[MinDataYear, MaxDataYear]`, so both shapes open a JSON error tab, never a wrong export. Wants a
+decision: disable Export while the field is empty/out of range, or fall back to the current year.
+**Effort:** small.
 
 ---
 
@@ -356,7 +359,7 @@ condition *and* move the predicate, believing one was safe because the other was
   block** (2026-08-15, on `fix/phone-inputmode-toaster-order`; squash hash joins this entry at
   merge). Two parallel builders with disjoint file ownership; 0 Critical / 0 Important from the
   code / UX / design battery, every Minor fixed. Per item:
-  **B49** — every real `type="number"` `<Input>` now pairs with an `inputMode` (12 added: 9
+  **B49** — every real `type="number"` `<Input>` now pairs with an `inputMode` (12 added: 10
   `decimal` for money/rates incl. AmountCurrencyInput — the wrapper all four amount surfaces
   render — FilterPanel min/max, Savings target, the three Budgets desktop inputs, the three
   Settings rate fields; 2 `numeric` for the Savings and export Year fields), plus the shared
@@ -367,8 +370,10 @@ condition *and* move the predicate, believing one was safe because the other was
   and headless Chrome raise no keyboard); the MECHANISM is the owner's S24 confirmation on the
   Budgets cards (v0.44.2), now recorded in the canonical `<MonthlyBudgetCard>` comment that
   every site points at, and the convention is in `docs/DESIGN_GUIDE.md`. Rider: the export Year
-  field keeps its raw string in state so clearing it no longer snaps to "0" (export URLs
-  byte-identical; the empty-→-year-0 residue is B52). Signed-bound caveat recorded at
+  field keeps its raw string in state so clearing it no longer snaps to "0" (`Number(s)` is the
+  old coercion per value, but a lone `-`/`1e` no longer collapses to 0 mid-typing, so `-5` now
+  reaches the URL and is 400'd instead of exporting year 5 — measured by the deep review; that
+  and the empty-→-year-0 residue are B52). Signed-bound caveat recorded at
   FilterPanel and filed as B51. Device check still owed: FilterPanel's minus key on the S24.
   **B50** — `<Toaster />` is the FIRST child of AppShell's root (was after `</main>`) and of
   QuickAdd's root, so a `toast.*` fired from a route's mount effect renders on a cold load.
