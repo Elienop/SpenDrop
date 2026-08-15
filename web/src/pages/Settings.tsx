@@ -673,6 +673,10 @@ function CurrencyCard({
             type="number"
             step="0.0001"
             min="0"
+            // A rate is four decimals deep, so the decimal keypad, not the
+            // digits one. `type` alone does not open it on Android — see
+            // `<MonthlyBudgetCard>` in `pages/Budgets.tsx`.
+            inputMode="decimal"
             value={rate}
             onChange={(e) => onRateChange(currency.code, e.target.value)}
             onFocus={selectAllOnFocus}
@@ -831,6 +835,9 @@ function CurrenciesSection() {
                           type="number"
                           step="0.0001"
                           min="0"
+                          // Same decimal keypad as the phone card above; inert
+                          // where a physical keyboard is attached.
+                          inputMode="decimal"
                           value={editRates[c.code] ?? ''}
                           onChange={(e) =>
                             setEditRates((prev) => ({
@@ -939,6 +946,7 @@ function CurrenciesSection() {
                       <Input
                         type="number"
                         step="0.0001"
+                        inputMode="decimal"
                         placeholder="0.79"
                         name={field.name}
                         onBlur={field.onBlur}
@@ -2253,7 +2261,7 @@ function useNewTokenReveal(): NewTokenReveal {
  * `<SettingsSectionPicker>` or `<Tabs>`, never both, and crossing `md` swaps
  * one for the other. Those are different component types in the same position,
  * so React unmounts the whole subtree and every section's state with it. For
- * five of the six sections that costs a scroll position or a half-typed form.
+ * four of the five sections that costs a scroll position or a half-typed form.
  * For this one it costs a secret the server hashed at rest and will never hand
  * out again: rotating a phone while the token was on screen left the user
  * holding a token they now have to revoke and re-mint, and nothing said so.
@@ -3572,7 +3580,20 @@ interface DataSectionProps {
 
 function DataSection({ admin }: DataSectionProps) {
   const now = new Date();
-  const [year, setYear] = useState(now.getFullYear());
+  // The RAW STRING is the state, and the number is derived. A numeric state
+  // could not represent "empty": `Number('')` is 0, so the moment the user
+  // cleared the field to retype it, the controlled input snapped to "0" and
+  // the next keystroke appended to that — backspace-and-retype was impossible.
+  // The numeric keypad this field now asks for makes clear-and-retype the
+  // normal way to change a year, so the trap got easier to hit.
+  //
+  // `Number(yearInput)` reproduces the old coercion EXACTLY, including
+  // `Number('') === 0`, so every export URL this section builds is unchanged
+  // for every input — the fix is confined to what the box displays. (An empty
+  // field still exports year 0; that is pre-existing and deliberately left
+  // alone here rather than folded into a typing fix.)
+  const [yearInput, setYearInput] = useState(String(now.getFullYear()));
+  const year = Number(yearInput);
   const [month, setMonth] = useState(now.getMonth() + 1);
   const [exportMode, setExportMode] = useState<'monthly' | 'yearly'>('monthly');
 
@@ -3629,8 +3650,11 @@ function DataSection({ admin }: DataSectionProps) {
               <Input
                 id="export-year"
                 type="number"
-                value={year}
-                onChange={(e) => setYear(Number(e.target.value))}
+                // A year has no fraction, so the digits keypad rather than the
+                // decimal one — the only `numeric` hint on this page.
+                inputMode="numeric"
+                value={yearInput}
+                onChange={(e) => setYearInput(e.target.value)}
                 onFocus={selectAllOnFocus}
                 min={PLANNING_MIN_YEAR}
                 max={PLANNING_MAX_YEAR}
@@ -4161,7 +4185,7 @@ function renderSettingsSection(value: SettingsTab, admin: boolean) {
  * cheap move — keep `TabsList` with `sr-only` and let a Select drive the same
  * value — leaves TWO controls for one choice in the accessibility tree, since
  * `sr-only` hides from sight and not from a screen reader. A phone user would
- * meet a six-item tablist AND a combobox that do the same thing.
+ * meet a five-item tablist AND a combobox that do the same thing.
  *
  * The other obvious move is worse, and it is measured rather than assumed:
  * dropping `TabsList` while keeping `Tabs`/`TabsContent` leaves every panel
@@ -4189,8 +4213,8 @@ function SettingsSectionPicker({
   return (
     <div className="flex flex-col gap-6">
       <Select value={value} onValueChange={onChange}>
-        {/* `h-11`, not the stock `h-10`: this is the only way to reach five of
-            the six sections on a phone, so it carries the 44px touch floor the
+        {/* `h-11`, not the stock `h-10`: this is the only way to reach four of
+            the five sections on a phone, so it carries the 44px touch floor the
             rest of the phone shell keeps. */}
         <SelectTrigger aria-label="Settings section" className="h-11 w-full">
           <SelectValue />
@@ -4223,7 +4247,8 @@ export function Settings() {
   const pageHeadingRef = useRef<HTMLHeadingElement>(null);
   // WIDTH, not pointer capability — unlike the heatmap's year grid, which
   // needs a pointer that can hit a sub-24px target. Nothing here depends on
-  // hover or precision; six long labels simply do not fit a narrow page. A
+  // hover or precision; the section labels simply do not fit a narrow page —
+  // measured when there were six of them, see the `TabsList` note below. A
   // touch tablet at ~720px portrait getting the Select is correct.
   const isMobile = useIsMobileViewport();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -4379,10 +4404,18 @@ export function Settings() {
           {/* The strip scrolls sideways rather than widening the page — see
               the note on `scrollableTabsList`, which explains why
               `justify-start` is the half that must not be lost. Below `md`
-              this is not rendered at all: six labels measured 568px of
-              scrollWidth against 313 of client, and the Reports treatment
-              (9px tick font, px-2) still came to 461px. Four short words fit
-              that way; six long ones do not at any size worth reading. */}
+              this is not rendered at all.
+
+              THE FIGURES BELOW ARE A DATED MEASUREMENT, kept as recorded
+              rather than rescaled. Taken 2026-08-09 (`cbaa4d0`), when this
+              page still had SIX sections — `users` merged into `account` on
+              2026-08-14 (`a8c484f`), so the strip carries five labels today.
+              At a 360px viewport those six labels came to 568px of scrollWidth
+              against 313 of client, and the Reports treatment (9px tick font,
+              px-2) still came to 461px. Four short words fit that way; six
+              long ones did not at any size worth reading. Five long ones have
+              not been re-measured — dropping one label of six does not close a
+              568-to-313 gap. */}
           <TabsList className={scrollableTabsList}>
             {visibleSettingsSections(admin).map((section) => (
               <TabsTrigger key={section.value} value={section.value}>
@@ -4403,7 +4436,7 @@ export function Settings() {
       )}
       {/* Outside the Tabs on purpose: "which build am I on" is a property of
           the app, not of a tab, so it stays put wherever the user has
-          navigated rather than hiding on five of the six panels. */}
+          navigated rather than hiding on four of the five panels. */}
       <AppVersion className="pt-2" />
     </div>
     </NewTokenRevealProvider>

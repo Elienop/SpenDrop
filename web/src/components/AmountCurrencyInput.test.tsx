@@ -77,6 +77,25 @@ describe('AmountCurrencyInput', () => {
     expect(screen.getByRole('spinbutton')).toHaveAttribute('min', '0');
   });
 
+  it('_PairsTypeNumberWithInputModeDecimal: the phone keypad hint', () => {
+    // The canonical statement of the mechanism lives on `<MonthlyBudgetCard>`
+    // in `pages/Budgets.tsx`: `type` says what the value is, `inputMode` says
+    // which soft keypad opens for it, and Android does not reliably infer a
+    // decimal one from the type alone (device-proven on the owner's S24,
+    // 2026-08-15). This control is the primary phone entry path — QuickAdd,
+    // TransactionEntryRow and TransactionEditSheet all render it.
+    //
+    // No test environment can prove the keyboard: happy-dom raises none, and
+    // neither does headless Chrome. The device proved the MECHANISM; every
+    // assertion of this shape in the suite (here, FilterPanel, Savings,
+    // Budgets, Settings) pins the ATTRIBUTE that carries it, so the hint
+    // cannot be dropped by a tidy-up without a red test.
+    renderInput();
+    const input = screen.getByRole('spinbutton');
+    expect(input).toHaveAttribute('type', 'number');
+    expect(input).toHaveAttribute('inputmode', 'decimal');
+  });
+
   it('renders no preview when currency === baseCode', () => {
     renderInput({ value: 100, currency: 'USD', baseCode: 'USD' });
     expect(screen.queryByText(/≈/)).not.toBeInTheDocument();

@@ -236,6 +236,30 @@ describe('Budgets page', () => {
       });
     });
 
+    // Keypad hint on a DESKTOP surface. The shape is explained once, on
+    // AmountCurrencyInput's `_PairsTypeNumberWithInputModeDecimal`; what is
+    // specific here is WHY a desktop tree carries it at all — the household's
+    // tablet is a coarse-pointer device that renders this table in landscape,
+    // and `inputMode` is inert wherever a physical keyboard is attached. The
+    // phone cards below `md` are pinned separately in `Budgets.mobile.test.tsx`.
+    test('the desktop month fields and Set-all ask for the decimal keypad', async () => {
+      renderBudgets();
+
+      await waitFor(() => {
+        expect(
+          screen.getByLabelText(/Budget for April 2026/i),
+        ).toBeInTheDocument();
+      });
+
+      const april = screen.getByLabelText(/Budget for April 2026/i);
+      expect(april).toHaveAttribute('type', 'number');
+      expect(april).toHaveAttribute('inputmode', 'decimal');
+
+      const bulk = screen.getByLabelText(/Apply amount to all months of 2026/i);
+      expect(bulk).toHaveAttribute('type', 'number');
+      expect(bulk).toHaveAttribute('inputmode', 'decimal');
+    });
+
     // B6a. Clearing a monthly budget now really unsets it, via
     // DELETE /budgets/{year}/{month} — the verb PUT cannot express, since it
     // rejects amount <= 0. Clearing is NOT budgeting zero: a month with no row
@@ -835,6 +859,19 @@ describe('Budgets page', () => {
       expect(
         (screen.getByLabelText(/Limit for Rent/i) as HTMLInputElement).value,
       ).toBe('');
+    });
+
+    // Same keypad hint, same reason as the Monthly panel's test above.
+    test('the desktop limit fields ask for the decimal keypad', async () => {
+      renderBudgets();
+
+      await waitFor(() => {
+        expect(screen.getByLabelText(/Limit for Rent/i)).toBeInTheDocument();
+      });
+
+      const rent = screen.getByLabelText(/Limit for Rent/i);
+      expect(rent).toHaveAttribute('type', 'number');
+      expect(rent).toHaveAttribute('inputmode', 'decimal');
     });
 
     test('PUTs a newly set positive limit on save', async () => {

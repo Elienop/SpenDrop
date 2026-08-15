@@ -200,10 +200,37 @@ export function FilterPanel({
 
               Known consequence, no migration: a saved filter created before
               this now also matches refunds, because a `max` of 50 always did
-              mean "<= 50" and -20 satisfies it. */}
+              mean "<= 50" and -20 satisfies it.
+
+              `inputMode="decimal"` opens the phone's decimal keypad — see
+              `<MonthlyBudgetCard>` in `pages/Budgets.tsx` for the reasoning and
+              the S24 evidence. Caveat unique to this pair, since these two
+              bounds are the only place in the app where a typed minus is
+              meant: the spec leaves a minus key up to the device for BOTH
+              `decimal` and `numeric`, so neither hint guarantees one.
+
+              WHAT TO DO IF THE S24 KEYPAD HIDES THE MINUS — the reflex ("drop
+              the hint") is probably wrong, so the order matters:
+
+              1. FIRST compare against a bare `type="number"` field with no
+                 `inputMode` on the same device. On Android/Chromium the two
+                 are reported to map to the same unsigned IME class, in which
+                 case removing the hint restores nothing and only costs the
+                 decimal keypad. VERIFY THAT BEFORE RELYING ON IT — it is a
+                 report, not something measured here, and the one platform
+                 where the hint genuinely does remove a minus is iOS (bare
+                 `type=number` gives the numbers-and-punctuation pad, which has
+                 `-`; `decimal` gives one without). This household is Android.
+              2. The durable fix is a sign affordance in this tab — a "refunds
+                 only" / sign chip beside the bounds — NOT a markup change.
+                 Worth doing regardless: nothing on screen currently tells a
+                 user that a negative bound is how you find refunds.
+              3. NOT `inputMode="text"`. That serves the rare negative bound by
+                 handing every positive one a QWERTY keyboard. */}
           <div className="flex items-center gap-2">
             <Input
               type="number"
+              inputMode="decimal"
               placeholder="Min $"
               value={filters.amountMin}
               onChange={(e) => setFilter('amountMin', e.target.value)}
@@ -214,6 +241,7 @@ export function FilterPanel({
             <span className="text-xs text-muted-foreground">to</span>
             <Input
               type="number"
+              inputMode="decimal"
               placeholder="Max $"
               value={filters.amountMax}
               onChange={(e) => setFilter('amountMax', e.target.value)}

@@ -447,6 +447,16 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
         {isEditing ? (
           <Input
             autoFocus
+            // One editor serves three columns, so the keypad hint has to be
+            // per-field rather than on the element: only `amount` is numeric,
+            // and without this the coarse-pointer tablet opens QWERTY on it.
+            // There is no `type="number"` here to infer from — the draft is a
+            // string for all three fields — which makes `inputMode` the only
+            // lever. Reasoning: `<MonthlyBudgetCard>` in `pages/Budgets.tsx`.
+            // The amount is signed (B10), so the minus-key caveat and its
+            // diagnostic order apply here too — see the Amount-tab comment in
+            // `FilterPanel.tsx`.
+            inputMode={field === 'amount' ? 'decimal' : undefined}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onBlur={() => void commitEdit(false)}

@@ -207,6 +207,12 @@ function SavingsSection() {
                       <FormControl>
                         <Input
                           type="number"
+                          // A year has no cents, so this is the one numeric
+                          // field here that wants the digits keypad rather
+                          // than the decimal one. See `<MonthlyBudgetCard>` in
+                          // `pages/Budgets.tsx` for why `type` alone is not
+                          // enough on Android.
+                          inputMode="numeric"
                           name={field.name}
                           onBlur={field.onBlur}
                           ref={field.ref}
@@ -251,6 +257,7 @@ function SavingsSection() {
                         <Input
                           type="number"
                           step="0.01"
+                          inputMode="decimal"
                           placeholder="0.00"
                           name={field.name}
                           onBlur={field.onBlur}

@@ -37,12 +37,16 @@ const mockedApi = vi.mocked(api);
 /**
  * Below `md` the Settings tab strip is replaced by a Select.
  *
- * The strip overflowed: six labels measured 568px of scrollWidth against 313
- * of client at a 360px viewport, and the Reports treatment (smaller tick font
- * plus `px-2`) still came to 461px. That is a layout fact a browser measures,
- * not this file — what is pinned here is that the swap happens, that the two
- * surfaces offer the SAME sections, and that the phone surface does not
- * reproduce the accessibility defect the obvious implementations have.
+ * The strip overflowed. THE FIGURES ARE A DATED MEASUREMENT, kept as recorded
+ * rather than rescaled: taken 2026-08-09 (`cbaa4d0`), when the page still had
+ * SIX sections — `users` merged into `account` on 2026-08-14 (`a8c484f`), so
+ * there are five today — those six labels measured 568px of scrollWidth
+ * against 313 of client at a 360px viewport, and the Reports treatment
+ * (smaller tick font plus `px-2`) still came to 461px. That is a layout fact a
+ * browser measures, not this file — what is pinned here is that the swap
+ * happens, that the two surfaces offer the SAME sections, and that the phone
+ * surface does not reproduce the accessibility defect the obvious
+ * implementations have.
  */
 
 interface HappyDomWindow {
@@ -99,7 +103,7 @@ function asRole(role: 'admin' | 'member') {
  * Render at phone width, having first proved the swap actually took.
  *
  * BOTH HALVES. The two surfaces are easy to confuse with a weak assertion —
- * both render the same six section bodies under the same page heading — so
+ * both render the same five section bodies under the same page heading — so
  * the control asserts the Select is present AND that no `tablist` exists.
  * Without the absence half, a page that rendered the tab strip at every width
  * would pass most of what follows.

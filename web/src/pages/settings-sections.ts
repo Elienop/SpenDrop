@@ -106,7 +106,7 @@ export function visibleSettingsSections(
  * The tab a given role may actually land on, given a raw `?tab=` value.
  *
  * THIS IS THE ROLE GATE FOR THE PHONE SURFACE, not a convenience. `isValidTab`
- * answers "is this one of the six values" and is deliberately role-blind, so it
+ * answers "is this one of the five values" and is deliberately role-blind, so it
  * cannot carry the gate: the desktop strip renders its panels by mapping over
  * `visibleSettingsSections(admin)`, which filters, but the phone renders ONE
  * section resolved from the raw value. Passing an unfiltered value there

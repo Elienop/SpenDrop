@@ -602,6 +602,35 @@ describe('ImportPreviewTable', () => {
     expect(errorCell.getAttribute('data-cell-error')).toBe('true');
   });
 
+  /**
+   * One `<Input>` serves three columns here, so the keypad hint cannot live on
+   * the element — it has to be derived from `field`. Both halves are asserted
+   * because a hint applied unconditionally would look identical on the amount
+   * cell and silently open a digits pad on free text. The shape is explained
+   * once, on AmountCurrencyInput's `_PairsTypeNumberWithInputModeDecimal`:
+   * no test environment raises a soft keyboard, so this pins the ATTRIBUTE.
+   */
+  it('the shared cell editor asks for a decimal keypad on amount and none on description', async () => {
+    const user = userEvent.setup();
+    render(<ImportPreviewTable preview={makePreview()} {...noopProps} />);
+
+    // `29.99` is row 2's amount, rendered via `row.amount.toFixed(2)`.
+    await user.dblClick(screen.getByText('29.99'));
+    const amountEditor = await screen.findByDisplayValue('29.99');
+    expect(amountEditor).toHaveAttribute('inputmode', 'decimal');
+  });
+
+  it('the shared cell editor leaves a description cell with no keypad hint', async () => {
+    const user = userEvent.setup();
+    render(<ImportPreviewTable preview={makePreview()} {...noopProps} />);
+
+    // The negative half of the pair above. This is the assertion that fails if
+    // the hint is applied to every field rather than derived from `field`.
+    await user.dblClick(screen.getByText('Amazon'));
+    const descriptionEditor = await screen.findByDisplayValue('Amazon');
+    expect(descriptionEditor).not.toHaveAttribute('inputmode');
+  });
+
   it('Escape during edit cancels without firing onPatchRow', async () => {
     const user = userEvent.setup();
     const onPatchRow = vi.fn();

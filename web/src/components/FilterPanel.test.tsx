@@ -103,4 +103,21 @@ describe('FilterPanel — signed amount bounds', () => {
       expect(input).toHaveAttribute('step', '0.01');
     }
   });
+
+  // Keypad hint — the shape is explained once, on AmountCurrencyInput's
+  // `_PairsTypeNumberWithInputModeDecimal`.
+  it('_BothBoundsAskForTheDecimalKeypad: inputmode on each end', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    await openAmountTab(user);
+
+    // Both ends again, for the same reason `min` is pinned on both: a hint on
+    // one bound leaves the other raising whatever the device guesses.
+    for (const name of ['Minimum amount', 'Maximum amount']) {
+      expect(screen.getByLabelText(name)).toHaveAttribute(
+        'inputmode',
+        'decimal',
+      );
+    }
+  });
 });

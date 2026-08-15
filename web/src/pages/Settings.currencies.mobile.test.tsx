@@ -1,5 +1,11 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import {
+  cleanup,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -210,6 +216,27 @@ describe('what a currency card carries', () => {
     const label = document.querySelector(`label[for="${rate.id}"]`);
     expect(label).not.toBeNull();
     expect(label?.textContent).toBe('Rate for LBP');
+  });
+
+  /**
+   * Keypad hint — the shape is explained once, on AmountCurrencyInput's
+   * `_PairsTypeNumberWithInputModeDecimal`. Asserted on BOTH presentations
+   * because they are two separate JSX blocks: a rate is four decimals deep, so
+   * a digits-only keypad would make the field unusable, and the card is the
+   * phone-only half where that actually bites.
+   */
+  test('both presentations of the rate field ask for the decimal keypad', async () => {
+    const list = await renderPhone();
+    const card = within(list).getByRole('spinbutton', { name: 'Rate for LBP' });
+    expect(card).toHaveAttribute('type', 'number');
+    expect(card).toHaveAttribute('inputmode', 'decimal');
+
+    cleanup();
+
+    const table = await renderDesktop();
+    const row = within(table).getByRole('spinbutton', { name: 'Rate for LBP' });
+    expect(row).toHaveAttribute('type', 'number');
+    expect(row).toHaveAttribute('inputmode', 'decimal');
   });
 });
 

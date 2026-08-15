@@ -399,6 +399,63 @@ describe('Settings', () => {
       });
     });
 
+    // The export Year box holds a STRING, not a number. With numeric state
+    // `Number('')` is 0, so clearing the field snapped it to "0" and the user
+    // could not backspace-and-retype — and the digits keypad this field asks
+    // for makes clear-and-retype the normal gesture. Both halves matter: the
+    // field must survive being emptied, AND the derived number must still
+    // build the same URL it always did.
+    test('the export Year survives being cleared and still exports the typed year', async () => {
+      const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null);
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
+      });
+
+      const yearInput = screen.getByLabelText(/year/i) as HTMLInputElement;
+      await user.clear(yearInput);
+      // The regression: a numeric state re-renders this as "0".
+      expect(yearInput.value).toBe('');
+
+      await user.type(yearInput, '2024');
+      expect(yearInput.value).toBe('2024');
+
+      await user.click(screen.getByRole('button', { name: /^export$/i }));
+      expect(openSpy).toHaveBeenCalledTimes(1);
+      expect(openSpy.mock.calls[0][0] as string).toMatch(
+        /\/api\/export\/monthly\/2024\/\d+/,
+      );
+      openSpy.mockRestore();
+    });
+
+    // Keypad hints on this page. The shape is explained once, on
+    // AmountCurrencyInput's `_PairsTypeNumberWithInputModeDecimal`. The two
+    // fields here are deliberately different: a rate is four decimals deep,
+    // an export year has no fraction at all.
+    test('Rate to Base asks for a decimal keypad, the export Year for a digits one', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderSettings();
+
+      await user.click(screen.getByRole('tab', { name: /currencies/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/rate to base/i)).toBeInTheDocument();
+      });
+      const rate = screen.getByLabelText(/rate to base/i);
+      expect(rate).toHaveAttribute('type', 'number');
+      expect(rate).toHaveAttribute('inputmode', 'decimal');
+
+      await user.click(screen.getByRole('tab', { name: /import \/ export/i }));
+      await waitFor(() => {
+        expect(screen.getByLabelText(/year/i)).toBeInTheDocument();
+      });
+      const year = screen.getByLabelText(/year/i);
+      expect(year).toHaveAttribute('type', 'number');
+      expect(year).toHaveAttribute('inputmode', 'numeric');
+    });
+
     test('accepts a symbol of exactly the limit in astral-plane characters', async () => {
       mockedApi.post.mockResolvedValue({});
       const user = userEvent.setup({ pointerEventsCheck: 0 });
