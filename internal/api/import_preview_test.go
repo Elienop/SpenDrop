@@ -1,0 +1,525 @@
+package api
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/elienop/spendrop/internal/database"
+)
+
+// uploadImportSheet uploads a workbook and returns the decoded preview plus
+// the session id. Every test in this file starts here, so the session under
+// test is built by the real parser rather than by a hand-written row slice —
+// the Rate cell has to survive header discovery and cell parsing to matter.
+func uploadImportSheet(t *testing.T, h *Handler, user database.User, xlsxData []byte) (map[string]any, string) {
+	t.Helper()
+	req := postMultipartFile(t, "/api/import/upload", xlsxData)
+	req = withUser(req, user)
+	rec := httptest.NewRecorder()
+	h.handleImportUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal upload response: %v", err)
+	}
+	id, _ := resp["import_id"].(string)
+	if id == "" {
+		t.Fatalf("upload response carries no import_id: %s", rec.Body.String())
+	}
+	return resp, id
+}
+
+// getImportSession calls the resume endpoint and returns the raw body, so a
+// caller can compare it BYTE for byte against another surface's.
+func getImportSession(t *testing.T, h *Handler, user database.User, importID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/import/"+importID, nil)
+	req = withUserAndURLParam(req, user, "importID", importID)
+	rec := httptest.NewRecorder()
+	h.handleImportGetSession(rec, req)
+	return rec
+}
+
+// fieldErrorsByRow indexes a preview's field_errors as row_id -> field ->
+// message, which is how every assertion below reads them.
+func fieldErrorsByRow(t *testing.T, preview map[string]any) map[int]map[string]string {
+	t.Helper()
+	out := map[int]map[string]string{}
+	raw, ok := preview["field_errors"]
+	if !ok {
+		t.Fatal("preview carries no field_errors key")
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("field_errors = %T, want an array", raw)
+	}
+	for _, item := range list {
+		entry, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("field_errors entry = %T, want an object", item)
+		}
+		rowID := int(entry["row_id"].(float64))
+		if out[rowID] == nil {
+			out[rowID] = map[string]string{}
+		}
+		out[rowID][entry["field"].(string)] = entry["message"].(string)
+	}
+	return out
+}
+
+func previewRows(t *testing.T, preview map[string]any) []map[string]any {
+	t.Helper()
+	raw, ok := preview["rows"].([]any)
+	if !ok {
+		t.Fatalf("rows = %T, want an array", preview["rows"])
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, r := range raw {
+		row, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("row = %T, want an object", r)
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// moneySheet is the fixture behind most of this file: one row per interesting
+// money shape, all of them otherwise valid, so nothing but the money decides
+// what happens to them.
+func moneySheet(t *testing.T) []byte {
+	t.Helper()
+	return createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			// row 0 — #5: a foreign original with no rate.
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", ""},
+			// row 1 — #6: a currency the household has not set up.
+			{"2026-01-16", "Duty free", "10.00", "Food", "100", "LBX", ""},
+			// row 2 — #4: the sheet's own USD contradicts its rate.
+			{"2026-01-17", "Pharmacy", "16.00", "Food", "1500000", "LBP", "89000"},
+			// row 3 — #3: the rate is the source of the USD.
+			{"2026-01-18", "Bakery", "", "Food", "1500000", "LBP", "89000"},
+		})
+}
+
+// TestBuildImportPreview_ThreeSurfacesAgree is the anti-drift test for the
+// whole preview contract: upload, a no-op PATCH and a GET resume must return
+// the SAME JSON for the same session, byte for byte.
+//
+// Byte equality rather than a field-by-field comparison, because the failure
+// this guards against is a field that exists on one surface and not another —
+// which is precisely what a comparison written field by field cannot see. The
+// history is on record: three handlers hand-built this map, and the PATCH copy
+// silently omitted import_id, row_count, columns and unique_categories, so
+// every edit after the first went to /import/undefined/rows/N.
+//
+// The fixture carries money flags on purpose. A preview with nothing to report
+// agrees trivially.
+func TestBuildImportPreview_ThreeSurfacesAgree(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "surfaces", "admin")
+
+	uploadReq := postMultipartFile(t, "/api/import/upload", moneySheet(t))
+	uploadReq = withUser(uploadReq, user)
+	uploadRec := httptest.NewRecorder()
+	h.handleImportUpload(uploadRec, uploadReq)
+	if uploadRec.Code != http.StatusOK {
+		t.Fatalf("upload: expected 200, got %d; body: %s", uploadRec.Code, uploadRec.Body.String())
+	}
+	uploadBody := uploadRec.Body.String()
+
+	var uploaded map[string]any
+	if err := json.Unmarshal([]byte(uploadBody), &uploaded); err != nil {
+		t.Fatalf("unmarshal upload: %v", err)
+	}
+	importID := uploaded["import_id"].(string)
+
+	// A PATCH that changes nothing: row 0 is already un-skipped. Its response
+	// is the full snapshot, so it must match the upload's.
+	patchRec := patchImportRow(t, h, user, importID, 0, "skip", false)
+	if patchRec.Code != http.StatusOK {
+		t.Fatalf("patch: expected 200, got %d; body: %s", patchRec.Code, patchRec.Body.String())
+	}
+	patchBody := patchRec.Body.String()
+
+	getRec := getImportSession(t, h, user, importID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+	getBody := getRec.Body.String()
+
+	if patchBody != uploadBody {
+		t.Errorf("PATCH response differs from upload's.\nupload = %s\npatch  = %s", uploadBody, patchBody)
+	}
+	if getBody != uploadBody {
+		t.Errorf("GET response differs from upload's.\nupload = %s\nget    = %s", uploadBody, getBody)
+	}
+
+	// A guard on the guard: if the fixture stopped producing flags, the three
+	// surfaces above would agree about nothing worth agreeing on.
+	if len(fieldErrorsByRow(t, uploaded)) == 0 {
+		t.Fatal("the fixture produced no field_errors, so byte equality proves nothing about the money family")
+	}
+}
+
+// TestHandleImportUpload_MoneyFlags pins the money family on the rail: which
+// field each condition lands on, the exact sentence it carries, and the
+// derived amount that replaces the sheet's own cell.
+//
+// The messages are asserted verbatim. The frontend renders them and composes
+// nothing, so the string IS the contract.
+func TestHandleImportUpload_MoneyFlags(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "moneyflags", "admin")
+
+	preview, _ := uploadImportSheet(t, h, user, moneySheet(t))
+	errs := fieldErrorsByRow(t, preview)
+
+	want := []struct {
+		rowID   int
+		field   string
+		message string
+	}{
+		{0, importFieldRate, "No rate for 1,500,000 LBP — enter the rate this row was booked at, or apply today's 89,000."},
+		{1, importFieldOriginalCurrency, "LBX isn't set up — add it under Settings → Currencies."},
+		{2, importFieldAmount, "16.00 ≠ 1,500,000 ÷ 89,000 = 16.85. Fix the amount, the original or the rate — SpenDrop stores what the rate produces."},
+	}
+	for _, w := range want {
+		got, ok := errs[w.rowID][w.field]
+		if !ok {
+			t.Errorf("row %d carries no %s error; got %v", w.rowID, w.field, errs[w.rowID])
+			continue
+		}
+		if got != w.message {
+			t.Errorf("row %d %s message =\n  %q\nwant\n  %q", w.rowID, w.field, got, w.message)
+		}
+	}
+
+	// Row 3 resolves cleanly and must NOT be flagged — without this arm a
+	// build that flagged every foreign row would pass every assertion above.
+	if flags, flagged := errs[3]; flagged {
+		t.Errorf("row 3 resolves through its rate and must carry no flag, got %v", flags)
+	}
+
+	rows := previewRows(t, preview)
+	if len(rows) != 4 {
+		t.Fatalf("preview has %d rows, want 4", len(rows))
+	}
+
+	// The wire `amount` is what the row WILL STORE, and amount_derived is how
+	// a reader tells a computed amount from a typed one.
+	if got := rows[3]["amount"]; got != 16.85 {
+		t.Errorf("row 3 amount = %v, want 16.85 — the preview must show the money it is about to write", got)
+	}
+	if got := rows[3]["amount_derived"]; got != true {
+		t.Errorf("row 3 amount_derived = %v, want true", got)
+	}
+	if got := rows[3]["rate"]; got != 89000.0 {
+		t.Errorf("row 3 rate = %v, want 89000", got)
+	}
+	if got := rows[3]["original_currency"]; got != "LBP" {
+		t.Errorf("row 3 original_currency = %v, want LBP", got)
+	}
+
+	// Row 2's amount is the sheet's own, untouched: it is blocked precisely
+	// because the two disagree, so silently showing the derived value would
+	// erase the disagreement the user has to resolve.
+	if got := rows[2]["amount"]; got != 16.0 {
+		t.Errorf("row 2 amount = %v, want the sheet's own 16", got)
+	}
+	if _, present := rows[2]["amount_derived"]; present {
+		t.Errorf("row 2 carries amount_derived, but its amount was not derived: %v", rows[2])
+	}
+
+	// A row with no money story at all keeps the wire it has always had.
+	if _, present := rows[1]["amount_derived"]; present {
+		t.Errorf("row 1 carries amount_derived on a non-derived row: %v", rows[1])
+	}
+}
+
+// TestHandleImportUpload_CollisionsUseDerivedCents is the identity test for
+// the whole stage: a row hand-typed in the app and the same row arriving in a
+// sheet that quotes the SAME rate are one transaction, so the preview must
+// predict the duplicate rather than let the user import a second copy.
+//
+// It can only pass if the collision hash is taken over the DERIVED cents. The
+// sheet's Amount cell is empty, so a grouping pass that hashed it would hash
+// zero — and drop the row from grouping entirely, reporting no collision at
+// all right up until confirm skipped it as a duplicate.
+func TestHandleImportUpload_CollisionsUseDerivedCents(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "derivedcollide", "admin")
+	ctx := context.Background()
+
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	var foodID int64
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+	if foodID == 0 {
+		t.Fatal("expected a seeded Food category")
+	}
+
+	// The manual row: typed in the app, in LBP, at the household's rate. The
+	// API divides by currencies.rate_to_base (89,000) and stores 1685 cents
+	// with the hash over that value.
+	body, _ := json.Marshal(map[string]any{
+		"date":              "2026-02-01",
+		"amount":            16.85,
+		"original_amount":   1500000,
+		"original_currency": "LBP",
+		"description":       "Souk run",
+		"category_id":       foodID,
+	})
+	createRec := httptest.NewRecorder()
+	createReq := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(body)), user)
+	createReq.Header.Set("Content-Type", "application/json")
+	h.handleCreateTransaction(createRec, createReq)
+	if createRec.Code != http.StatusCreated && createRec.Code != http.StatusOK {
+		t.Fatalf("manual create: status %d: %s", createRec.Code, createRec.Body.String())
+	}
+
+	// The sheet: the same money, stated the other way round — no USD cell at
+	// all, just the original and the rate that produced it.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-02-01", "Souk run", "", "Food", "1500000", "LBP", "89000"},
+		})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+
+	groups, _ := preview["collision_groups"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("collision_groups = %v, want exactly one db_match group", preview["collision_groups"])
+	}
+	group := groups[0].(map[string]any)
+	if group["reason"] != "db_match" {
+		t.Errorf("group reason = %v, want db_match", group["reason"])
+	}
+	match, ok := group["db_match"].(map[string]any)
+	if !ok {
+		t.Fatalf("group carries no db_match payload: %v", group)
+	}
+	if got := int64(match["amount_cents"].(float64)); got != 1685 {
+		t.Errorf("db_match amount_cents = %d, want 1685 — the manual row and the sheet row must resolve to the same cents", got)
+	}
+}
+
+// TestHandleImportUpload_CollisionsUseDerivedCents_OtherRateIsNotACollision is
+// the control for the test above, and the reason the hash formula did not need
+// to change. The same original quoted at a DIFFERENT rate is different money
+// and therefore a different booking — so it must NOT be predicted as a
+// duplicate.
+func TestHandleImportUpload_CollisionsUseDerivedCents_OtherRateIsNotACollision(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "otherrate", "admin")
+	ctx := context.Background()
+
+	cats, err := q.ListAllCategories(ctx)
+	if err != nil {
+		t.Fatalf("ListAllCategories: %v", err)
+	}
+	var foodID int64
+	for _, c := range cats {
+		if c.Name == "Food" {
+			foodID = c.ID
+		}
+	}
+
+	body, _ := json.Marshal(map[string]any{
+		"date":              "2026-02-01",
+		"amount":            16.85,
+		"original_amount":   1500000,
+		"original_currency": "LBP",
+		"description":       "Souk run",
+		"category_id":       foodID,
+	})
+	createRec := httptest.NewRecorder()
+	createReq := withUser(httptest.NewRequest(http.MethodPost, "/api/transactions", bytes.NewReader(body)), user)
+	createReq.Header.Set("Content-Type", "application/json")
+	h.handleCreateTransaction(createRec, createReq)
+	if createRec.Code != http.StatusCreated && createRec.Code != http.StatusOK {
+		t.Fatalf("manual create: status %d: %s", createRec.Code, createRec.Body.String())
+	}
+
+	// 89,500 instead of 89,000: 1,500,000 LBP is 16.76 at that rate, not
+	// 16.85. Same evening, same shop, a different booking.
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-02-01", "Souk run", "", "Food", "1500000", "LBP", "89500"},
+		})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+	if groups, _ := preview["collision_groups"].([]any); len(groups) != 0 {
+		t.Errorf("collision_groups = %v, want none — a row booked at another rate is different money", groups)
+	}
+	rows := previewRows(t, preview)
+	if got := rows[0]["amount"]; got != 16.76 {
+		t.Errorf("row 0 amount = %v, want 16.76 (1,500,000 ÷ 89,500)", got)
+	}
+}
+
+// TestHandleImportGetSession_UnknownCurrencyClearsAfterUpsert covers the one
+// remedy that lives OUTSIDE the import session. An unknown currency is fixed
+// in Settings, and the user must not have to re-upload the file afterwards:
+// every surface re-resolves against the currencies table as it stands, so a
+// plain resume clears the flag.
+func TestHandleImportGetSession_UnknownCurrencyClearsAfterUpsert(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "lbxadder", "admin")
+	ctx := context.Background()
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-03-01", "Airport", "", "Food", "1000", "LBX", "50"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if _, flagged := fieldErrorsByRow(t, preview)[0][importFieldOriginalCurrency]; !flagged {
+		t.Fatalf("upload did not flag the unknown currency: %v", preview["field_errors"])
+	}
+
+	if err := q.UpsertCurrency(ctx, database.UpsertCurrencyParams{
+		Code:       "LBX",
+		Name:       "Test Coin",
+		Symbol:     "X",
+		RateToBase: 50,
+		IsBase:     false,
+	}); err != nil {
+		t.Fatalf("UpsertCurrency: %v", err)
+	}
+
+	getRec := getImportSession(t, h, user, importID)
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("get: expected 200, got %d; body: %s", getRec.Code, getRec.Body.String())
+	}
+	var resumed map[string]any
+	if err := json.Unmarshal(getRec.Body.Bytes(), &resumed); err != nil {
+		t.Fatalf("unmarshal resume: %v", err)
+	}
+
+	if errs := fieldErrorsByRow(t, resumed); len(errs) != 0 {
+		t.Errorf("resume still flags the row after the currency was added: %v", errs)
+	}
+	rows := previewRows(t, resumed)
+	if got := rows[0]["amount"]; got != 20.0 {
+		t.Errorf("row 0 amount = %v, want 20 (1,000 ÷ 50) once the currency resolves", got)
+	}
+	if got := rows[0]["amount_derived"]; got != true {
+		t.Errorf("row 0 amount_derived = %v, want true", got)
+	}
+}
+
+// TestHandleImportUpload_CurrenciesSummary pins the rate the preview OFFERS.
+//
+// It rides on the preview rather than being read from the currencies endpoint
+// because the number the user is offered and the number the import records
+// have to be the same one: "apply today's 89,000" turns into a PATCH carrying
+// that literal value, which is then stored as the row's booked_rate. Two
+// sources would disagree for as long as either cache was staler.
+func TestHandleImportUpload_CurrenciesSummary(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "cursummary", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{{"2026-01-15", "Groceries", "42.50", "Food"}})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+
+	raw, ok := preview["currencies"]
+	if !ok {
+		t.Fatal("preview carries no currencies key; the rate offer has no source")
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("currencies = %T, want an array", raw)
+	}
+	got := map[string]map[string]any{}
+	for _, item := range list {
+		entry := item.(map[string]any)
+		got[entry["code"].(string)] = entry
+	}
+
+	for _, want := range []struct {
+		code   string
+		rate   float64
+		isBase bool
+	}{
+		{"USD", 1, true},
+		{"LBP", 89000, false},
+		{"EUR", 0.92, false},
+	} {
+		entry, ok := got[want.code]
+		if !ok {
+			t.Errorf("currencies is missing %s: %v", want.code, list)
+			continue
+		}
+		if entry["rate_to_base"] != want.rate {
+			t.Errorf("%s rate_to_base = %v, want %v", want.code, entry["rate_to_base"], want.rate)
+		}
+		if entry["is_base"] != want.isBase {
+			t.Errorf("%s is_base = %v, want %v", want.code, entry["is_base"], want.isBase)
+		}
+	}
+}
+
+// TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
+// family's exemption: skipping IS the remedy the flag offers, so a skipped row
+// must not go on blocking the confirm it was skipped to unblock.
+func TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "skipmoney", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "1500000", "LBP", ""},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	if _, flagged := fieldErrorsByRow(t, preview)[0][importFieldRate]; !flagged {
+		t.Fatalf("upload did not flag the rate-less row: %v", preview["field_errors"])
+	}
+
+	rec := patchImportRow(t, h, user, importID, 0, "skip", true)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("patch skip: expected 200, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	if errs := fieldErrorsByRow(t, patched); len(errs) != 0 {
+		t.Errorf("field_errors = %v, want none once the row is skipped", errs)
+	}
+}

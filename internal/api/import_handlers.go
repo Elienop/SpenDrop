@@ -233,22 +233,26 @@ func checkImportRowLengths(rows []importRow) []importFieldError {
 // inserted, so counting it would make the progress meter lie.
 //
 // Rows that fail to resolve to a valid hash — unparseable date, empty
-// description, zero amount, mismatched money signs, unresolved category —
-// are silently omitted from grouping. They'll still be rejected at confirm
-// time by processImportRows; the preview's job here is to flag collisions,
-// not to re-implement the full row validator.
+// description, no storable money, mismatched money signs, an over-long field,
+// an unresolved category — are silently omitted from grouping. They'll still
+// be rejected at confirm time by processImportRows; the preview's job here is
+// to flag collisions, not to re-implement the full row validator.
 //
-// The hash is computed over the SIGNED cents value the row would store, in
-// lockstep with processImportRows. The two constructions are independent
-// code but one identity: if only one of them signs its input, the preview
-// predicts duplicates that insert cleanly, or clears rows that then die on
-// the partial unique index and land in the opaque Errored bucket.
+// The hash is computed over the cents the row WILL STORE, and it gets them
+// from preCategorySkipReason — the same call, returning the same importMoney,
+// that the insert loop builds its params from. That is what makes the preview
+// and the insert one identity rather than two implementations that agree
+// today: a rate row's identity is its DERIVED cents, so a hand-typed row at
+// 89,000 and a sheet row at 89,000 are the same transaction, while the same
+// original quoted at 89,500 is a different booking. Hashing the sheet's own
+// Amount cell instead would hash zero for a row whose USD is empty, drop it
+// from grouping, and report no collision right up until confirm skipped it as
+// a duplicate.
 //
-// Called from two places:
-//  1. handleImportUpload, once at upload time, to seed the initial
-//     collision_groups field on the preview response.
-//  2. handleImportPatchRow, once per PATCH, to recompute groups after any
-//     field edit. The PATCH handler passes the session's mutated row slice.
+// Called from three places:
+//  1. buildImportPreview, for the upload / PATCH / GET responses.
+//  2. handleImportConfirm's gate, with the user's real category choices.
+//  3. nothing else — a fourth caller would be a fourth chance to disagree.
 //
 // The DB lookup is O(rows) — one GetTransactionByContentHash call per
 // hash-resolvable row. Callers MUST pass the already-loaded category
@@ -262,6 +266,7 @@ func buildCollisionGroups(
 	defaultCategoryID int64, // optional: user's chosen default at confirm time; 0 at upload time
 	catNameToID map[string]int64,
 	catIDToName map[int64]string,
+	cur importCurrencies,
 ) ([]collisionGroup, error) {
 	byHash := make(map[string][]int) // hash -> member row_ids
 
@@ -270,17 +275,15 @@ func buildCollisionGroups(
 		if row.Skip {
 			continue
 		}
-		if row.Description == "" || row.Amount == 0 {
-			continue
-		}
-		if moneySignsDisagree(row.Amount, row.OriginalAmount) {
-			// Confirm skips this row as skipReasonSignMismatch, so it
-			// cannot collide with anything: grouping it would 409 the
-			// whole import over a row that was never going to land.
-			continue
-		}
-		date, err := parseImportDate(row.Date)
-		if err != nil {
+		// One predicate, shared with the insert loop, rather than a second
+		// copy of the same list. Every reason it blocks on — unparseable date,
+		// empty description, over-long field, contradictory signs, unresolvable
+		// money, nothing to store — is a reason confirm will reject the row, so
+		// grouping it would 409 the whole import over a row that was never
+		// going to land. The resolved money comes back with it, which is what
+		// makes the hash below the SAME quantity the insert hashes.
+		date, money, _, skipped := preCategorySkipReason(row, cur)
+		if skipped {
 			continue
 		}
 		categoryID := resolveCategoryID(row.Category, categoryMap, catNameToID, defaultCategoryID)
@@ -293,7 +296,7 @@ func buildCollisionGroups(
 		}
 		hash := database.ComputeContentHash(
 			date,
-			dollarsToCents(row.Amount),
+			money.AmountCents,
 			row.Description,
 			canonical,
 		)
@@ -1393,23 +1396,16 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store in memory
-	importStore.Store(importID, &importEntry{
+	entry := &importEntry{
 		UserID:    user.ID,
 		Rows:      parsedRows,
 		Columns:   detectedColumns,
 		CreatedAt: time.Now(),
-	})
+	}
+	importStore.Store(importID, entry)
 
-	// Collect unique category names from all rows for the mapping UI.
-	uniqueCategories := uniqueCategoriesFromRows(parsedRows)
-
-	// Phase 3.4b: the upload preview computes collision_groups via
-	// buildCollisionGroups. Unlike the previous upload-time prediction,
-	// this pass detects intra-file collisions (the 20-identical-Starbucks
-	// case) in addition to DB matches, and returns them in a shape the
-	// editable preview table can consume directly. Categories are loaded
-	// here so buildCollisionGroups uses the same canonical name resolution
-	// as the confirm path.
+	// Categories are loaded here so the preview's hash formula uses the same
+	// canonical name resolution as the confirm path.
 	existingCats, err := h.queries.ListAllCategories(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to load categories")
@@ -1422,52 +1418,23 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
-	// One snapshot of the currencies table for this whole pass — see
-	// importCurrencies. Every row's money is resolved against it, and the
-	// preview reports it so the "apply today's rate" offer and the rate the
-	// import would record are the same number.
-	currencies, err := loadImportCurrencies(r.Context(), h.queries)
+	// The entry is already in the store, so another tab could PATCH it
+	// between the Store above and the read below. Held for the same reason
+	// the PATCH and GET handlers hold it: the rows and the collision groups
+	// in one response have to describe one snapshot.
+	entry.mu.Lock()
+	preview, err := h.buildImportPreview(r.Context(), importID, entry, catNameToID, catIDToName)
+	entry.mu.Unlock()
 	if err != nil {
-		log.Printf("import upload: load currencies: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to load currencies")
-		return
-	}
-
-	groups, err := buildCollisionGroups(
-		r.Context(),
-		h.queries,
-		parsedRows,
-		nil, // categoryMap not chosen yet at upload time
-		0,   // defaultCategoryID not chosen yet either
-		catNameToID,
-		catIDToName,
-	)
-	if err != nil {
-		log.Printf("import upload: build collision groups: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to compute collision groups")
+		log.Printf("import upload: build preview: %v", err)
+		writeError(w, http.StatusInternalServerError, "failed to build import preview")
 		return
 	}
 
 	// Start background cleanup (idempotent via sync.Once)
 	startImportCleanup()
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"import_id":         importID,
-		"row_count":         len(parsedRows),
-		"rows":              parsedRows,
-		"columns":           detectedColumns,
-		"unique_categories": uniqueCategories,
-		"collision_groups":  groups,
-		"field_errors":      checkImportRowLengths(parsedRows),
-		// Computed with nil/0 for the same reason collision_groups is:
-		// the user has chosen nothing yet. So this is the full list of
-		// names the file contains that nothing in the household matches
-		// — precisely what the mapping UI has to ask about. The frontend
-		// marks each entry resolved against its own local choices, which
-		// is how its gate stays the same shape as the confirm gate
-		// without reimplementing which rows are eligible.
-		"unresolved_categories": unresolvedImportCategories(parsedRows, nil, catNameToID, 0, currencies),
-	})
+	writeJSON(w, http.StatusOK, preview)
 }
 
 // importConfirmRequest is the JSON body for confirming an import.
@@ -1770,6 +1737,7 @@ func (h *Handler) handleImportConfirm(w http.ResponseWriter, r *http.Request) {
 		req.DefaultCategoryID,
 		catNameToID,
 		catIDToName,
+		gateCurrencies,
 	)
 	if err != nil {
 		entry.mu.Unlock()
@@ -2104,12 +2072,15 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		row.Skip = normalized.(bool)
 	}
 
-	// Rebuild the collision view against the just-edited session slice.
-	// categoryMap and defaultCategoryID are nil/0 — the upload-time path
-	// uses those too (see Chunk 1 Task 5 Step 5.2), so the preview-time
-	// grouping contract is identical before and after an edit. The
-	// canonical category lookups come from the live DB via
-	// ListAllCategories.
+	// Rebuild the whole preview against the just-edited session slice. Every
+	// derived field is recomputed — collision groups, both families of field
+	// errors, the unresolved categories, the currencies — which is what makes
+	// an edit resolve a flag with no client-side bookkeeping: skipping the
+	// last row carrying an undecided name drops the entry, and shortening a
+	// description drops its error.
+	//
+	// The canonical category lookups come from the live DB via
+	// ListAllCategories so the preview-time hash formula matches confirm's.
 	existingCats, listErr := h.queries.ListAllCategories(r.Context())
 	if listErr != nil {
 		log.Printf("import patch: list categories: %v", listErr)
@@ -2123,55 +2094,14 @@ func (h *Handler) handleImportPatchRow(w http.ResponseWriter, r *http.Request) {
 		catIDToName[c.ID] = c.Name
 	}
 
-	currencies, curErr := loadImportCurrencies(r.Context(), h.queries)
-	if curErr != nil {
-		log.Printf("import patch: load currencies: %v", curErr)
-		writeError(w, http.StatusInternalServerError, "failed to load currencies")
-		return
-	}
-
-	groups, groupErr := buildCollisionGroups(
-		r.Context(),
-		h.queries,
-		entry.Rows,
-		nil,
-		0,
-		catNameToID,
-		catIDToName,
-	)
-	if groupErr != nil {
-		log.Printf("import patch: build collision groups: %v", groupErr)
+	preview, previewErr := h.buildImportPreview(r.Context(), importID, entry, catNameToID, catIDToName)
+	if previewErr != nil {
+		log.Printf("import patch: build preview: %v", previewErr)
 		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
 		return
 	}
 
-	// Emit the full ImportPreview shape — same fields as handleImportUpload
-	// and handleImportGetSession. The PatchRowResponse TS type aliases
-	// ImportPreview, so the frontend's applyResponse spreads the whole
-	// object into state; omitting import_id/row_count/columns/
-	// unique_categories here caused them to land as `undefined` on the
-	// merged preview, which in turn caused the next PATCH to build a
-	// URL with `import/undefined/rows/N` and 404, silently dropping
-	// every subsequent edit (including un-checking the Skip checkbox).
-	// unique_categories is recomputed from the current rows, matching
-	// the GET resume handler — if a description edit renames a category
-	// cell, that cell's new string is in the snapshot.
-	uniqueCats := uniqueCategoriesFromRows(entry.Rows)
-	writeJSON(w, http.StatusOK, map[string]any{
-		"import_id":         importID,
-		"row_count":         len(entry.Rows),
-		"rows":              entry.Rows,
-		"columns":           entry.Columns,
-		"unique_categories": uniqueCats,
-		"collision_groups":  groups,
-		"field_errors":      checkImportRowLengths(entry.Rows),
-		// Recomputed on every PATCH, like every other derived field on
-		// this response. That is what makes a skip toggle resolve a
-		// category entry: skipped rows are excluded, so skipping the
-		// last row carrying an undecided name drops the entry, and the
-		// frontend's gate clears with no client-side bookkeeping.
-		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0, currencies),
-	})
+	writeJSON(w, http.StatusOK, preview)
 }
 
 // handleImportGetSession returns the full current snapshot of an import
@@ -2219,12 +2149,10 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
-	// Load categories for the canonical hash resolution.
-	// buildCollisionGroups needs catNameToID (upload-time name match)
-	// and catIDToName (canonical name for the hash formula). Same
-	// pattern as the Chunk 1 upload call site and the Chunk 2 PATCH
-	// call site — keeping the three sites byte-identical makes future
-	// refactors easier to audit.
+	// Load categories for the canonical hash resolution. buildImportPreview
+	// needs catNameToID (upload-time name match) and catIDToName (canonical
+	// name for the hash formula); every surface loads them the same way so
+	// the preview-time hash matches confirm's.
 	existingCats, err := h.queries.ListAllCategories(r.Context())
 	if err != nil {
 		log.Printf("import get: list categories: %v", err)
@@ -2238,48 +2166,19 @@ func (h *Handler) handleImportGetSession(w http.ResponseWriter, r *http.Request)
 		catIDToName[c.ID] = c.Name
 	}
 
-	currencies, err := loadImportCurrencies(r.Context(), h.queries)
+	// Everything on the resume response is recomputed here, and the money
+	// family is why that matters beyond freshness: a currency added in
+	// Settings since the upload clears its rows' flags on this GET, with no
+	// re-upload, because the preview is a function of the currencies table as
+	// it stands rather than of what it said when the file was parsed.
+	preview, err := h.buildImportPreview(r.Context(), importID, entry, catNameToID, catIDToName)
 	if err != nil {
-		log.Printf("import get: load currencies: %v", err)
-		writeError(w, http.StatusInternalServerError, "failed to load currencies")
-		return
-	}
-
-	groups, err := buildCollisionGroups(
-		r.Context(),
-		h.queries,
-		entry.Rows,
-		nil, // categoryMap not chosen yet at resume time
-		0,   // defaultCategoryID not chosen yet either
-		catNameToID,
-		catIDToName,
-	)
-	if err != nil {
-		log.Printf("import get: build collision groups: %v", err)
+		log.Printf("import get: build preview: %v", err)
 		writeError(w, http.StatusInternalServerError, "failed to rebuild collision groups")
 		return
 	}
 
-	// unique_categories is the sorted-distinct set of category strings
-	// seen in entry.Rows. The frontend uses it to seed the
-	// category-mapping dropdowns — same as the upload response.
-	// Recompute from the current rows (not a cached field) so edits
-	// that rename a category cell are reflected in the resume snapshot.
-	uniqueCats := uniqueCategoriesFromRows(entry.Rows)
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"import_id":         importID,
-		"row_count":         len(entry.Rows),
-		"rows":              entry.Rows,
-		"columns":           entry.Columns,
-		"unique_categories": uniqueCats,
-		"collision_groups":  groups,
-		"field_errors":      checkImportRowLengths(entry.Rows),
-		// Present on the resume path for the same reason field_errors is:
-		// without it, reloading the page during an import clears every
-		// flag the preview was asking the user to act on.
-		"unresolved_categories": unresolvedImportCategories(entry.Rows, nil, catNameToID, 0, currencies),
-	})
+	writeJSON(w, http.StatusOK, preview)
 }
 
 // processImportRows is the pure-processing core of handleImportConfirm.
