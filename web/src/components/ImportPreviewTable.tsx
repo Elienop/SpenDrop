@@ -24,6 +24,7 @@ import {
   fallbackFieldErrorMessage,
   isEditableInPreview,
 } from '@/lib/import-field-errors';
+import { ATTENTION_TEXT_CLASS } from '@/lib/attention';
 import { dollarsToCents } from '@/lib/currency';
 import { formatAmount, formatRate } from '@/lib/format';
 import {
@@ -79,6 +80,16 @@ const fieldErrorDetailId = (rowID: number) => `import-field-error-${rowID}`;
  * the focused element — and it is not a place a keyboard user can act
  * from.
  */
+/**
+ * The amber strip an aggregate bar renders as, now that it is a block in
+ * the card rather than a `colSpan` cell in the table. Same register as
+ * the collision group header it used to sit beside — `bg-amber-500/15`
+ * with a `border-l-2` rule — plus the box the table used to provide:
+ * a rounded border and its own padding.
+ */
+const AGGREGATE_BAR_CLASS =
+  'rounded-md border border-l-2 border-l-amber-500 bg-amber-500/15 p-3';
+
 const LENGTH_BAR_KEY = 'length';
 const MONEY_BAR_KEY = 'money';
 const LENGTH_BAR_HEADING_ID = 'import-length-bar-heading';
@@ -144,14 +155,27 @@ interface ComputedAmount {
   amount: number;
 }
 
-type RenderUnit =
+/**
+ * The two bars that describe a WHOLE SET of rows rather than any one of
+ * them. Split out of the union below because they are rendered somewhere
+ * else — above the table, not inside it — see the comment at their call
+ * site for the measurement that put them there.
+ */
+type AggregateBarUnit =
   | { kind: 'field-error-bar'; rowIDs: number[] }
   | {
       kind: 'money-error-bar';
       rowIDs: number[];
       rateOffers: RateOffer[];
       computedAmounts: ComputedAmount[];
-    }
+    };
+
+function isAggregateBar(unit: RenderUnit): unit is AggregateBarUnit {
+  return unit.kind === 'field-error-bar' || unit.kind === 'money-error-bar';
+}
+
+type RenderUnit =
+  | AggregateBarUnit
   | { kind: 'group-header'; group: CollisionGroup }
   | {
       kind: 'row';
@@ -579,6 +603,12 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // anchor untouched — the browser's default focus-advance handles that.
   const editCellRef = useRef<HTMLTableCellElement | null>(null);
 
+  // The whole card, as the search root for the focus chain: the
+  // aggregate bars live above the scroll container now, so a lookup
+  // scoped to the container would miss exactly the headings a burst is
+  // most likely to return to.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+
   // The primary action, as the last-resort focus target for a burst that
   // removed the bar it was fired from. Outside the scroll container on
   // purpose: it is the one control on this surface that never unmounts
@@ -652,6 +682,14 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   // also dictates row ORDER: collision groups always float to the top,
   // clean rows follow.
   const renderPlan = useMemo(() => buildRenderPlan(preview), [preview]);
+  // The bars are lifted OUT of the plan for rendering (see their call
+  // site) but stay IN it for building, so their order relative to each
+  // other, and the row order their bursts fire in, are decided in exactly
+  // one place.
+  const aggregateBars = useMemo(
+    () => renderPlan.filter(isAggregateBar),
+    [renderPlan],
+  );
 
   /**
    * Where focus goes when a burst finishes.
@@ -685,10 +723,14 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
   const focusAfterBurst = useCallback((headingKey: string) => {
     requestAnimationFrame(() => {
       const container = scrollContainerRef.current;
+      // Searched from the CARD, not from the scroller: the aggregate
+      // bars render above it, and a container-scoped lookup would find
+      // only the collision group headings.
+      const root = rootRef.current;
       const heading =
-        container?.querySelector<HTMLElement>(
+        root?.querySelector<HTMLElement>(
           `[data-bulk-heading="${headingKey}"]`,
-        ) ?? container?.querySelector<HTMLElement>('[data-bulk-heading]');
+        ) ?? root?.querySelector<HTMLElement>('[data-bulk-heading]');
       if (heading) {
         heading.focus();
         return;
@@ -1009,125 +1051,25 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
     );
   };
 
-  // Status text is derived, but the aria-live container is persistent:
-  // a single span that always exists, with its text content swapping
-  // between the amber / emerald states. Ternary-ing between two
-  // aria-live elements remounts the live region and screen readers
-  // skip the update (AT-2024-07 regression).
-  // Listed rather than branched so the two blockers compose: a preview
-  // can carry collisions AND over-length rows at once, and naming only
-  // one of them would send the user to fix half the problem and watch
-  // the button stay disabled. The collisions-only wording is unchanged
-  // from before over-length rows existed.
-  const blockers: string[] = [];
-  if (unresolvedCount > 0) {
-    blockers.push(
-      `${unresolvedCount} ${unresolvedCount === 1 ? 'collision' : 'collisions'}`,
-    );
-  }
-  if (fieldErrorRowCount > 0) {
-    blockers.push(
-      `${fieldErrorRowCount} too-long ${fieldErrorRowCount === 1 ? 'row' : 'rows'}`,
-    );
-  }
-  // Named as rows WITH a problem rather than as "money rows": what is
-  // wrong differs per row (no rate, an unknown currency, an amount that
-  // disagrees with its own division) and the server's sentence on each
-  // row says which. The status line is a count and a verb.
-  if (moneyErrorRowCount > 0) {
-    blockers.push(
-      moneyErrorRowCount === 1
-        ? '1 row with a money problem'
-        : `${moneyErrorRowCount} rows with money problems`,
-    );
-  }
-  // Named separately from the other two because the remedy is somewhere
-  // else — the mapping panel below the table, not a cell in it. "Fix or
-  // skip" would point at the wrong thing, so this blocker carries its own
-  // verb and the sentence composes the two halves.
-  //
-  // "choices", not "unmatched names": the count covers both a name that
-  // matches nothing AND rows with an empty Category cell, and only the
-  // panel below knows which is which. Wording that named one of the two
-  // would be wrong for the other half of the time.
-  const categoryBlocker =
-    unresolvedCategoryCount > 0
-      ? `${unresolvedCategoryCount} category ${unresolvedCategoryCount === 1 ? 'choice' : 'choices'} still needed below`
-      : '';
-  const rowBlockerText =
-    blockers.length > 0
-      ? `Fix or skip ${joinBlockers(blockers)} to enable import`
-      : '';
-  const statusText =
-    [rowBlockerText, categoryBlocker].filter(Boolean).join('. ') ||
-    `Ready to import ${keepCount} ${keepCount === 1 ? 'row' : 'rows'}`;
-  const statusColor =
-    blockers.length > 0 || unresolvedCategoryCount > 0
-      ? 'text-amber-500'
-      : 'text-emerald-500';
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div
-        ref={scrollContainerRef}
-        // A focus ANCHOR, not a tab stop, and the last resort of
-        // `focusAfterBurst`: when a burst leaves no bar standing and
-        // Import is still disabled, this is the nearest thing to "where
-        // the user was". Also what a scrollable region needs to be
-        // reachable by keyboard at all.
-        tabIndex={-1}
-        className="max-h-[480px] overflow-auto rounded-md border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <Table>
-          <TableHeader>
-            <TableRow>
-              {/* sticky thead keeps column labels visible while scrolling
-                  through a long preview; bg-background + z-10 keeps it
-                  readable above the first row that scrolls under it. */}
-              <TableHead className="sticky top-0 z-10 bg-background">Date</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-background">Description</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-background">Category</TableHead>
-              <TableHead className="sticky top-0 z-10 bg-background text-right">Amount</TableHead>
-              {/* Beside the Amount it divides, not at the end of the row:
-                  the rate and the figure it produced are two halves of
-                  one statement about this row's money.
-
-                  "Rate to base", the same words Settings → Currencies
-                  uses for the same number ("Rate to Base"), because a
-                  bare "Rate" does not say which way round it goes — and
-                  the upload copy spends a whole sentence closing exactly
-                  that ambiguity.
-
-                  ALWAYS RENDERED, even for a sheet with no rate column
-                  and no foreign row: a table whose shape depends on its
-                  data moves the Skip checkbox under the user's cursor
-                  between one upload and the next, and the empty cells
-                  are where a rate is TYPED (that is the fix for a
-                  rate-missing row, and it has to be reachable before the
-                  row has a rate). */}
-              <TableHead
-                data-import-col="rate"
-                className="sticky top-0 z-10 bg-background text-right"
-              >
-                Rate to base
-              </TableHead>
-              <TableHead className="sticky top-0 z-10 bg-background w-12">Skip</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {renderPlan.map((unit) => {
-              if (unit.kind === 'field-error-bar') {
+  /**
+   * One aggregate bar, rendered ABOVE the table rather than inside it.
+   *
+   * A plain function rather than a component: it closes over the same
+   * burst handlers the rest of this file uses, and lifting it out would
+   * mean threading five callbacks through props to gain nothing.
+   */
+  const renderAggregateBar = (unit: AggregateBarUnit) => {
+    if (unit.kind === 'field-error-bar') {
                 const count = unit.rowIDs.length;
                 // Same guard as the collision group's Skip-all: two fast
                 // clicks would otherwise double-fire the PATCH burst.
                 const skipAllDisabled = pendingPatchCount > 0;
                 return (
-                  <TableRow
+                  <div
                     key="field-error-bar"
                     data-field-error-bar="true"
-                    className="bg-amber-500/15 border-l-2 border-l-amber-500 hover:bg-amber-500/15"
+                    className={AGGREGATE_BAR_CLASS}
                   >
-                    <TableCell colSpan={PREVIEW_COLUMN_COUNT}>
                       <div className="flex items-center justify-between gap-3">
                         {/*
                           Count and action only. The explanation of WHY
@@ -1176,23 +1118,21 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                             ? 'Skip this row'
                             : `Skip these ${count} rows`}
                         </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
+                    </div>
+                  </div>
                 );
               }
-              if (unit.kind === 'money-error-bar') {
+    if (unit.kind === 'money-error-bar') {
                 const count = unit.rowIDs.length;
                 // Same guard as every other bulk control here: two fast
                 // clicks would double-fire the PATCH burst.
                 const bulkDisabled = pendingPatchCount > 0;
                 return (
-                  <TableRow
+                  <div
                     key="money-error-bar"
                     data-money-error-bar="true"
-                    className="bg-amber-500/15 border-l-2 border-l-amber-500 hover:bg-amber-500/15"
+                    className={AGGREGATE_BAR_CLASS}
                   >
-                    <TableCell colSpan={PREVIEW_COLUMN_COUNT}>
                       {/* `flex-wrap`, unlike the bar above it: this one can
                           carry three controls at once, and a preview table
                           is the surface most likely to be read on a narrow
@@ -1305,11 +1245,153 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
                               : `Skip these ${count} rows`}
                           </Button>
                         </div>
-                      </div>
-                    </TableCell>
-                  </TableRow>
+                    </div>
+                  </div>
                 );
               }
+    return null;
+  };
+
+  // Status text is derived, but the aria-live container is persistent:
+  // a single span that always exists, with its text content swapping
+  // between the amber / emerald states. Ternary-ing between two
+  // aria-live elements remounts the live region and screen readers
+  // skip the update (AT-2024-07 regression).
+  // Listed rather than branched so the two blockers compose: a preview
+  // can carry collisions AND over-length rows at once, and naming only
+  // one of them would send the user to fix half the problem and watch
+  // the button stay disabled. The collisions-only wording is unchanged
+  // from before over-length rows existed.
+  const blockers: string[] = [];
+  if (unresolvedCount > 0) {
+    blockers.push(
+      `${unresolvedCount} ${unresolvedCount === 1 ? 'collision' : 'collisions'}`,
+    );
+  }
+  if (fieldErrorRowCount > 0) {
+    blockers.push(
+      `${fieldErrorRowCount} too-long ${fieldErrorRowCount === 1 ? 'row' : 'rows'}`,
+    );
+  }
+  // Named as rows WITH a problem rather than as "money rows": what is
+  // wrong differs per row (no rate, an unknown currency, an amount that
+  // disagrees with its own division) and the server's sentence on each
+  // row says which. The status line is a count and a verb.
+  if (moneyErrorRowCount > 0) {
+    blockers.push(
+      moneyErrorRowCount === 1
+        ? '1 row with a money problem'
+        : `${moneyErrorRowCount} rows with money problems`,
+    );
+  }
+  // Named separately from the other two because the remedy is somewhere
+  // else — the mapping panel below the table, not a cell in it. "Fix or
+  // skip" would point at the wrong thing, so this blocker carries its own
+  // verb and the sentence composes the two halves.
+  //
+  // "choices", not "unmatched names": the count covers both a name that
+  // matches nothing AND rows with an empty Category cell, and only the
+  // panel below knows which is which. Wording that named one of the two
+  // would be wrong for the other half of the time.
+  const categoryBlocker =
+    unresolvedCategoryCount > 0
+      ? `${unresolvedCategoryCount} category ${unresolvedCategoryCount === 1 ? 'choice' : 'choices'} still needed below`
+      : '';
+  const rowBlockerText =
+    blockers.length > 0
+      ? `Fix or skip ${joinBlockers(blockers)} to enable import`
+      : '';
+  const statusText =
+    [rowBlockerText, categoryBlocker].filter(Boolean).join('. ') ||
+    `Ready to import ${keepCount} ${keepCount === 1 ? 'row' : 'rows'}`;
+  // ATTENTION_TEXT_CLASS, not a bare `text-amber-500`: this sentence is
+  // 14px body text, and amber-500 on the light theme's white measures
+  // ≈2.1:1 — the status line that says why Import is disabled is the
+  // last string in the app that should be hard to read. The shared token
+  // switches shade by theme; see `lib/attention.ts`.
+  const statusColor =
+    blockers.length > 0 || unresolvedCategoryCount > 0
+      ? ATTENTION_TEXT_CLASS
+      : 'text-emerald-500';
+
+  return (
+    <div ref={rootRef} className="flex flex-col gap-3">
+      {/*
+        THE AGGREGATE BARS SIT OUTSIDE THE TABLE, and that is a layout
+        decision with a measurement behind it. Rendered as `colSpan` cells
+        they inherited the table's width — at 360px the table is 656px
+        wide inside a 246px scroller, which put one bulk button at x
+        328–590 (entirely off-screen) and clipped another at 288 — and,
+        being the first rows of the tbody, they scrolled out of view the
+        moment the user reached row 30. Out here they wrap at the CARD's
+        width and stay put while the body scrolls.
+
+        Reading order is unchanged (bars, then table) and so is
+        everything they carry: the heading role, `data-bulk-heading` for
+        the focus chain, and the ids their buttons are described by. The
+        collision GROUP headers stay in the table on purpose — they label
+        the rows immediately below them, so they have to travel with them.
+      */}
+      {aggregateBars.map(renderAggregateBar)}
+      <Table
+        containerProps={{
+          ref: scrollContainerRef,
+          // A focus ANCHOR, not a tab stop, and the last resort of
+          // `focusAfterBurst`: when a burst leaves no bar standing and
+          // Import is still disabled, this is the nearest thing to
+          // "where the user was". Also what a scrollable region needs to
+          // be reachable by keyboard at all.
+          tabIndex: -1,
+          // ON THE TABLE'S OWN WRAPPER, not on a box around it: the
+          // sticky `th`s below resolve against the nearest SCROLLING
+          // ancestor, so the height cap has to be on the same element as
+          // the `<table>` or the labels scroll away with the rows. See
+          // `containerProps` in `ui/table.tsx` for the measurement.
+          className:
+            'max-h-[480px] rounded-md border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+        }}
+      >
+          <TableHeader>
+            <TableRow>
+              {/* sticky thead keeps column labels visible while scrolling
+                  through a long preview; bg-background + z-10 keeps it
+                  readable above the first row that scrolls under it. */}
+              <TableHead className="sticky top-0 z-10 bg-background">Date</TableHead>
+              <TableHead className="sticky top-0 z-10 bg-background">Description</TableHead>
+              <TableHead className="sticky top-0 z-10 bg-background">Category</TableHead>
+              <TableHead className="sticky top-0 z-10 bg-background text-right">Amount</TableHead>
+              {/* Beside the Amount it divides, not at the end of the row:
+                  the rate and the figure it produced are two halves of
+                  one statement about this row's money.
+
+                  "Rate to base", the same words Settings → Currencies
+                  uses for the same number ("Rate to Base"), because a
+                  bare "Rate" does not say which way round it goes — and
+                  the upload copy spends a whole sentence closing exactly
+                  that ambiguity.
+
+                  ALWAYS RENDERED, even for a sheet with no rate column
+                  and no foreign row: a table whose shape depends on its
+                  data moves the Skip checkbox under the user's cursor
+                  between one upload and the next, and the empty cells
+                  are where a rate is TYPED (that is the fix for a
+                  rate-missing row, and it has to be reachable before the
+                  row has a rate). */}
+              <TableHead
+                data-import-col="rate"
+                className="sticky top-0 z-10 bg-background text-right"
+              >
+                Rate to base
+              </TableHead>
+              <TableHead className="sticky top-0 z-10 bg-background w-12">Skip</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {renderPlan.map((unit) => {
+              // The bars are rendered above the table (see their call
+              // site); the plan still carries them so their order is
+              // decided in one place.
+              if (isAggregateBar(unit)) return null;
               if (unit.kind === 'group-header') {
                 const count = unit.group.member_row_ids.length;
                 const matchesExisting = unit.group.reason === 'db_match';
@@ -1579,8 +1661,7 @@ export function ImportPreviewTable(props: ImportPreviewTableProps) {
               );
             })}
           </TableBody>
-        </Table>
-      </div>
+      </Table>
       <Separator />
       <div className="flex items-center justify-between gap-3">
         <div className="text-sm" aria-live="polite" aria-atomic="true">

@@ -1880,6 +1880,98 @@ describe('ImportPreviewTable — money', () => {
     expect(onPatchRow).toHaveBeenNthCalledWith(2, 2, 'skip', true);
   });
 
+  it('scrolls the body on the same box the sticky header sticks to', () => {
+    // `position: sticky` resolves against the nearest SCROLLING ancestor.
+    // While the height cap sat on a box OUTSIDE the table's own wrapper,
+    // the wrapper scrolled horizontally and never vertically, so the
+    // labels stuck to a box that does not move and scrolled away with
+    // the rows (measured at 1288: `scrollTop = 300` put the thead at
+    // y = −26 against a scroller top of 273).
+    //
+    // happy-dom does no layout, so this is derived from the DOM SHAPE:
+    // the element that caps the height is the table's direct parent, and
+    // it is the first ancestor of the sticky `th` that scrolls.
+    render(<ImportPreviewTable preview={makePreview()} {...noopProps} />);
+
+    const table = document.querySelector('table')!;
+    const scroller = table.parentElement!;
+    expect(scroller.className).toContain('max-h-[480px]');
+    expect(scroller.className).toContain('overflow-auto');
+
+    const header = screen.getByRole('columnheader', { name: 'Date' });
+    expect(header.className).toContain('sticky');
+    let ancestor: HTMLElement | null = header.parentElement;
+    while (ancestor && !/overflow-(auto|scroll|hidden)/.test(ancestor.className)) {
+      ancestor = ancestor.parentElement;
+    }
+    expect(ancestor).toBe(scroller);
+  });
+
+  it('keeps the aggregate bars out of the scrolling table', () => {
+    // Inside a colSpan cell they inherited the TABLE's width: at 360 the
+    // table is 656px in a 246px scroller, which put one bulk button
+    // entirely off-screen at x 328–590 — and, as the first tbody rows,
+    // they scrolled out of sight the moment the user reached row 30.
+    render(
+      <ImportPreviewTable
+        preview={makePreview({
+          currencies: PREVIEW_CURRENCIES,
+          collision_groups: [
+            { group_id: 'g1', reason: 'intra_file', member_row_ids: [0, 1] },
+          ],
+          field_errors: [
+            fieldError(2, 'notes'),
+            {
+              row_id: 0,
+              field: 'rate',
+              message: SERVER_MONEY_MESSAGES.rateMissing,
+            },
+          ],
+        })}
+        {...noopProps}
+        unresolvedCount={1}
+        canImport={false}
+      />,
+    );
+
+    const table = document.querySelector('table')!;
+    const scroller = table.parentElement!;
+    const lengthBar = document.querySelector('[data-field-error-bar="true"]')!;
+    const moneyBar = document.querySelector('[data-money-error-bar="true"]')!;
+
+    for (const bar of [lengthBar, moneyBar]) {
+      expect(bar.closest('table')).toBeNull();
+      expect(scroller.contains(bar)).toBe(false);
+    }
+    // Reading order is unchanged: the bars still come before the table.
+    expect(
+      lengthBar.compareDocumentPosition(table) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    // The collision GROUP header stays where it was, because it labels
+    // the rows immediately under it rather than the set as a whole.
+    expect(
+      document.querySelector('[data-group-header="true"]')!.closest('table'),
+    ).not.toBeNull();
+  });
+
+  it('colours the blocked status line for both themes', () => {
+    // amber-500 on the light theme's white is ≈2.1:1 at 14px. Both halves
+    // of the token are pinned: a rule that only fixed the dark theme
+    // would look identical in a className that contained just one.
+    render(
+      <ImportPreviewTable
+        preview={makePreview({ field_errors: [fieldError(0, 'notes')] })}
+        {...noopProps}
+        canImport={false}
+      />,
+    );
+
+    const status = screen.getByText(/^Fix or skip/);
+    expect(status.className).toContain('text-amber-600');
+    expect(status.className).toContain('dark:text-amber-500');
+  });
+
   it('leaves a preview with no money problems exactly as it was', async () => {
     // THE POSITIVE CONTROL. The snapshot file was written by the
     // component BEFORE this feature existed; the only thing removed from
