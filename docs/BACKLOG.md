@@ -138,17 +138,6 @@ one-common-accounts-page question. Ask (3) is a real design decision (the admin-
 capability split on a single surface) and needs a brainstorm with the owner before any build.
 Also still open from the original framing: whether a MEMBER may edit their own display name.
 
-### B20 — users.role integrity rests on one handler
-**Verified: read** (found 2026-08-08 during B18 merge-semantics mutation testing; second half
-during the session-survival test work). Two hardening gaps in the same surface: (1)
-`users.role` has NO CHECK constraint — under a mutated handler, `role = ''` writes cleanly
-into SQLite; `handleUpdateUser`'s whitelist plus its merge fallback are the only guards of
-that column's well-formedness, and any future path writing role bypasses both. (2)
-`handleUpdateUser` discards `DeleteSessionsByUserID`'s error (`_ =`) — a failed DELETE after
-a demotion leaves admin-capable cookies alive and still returns 200; untestable today without
-a fault-injection seam.
-**Effort:** small — a migration adding the CHECK, plus an error check.
-
 ### B23 — offline-capture hold filing on identity change is untested
 **Verified: read** (found 2026-08-08 while guarding the stale-verify race). `markNeedsSignIn`
 files the queued-capture hold when the session identity changes. The race tests assert it is
@@ -171,30 +160,6 @@ Three separate defects in one surface, none of them mobile-specific:
    visual. (The error path is fine — `alert.tsx` has `role="alert"`.)
 Fixing (1) touches every card on all four tabs, which is why it was NOT folded into slice 3.
 **Effort:** medium for (1); small for (2) and (3).
-
-### B36 — a member can take another member's display name, and attribution follows
-**Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
-mechanism confirmed independently: `created_by` **is** the display name
-(`internal/api/transaction_handlers.go:150`) and is the only attribution the ledger renders —
-`TransactionRow.tsx:297`, `TransactionCard.tsx:245`, `Trash.tsx:266`/`:1068`,
-`HeatmapDaySheet.tsx:262` all render `{transaction.created_by || 'Unknown'}` and nothing else.
-
-**Introduced by the self-service rename.** Before it, `display_name` was admin-written only, so a
-member could not self-select an impersonating label. Now a member can read the admin's exact string
-off the household-wide ledger and PATCH to it; because `created_by` comes from a live JOIN, the
-relabel applies **retroactively** to every row they have ever entered, and reverts instantly on
-rename-back. Observed: two ledger rows reading `Elie Abdelahad`, `user_id` 1 and 2.
-
-Low severity — needs an insider already trusted with the ledger, grants no privilege or data access,
-fully reversible, and the admin can disambiguate in Settings, where a Username column sits beside
-Display Name. It becomes Medium if the household grows past two, or if attribution is ever used for
-reimbursement.
-
-**Fix is frontend-only and NOT a server-side uniqueness check** — a uniqueness error leaks the set
-of existing display names to a member. `user_id` is already on the wire in `transactionResponse`, so
-render `@username` (or mark the current user's own rows) wherever `created_by` appears.
-**Effort:** small. **Owner has not yet decided whether to take it** (still undecided as of
-2026-08-14; no attribution change has shipped — grepped).
 
 ### B39 — the 20-slot category palette fails its own pair-separation check, in both themes
 
@@ -253,6 +218,19 @@ the numeric state used to collapse it to 5; the handler 400s anything outside
 decision: disable Export while the field is empty/out of range, or fall back to the current year.
 **Effort:** small.
 
+
+### B53 — an open SSE stream is the one authority not re-derived per request
+**Verified: read** (2026-08-15, security review of the B20 session-wipe change).
+`internal/api/events_handlers.go:~67-87` authorises once at connect (route-level
+`RequireAuthOrAPIToken`) and then loops on the broker channel until the client disconnects; the
+role-change session wipe deletes session rows but does not close the stream. Today this leaks
+nothing material — frames are literal topic strings (`transactions`, `dashboard`, `reports`,
+`budgets`) plus `retry`/pings, which a member is entitled to, and every follow-up fetch 401s.
+Recorded because it is the single exception to "authority is re-read per request" (sessions,
+API tokens and the localStorage cache all are): if an SSE payload ever carries row data or an
+admin-scoped topic this becomes a live leak with no test in the way. Fix candidate: signal the
+broker after the commit (`sse.Client` already carries `userID`) so a wipe drops that user's
+streams. **Effort:** small.
 ---
 
 ## Queued stages
@@ -343,6 +321,89 @@ condition *and* move the predicate, believing one was safe because the other was
 ## Closed
 
 *(Move items here with their commit hash rather than deleting them.)*
+
+- **B20 + B36 — role integrity at the DB layer, and `@username` attribution** (2026-08-15, on
+  `fix/role-guard-and-username-attribution`; squash hash joins this entry at merge). Three
+  parallel builders with disjoint ownership (backend B20, backend B36 wire, frontend B36 render).
+  **B20** — migration `020_users_role_integrity.sql`: `BEFORE INSERT` + `BEFORE UPDATE OF role`
+  triggers `RAISE(ABORT)` on any `users.role` outside {'admin','member'}, plus a repair `UPDATE
+  … SET role='member' WHERE role NOT IN (…)` for hand-edited/restored DBs (semantics-preserving:
+  every gate already treats such a row as non-admin; `updated_at` untouched). **The filed
+  mechanism — a CHECK via a 019-style rebuild — was measured to DESTROY THE LEDGER**: `users` is
+  the parent of seven cascading FKs, and dropping the old table inside the runner's transaction
+  under `foreign_keys=ON` cascade-deleted every child row (transactions 2→0, sessions,
+  checkpoints, push subscriptions, saved filters, audit actors) with COMMIT succeeding; no escape
+  hatch works (`PRAGMA foreign_keys=OFF` is a no-op inside a tx, `defer_foreign_keys` defers the
+  check not the action, rename-first rewrites the children's REFERENCES). Triggers enforce the
+  same invariant with no rebuild — recorded in the migration header. `handleUpdateUser`: the role
+  UPDATE and the session wipe now share one transaction, so a failed wipe rolls the demotion back
+  and 500s — chosen over "keep the demotion, report failure" because the handler only wipes when
+  the role CHANGES, so a persisted demotion without its wipe is invisible to the retry (mutant C
+  measured exactly that). `handleDeleteUser`: wipe error-checked and kept (cascade is live but
+  `ForeignKeys` is a config field). Premise correction: a surviving cookie was never
+  "admin-capable" — role is re-read on every request — the real gap was the dishonest 200.
+  Fault-injection seam for the tests is a `BEFORE DELETE ON sessions` trigger, no production
+  seam. Security review then found the merge source (`existing`) was read OUTSIDE the
+  transaction — a concurrent rename could merge a stale `admin` back over a just-committed
+  demotion with no wipe; the read moved onto `qtx`, and the race was REPRODUCED, not reasoned:
+  the regression test fires a demotion and a rename concurrently 100× and asserts the
+  order-independent invariant (final role `member`); the pre-fix handler died 30/30 at two
+  GOMAXPROCS regimes, the fixed one is clean under `-race`. `docs/SCHEMA.md` regenerated
+  (append-only). Filed B53 (an open SSE stream is the one authority not re-derived per request).
+  **B36** — owner decided 2026-08-15: render `@username` (option a), NOT a display-name
+  uniqueness check (leaks the set of names). Wire: `created_by_username` on every
+  transaction-shaped response — list (raw-SQL scan, same LEFT JOIN), create, batch, idempotent
+  replay, and both trash queries (`u.username` on the existing LEFT JOIN; hand-maintained
+  `queries.sql.go` row structs/Scan lists updated in lockstep) — always emitted, `""` when the
+  creator's row is gone; `toTransactionResponse` takes it as a third positional so the compiler
+  forces every future emit site. Disclosure trade written at the field: usernames are the
+  non-secret half of a credential pair, login is rate-limited per IP with a dummy bcrypt on
+  user-miss, admins already see every username in Settings; usernames are immutable ASCII
+  (`usernameRegexp`, no UPDATE path). Render: one `<CreatorLabel createdBy createdByUsername>`
+  replaces six byte-identical "Entered by" blocks — handle after a REAL space (a margin reads as
+  one email-like token to a screen reader), suppressed when either half is empty; recipe in
+  `docs/DESIGN_GUIDE.md`. UX review caught the first shape pinning the bug: name and handle in
+  ONE truncating span clips the handle FIRST — the spoofable half survives and the identifier
+  goes; now the display name is the `min-w-0 truncate` half and the handle a `shrink-0` sibling
+  capped at `max-w-[50%]` (with `flex-1` on the row so the percentage has a definite basis —
+  without it the cap clips even when there is room), `whitespace-pre` keeping the space a
+  rendered character; `title` carries the full pair for the desktop cell. Tests decode
+  into maps with fixtures whose display_name ≠ username so a column swap is caught. Filed
+  premise corrections: heatmap and RecentlyAdded are readers of the list endpoint, not producers;
+  the username gate is `isValidUsername`, not `validateUsername`.
+  Original findings, kept for the record:
+  *B20 — users.role integrity rests on one handler.* **Verified: read** (found 2026-08-08 during B18 merge-semantics mutation testing; second half
+  during the session-survival test work). Two hardening gaps in the same surface: (1)
+  `users.role` has NO CHECK constraint — under a mutated handler, `role = ''` writes cleanly
+  into SQLite; `handleUpdateUser`'s whitelist plus its merge fallback are the only guards of
+  that column's well-formedness, and any future path writing role bypasses both. (2)
+  `handleUpdateUser` discards `DeleteSessionsByUserID`'s error (`_ =`) — a failed DELETE after
+  a demotion leaves admin-capable cookies alive and still returns 200; untestable today without
+  a fault-injection seam.
+  **Effort:** small — a migration adding the CHECK, plus an error check.
+
+  *B36 — a member can take another member's display name, and attribution follows.* **Verified: reproduced by the security audit of `PATCH /api/auth/me`** (2026-08-09), and the
+  mechanism confirmed independently: `created_by` **is** the display name
+  (`internal/api/transaction_handlers.go:150`) and is the only attribution the ledger renders —
+  `TransactionRow.tsx:297`, `TransactionCard.tsx:245`, `Trash.tsx:266`/`:1068`,
+  `HeatmapDaySheet.tsx:262` all render `{transaction.created_by || 'Unknown'}` and nothing else.
+  
+  **Introduced by the self-service rename.** Before it, `display_name` was admin-written only, so a
+  member could not self-select an impersonating label. Now a member can read the admin's exact string
+  off the household-wide ledger and PATCH to it; because `created_by` comes from a live JOIN, the
+  relabel applies **retroactively** to every row they have ever entered, and reverts instantly on
+  rename-back. Observed: two ledger rows reading `Elie Abdelahad`, `user_id` 1 and 2.
+  
+  Low severity — needs an insider already trusted with the ledger, grants no privilege or data access,
+  fully reversible, and the admin can disambiguate in Settings, where a Username column sits beside
+  Display Name. It becomes Medium if the household grows past two, or if attribution is ever used for
+  reimbursement.
+  
+  **Fix is frontend-only and NOT a server-side uniqueness check** — a uniqueness error leaks the set
+  of existing display names to a member. `user_id` is already on the wire in `transactionResponse`, so
+  render `@username` (or mark the current user's own rows) wherever `created_by` appears.
+  **Effort:** small. **Owner has not yet decided whether to take it** (still undecided as of
+  2026-08-14; no attribution change has shipped — grepped).
 
 - **B21 — display_name charset gate** — **already shipped in PR #137 (`a8c484f`, 2026-08-14)**
   and closed here on 2026-08-15 when the stage-3 scout found the entry stale. The fix is exactly
