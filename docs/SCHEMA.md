@@ -1140,6 +1140,16 @@ CREATE TABLE health_write_probe (
 -- row. Only the conversion path writes a rate, and only from the same call
 -- that performed the division.
 --
+-- ADDENDUM (2026-08-15, import per-row rate stage): the paragraph above is
+-- history, not current behaviour, and is left as written because a migration
+-- records what was true when it ran. As of that stage an imported row DOES
+-- book a rate — the one its own sheet quoted, in a `Rate` column — and stores
+-- the household's canonical currency code rather than the sheet's spelling.
+-- NULL remains the value for a label-only row (a foreign pair with no rate
+-- quoted), for a base-currency row, and for every row that predates the
+-- column; and it is still true that no rate is ever backfilled or inferred
+-- from the stored pair.
+--
 -- Why NO `PRAGMA foreign_keys` toggle (and why adding one would be worse than
 -- useless): this file runs inside the single transaction the migration runner
 -- wraps every migration in (applyPendingMigrations in migrate.go), and the
