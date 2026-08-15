@@ -63,12 +63,12 @@ const MACHADO = {
 };
 
 // ── color conversions ──────────────────────────────────────────────────────────
-const hex2srgb = (h) => { h = h.trim().replace(/^#/, ""); return [0, 2, 4].map(i => parseInt(h.slice(i, i + 2), 16) / 255); };
+const hex2srgb = (h) => { h = h.trim().replace(/^#/, ""); return [0, 2, 4].map(i => Number.parseInt(h.slice(i, i + 2), 16) / 255); };
 
 // ── input boundary ── EVERY user-supplied color string (palette entries AND
 // the surface, CLI and browser alike) passes these before any math:
-// unguarded, parseInt propagates NaN through every check and the run fails
-// OPEN. Normalization is spelled out rather than engine-native: JS trim()
+// unguarded, Number.parseInt propagates NaN through every check and the run
+// fails OPEN. Normalization is spelled out rather than engine-native: JS trim()
 // and Python str.strip() differ at the edges (trim() strips U+FEFF;
 // str.strip() strips U+001C–U+001F and U+0085), so the shared set is their
 // intersection — ASCII whitespace plus the Unicode space/separator

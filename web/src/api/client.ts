@@ -1,12 +1,14 @@
+import { trimTrailingSlashes } from '@/lib/url';
+
 // Resolve the API base URL once at module load time. Trailing slashes
 // are stripped so callers can always concatenate with `/${path}` without
 // worrying about doubling up. In typical deployments the frontend is
 // served by the Go binary at the same origin, so the default `/api`
 // (relative) is correct; `VITE_API_BASE_URL` lets dev setups and
 // reverse-proxied hosts point at an absolute URL.
-const API_BASE_URL = (
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api'
-).replace(/\/+$/, '');
+const API_BASE_URL = trimTrailingSlashes(
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api',
+);
 
 // Error thrown for every non-OK API response. It extends the built-in
 // Error additively: `.message` keeps the legacy contract (the bare string

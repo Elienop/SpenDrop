@@ -552,3 +552,66 @@ describe('offline-queue — openDB latch recovery', () => {
     }
   });
 });
+
+describe('offline-queue — IndexedDB failures reject with an Error', () => {
+  test('a real DOMException reaches the caller with its .name intact', async () => {
+    // A user id no other test touches, so nothing has opened its DB yet.
+    const CLASHING = 4242;
+    // Create that DB at a HIGHER version than the module asks for. The module
+    // opens at DB_VERSION 1, which the spec answers with a VersionError
+    // DOMException on the request — a genuine, unstubbed IndexedDB failure.
+    await new Promise<void>((resolve, reject) => {
+      const req = indexedDB.open('spendrop-offline-4242', 2);
+      req.onsuccess = () => {
+        req.result.close();
+        resolve();
+      };
+      req.onerror = () => reject(req.error);
+    });
+
+    const failure = await enqueue(CLASHING, payload()).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    // The browser's own error object is passed through, NOT re-wrapped: the
+    // name is the only part of an IndexedDB failure worth branching on, and a
+    // `new Error(String(err))` wrap would flatten it to 'Error'.
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).toBeInstanceOf(DOMException);
+    expect((failure as DOMException).name).toBe('VersionError');
+  });
+
+  test('a blocked open with a null error still rejects with an Error', async () => {
+    // `onblocked` fires when another connection holds the old version open —
+    // nothing has failed yet, so the spec leaves `request.error` null. Driven
+    // through the same stubbed-open pattern the latch-recovery test uses,
+    // because a blocked open needs a version upgrade the module never asks for
+    // (DB_VERSION is pinned at 1).
+    const BLOCKED = 98;
+    const spy = vi.spyOn(indexedDB, 'open').mockImplementationOnce(() => {
+      const req = {
+        onsuccess: null as (() => void) | null,
+        onerror: null as (() => void) | null,
+        onupgradeneeded: null as (() => void) | null,
+        onblocked: null as (() => void) | null,
+        error: null,
+        result: null,
+      } as unknown as IDBOpenDBRequest;
+      queueMicrotask(() => req.onblocked?.(new Event('blocked') as never));
+      return req;
+    });
+
+    const failure = await countQueued(BLOCKED).then(
+      () => null,
+      (err: unknown) => err,
+    );
+
+    // Rejecting with the raw null `error` would hand the caller `null`, and
+    // every `err.message` / `err instanceof` in the drain path would break.
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain('spendrop-offline-98');
+
+    spy.mockRestore();
+  });
+});

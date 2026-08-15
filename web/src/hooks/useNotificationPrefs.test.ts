@@ -107,6 +107,25 @@ describe('useNotificationPrefs', () => {
     expect(result.current.settings).toEqual(updated);
   });
 
+  test('a failed PUT rolls the optimistic merge back to the pre-PUT value', async () => {
+    // The pre-PUT value must be the one restored — not the optimistic merge,
+    // and not the server echo. SETTINGS has txn_added: false / digest_mode:
+    // 'off', so a rollback to `next` would show them flipped.
+    mockApi.put.mockRejectedValue(new Error('network down'));
+    const { result } = renderHook(() => useNotificationPrefs());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    await act(async () => {
+      await expect(
+        result.current.update({ txn_added: true, digest_mode: 'daily' }),
+      ).rejects.toThrow('network down');
+    });
+
+    expect(result.current.settings).toEqual(SETTINGS);
+    expect(result.current.settings?.txn_added).toBe(false);
+    expect(result.current.settings?.digest_mode).toBe('off');
+  });
+
   test('non-admin update(partial) is a no-op and never PUTs', async () => {
     mockUseAuth.mockReturnValue(asAuth(MEMBER));
     const { result } = renderHook(() => useNotificationPrefs());

@@ -86,6 +86,24 @@ export interface QueuedTransaction {
 
 // --- IndexedDB plumbing -----------------------------------------------------
 
+/**
+ * The reason to reject an IndexedDB failure with.
+ *
+ * `IDBRequest.error` / `IDBTransaction.error` are typed `DOMException | null`,
+ * and `null` is not a usable rejection reason (typescript:S6671) — a caller
+ * that does `catch (err) { err.message }` gets a TypeError instead of the
+ * failure. The browser's own `DOMException` IS an Error (lib.dom declares
+ * `interface DOMException extends Error`), so it is handed back untouched:
+ * re-wrapping it would discard `.name` ('QuotaExceededError', 'AbortError',
+ * 'VersionError', …), which is the only part of an IndexedDB failure worth
+ * branching on. A fresh Error is constructed ONLY for the null cases the spec
+ * allows: an open request blocked by another tab (nothing has failed yet, so
+ * `error` is null) and a transaction ended by an explicit `abort()`.
+ */
+function idbFailure(error: DOMException | null, context: string): Error {
+  return error ?? new Error(context);
+}
+
 // One open handle per per-user DB name. The promise is cached only while it is
 // pending or resolved; on error/blocked it is deleted so the next call retries
 // a fresh open rather than latching a rejected promise forever (which would
@@ -110,11 +128,11 @@ function openDB(userId: number): Promise<IDBDatabase> {
     // otherwise leave a forever-pending promise.
     req.onerror = () => {
       dbPromises.delete(name);
-      reject(req.error);
+      reject(idbFailure(req.error, `IndexedDB open failed: ${name}`));
     };
     req.onblocked = () => {
       dbPromises.delete(name);
-      reject(req.error);
+      reject(idbFailure(req.error, `IndexedDB open blocked: ${name}`));
     };
   });
   dbPromises.set(name, p);
@@ -124,15 +142,18 @@ function openDB(userId: number): Promise<IDBDatabase> {
 function reqDone<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
+    req.onerror = () =>
+      reject(idbFailure(req.error, 'IndexedDB request failed'));
   });
 }
 
 function txDone(tx: IDBTransaction): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-    tx.onabort = () => reject(tx.error);
+    tx.onerror = () =>
+      reject(idbFailure(tx.error, 'IndexedDB transaction failed'));
+    tx.onabort = () =>
+      reject(idbFailure(tx.error, 'IndexedDB transaction aborted'));
   });
 }
 

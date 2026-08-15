@@ -1,14 +1,15 @@
 import { useEffect } from 'react';
 import { queryClient } from '@/lib/queryClient';
 import { useAuth } from '@/hooks/useAuth';
+import { trimTrailingSlashes } from '@/lib/url';
 
 // Resolve the SSE endpoint from the same API base the REST client uses
 // (web/src/api/client.ts). Default same-origin deployment → '/api/events'.
 // EventSource cannot set headers, so it relies on the same-origin session
 // cookie (sent because the request is same-origin / withCredentials).
-const API_BASE_URL = (
-  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api'
-).replace(/\/+$/, '');
+const API_BASE_URL = trimTrailingSlashes(
+  (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '/api',
+);
 const EVENTS_URL = `${API_BASE_URL}/events`;
 
 // Trailing-debounce window: coalesce a burst of hints for the same resource

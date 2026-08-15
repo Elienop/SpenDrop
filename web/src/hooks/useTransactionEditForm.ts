@@ -225,7 +225,7 @@ export function useTransactionEditForm({
           currency: editCurrency,
           date,
           description,
-          category_id: parseInt(categoryId, 10),
+          category_id: Number.parseInt(categoryId, 10),
           tags,
         },
         baseCode,
