@@ -65,11 +65,18 @@ type importRow struct {
 	// RawRate is the Rate cell exactly as it arrived, kept so the resolver can
 	// tell an ABSENT rate from an unparseable one — #5 (rate_missing) and #9
 	// (rate_invalid) are different faults with different fixes, and Rate alone
-	// is 0 for both. It never leaves the server: the wire carries the parsed
-	// number or nothing, and a client that saw the raw string would be tempted
-	// to re-parse it.
+	// is 0 for both. It never leaves the server AS ITSELF: the preview echoes
+	// it back under rate_raw only when it is unusable, so the table can show
+	// what the sheet held beside a message telling the user to fix it.
 	RawRate string `json:"-"`
-	Skip    bool   `json:"skip"`
+	// RawOriginalAmount is the Original Amount cell as it arrived, kept for
+	// exactly the reason RawRate is. parseImportAmount ZEROES a cell it cannot
+	// use — out of range, or unparseable — so OriginalAmount alone cannot tell
+	// "the sheet stated no original" from "the sheet stated one the ledger
+	// cannot hold", and the two need opposite messages: one says there is
+	// nothing to convert, the other says the figure is too big.
+	RawOriginalAmount string `json:"-"`
+	Skip              bool   `json:"skip"`
 }
 
 // dbMatchPreview carries the displayable fields of a live DB row that
@@ -77,6 +84,12 @@ type importRow struct {
 // collisionGroup so the frontend can render "you're about to re-import
 // this existing transaction" context without a second round-trip. Populated
 // only for groups whose reason is "db_match".
+//
+// AmountCents is the standing, deliberate exception to the dollars-on-the-wire
+// rule (see the Money Wire-Edge DTO discipline): it is typed as cents on the
+// client and formatted there, it predates this stage, and renaming it now
+// would break a shape the frontend already reads. Every OTHER money field on
+// an import response is dollars.
 type dbMatchPreview struct {
 	ID           int64  `json:"id"`
 	Date         string `json:"date"`
@@ -486,6 +499,13 @@ func validateImportField(field string, value any) (normalized any, errCode strin
 		}
 		cents, err := parseImportAmount(s)
 		if err != nil {
+			// A figure that parses but is too big gets its own sentence: the
+			// preview's "use the computed amount" action PATCHes exactly this
+			// value on a row whose derived amount is out of range, and the 400
+			// lands in the cell in place of the row's real flag.
+			if errors.Is(err, errImportAmountRange) {
+				return nil, "INVALID_AMOUNT", importAmountOutOfRangeMessage()
+			}
 			return nil, "INVALID_AMOUNT", "amount is not a valid number"
 		}
 		// Return dollars so the caller can assign directly to row.Amount
@@ -1363,6 +1383,10 @@ func (h *Handler) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 				case "notes":
 					ir.Notes = val
 				case "original_amount":
+					// The raw cell is kept whatever happens to the parse, so a
+					// figure the ledger cannot hold stays distinguishable from
+					// an empty cell — see importRow.RawOriginalAmount.
+					ir.RawOriginalAmount = val
 					if val != "" {
 						if cents, err := parseImportAmount(val); err == nil {
 							ir.OriginalAmount = centsToDollars(cents)
@@ -2633,10 +2657,18 @@ func parseImportAmount(s string) (int64, error) {
 		return 0, fmt.Errorf("non-finite amount: %q", s)
 	}
 	if math.Abs(parsed) > MaxTransactionAmount {
-		return 0, fmt.Errorf("amount out of range: %q", s)
+		return 0, fmt.Errorf("amount out of range: %q: %w", s, errImportAmountRange)
 	}
 	return dollarsToCents(parsed), nil
 }
+
+// errImportAmountRange marks the one parseImportAmount failure that is not a
+// parse failure: a number the caller wrote correctly and SpenDrop will not
+// store. It is a sentinel because the two need different sentences — "this is
+// not a number" is a false statement about 2,000,000,000, and the PATCH 400 it
+// produces is rendered into the cell the user just edited, where it replaces
+// an accurate flag about the row's real problem.
+var errImportAmountRange = errors.New("amount out of range")
 
 // parseImportDate converts a string from an imported xlsx Date cell into a
 // time.Time. It tries two strategies in order:

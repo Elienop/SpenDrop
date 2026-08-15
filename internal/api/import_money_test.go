@@ -258,8 +258,70 @@ func TestResolveImportMoney_Matrix(t *testing.T) {
 				RawRate:          "89000",
 			},
 			wantField:   importFieldAmount,
-			wantMessage: "1,000,000,001 is not an amount SpenDrop can store — a figure has to be at least one cent and no more than 1,000,000,000. Fix the original amount.",
+			wantMessage: "That original amount is not a figure SpenDrop can store — it has to be at least one cent and no more than 1,000,000,000 in its own currency. Fix the original amount.",
 			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// #12, and the shape that actually reaches production: the upload
+			// parser ZEROES an Original Amount cell it cannot use (2 billion
+			// LBP is past MaxTransactionAmount in its own currency), so by the
+			// time the resolver sees the row the figure is gone and only the
+			// raw cell says the sheet ever stated one.
+			//
+			// Without the raw, this row is indistinguishable from "no original
+			// at all" and gets diagnosed as rate_without_currency — "nothing to
+			// convert", about a sheet that plainly has both halves.
+			name: "#12 original amount cell the parser could not use",
+			row: importRow{
+				OriginalCurrency:  "LBP",
+				RawOriginalAmount: "2000000000",
+				Rate:              89000,
+				RawRate:           "89000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That original amount is not a figure SpenDrop can store — it has to be at least one cent and no more than 1,000,000,000 in its own currency. Fix the original amount.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// The same row with its rate cleared. It must stay a diagnosis of
+			// the ORIGINAL cell — the old behaviour let it fall through to
+			// zero_amount, a silent skip of a row the sheet filled in.
+			name: "#12 unusable original with no rate is still the original's fault",
+			row: importRow{
+				OriginalCurrency:  "LBP",
+				RawOriginalAmount: "2000000000",
+			},
+			wantField:   importFieldAmount,
+			wantMessage: "That original amount is not a figure SpenDrop can store — it has to be at least one cent and no more than 1,000,000,000 in its own currency. Fix the original amount.",
+			wantReason:  skipReasonAmountInvalid,
+		},
+		{
+			// #10's third arm: a currency and a rate, and no original for the
+			// rate to convert. The raw original cell is EMPTY, which is what
+			// separates this from the two cases above — absent, not wrong.
+			name: "#10 currency and rate with no original",
+			row: importRow{
+				Amount:           16.85,
+				OriginalCurrency: "LBP",
+				Rate:             89000,
+				RawRate:          "89000",
+			},
+			wantField:   importFieldRate,
+			wantMessage: "This row has a rate but nothing to convert — a rate needs both an original amount and an original currency. Add them, or clear the rate.",
+			wantReason:  skipReasonRateWithoutCurrency,
+		},
+		{
+			// A currency named with no foreign money behind it stores NO
+			// original at all — the same collapse as #7. A lone
+			// original_currency beside a NULL original_amount_cents is the
+			// half-pair shape the app treats as corruption and strips on the
+			// next save, so import must not create it.
+			name: "bare currency with nothing behind it collapses",
+			row: importRow{
+				Amount:           42.50,
+				OriginalCurrency: "lbp",
+			},
+			wantAmountCents: 4250,
 		},
 		{
 			// #12 lower bound — the division rounds away to nothing, which

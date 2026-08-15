@@ -527,6 +527,91 @@ func TestHandleImportUpload_InfiniteRateCellIsInvalidNotAbsent(t *testing.T) {
 	}
 }
 
+// TestHandleImportUpload_OutOfRangeOriginalNamesTheOriginalCell walks the row
+// the parser mutilates on the way in. 2,000,000,000 LBP is about $22,000 — a
+// perfectly ordinary Beirut supermarket run — but it is past
+// MaxTransactionAmount as WRITTEN, so parseImportAmount zeroes the cell.
+//
+// The row then has an original the resolver cannot see. Diagnosed off the
+// parsed value alone it reads as "a rate with nothing to convert", which is a
+// sentence about a sheet that plainly has both halves; and clearing the rate to
+// try to satisfy that message drops the row into a silent zero_amount skip.
+// This is the reachability test for the raw cell that tells the two apart.
+func TestHandleImportUpload_OutOfRangeOriginalNamesTheOriginalCell(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "bigoriginal", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Souk run", "", "Food", "2000000000", "LBP", "89000"},
+		})
+
+	preview, importID := uploadImportSheet(t, h, user, xlsxData)
+	want := "That original amount is not a figure SpenDrop can store — it has to be at least one cent and no more than 1,000,000,000 in its own currency. Fix the original amount."
+	got, flagged := fieldErrorsByRow(t, preview)[0][importFieldAmount]
+	if !flagged {
+		t.Fatalf("the row was not flagged on the amount: %v", preview["field_errors"])
+	}
+	if got != want {
+		t.Errorf("message = %q\nwant    = %q", got, want)
+	}
+
+	// Clearing the rate must not turn the diagnosis into silence.
+	rec := patchImportRow(t, h, user, importID, 0, "rate", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("clear rate: %d %s", rec.Code, rec.Body.String())
+	}
+	var patched map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &patched); err != nil {
+		t.Fatalf("unmarshal patch: %v", err)
+	}
+	if got := fieldErrorsByRow(t, patched)[0][importFieldAmount]; got != want {
+		t.Errorf("after clearing the rate, message = %q\nwant %q", got, want)
+	}
+}
+
+// TestHandleImportUpload_UnusableRateCellTravelsAsRateRaw covers the other
+// half of "the server keeps the raw cell": a message that says "clear the
+// cell" is unhelpful beside a table showing an empty one. The parsed rate is
+// absent (it is unusable), so without this field the preview has nothing to
+// display and the user cannot see what they are being asked to fix.
+//
+// It is emitted ONLY for a cell that is both non-empty and unusable — a usable
+// rate travels as the number, and an empty one as nothing at all.
+func TestHandleImportUpload_UnusableRateCellTravelsAsRateRaw(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "rateraw", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency", "Rate"},
+		[][]string{
+			{"2026-01-15", "Bad rate", "", "Food", "1500000", "LBP", "eighty nine thousand"},
+			{"2026-01-16", "Good rate", "", "Food", "1500000", "LBP", "89000"},
+			{"2026-01-17", "No rate", "16.85", "Food", "1500000", "LBP", ""},
+		})
+
+	preview, _ := uploadImportSheet(t, h, user, xlsxData)
+	rows := previewRows(t, preview)
+
+	if got := rows[0]["rate_raw"]; got != "eighty nine thousand" {
+		t.Errorf("row 0 rate_raw = %v, want the cell's own text", got)
+	}
+	if _, present := rows[0]["rate"]; present {
+		t.Errorf("row 0 carries a parsed rate as well: %v", rows[0])
+	}
+	if _, present := rows[1]["rate_raw"]; present {
+		t.Errorf("row 1 (usable rate) carries rate_raw: %v", rows[1])
+	}
+	if _, present := rows[2]["rate_raw"]; present {
+		t.Errorf("row 2 (empty cell) carries rate_raw: %v", rows[2])
+	}
+}
+
 // TestBuildImportPreview_SkippedRowCarriesNoMoneyFlag mirrors the length
 // family's exemption: skipping IS the remedy the flag offers, so a skipped row
 // must not go on blocking the confirm it was skipped to unblock.

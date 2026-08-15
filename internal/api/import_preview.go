@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // importCurrencySummary is one row of the household's currencies table as the
@@ -48,6 +49,17 @@ func (c importCurrencies) summaries() []importCurrencySummary {
 type importPreviewRow struct {
 	importRow
 	AmountDerived bool `json:"amount_derived,omitempty"`
+	// RateRaw is the Rate cell's own text, echoed back ONLY when the cell is
+	// non-empty and unusable.
+	//
+	// Without it the rate_invalid flag is unactionable: the parsed rate is
+	// absent by definition (that is what makes the cell invalid), so the
+	// table shows an empty box beside a message that says "clear the cell",
+	// and the user cannot see what they are being asked to fix. It is not
+	// emitted for a usable rate (the number is already on the wire) or an
+	// empty one (there is nothing to show), so its presence is itself the
+	// signal that this row's rate is the unusable kind.
+	RateRaw string `json:"rate_raw,omitempty"`
 }
 
 // importPreview is THE preview snapshot. Every surface that shows a session
@@ -116,6 +128,9 @@ func (h *Handler) buildImportPreview(
 	for _, row := range entry.Rows {
 		money, moneyErr, _ := resolveImportMoney(row, currencies)
 		previewRow := importPreviewRow{importRow: row}
+		if raw := strings.TrimSpace(row.RawRate); raw != "" && !importRateIsUsable(row.Rate) {
+			previewRow.RateRaw = raw
+		}
 		switch {
 		case moneyErr != nil:
 			// Skipped rows are exempt, exactly as they are from the length

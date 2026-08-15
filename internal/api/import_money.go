@@ -207,19 +207,43 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 		return importMoney{AmountCents: usdCents}, nil, ""
 	}
 
+	// #12, the ORIGINAL CELL — judged here, before anything is decided about
+	// the rate, because the answer changes what every branch below means.
+	//
+	// Two shapes, one condition, one message. The upload parser ZEROES an
+	// Original Amount it cannot use (`parseImportAmount` refuses anything past
+	// MaxTransactionAmount in its own currency, and anything unparseable), so
+	// a sheet stating 2,000,000,000 LBP arrives here with origCents == 0 and
+	// only RawOriginalAmount to say a figure was ever there. Read without the
+	// raw cell, that row looks like "no original at all" and gets diagnosed as
+	// rate_without_currency — "nothing to convert", about a sheet that plainly
+	// has both halves — or, once the user clears the rate to try to fix it,
+	// silently skipped as zero_amount. The second shape is the same fault
+	// arriving from a caller that did not go through the parser, and it is
+	// checked on the whole foreign branch rather than only before the
+	// division, because a LABEL row (#2) would otherwise store an
+	// out-of-range original_amount_cents that nothing downstream re-bounds.
+	if origCents == 0 {
+		if strings.TrimSpace(row.RawOriginalAmount) != "" {
+			return blocked(importFieldAmount, importOriginalAmountInvalidMessage(), skipReasonAmountInvalid)
+		}
+	} else if err := validateMoneyAmount(row.OriginalAmount, "original_amount"); err != nil {
+		return blocked(importFieldAmount, importOriginalAmountInvalidMessage(), skipReasonAmountInvalid)
+	}
+
 	if origCents == 0 {
 		// #10 from the other side: a rate, a currency, and nothing to divide.
 		if hasRate {
 			return blocked(importFieldRate, importRateWithoutCurrencyMessage(), skipReasonRateWithoutCurrency)
 		}
-		// A currency label with no original amount. Out of scope for this
-		// stage (design §8) and left exactly as it has always been stored:
-		// the USD cell, with the code recorded beside it — canonicalised now,
-		// which is the one difference.
-		return importMoney{
-			AmountCents:      usdCents,
-			OriginalCurrency: sql.NullString{String: currency.Code, Valid: true},
-		}, nil, ""
+		// A currency named with no foreign money behind it. It COLLAPSES, like
+		// #7: the row is base money, and the code alone records nothing a
+		// reader could act on. Storing it would create the half-pair shape —
+		// original_currency set beside a NULL original_amount_cents — that the
+		// app already treats as corruption and strips on the next save, so
+		// import must not manufacture rows that will silently change the first
+		// time anyone edits them.
+		return importMoney{AmountCents: usdCents}, nil, ""
 	}
 
 	if !hasRate {
@@ -241,23 +265,17 @@ func resolveImportMoney(row importRow, cur importCurrencies) (importMoney, *impo
 		}, nil, ""
 	}
 
-	// #12, first half. The ORIGINAL is judged here, on its own, before any
-	// division — not left to the converter to report.
+	// #3, #4 and #12's second half. One divisor for the whole app.
 	//
-	// convertForeignMoney validates the original before it looks at the rate,
-	// so a row that is bad in both fields comes back with the amount error and
-	// the rate fault is invisible. Reading the row's fault off which error the
-	// helper happened to return would therefore be inferring a field from an
-	// internal check ORDER, and it would make the message lie in a case the
+	// The original was bounded above, on its own, rather than left to the
+	// converter to report. convertForeignMoney validates the original BEFORE
+	// it looks at the rate, so a row bad in both fields comes back with the
+	// amount error and the rate fault is invisible — reading a row's fault off
+	// which error the helper happened to return is inferring a field from an
+	// internal check ORDER. It would also make the message lie in a case the
 	// helper handles perfectly well: an out-of-range original divided by a
 	// large rate yields a value that IS storable, so a sentence blaming the
-	// quotient would be arithmetically false. Deciding here keeps every
-	// message true of the row it names, whatever order the helper checks in.
-	if err := validateMoneyAmount(row.OriginalAmount, "original_amount"); err != nil {
-		return blocked(importFieldAmount, importOriginalAmountInvalidMessage(row.OriginalAmount), skipReasonAmountInvalid)
-	}
-
-	// #3, #4 and #12's second half. One divisor for the whole app.
+	// quotient would be arithmetically false.
 	converted, err := convertForeignMoney(row.OriginalAmount, row.Rate)
 	if err != nil {
 		// Unreachable from here — importRateIsUsable has already refused
@@ -427,12 +445,20 @@ func importAmountDisagreesMessage(usd, original, rate, derived float64) string {
 // importAmountInvalidMessage's sentence would state a division that either did
 // not happen or did not fail.
 //
-// It names the same band, because it is the same band: every money figure on a
-// row, foreign or base, has to be at least one cent and no more than
-// MaxTransactionAmount.
-func importOriginalAmountInvalidMessage(original float64) string {
-	return fmt.Sprintf("%s is not an amount SpenDrop can store — a figure has to be at least one cent and no more than %s. Fix the original amount.",
-		formatImportQuantity(original), formatImportQuantity(MaxTransactionAmount))
+// It takes no arguments, and that is forced rather than chosen: the reachable
+// shape of this fault is a cell the parser already ZEROED, so there is no
+// figure left to quote. Quoting the raw cell instead would put an unbounded,
+// unsanitised sheet value into a sentence rendered on four surfaces, to say
+// something the user can already see in the cell the flag points at.
+//
+// It names the same band as the converted-amount message, because it is the
+// same band — every money figure on a row, foreign or base — and says "in its
+// own currency" because that is the trap: 2,000,000,000 LBP is about $22,000,
+// which sounds storable until you notice the bound applies to the figure as
+// written.
+func importOriginalAmountInvalidMessage() string {
+	return fmt.Sprintf("That original amount is not a figure SpenDrop can store — it has to be at least one cent and no more than %s in its own currency. Fix the original amount.",
+		formatImportQuantity(MaxTransactionAmount))
 }
 
 // importAmountInvalidMessage explains a CONVERSION that lands outside what a
@@ -446,6 +472,16 @@ func importOriginalAmountInvalidMessage(original float64) string {
 func importAmountInvalidMessage(original, rate float64) string {
 	return fmt.Sprintf("%s ÷ %s is not an amount SpenDrop can store — it has to be at least one cent and no more than %s. Fix the original amount or the rate.",
 		formatImportQuantity(original), formatImportQuantity(rate), formatImportQuantity(MaxTransactionAmount))
+}
+
+// importAmountOutOfRangeMessage explains a base amount that parses but is more
+// than a row may hold. It states the bound in both directions because the cap
+// is on MAGNITUDE — a refund of -2,000,000,000 is refused by the same gate —
+// and because a message that named only the ceiling would read as though the
+// sign were the problem.
+func importAmountOutOfRangeMessage() string {
+	return fmt.Sprintf("That amount is outside what SpenDrop can store — a row may not exceed %s in either direction.",
+		formatImportQuantity(MaxTransactionAmount))
 }
 
 // importCurrencyLabel renders an unresolved currency cell for a message.

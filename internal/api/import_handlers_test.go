@@ -3850,6 +3850,89 @@ func TestHandleImportConfirm_BaseCurrencyLabelCollapses(t *testing.T) {
 	}
 }
 
+// TestHandleImportConfirm_BareCurrencyStoresNoForeignHalf is the confirm-side
+// half of the collapse. A currency named with no amount behind it has no
+// foreign money to record, and storing the code alone would create the
+// half-pair — original_currency set beside a NULL original_amount_cents —
+// that the app treats as a corruption shape and strips on the next save. A row
+// that silently changes the first time anyone edits it is worse than a row
+// that never carried the label.
+func TestHandleImportConfirm_BareCurrencyStoresNoForeignHalf(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "barecurrency", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category", "Original Amount", "Original Currency"},
+		[][]string{
+			{"2026-01-15", "Corner shop", "42.50", "Food", "", "LBP"},
+		})
+	resp := uploadAndConfirmImport(t, h, user, xlsxData)
+	if got := int(resp["imported"].(float64)); got != 1 {
+		t.Fatalf("imported = %d, want 1; %v", got, resp)
+	}
+
+	got := readOnlyStoredRow(t, db)
+	if got.AmountCents != 4250 {
+		t.Errorf("amount_cents = %d, want 4250", got.AmountCents)
+	}
+	if got.OriginalCurrency.Valid {
+		t.Errorf("original_currency = %+v, want NULL — there is no foreign amount for it to describe", got.OriginalCurrency)
+	}
+	if got.OriginalCents.Valid {
+		t.Errorf("original_amount_cents = %+v, want NULL", got.OriginalCents)
+	}
+	if got.BookedRate.Valid {
+		t.Errorf("booked_rate = %+v, want NULL", got.BookedRate)
+	}
+}
+
+// TestHandleImportPatchRow_AmountOutOfRangeNamesTheBound covers a cross-stack
+// trap. The preview offers "use the computed amount" on a row whose derived
+// value is out of range, and that click is a PATCH of the amount — which is
+// refused, correctly. But the 400 used to say "amount is not a valid number"
+// about a number that parses perfectly well, and the frontend renders the 400
+// into the cell, replacing an accurate flag with a false sentence.
+func TestHandleImportPatchRow_AmountOutOfRangeNamesTheBound(t *testing.T) {
+	clearImportStore()
+	q, db := setupTestDB(t)
+	h := NewHandler(q, db)
+	user := seedTestUser(t, q, "amountbound", "admin")
+
+	xlsxData := createTestXLSX(t, "Transactions",
+		[]string{"Date", "Description", "Amount", "Category"},
+		[][]string{{"2026-01-15", "Groceries", "42.50", "Food"}})
+	_, importID := uploadImportSheet(t, h, user, xlsxData)
+
+	rec := patchImportRow(t, h, user, importID, 0, "amount", "2000000000")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("patch amount: expected 400, got %d; body: %s", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 400: %v", err)
+	}
+	if body["code"] != "INVALID_AMOUNT" {
+		t.Errorf("code = %v, want INVALID_AMOUNT", body["code"])
+	}
+	want := "That amount is outside what SpenDrop can store — a row may not exceed 1,000,000,000 in either direction."
+	if body["message"] != want {
+		t.Errorf("message = %v\nwant       = %q", body["message"], want)
+	}
+
+	// The control: a genuinely unparseable value keeps the sentence it has
+	// always had, so the split is a real distinction and not a rename.
+	rec2 := patchImportRow(t, h, user, importID, 0, "amount", "twelve")
+	var body2 map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &body2); err != nil {
+		t.Fatalf("unmarshal 400: %v", err)
+	}
+	if body2["message"] != "amount is not a valid number" {
+		t.Errorf("unparseable message = %v, want %q", body2["message"], "amount is not a valid number")
+	}
+}
+
 // TestHandleImportConfirm_SameSheetReimportDedupes pins the dedupe identity of
 // a DERIVED row: re-importing the same sheet must recognise every row as one
 // SpenDrop already has.
