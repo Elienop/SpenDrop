@@ -198,6 +198,14 @@ const ChartTooltipContent = React.forwardRef<
 
     const nestLabel = payload.length === 1 && indicator !== "dot"
 
+    // Each row is paired with its React key here rather than at the JSX, so the
+    // key can be derived from the whole list at once — uniqueness is a property
+    // of the list, not of one row. See `withRowKeys`.
+    const rows = withRowKeys(
+      payload.filter((item) => item.type !== "none"),
+      (item) => [item.dataKey, item.name]
+    )
+
     return (
       <div
         ref={ref}
@@ -208,90 +216,80 @@ const ChartTooltipContent = React.forwardRef<
       >
         {!nestLabel ? tooltipLabel : null}
         <div className="grid gap-1.5">
-          {payload
-            .filter((item) => item.type !== "none")
-            .map((item, index) => {
-              const key = `${nameKey || item.name || item.dataKey || "value"}`
-              const itemConfig = getPayloadConfigFromPayload(config, item, key)
-              const indicatorColor = color || item.payload.fill || item.color
+          {rows.map(({ item, key: rowKey }, index) => {
+            const key = `${nameKey || item.name || item.dataKey || "value"}`
+            const itemConfig = getPayloadConfigFromPayload(config, item, key)
+            const indicatorColor = color || item.payload.fill || item.color
 
-              return (
-                // recharts 3 widened `dataKey` to include a function type,
-                // which is not a valid React key. The index is stable here:
-                // this list is a single tooltip's payload, rendered in place
-                // and never reordered.
-                //
-                // Deliberate: SonarQube S6479 ("do not use array index in
-                // keys") is ACCEPTED on this line. A payload item carries no
-                // identity that is both stable and unique — `name` is shared by
-                // design (see the "two tooltip rows sharing a name" test in
-                // chart.test.tsx, which fails on React's duplicate-key warning
-                // if this line ever keys by it) and `dataKey` may be a function, whose
-                // stringification two series can also share. A composite of
-                // those can collide, and a colliding key is strictly worse than
-                // the index: React conflates the two rows. Position in the
-                // payload IS the identity recharts gives us.
-                <div
-                  key={index}
-                  className={cn(
-                    "flex w-full items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:text-muted-foreground",
-                    indicator === "dot" && "items-center"
-                  )}
-                >
-                  {formatter && item?.value !== undefined && item.name ? (
-                    formatter(item.value, item.name, item, index, item.payload)
-                  ) : (
-                    <div
-                      className={cn(
-                        "flex flex-1 justify-between gap-4 leading-none",
-                        nestLabel ? "items-end" : "items-center"
-                      )}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        {nestLabel ? tooltipLabel : null}
-                        {itemConfig?.icon ? (
-                          <itemConfig.icon />
-                        ) : (
-                          !hideIndicator && (
-                            <div
-                              className={cn(
-                                "shrink-0 rounded-[2px] border-[--color-border] bg-[--color-bg]",
-                                {
-                                  "h-2.5 w-2.5": indicator === "dot",
-                                  "w-1": indicator === "line",
-                                  "w-0 border-[1.5px] border-dashed bg-transparent":
-                                    indicator === "dashed",
-                                  "my-0.5": nestLabel && indicator === "dashed",
-                                }
-                              )}
-                              style={
-                                {
-                                  "--color-bg": indicatorColor,
-                                  "--color-border": indicatorColor,
-                                } as React.CSSProperties
+            return (
+              // `rowKey` is this row's own identity, not its position — the
+              // index that used to sit here was an accepted S6479 finding and
+              // that acceptance is withdrawn. Note it is NOT the `key` above:
+              // that one is the config lookup, which two rows are allowed to
+              // share (a shared name resolves to a shared config entry, which
+              // is correct). A React key may not be shared, and `withRowKeys`
+              // is what guarantees this one is not.
+              <div
+                key={rowKey}
+                className={cn(
+                  "flex w-full items-stretch gap-2 [&>svg]:h-2.5 [&>svg]:w-2.5 [&>svg]:text-muted-foreground",
+                  indicator === "dot" && "items-center"
+                )}
+              >
+                {formatter && item?.value !== undefined && item.name ? (
+                  formatter(item.value, item.name, item, index, item.payload)
+                ) : (
+                  <div
+                    className={cn(
+                      "flex flex-1 justify-between gap-4 leading-none",
+                      nestLabel ? "items-end" : "items-center"
+                    )}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      {nestLabel ? tooltipLabel : null}
+                      {itemConfig?.icon ? (
+                        <itemConfig.icon />
+                      ) : (
+                        !hideIndicator && (
+                          <div
+                            className={cn(
+                              "shrink-0 rounded-[2px] border-[--color-border] bg-[--color-bg]",
+                              {
+                                "h-2.5 w-2.5": indicator === "dot",
+                                "w-1": indicator === "line",
+                                "w-0 border-[1.5px] border-dashed bg-transparent":
+                                  indicator === "dashed",
+                                "my-0.5": nestLabel && indicator === "dashed",
                               }
-                            />
-                          )
-                        )}
-                        <span className="text-muted-foreground">
-                          {itemConfig?.label || item.name}
-                        </span>
-                      </div>
-                      {item.value != null && (
-                        <span className="font-mono font-medium tabular-nums text-foreground">
-                          {typeof item.value === "number"
-                            ? item.value.toLocaleString(undefined, {
-                                minimumFractionDigits: 2,
-                                maximumFractionDigits: 2,
-                              })
-                            : item.value.toLocaleString()}
-                        </span>
+                            )}
+                            style={
+                              {
+                                "--color-bg": indicatorColor,
+                                "--color-border": indicatorColor,
+                              } as React.CSSProperties
+                            }
+                          />
+                        )
                       )}
+                      <span className="text-muted-foreground">
+                        {itemConfig?.label || item.name}
+                      </span>
                     </div>
-                  )}
-                </div>
-              )
-            })}
+                    {item.value != null && (
+                      <span className="font-mono font-medium tabular-nums text-foreground">
+                        {typeof item.value === "number"
+                          ? item.value.toLocaleString(undefined, {
+                              minimumFractionDigits: 2,
+                              maximumFractionDigits: 2,
+                            })
+                          : item.value.toLocaleString()}
+                      </span>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
     )
@@ -393,6 +391,14 @@ const ChartLegendContent = React.forwardRef<
         : typeof position === "string" &&
           TOP_ANCHORED_LEGEND_POSITIONS.has(position)
 
+    // Chips paired with their React keys — same reasoning as the tooltip's
+    // rows above. The legend's display name lives on `value` (recharts' own
+    // `name ?? dataKey`), not on `name`, so that is the half handed over here.
+    const chips = withRowKeys(
+      payload.filter((item) => item.type !== "none"),
+      (item) => [item.dataKey, item.value]
+    )
+
     return (
       <div
         ref={ref}
@@ -416,80 +422,133 @@ const ChartLegendContent = React.forwardRef<
           className
         )}
       >
-        {payload
-          .filter((item) => item.type !== "none")
-          .map((item, index) => {
-            const key = `${nameKey || item.dataKey || "value"}`
-            const itemConfig = getPayloadConfigFromPayload(config, item, key)
-            // `item.color` is the series' own fill/stroke, which for a
-            // gradient-filled series is the literal string `"url(#…)"` — not a
-            // CSS colour, so React drops the declaration and the swatch renders
-            // fully transparent. Browser-verified on Savings' Year-over-Year:
-            // both swatches computed to `rgba(0, 0, 0, 0)` beside three
-            // gradient shapes. The config is the same source `ChartStyle` uses
-            // to emit `--color-<key>`, so it always holds a real colour when
-            // one was declared.
-            //
-            // `||` rather than `??` on purpose: an empty-string colour is
-            // absent, which is how `ChartStyle` treats it (chart.tsx:83). A
-            // series with no config colour falls through to exactly the old
-            // behaviour.
-            //
-            // A `{ theme: { light, dark } }` config still renders transparent
-            // here; nothing in this app uses that form.
-            const swatchColor = itemConfig?.color || item.color
+        {chips.map(({ item, key: rowKey }) => {
+          const key = `${nameKey || item.dataKey || "value"}`
+          const itemConfig = getPayloadConfigFromPayload(config, item, key)
+          // `item.color` is the series' own fill/stroke, which for a
+          // gradient-filled series is the literal string `"url(#…)"` — not a
+          // CSS colour, so React drops the declaration and the swatch renders
+          // fully transparent. Browser-verified on Savings' Year-over-Year:
+          // both swatches computed to `rgba(0, 0, 0, 0)` beside three
+          // gradient shapes. The config is the same source `ChartStyle` uses
+          // to emit `--color-<key>`, so it always holds a real colour when
+          // one was declared.
+          //
+          // `||` rather than `??` on purpose: an empty-string colour is
+          // absent, which is how `ChartStyle` treats it (chart.tsx:83). A
+          // series with no config colour falls through to exactly the old
+          // behaviour.
+          //
+          // A `{ theme: { light, dark } }` config still renders transparent
+          // here; nothing in this app uses that form.
+          const swatchColor = itemConfig?.color || item.color
 
-            return (
-              // recharts 3 widened `dataKey` to include a function type, and
-              // `item.value` — the series NAME, which two series may legitimately
-              // share — is not a key either. Same reasoning as
-              // `ChartTooltipContent` above: this list is one legend's payload,
-              // rendered in place and never reordered. SonarQube S6479 is
-              // ACCEPTED here for the same reason it is accepted there. The
-              // `ChartLegendContent and ChartTooltipContent React keys` describe
-              // block in chart.test.tsx guards BOTH sites against a
-              // "stable-looking" key being reinvented — one case each, because
-              // a legend case cannot fail for a tooltip mutant: each renders two
-              // series that share a name and fails on React's duplicate-key
-              // warning.
-              //
-              // `whitespace-nowrap` keeps a label on one line — but on its own
-              // it also makes the chip UNSHRINKABLE, because a flex item's
-              // automatic minimum size is its min-content and nowrap raises
-              // that to the whole string. Category names are user-supplied and
-              // capped at 100 characters server-side, so one long one became a
-              // chip wider than the fixed-width legend wrapper and painted
-              // outside the card — the same overflow the wrapping above exists
-              // to fix, reintroduced for exactly the data that triggers it.
-              // `min-w-0` lifts that floor, `max-w-full` caps the chip at the
-              // wrapper, `overflow-hidden` contains what is left, and the
-              // `truncate` span turns it into an ellipsis rather than a
-              // clipped half-glyph.
-              <div
-                key={index}
-                className={cn(
-                  "flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden whitespace-nowrap [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground"
-                )}
-              >
-                {itemConfig?.icon && !hideIcon ? (
-                  <itemConfig.icon />
-                ) : (
-                  <div
-                    className="h-2 w-2 shrink-0 rounded-[2px]"
-                    style={{
-                      backgroundColor: swatchColor,
-                    }}
-                  />
-                )}
-                <span className="truncate">{itemConfig?.label}</span>
-              </div>
-            )
-          })}
+          return (
+            // `rowKey` is this chip's own identity, not its position — the
+            // index that used to sit here was an accepted S6479 finding and
+            // that acceptance is withdrawn. The
+            // `ChartLegendContent and ChartTooltipContent React keys` describe
+            // block in chart.test.tsx guards BOTH sites against a
+            // "stable-looking" key being reinvented — one case each, because
+            // a legend case cannot fail for a tooltip mutant.
+            //
+            // `whitespace-nowrap` keeps a label on one line — but on its own
+            // it also makes the chip UNSHRINKABLE, because a flex item's
+            // automatic minimum size is its min-content and nowrap raises
+            // that to the whole string. Category names are user-supplied and
+            // capped at 100 characters server-side, so one long one became a
+            // chip wider than the fixed-width legend wrapper and painted
+            // outside the card — the same overflow the wrapping above exists
+            // to fix, reintroduced for exactly the data that triggers it.
+            // `min-w-0` lifts that floor, `max-w-full` caps the chip at the
+            // wrapper, `overflow-hidden` contains what is left, and the
+            // `truncate` span turns it into an ellipsis rather than a
+            // clipped half-glyph.
+            <div
+              key={rowKey}
+              className={cn(
+                "flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden whitespace-nowrap [&>svg]:h-3 [&>svg]:w-3 [&>svg]:text-muted-foreground"
+              )}
+            >
+              {itemConfig?.icon && !hideIcon ? (
+                <itemConfig.icon />
+              ) : (
+                <div
+                  className="h-2 w-2 shrink-0 rounded-[2px]"
+                  style={{
+                    backgroundColor: swatchColor,
+                  }}
+                />
+              )}
+              <span className="truncate">{itemConfig?.label}</span>
+            </div>
+          )
+        })}
       </div>
     )
   }
 )
 ChartLegendContent.displayName = "ChartLegend"
+
+/**
+ * Pairs each payload row with the React key it will render under, drawn from
+ * the row's own identity instead of its position (SonarQube S6479).
+ *
+ * A row stands for a series, and the identity a series carries here is its
+ * `dataKey` — the column it reads — together with its display name. Neither
+ * half is unique on its own:
+ *
+ *  - two series may legitimately share a NAME (the same label on two axes),
+ *    which the key tests in `chart.test.tsx` pin;
+ *  - recharts 3 widened `dataKey` to admit a FUNCTION, which carries no
+ *    serialisable identity at all;
+ *  - a row may carry neither.
+ *
+ * So the pair is the identity, and the residue — two rows whose identity really
+ * is identical — is separated by counting the REPEAT rather than by falling
+ * back to the array index. The difference is not cosmetic: an index renames
+ * every row after an insertion, so React tears down and rebuilds their DOM,
+ * while a repeat count renames only rows that were already indistinguishable.
+ *
+ * The keys are injective by construction — the identity parts and the repeat go
+ * through `JSON.stringify`, which escapes them — because React silently
+ * conflates two rows that share a key, and a "stable-looking" composite that
+ * can collide is strictly worse than the index it replaced.
+ */
+function withRowKeys<T>(
+  rows: readonly T[],
+  identify: (row: T) => readonly unknown[]
+): { item: T; key: string }[] {
+  const repeats = new Map<string, number>()
+
+  return rows.map((item) => {
+    const identity = identify(item).map(describeIdentityPart)
+    const fingerprint = JSON.stringify(identity)
+    const repeat = repeats.get(fingerprint) ?? 0
+    repeats.set(fingerprint, repeat + 1)
+    return { item, key: JSON.stringify([...identity, repeat]) }
+  })
+}
+
+/** One half of a row's identity, reduced to something JSON can carry. */
+function describeIdentityPart(part: unknown): string | null {
+  // A function `dataKey` is flattened to the same token as a missing one
+  // rather than stringified. Its source text is not identity — two series can
+  // share `(d) => d.total` — so stringifying it would mint a key that looks
+  // unique and is not. Collapsing it keeps the tie visible for the repeat
+  // counter to resolve.
+  // Only primitives are kept. `String({})` is `"[object Object]"` for EVERY
+  // object, so coercing one would mint the same "unique" key for two different
+  // rows — the exact collision this helper exists to prevent, and what SonarQube
+  // S6551 flags. Recharts' own types make that unreachable today (`DataKey` is
+  // `string | number | ((obj) => …)` and `name` is a primitive), so this arm is
+  // a guard against a future widening rather than a live case: no test pins it,
+  // because faking an object into a typed payload would prove less than this
+  // comment does.
+  if (typeof part === "string") return part
+  if (typeof part === "number" || typeof part === "boolean") return String(part)
+  return null
+}
 
 // Helper to extract item config from a payload.
 function getPayloadConfigFromPayload(

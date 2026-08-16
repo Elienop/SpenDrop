@@ -179,7 +179,22 @@ function CalendarRoot({ className, rootRef, ...props }: RootProps) {
   )
 }
 
-function CalendarChevron({ className, orientation, ...props }: ChevronProps) {
+// `Readonly<…>` on this renderer and not on its three neighbours is deliberate
+// (SonarQube S6759). The rule resolves the props parameter's type and only
+// inspects it when that type carries `ts.TypeFlags.Object`: `ChevronProps` is a
+// bare object literal — `Parameters<typeof Chevron>[0]` over an inline
+// `{ className?; size?; disabled?; orientation? }` — so its four mutable members
+// are reported. `RootProps`, `WeekNumberProps` and `DayButtonProps` each resolve
+// to an INTERSECTION (`{ … } & HTMLAttributes<…>`), and `Calendar`'s own props to
+// a union; the rule bails on anything that is not an object type, so wrapping
+// those would be churn it never asked for. `Readonly<T>` is a homomorphic mapped
+// type: it constrains what this body may assign to its own parameter and changes
+// neither what react-day-picker passes in nor what is rendered.
+function CalendarChevron({
+  className,
+  orientation,
+  ...props
+}: Readonly<ChevronProps>) {
   if (orientation === "left") {
     return <ChevronLeftIcon className={cn("size-4", className)} {...props} />
   }

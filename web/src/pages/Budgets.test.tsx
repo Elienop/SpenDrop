@@ -1356,4 +1356,78 @@ describe('Budgets page', () => {
       expect(april().value).toBe('4000');
     });
   });
+
+  // The browser's own "Leave site?" prompt is the last line of defence for a
+  // full close or reload, which the in-app guard above never sees. The standard
+  // shows it when the beforeunload event was cancelled OR its `returnValue` is
+  // not the empty string; these handlers use only the first half, and the
+  // `returnValue = ''` they used to carry (SonarQube S1874) satisfied neither.
+  // So cancellation is the whole observable.
+  //
+  // happy-dom has no browser chrome to prompt with, so `defaultPrevented` on a
+  // dispatched event stands in for it — the same bit the HTML standard's
+  // "prompt to unload a document" algorithm reads.
+  //
+  // Both sections are asserted separately because each registers its OWN
+  // handler. A test that only made one of them dirty would leave the other
+  // site's `preventDefault()` deletable with the suite still green.
+  describe('browser close guard (beforeunload)', () => {
+    beforeEach(asAdmin);
+
+    /** Dispatches a cancelable beforeunload; true if a handler cancelled it. */
+    function beforeUnloadWasCancelled(): boolean {
+      const event = new Event('beforeunload', { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    }
+
+    test('a page with nothing unsaved does not cancel beforeunload', async () => {
+      renderBudgets();
+      expect(
+        await screen.findByLabelText(/Budget for April 2026/i),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByLabelText(/Limit for Groceries/i),
+      ).toBeInTheDocument();
+
+      // Negative control. Without it a handler that cancelled unconditionally —
+      // one that dropped its `dirtyCount === 0` guard — would satisfy both
+      // tests below, and the prompt would start appearing on every reload of a
+      // page the user has not touched.
+      expect(beforeUnloadWasCancelled()).toBe(false);
+    });
+
+    test('an unsaved monthly budget cancels beforeunload', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const april = () =>
+        screen.getByLabelText(/Budget for April 2026/i) as HTMLInputElement;
+      await waitFor(() => expect(april().value).toBe('3000'));
+
+      await user.clear(april());
+      await user.type(april(), '4000');
+      expect(
+        await screen.findByRole('button', { name: /^Save Budgets \(1\)$/ }),
+      ).toBeInTheDocument();
+
+      expect(beforeUnloadWasCancelled()).toBe(true);
+    });
+
+    test('an unsaved category limit cancels beforeunload', async () => {
+      const user = userEvent.setup({ pointerEventsCheck: 0 });
+      renderBudgets();
+
+      const rent = () =>
+        screen.getByLabelText(/Limit for Rent/i) as HTMLInputElement;
+      expect(await screen.findByLabelText(/Limit for Rent/i)).toBeInTheDocument();
+
+      await user.type(rent(), '250');
+      expect(
+        await screen.findByRole('button', { name: /^Save Category Limits \(1\)$/ }),
+      ).toBeInTheDocument();
+
+      expect(beforeUnloadWasCancelled()).toBe(true);
+    });
+  });
 });

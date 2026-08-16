@@ -50,6 +50,7 @@ import { charCount } from '@/lib/text';
 import { newClientKey } from '@/lib/client-key';
 import {
   isRetryableSaveFailure,
+  noClientKeyMessage,
   noRateMessage,
   saveFailureMessage,
 } from '@/lib/save-failure';
@@ -395,7 +396,21 @@ export function TransactionEntryRow({
       // touches the button. A RETRY is deliberately not gated — it re-sends the
       // same key, so sending it twice cannot duplicate.
       if (sendingRef.current) return;
-      const clientKey = newClientKey();
+      let clientKey: string;
+      try {
+        clientKey = newClientKey();
+      } catch {
+        // `newClientKey` refuses rather than mint a weak key. Nothing has been
+        // built or sent yet, so the outcome is not in doubt: this row is not
+        // saved. Report it — react-hook-form catches whatever `submit` throws,
+        // resets its own state and rethrows, so without this the save is loud
+        // in the console and invisible on screen.
+        //
+        // Same copy as QuickAdd, from the shared reading, so the two entry
+        // surfaces cannot tell the user two different stories about it.
+        toast.error(noClientKeyMessage());
+        return;
+      }
       let payload: CreateTransactionInput;
       // `refund` is a form field, not a wire field — the server infers nothing
       // from a flag, it just stores the sign. Destructured out rather than

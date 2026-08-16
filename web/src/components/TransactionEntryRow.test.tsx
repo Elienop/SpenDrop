@@ -21,6 +21,7 @@ import { createElement, type ReactElement, type ReactNode } from 'react';
 import { TransactionEntryRow } from './TransactionEntryRow';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import { MAX_DESCRIPTION_LENGTH } from '@/lib/constants';
+import { noClientKeyMessage } from '@/lib/save-failure';
 import type { Category, Transaction } from '../api/types';
 
 // Each render gets a fresh QueryClient so the `useCurrencies` cache is isolated
@@ -1545,6 +1546,60 @@ describe('TransactionEntryRow', () => {
       expect(
         await screen.findByRole('switch', { name: 'Refund' }),
       ).toBeChecked();
+    });
+  });
+
+  // -----------------------------------------------------------------
+  // Phase L: the key could not be minted
+  // -----------------------------------------------------------------
+  //
+  // `newClientKey` throws rather than mint a weak idempotency key, and it is
+  // the first thing `submit` does. react-hook-form catches whatever the submit
+  // handler throws, resets its own state and rethrows — so the throw used to
+  // leave a console error and a row that looked untouched.
+  describe('no idempotency key could be minted', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('says the entry was not saved instead of failing silently', async () => {
+      const user = userEvent.setup();
+      render(
+        <TransactionEntryRow
+          categories={mockCategories}
+          onSubmit={onSubmit}
+          onDelete={onDelete}
+        />,
+      );
+
+      await fillRow(user, { amount: '25', description: 'Bread' });
+
+      // A `crypto` that cannot supply random bytes — the one shape
+      // `newClientKey` refuses to mint from (see client-key.test.ts). Stubbed
+      // after the fill so only the submit runs on the crippled platform.
+      vi.stubGlobal('crypto', {});
+
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => expect(toast.error).toHaveBeenCalled());
+      const [message, opts] = (toast.error as Mock).mock.calls[0] as [
+        string,
+        ToastOpts | undefined,
+      ];
+      // Compared against the shared copy rather than a re-typed string: the
+      // wording itself is pinned in save-failure.test.ts, and what this
+      // surface has to prove is that it defers to it. A call site that grew
+      // its own sentence is exactly how the phone and the desktop row start
+      // telling the user two different stories about one failure.
+      expect(message).toBe(noClientKeyMessage());
+      // A bare toast, like the no-rate case: no Retry to hold it open for,
+      // and the failure slot's id is the very key that could not be minted.
+      expect(opts).toBeUndefined();
+
+      // The half that makes the toast worth anything: it is reporting a save
+      // that genuinely did not happen.
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(toast.success).not.toHaveBeenCalled();
     });
   });
 });

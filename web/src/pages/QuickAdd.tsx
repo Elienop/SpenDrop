@@ -35,6 +35,7 @@ import { parseQuickEntry } from '@/lib/quick-parse';
 import { newClientKey } from '@/lib/client-key';
 import {
   isRetryableSaveFailure,
+  noClientKeyMessage,
   noRateMessage,
   saveFailureMessage,
 } from '@/lib/save-failure';
@@ -453,7 +454,23 @@ export function QuickAdd() {
   // again therefore mints a new key, which is correct: that is a new intent.
   const submit = useCallback(async () => {
     if (!canSubmit || effective.categoryId == null) return;
-    const clientKey = newClientKey();
+    let clientKey: string;
+    try {
+      clientKey = newClientKey();
+    } catch {
+      // `newClientKey` refuses rather than mint a weak key. Minting is the
+      // first thing this function does, so nothing has been built or sent and
+      // the outcome is not in doubt: this entry is not saved. Report it — the
+      // throw would otherwise escape `void submit()` as an unhandled rejection
+      // and leave the tap looking like it did nothing at all.
+      //
+      // Bare toast, like the no-rate case below and unlike a failed POST: with
+      // no Retry to hold there is nothing to keep the toast open for, and the
+      // failure toast's slot id IS the client key, which is precisely what
+      // could not be minted.
+      toast.error(noClientKeyMessage());
+      return;
+    }
     let payload: CreateTransactionInput;
     try {
       payload = toCreatePayload(
