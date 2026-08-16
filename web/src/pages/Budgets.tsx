@@ -647,15 +647,25 @@ function MonthlyBudgetsSection({
   }, [dirtyCount, dirtyCountRef, onDirtyChange]);
 
   // Block accidental browser close / reload while changes are unsaved.
-  // The browser always shows its own generic prompt; the `returnValue`
-  // assignment is the legacy handshake that triggers it on Chromium.
+  // `preventDefault()` is the documented trigger; the prompt itself is the
+  // browser's own and its wording is not ours to set. The `e.returnValue = ''`
+  // that used to sit beside it (SonarQube S1874) was inert by the standard,
+  // which shows the prompt when "eventFiringResult is false, or the returnValue
+  // attribute of event is not the empty string" — an OR, and an empty string
+  // satisfies neither half, so it could not arm the legacy path nor suppress
+  // the cancel. Only Chromium <= 118 disagreed: MDN records that Chrome below
+  // 119 "incorrectly activated the confirmation dialog" on an empty string, and
+  // 119 is also where Chrome began honouring `preventDefault()`. So that line
+  // was the whole prompt on pre-October-2023 Chromium and nothing at all after
+  // it; the conformant legacy form is `returnValue = true`, which S1874 flags
+  // just the same.
+  //
   // Note: this does NOT fire on in-app navigation (route changes) —
   // those are guarded separately.
   useEffect(() => {
     if (dirtyCount === 0) return;
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      e.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
@@ -1366,13 +1376,13 @@ function CategoryLimitsSection({
   }, [dirtyCount, dirtyCountRef, onDirtyChange]);
 
   // Block accidental browser close / reload while changes are unsaved.
-  // Mirrors <MonthlyBudgetsSection>'s handler; both sections live on
-  // the Budgets page, so either being dirty must arm the prompt.
+  // Mirrors <MonthlyBudgetsSection>'s handler — including why `preventDefault()`
+  // goes without a `returnValue`; both sections live on the Budgets page, so
+  // either being dirty must arm the prompt.
   useEffect(() => {
     if (dirtyCount === 0) return;
     const handler = (e: BeforeUnloadEvent) => {
       e.preventDefault();
-      e.returnValue = '';
     };
     window.addEventListener('beforeunload', handler);
     return () => window.removeEventListener('beforeunload', handler);
