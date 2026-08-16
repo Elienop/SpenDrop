@@ -13,25 +13,31 @@ const ToggleGroupContext = React.createContext<
 })
 
 const ToggleGroup = React.forwardRef<
-  React.ElementRef<typeof ToggleGroupPrimitive.Root>,
+  React.ComponentRef<typeof ToggleGroupPrimitive.Root>,
   React.ComponentPropsWithoutRef<typeof ToggleGroupPrimitive.Root> &
     VariantProps<typeof toggleVariants>
->(({ className, variant, size, children, ...props }, ref) => (
-  <ToggleGroupPrimitive.Root
-    ref={ref}
-    className={cn("flex items-center justify-center gap-1", className)}
-    {...props}
-  >
-    <ToggleGroupContext.Provider value={{ variant, size }}>
-      {children}
-    </ToggleGroupContext.Provider>
-  </ToggleGroupPrimitive.Root>
-))
+>(({ className, variant, size, children, ...props }, ref) => {
+  // `ToggleGroupItem` reads `variant` and `size` off this context and nothing
+  // else, so they are the whole dependency list.
+  const contextValue = React.useMemo(() => ({ variant, size }), [variant, size])
+
+  return (
+    <ToggleGroupPrimitive.Root
+      ref={ref}
+      className={cn("flex items-center justify-center gap-1", className)}
+      {...props}
+    >
+      <ToggleGroupContext.Provider value={contextValue}>
+        {children}
+      </ToggleGroupContext.Provider>
+    </ToggleGroupPrimitive.Root>
+  )
+})
 
 ToggleGroup.displayName = ToggleGroupPrimitive.Root.displayName
 
 const ToggleGroupItem = React.forwardRef<
-  React.ElementRef<typeof ToggleGroupPrimitive.Item>,
+  React.ComponentRef<typeof ToggleGroupPrimitive.Item>,
   React.ComponentPropsWithoutRef<typeof ToggleGroupPrimitive.Item> &
     VariantProps<typeof toggleVariants>
 >(({ className, children, variant, size, ...props }, ref) => {

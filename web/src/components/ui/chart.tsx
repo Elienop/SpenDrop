@@ -55,10 +55,15 @@ const ChartContainer = React.forwardRef<
   }
 >(({ id, className, children, config, ...props }, ref) => {
   const uniqueId = React.useId()
-  const chartId = `chart-${id || uniqueId.replace(/:/g, "")}`
+  const chartId = `chart-${id || uniqueId.replaceAll(":", "")}`
+
+  // Memoised so the provider's value identity only changes when `config` does.
+  // Every consumer reads `config` and nothing else, so `config` is the whole
+  // dependency list — a wider one would just reintroduce the per-render churn.
+  const chartContextValue = React.useMemo(() => ({ config }), [config])
 
   return (
-    <ChartContext.Provider value={{ config }}>
+    <ChartContext.Provider value={chartContextValue}>
       <div
         data-chart={chartId}
         ref={ref}
@@ -215,6 +220,17 @@ const ChartTooltipContent = React.forwardRef<
                 // which is not a valid React key. The index is stable here:
                 // this list is a single tooltip's payload, rendered in place
                 // and never reordered.
+                //
+                // Deliberate: SonarQube S6479 ("do not use array index in
+                // keys") is ACCEPTED on this line. A payload item carries no
+                // identity that is both stable and unique — `name` is shared by
+                // design (see the "two tooltip rows sharing a name" test in
+                // chart.test.tsx, which fails on React's duplicate-key warning
+                // if this line ever keys by it) and `dataKey` may be a function, whose
+                // stringification two series can also share. A composite of
+                // those can collide, and a colliding key is strictly worse than
+                // the index: React conflates the two rows. Position in the
+                // payload IS the identity recharts gives us.
                 <div
                   key={index}
                   className={cn(
@@ -285,22 +301,74 @@ ChartTooltipContent.displayName = "ChartTooltip"
 
 const ChartLegend = RechartsPrimitive.Legend
 
+// The `position` values that put the legend against the TOP of the box it is
+// placed in, so the gap separating it from the plot has to sit UNDER it.
+// `"top"` is the outside placement above the plot area; the three `insideTop*`
+// values anchor to the top edge with `verticalAnchor: "start"`, i.e. the legend
+// hangs downwards from there (recharts' `getCartesianPosition`). The other
+// nine members of the union — `"bottom"`, `"left"`, `"right"`, `"center"`, the
+// `insideBottom*` trio and `insideLeft`/`insideRight` — sit below or beside the
+// plot, where the gap belongs on top. The `{ x, y }` object form is not
+// a string, so it never matches here and lands on the default arm; there is no
+// edge it is anchored to that could be read off it.
+const TOP_ANCHORED_LEGEND_POSITIONS: ReadonlySet<string> = new Set([
+  "top",
+  "insideTop",
+  "insideTopLeft",
+  "insideTopRight",
+])
+
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
   React.ComponentProps<"div"> &
-    // recharts 3 removed `payload` and `verticalAlign` from `LegendProps`, so
-    // the old `Pick<LegendProps, …>` no longer type-checks — and while broken
-    // it made `payload` a REQUIRED prop at every `<ChartLegendContent />` call
-    // site. Intersecting the default legend content's own props restores both
-    // fields and makes `payload` optional again, which is what the call sites
-    // in SpendingTab and SavingsTab rely on.
-    RechartsPrimitive.DefaultLegendContentProps & {
+    // recharts 3 dropped `payload` from `LegendProps` (`Legend.d.ts` omits it
+    // and never adds it back), so the upstream
+    // `Pick<LegendProps, "payload" | "verticalAlign">` no longer type-checks —
+    // and while broken it made `payload` a REQUIRED prop at every
+    // `<ChartLegendContent />` call site. Intersecting the default legend
+    // content's own props restores `payload` as an optional field, which is
+    // what the call sites in SpendingTab and SavingsTab rely on.
+    Omit<RechartsPrimitive.DefaultLegendContentProps, "verticalAlign"> & {
       hideIcon?: boolean
       nameKey?: string
+      // Both placement props are restated locally, for two different reasons.
+      //
+      // `position` is declared on `<Legend>` rather than on
+      // `DefaultLegendContentProps`, so it does not arrive with the
+      // intersection at all.
+      //
+      // `verticalAlign` does — but recharts 3.10 deprecated it, and INHERITING
+      // that declaration is what makes reading the prop below report
+      // "'verticalAlign' is deprecated" (SonarQube typescript:S1874 reads
+      // TypeScript's own deprecation suggestions, and it fired on the
+      // destructure). It is omitted above and restated here so this component
+      // can keep honouring the prop without re-raising a finding this branch
+      // exists to clear. A CALL SITE that sets it still gets its own warning
+      // from `<Legend>`, which is where it belongs. The union is written out
+      // rather than imported: recharts does not re-export
+      // `VerticalAlignmentType` from its root, and reaching into
+      // `recharts/types/…` for it would be worse than restating three literals.
+      //
+      // Deprecated is not removed: `legendDefaultProps` still defaults
+      // `verticalAlign` to "bottom" and `getDefaultPosition` still branches on
+      // it, so a call site setting it really does still move the legend.
+      // `<Legend>` spreads its resolved props straight onto the `content`
+      // element (Legend.js `LegendContent`), so both props arrive here —
+      // `verticalAlign` already resolved to its default, `position` as
+      // `undefined` when the call site leaves it unset.
+      position?: RechartsPrimitive.CartesianPosition
+      verticalAlign?: "top" | "middle" | "bottom"
     }
 >(
   (
-    { className, hideIcon = false, payload, verticalAlign = "bottom", nameKey },
+    {
+      className,
+      hideIcon = false,
+      payload,
+      position,
+      verticalAlign = "bottom",
+      nameKey,
+    },
     ref
   ) => {
     const { config } = useChart()
@@ -308,6 +376,22 @@ const ChartLegendContent = React.forwardRef<
     if (!payload?.length) {
       return null
     }
+
+    // Which edge the legend is pinned to, and therefore which side of it faces
+    // the plot. Both placement props are read, with `position` winning whenever
+    // it is set — the precedence recharts itself applies: `Legend.d.ts` says of
+    // `position` "If this is defined, it overrides `align` and `verticalAlign`",
+    // and `LegendImpl` only falls back to `getDefaultPosition`, the branch that
+    // reads `verticalAlign`, when `props.position == null` (Legend.js). The
+    // `= "bottom"` default states recharts' own `legendDefaultProps` value,
+    // which is what an unset call site actually delivers here; it does not
+    // change the outcome, since a `verticalAlign` of `undefined` takes the same
+    // arm as "bottom" — only "top" is a top edge.
+    const atTop =
+      position === undefined
+        ? verticalAlign === "top"
+        : typeof position === "string" &&
+          TOP_ANCHORED_LEGEND_POSITIONS.has(position)
 
     return (
       <div
@@ -323,7 +407,12 @@ const ChartLegendContent = React.forwardRef<
           // series named. `gap-y` is smaller than `gap-x` because the vertical
           // gap only exists once wrapping happens.
           "flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5",
-          verticalAlign === "top" ? "pb-3" : "pt-3",
+          // The padding separates the legend from the plot, so it goes on the
+          // side facing it: under a legend pinned to the top, above one that
+          // sits below or beside the plot. All three production legends set
+          // neither placement prop and so land on `pt-3`, which is where
+          // `verticalAlign`'s "bottom" default puts them.
+          atTop ? "pb-3" : "pt-3",
           className
         )}
       >
@@ -355,7 +444,14 @@ const ChartLegendContent = React.forwardRef<
               // `item.value` — the series NAME, which two series may legitimately
               // share — is not a key either. Same reasoning as
               // `ChartTooltipContent` above: this list is one legend's payload,
-              // rendered in place and never reordered.
+              // rendered in place and never reordered. SonarQube S6479 is
+              // ACCEPTED here for the same reason it is accepted there. The
+              // `ChartLegendContent and ChartTooltipContent React keys` describe
+              // block in chart.test.tsx guards BOTH sites against a
+              // "stable-looking" key being reinvented — one case each, because
+              // a legend case cannot fail for a tooltip mutant: each renders two
+              // series that share a name and fails on React's duplicate-key
+              // warning.
               //
               // `whitespace-nowrap` keeps a label on one line — but on its own
               // it also makes the chip UNSHRINKABLE, because a flex item's

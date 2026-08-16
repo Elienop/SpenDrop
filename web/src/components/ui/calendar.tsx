@@ -6,7 +6,14 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
 } from "lucide-react"
-import { DayButton, DayPicker, getDefaultClassNames } from "react-day-picker"
+import {
+  DayButton,
+  DayPicker,
+  getDefaultClassNames,
+  type ChevronProps,
+  type RootProps,
+  type WeekNumberProps,
+} from "react-day-picker"
 
 import { cn } from "@/lib/utils"
 import { Button, buttonVariants } from "@/components/ui/button"
@@ -21,7 +28,22 @@ function Calendar({
   components,
   ...props
 }: React.ComponentProps<typeof DayPicker> & {
-  buttonVariant?: React.ComponentProps<typeof Button>["variant"]
+  // `Exclude<…, undefined>` rather than the bare lookup: the `?` already admits
+  // `undefined`, so carrying it in the value type too is redundant (SonarQube
+  // S4782). `null` is kept, but it is NOT a way of asking for the default:
+  // class-variance-authority 0.7.1 returns early on it —
+  // `if (variantProp === null) return null` in its `dist/index.js` — and emits
+  // no class at all for that variant, the `defaultVariants` entry included.
+  // (Measured: `buttonVariants({ variant: null })` drops the whole variant
+  // block and keeps only the base and `size` classes.) That is a meaningful
+  // thing for a caller to ask for — a nav button with no variant styling — so
+  // the type still admits it. `undefined` is the value that falls back, and it
+  // never reaches cva from here: the `= "ghost"` destructure default above
+  // catches it first.
+  buttonVariant?: Exclude<
+    React.ComponentProps<typeof Button>["variant"],
+    undefined
+  >
 }) {
   const defaultClassNames = getDefaultClassNames()
 
@@ -125,50 +147,57 @@ function Calendar({
         ...classNames,
       }}
       components={{
-        Root: ({ className, rootRef, ...props }) => {
-          return (
-            <div
-              data-slot="calendar"
-              ref={rootRef}
-              className={cn(className)}
-              {...props}
-            />
-          )
-        },
-        Chevron: ({ className, orientation, ...props }) => {
-          if (orientation === "left") {
-            return (
-              <ChevronLeftIcon className={cn("size-4", className)} {...props} />
-            )
-          }
-
-          if (orientation === "right") {
-            return (
-              <ChevronRightIcon
-                className={cn("size-4", className)}
-                {...props}
-              />
-            )
-          }
-
-          return (
-            <ChevronDownIcon className={cn("size-4", className)} {...props} />
-          )
-        },
+        Root: CalendarRoot,
+        Chevron: CalendarChevron,
         DayButton: CalendarDayButton,
-        WeekNumber: ({ children, ...props }) => {
-          return (
-            <td {...props}>
-              <div className="flex size-[--cell-size] items-center justify-center text-center">
-                {children}
-              </div>
-            </td>
-          )
-        },
+        WeekNumber: CalendarWeekNumber,
         ...components,
       }}
       {...props}
     />
+  )
+}
+
+// The three renderers below used to be arrow functions written inline in
+// `components={{ … }}` (SonarQube S6478). A component declared during render is
+// a NEW component type on every render, so React unmounts and remounts the
+// whole subtree under it rather than updating it — throwing away DOM state and
+// focus inside the calendar on every keystroke that re-renders the parent.
+// None of them closes over anything from `Calendar` (`cn` and the icons are
+// module-level), so hoisting costs nothing and needs no factory: the props each
+// one reads are the props react-day-picker already passes it. `DayButton` was
+// always hoisted; these three now match it.
+
+function CalendarRoot({ className, rootRef, ...props }: RootProps) {
+  return (
+    <div
+      data-slot="calendar"
+      ref={rootRef}
+      className={cn(className)}
+      {...props}
+    />
+  )
+}
+
+function CalendarChevron({ className, orientation, ...props }: ChevronProps) {
+  if (orientation === "left") {
+    return <ChevronLeftIcon className={cn("size-4", className)} {...props} />
+  }
+
+  if (orientation === "right") {
+    return <ChevronRightIcon className={cn("size-4", className)} {...props} />
+  }
+
+  return <ChevronDownIcon className={cn("size-4", className)} {...props} />
+}
+
+function CalendarWeekNumber({ children, ...props }: WeekNumberProps) {
+  return (
+    <td {...props}>
+      <div className="flex size-[--cell-size] items-center justify-center text-center">
+        {children}
+      </div>
+    </td>
   )
 }
 

@@ -27,7 +27,7 @@ import { cn } from "@/lib/utils"
 // arithmetic (band >= 44px, positive seam clearance) is pinned in
 // Settings.notifications.test.tsx.
 const Switch = React.forwardRef<
-  React.ElementRef<typeof SwitchPrimitives.Root>,
+  React.ComponentRef<typeof SwitchPrimitives.Root>,
   React.ComponentPropsWithoutRef<typeof SwitchPrimitives.Root>
 >(({ className, ...props }, ref) => (
   <SwitchPrimitives.Root

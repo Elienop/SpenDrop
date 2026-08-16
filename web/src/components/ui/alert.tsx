@@ -37,12 +37,20 @@ Alert.displayName = "Alert"
 const AlertTitle = React.forwardRef<
   HTMLParagraphElement,
   React.HTMLAttributes<HTMLHeadingElement>
->(({ className, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => (
+  // `children` is destructured and placed explicitly rather than riding in on
+  // `{...props}`. The rendered DOM is identical either way — React puts a
+  // spread `children` in exactly this position — but the spread form hides the
+  // heading's content from static analysis, so nothing can tell an `<h5>` that
+  // is always given a label from one that is never given one (SonarQube S6850:
+  // a heading with no content has no accessible name).
   <h5
     ref={ref}
     className={cn("mb-1 font-medium leading-none tracking-tight", className)}
     {...props}
-  />
+  >
+    {children}
+  </h5>
 ))
 AlertTitle.displayName = "AlertTitle"
 
