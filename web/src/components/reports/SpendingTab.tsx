@@ -107,6 +107,27 @@ function buildVelocityData(
   return result;
 }
 
+/**
+ * Chronological order for the `"YYYY-MM-01"` month keys `catTrendData` builds.
+ *
+ * They are fixed-width ASCII, so chronological order IS byte order — but a bare
+ * `.sort()` leans on that silently (SonarQube S2871). Its default converts every
+ * element with `String()` and compares UTF-16 code units, which is right here
+ * only by accident of the key shape; the accident stops holding the moment the
+ * shape does, and nothing would say so.
+ *
+ * `<` / `>` rather than `String.localeCompare` (which is what the rule suggests
+ * for arrays of strings): this is a chronological order, not an alphabetical
+ * one, so it must not depend on the runtime's collation locale — under ICU the
+ * `-` separator is a variable-weight character, and numeric collation
+ * (`-u-kn`) is locale-tunable too. Code-unit comparison is exact for these
+ * keys and locale-independent.
+ */
+function compareMonthKeys(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 const VELOCITY_CONFIG = {
   current: { label: 'Current Month', color: 'hsl(var(--primary))' },
   previous: { label: 'Previous Month', color: 'hsl(var(--primary) / 0.35)' },
@@ -201,7 +222,7 @@ export function SpendingTab() {
       }
       byCat.set(cat.id, inner);
     }
-    const sortedMonths = Array.from(monthSet).sort();
+    const sortedMonths = Array.from(monthSet).sort(compareMonthKeys);
     return sortedMonths.map((date) => {
       const point: Record<string, string | number> = { date };
       for (const cat of expenseCategories) {

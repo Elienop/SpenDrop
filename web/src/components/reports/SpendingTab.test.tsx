@@ -61,12 +61,12 @@ const BREAKDOWN: CategoryBreakdownItem[] = [
  * 2-digit year is exercised on both sides of it.
  *
  * EMITTED NEWEST-FIRST, DELIBERATELY. Do not "tidy" this into ascending order.
- * `catTrendData` builds `monthSet` in iteration order and then calls `.sort()`
- * on it; with an ascending fixture that sort is a NO-OP, so deleting it left
- * all 8 tests green while the X-axis test's comment claimed the chronological
- * sort was covered. Reversing the fixture makes `monthSet`'s insertion order
- * descending, so the axis is ascending ONLY because `.sort()` runs — which is
- * what turns that claim into an actual assertion.
+ * `catTrendData` builds `monthSet` in iteration order and then sorts it with
+ * `compareMonthKeys`; with an ascending fixture that sort is a NO-OP, so
+ * deleting it left all 8 tests green while the X-axis test's comment claimed
+ * the chronological sort was covered. Reversing the fixture makes `monthSet`'s
+ * insertion order descending, so the axis is ascending ONLY because the sort
+ * runs — which is what turns that claim into an actual assertion.
  *
  * Reversing is safe for everything else here: `byCat` is keyed by date string,
  * and each category's `totalSum` is an order-independent sum, so the legend's

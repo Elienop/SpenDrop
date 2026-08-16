@@ -297,6 +297,175 @@ describe('ChartLegendContent and ChartTooltipContent React keys', () => {
       spy.mockRestore()
     }
   })
+
+  // The two cases above share a NAME and differ in `dataKey`, which is the
+  // collision `key={item.value}` produced. The keys now come from `withRowKeys`,
+  // whose contract is one step stronger: two rows that agree on BOTH halves of
+  // their identity still may not share a key — that is what its repeat counter
+  // is for, and it is the part a "just concatenate the fields" rewrite would
+  // quietly drop.
+  //
+  // Driven through the content components' own `payload` prop rather than a
+  // chart, because recharts will not build two payload rows for one series;
+  // `payload` is a declared prop of both, and the ordering/identity tests in
+  // this file already render `ChartLegendContent` that way.
+  const TWIN_CONFIG = {
+    first: { label: 'Twin', color: 'rgb(1, 1, 1)' },
+  } satisfies ChartConfig
+
+  // Two fixtures, because the two components read a row's display name from
+  // different fields: the legend from `value` (recharts' `name ?? dataKey`),
+  // the tooltip from `name`. A single shared row would leave one of them
+  // matching on an absent field, and the test would pass without the identity
+  // halves ever being equal.
+  const TWIN_LEGEND_ROW = {
+    value: SHARED_NAME,
+    dataKey: 'first',
+    color: 'rgb(1, 1, 1)',
+  }
+
+  const TWIN_TOOLTIP_ROW = {
+    name: SHARED_NAME,
+    dataKey: 'first',
+    // Required by recharts 3's tooltip `Payload`. Identical on both twins on
+    // purpose: it is the series' generated handle, and these two rows stand for
+    // the SAME series, so it must not be what pulls them apart.
+    graphicalItemId: 'first',
+    // A value, so the row wrapper carries text the name span does not and the
+    // count below is over the two name spans rather than over their ancestors
+    // as well.
+    value: 1,
+    color: 'rgb(1, 1, 1)',
+    payload: {},
+  }
+
+  test('two legend chips identical in dataKey AND name do not collide', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(
+        <ChartContainer config={TWIN_CONFIG}>
+          <ChartLegendContent payload={[TWIN_LEGEND_ROW, TWIN_LEGEND_ROW]} />
+        </ChartContainer>
+      )
+      // Positive control: two indistinguishable chips really are on screen, so
+      // the warning count below is measured over a list that could collide.
+      expect(screen.getAllByText('Twin')).toHaveLength(2)
+      expect(
+        spy.mock.calls.filter((args) =>
+          args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
+        )
+      ).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('two tooltip rows identical in dataKey AND name do not collide', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(
+        <ChartContainer config={TWIN_CONFIG}>
+          <ChartTooltipContent
+            active
+            hideLabel
+            payload={[TWIN_TOOLTIP_ROW, TWIN_TOOLTIP_ROW]}
+          />
+        </ChartContainer>
+      )
+      // The rows show the raw name, not the config label: the tooltip's config
+      // lookup key is `name`, which is not a key of `TWIN_CONFIG` — the same
+      // asymmetry the shared-name tooltip test above notes.
+      expect(screen.getAllByText(SHARED_NAME)).toHaveLength(2)
+      expect(
+        spy.mock.calls.filter((args) =>
+          args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
+        )
+      ).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  // Everything above guards against a COLLIDING key. Nothing above guards
+  // against going back to `key={index}`, which collides with nothing and was
+  // what both sites carried until this change — the duplicate-key spy stays
+  // silent for it. What an index actually costs is only visible on a REORDER:
+  // keyed by position, React keeps each DOM node where it is and rewrites its
+  // text, so the node that showed the first series ends up showing the second.
+  // Keyed by identity it moves the node instead. Node identity is therefore
+  // the observable, the same way the Calendar renderer tests distinguish an
+  // update from a remount.
+  //
+  // Reordering is not hypothetical here: recharts 3 sorts legend items in its
+  // own selector (`itemSorter`, see the ordering tests at the top of this
+  // file), so this payload arrives already sorted and re-sorts when a value
+  // changes.
+  const ORDER_CONFIG = {
+    alpha: { label: 'Alpha', color: 'rgb(1, 1, 1)' },
+    beta: { label: 'Beta', color: 'rgb(2, 2, 2)' },
+  } satisfies ChartConfig
+
+  const ALPHA_LEGEND = { value: 'Alpha', dataKey: 'alpha', color: 'rgb(1, 1, 1)' }
+  const BETA_LEGEND = { value: 'Beta', dataKey: 'beta', color: 'rgb(2, 2, 2)' }
+
+  test('a reordered legend payload moves a chip instead of rewriting it', () => {
+    const legend = (payload: typeof ALPHA_LEGEND[]) => (
+      <ChartContainer config={ORDER_CONFIG}>
+        <ChartLegendContent payload={payload} />
+      </ChartContainer>
+    )
+
+    const { rerender } = render(legend([ALPHA_LEGEND, BETA_LEGEND]))
+    const alphaBefore = screen.getByText('Alpha')
+    // Positive control: both chips are really on screen, so the comparison
+    // below is between two rendered nodes.
+    expect(screen.getByText('Beta')).toBeInTheDocument()
+
+    rerender(legend([BETA_LEGEND, ALPHA_LEGEND]))
+
+    // The order really did change...
+    expect(screen.getByText('Beta').compareDocumentPosition(alphaBefore)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+    // ...and Alpha is still the SAME element, moved rather than rebuilt.
+    expect(screen.getByText('Alpha')).toBe(alphaBefore)
+  })
+
+  const ALPHA_TIP = {
+    name: 'Alpha',
+    dataKey: 'alpha',
+    graphicalItemId: 'alpha',
+    value: 1,
+    color: 'rgb(1, 1, 1)',
+    payload: {},
+  }
+  const BETA_TIP = {
+    name: 'Beta',
+    dataKey: 'beta',
+    graphicalItemId: 'beta',
+    value: 2,
+    color: 'rgb(2, 2, 2)',
+    payload: {},
+  }
+
+  test('a reordered tooltip payload moves a row instead of rewriting it', () => {
+    const tip = (payload: typeof ALPHA_TIP[]) => (
+      <ChartContainer config={ORDER_CONFIG}>
+        <ChartTooltipContent active hideLabel payload={payload} />
+      </ChartContainer>
+    )
+
+    const { rerender } = render(tip([ALPHA_TIP, BETA_TIP]))
+    const alphaBefore = screen.getByText('Alpha')
+    expect(screen.getByText('Beta')).toBeInTheDocument()
+
+    rerender(tip([BETA_TIP, ALPHA_TIP]))
+
+    expect(screen.getByText('Beta').compareDocumentPosition(alphaBefore)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+    expect(screen.getByText('Alpha')).toBe(alphaBefore)
+  })
 })
 
 describe('ChartLegendContent overflow', () => {
