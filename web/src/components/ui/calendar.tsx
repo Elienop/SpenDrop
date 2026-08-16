@@ -30,8 +30,16 @@ function Calendar({
 }: React.ComponentProps<typeof DayPicker> & {
   // `Exclude<…, undefined>` rather than the bare lookup: the `?` already admits
   // `undefined`, so carrying it in the value type too is redundant (SonarQube
-  // S4782). `null` is kept — cva reads it as "fall back to the default
-  // variant", so dropping it would narrow what a caller may pass.
+  // S4782). `null` is kept, but it is NOT a way of asking for the default:
+  // class-variance-authority 0.7.1 returns early on it —
+  // `if (variantProp === null) return null` in its `dist/index.js` — and emits
+  // no class at all for that variant, the `defaultVariants` entry included.
+  // (Measured: `buttonVariants({ variant: null })` drops the whole variant
+  // block and keeps only the base and `size` classes.) That is a meaningful
+  // thing for a caller to ask for — a nav button with no variant styling — so
+  // the type still admits it. `undefined` is the value that falls back, and it
+  // never reaches cva from here: the `= "ghost"` destructure default above
+  // catches it first.
   buttonVariant?: Exclude<
     React.ComponentProps<typeof Button>["variant"],
     undefined

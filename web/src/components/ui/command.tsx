@@ -39,9 +39,12 @@ const CommandInput = React.forwardRef<
 >(({ className, ...props }, ref) => (
   // `data-slot` rather than the bare `cmdk-input-wrapper` attribute this used
   // to carry: cmdk never emits or reads that name (it is not in the library's
-  // bundle — only shadcn's own template wrote it), and a non-`data-` custom
-  // attribute is invalid HTML. The only selector for it in this repo is
-  // `CommandDialog`'s class list above, changed in step with it.
+  // bundle — only shadcn's own template wrote it). The attribute was also
+  // unknown to JSX (SonarQube S6747) and non-conforming HTML — harmless at
+  // runtime, since it parsed, queried and selected fine, but dead weight.
+  // `data-slot` is conforming and is the hook calendar.tsx and button-group.tsx
+  // already use. The only selector for it in this repo is `CommandDialog`'s
+  // class list above, changed in step with it.
   <div
     className="flex items-center border-b px-3"
     data-slot="command-input-wrapper"
