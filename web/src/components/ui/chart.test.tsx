@@ -466,6 +466,103 @@ describe('ChartLegendContent and ChartTooltipContent React keys', () => {
     )
     expect(screen.getByText('Alpha')).toBe(alphaBefore)
   })
+
+  // The two identity parts that are not plain strings, each read through the
+  // tooltip because its row falls back to `item.name` when the config has no
+  // entry — the legend chip renders only its config label, so a value that is
+  // not also a config key is invisible there.
+  //
+  // Both are proved on the reorder observable rather than the duplicate-key
+  // spy, and that is not a stylistic choice: `withRowKeys` is collision-free by
+  // construction, since a residual tie falls back to the repeat counter. So
+  // mishandling an identity part never costs a duplicate key. It silently
+  // demotes that row to index-keying, and only a reorder can see the
+  // difference.
+  test('a numeric name is identity, not noise', () => {
+    // Both rows carry the SAME dataKey, so the number is the only thing telling
+    // them apart — one edit away from real, since SavingsTab names its series
+    // after years. Reduce a number to the token a function gets and the two
+    // fingerprints become equal, the counter separates them by position, and
+    // this reorder rewrites in place instead of moving.
+    const row = (name: number, color: string) => ({
+      name,
+      dataKey: 'shared',
+      graphicalItemId: `series-${name}`,
+      value: name,
+      color,
+      payload: {},
+    })
+    const y2025 = row(2025, 'rgb(1, 1, 1)')
+    const y2026 = row(2026, 'rgb(2, 2, 2)')
+    const tip = (payload: (typeof y2025)[]) => (
+      <ChartContainer config={ORDER_CONFIG}>
+        <ChartTooltipContent active hideLabel payload={payload} />
+      </ChartContainer>
+    )
+
+    const { rerender } = render(tip([y2025, y2026]))
+    const firstBefore = screen.getByText('2025')
+    // Positive control: both rows are really on screen.
+    expect(screen.getByText('2026')).toBeInTheDocument()
+
+    rerender(tip([y2026, y2025]))
+
+    expect(screen.getByText('2026').compareDocumentPosition(firstBefore)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    )
+    expect(screen.getByText('2025')).toBe(firstBefore)
+  })
+
+  test('a function dataKey is refused as identity, and the tie falls to position', () => {
+    // recharts 3 widened `dataKey` to include a function. Its source text is
+    // deliberately NOT identity — two series can genuinely share
+    // `(d) => d.total` — so `describeIdentityPart` collapses every function to
+    // the same token as a missing part.
+    //
+    // This pins that refusal, which nothing else does. Give two rows the same
+    // name and DIFFERENT function dataKeys: collapsed, their fingerprints tie
+    // and the repeat counter separates them BY POSITION, so a reorder rewrites
+    // each slot in place. Stringify the functions instead — the tempting
+    // "improvement", since these two texts do differ — and the keys become
+    // identity-bearing, so the nodes move instead. The assertion below is the
+    // one that tells those apart, and it fails on that mutant.
+    const SAME = 'Same Name'
+    const first = {
+      name: SAME,
+      dataKey: (d: { first: number }) => d.first,
+      graphicalItemId: 'first',
+      value: 1,
+      color: 'rgb(1, 1, 1)',
+      payload: {},
+    }
+    const second = {
+      name: SAME,
+      dataKey: (d: { second: number }) => d.second,
+      graphicalItemId: 'second',
+      value: 2,
+      color: 'rgb(2, 2, 2)',
+      payload: {},
+    }
+    const tip = (payload: (typeof first | typeof second)[]) => (
+      <ChartContainer config={ORDER_CONFIG}>
+        <ChartTooltipContent active hideLabel payload={payload} />
+      </ChartContainer>
+    )
+
+    const { rerender } = render(tip([first, second]))
+    // Positive control: both rows rendered, and they are told apart by value
+    // because their names are equal by construction.
+    // Values render through the tooltip's formatter, so they read as "1.00".
+    const slotZero = screen.getByText('1.00')
+    expect(screen.getByText('2.00')).toBeInTheDocument()
+
+    rerender(tip([second, first]))
+
+    // The same element now carries the other row's value: the key held the
+    // slot, not the row, which is what a positional tiebreak means.
+    expect(slotZero).toHaveTextContent('2.00')
+    expect(screen.getAllByText(SAME)).toHaveLength(2)
+  })
 })
 
 describe('ChartLegendContent overflow', () => {
