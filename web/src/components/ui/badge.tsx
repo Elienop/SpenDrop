@@ -29,7 +29,11 @@ export interface BadgeProps
   extends React.HTMLAttributes<HTMLDivElement>,
     VariantProps<typeof badgeVariants> {}
 
-function Badge({ className, variant, ...props }: BadgeProps) {
+// `Readonly<…>` at the parameter rather than `readonly` members on `BadgeProps`
+// (SonarQube S6759): the exported interface is the callers' contract and is left
+// alone. Readonly modifiers do not participate in assignability, so every
+// existing `<Badge …>` still type-checks and renders identically.
+function Badge({ className, variant, ...props }: Readonly<BadgeProps>) {
   return (
     <div className={cn(badgeVariants({ variant }), className)} {...props} />
   )
