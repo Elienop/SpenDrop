@@ -1,5 +1,5 @@
 import { describe, test, expect, vi, afterEach } from 'vitest';
-import { render, screen, cleanup } from '@testing-library/react';
+import { render, screen, cleanup, fireEvent } from '@testing-library/react';
 import React from 'react';
 
 // Every other chart test in this repo mocks recharts wholesale
@@ -28,8 +28,6 @@ vi.mock('recharts', async (importOriginal) => {
   };
 });
 
-import spendingTabSource from '../reports/SpendingTab.tsx?raw';
-import savingsTabSource from '../reports/SavingsTab.tsx?raw';
 import { LineChart, Line, BarChart, Bar, XAxis } from 'recharts';
 import {
   ChartContainer,
@@ -195,12 +193,18 @@ describe('ChartLegendContent swatch colour', () => {
   })
 })
 
-describe('ChartLegendContent React keys', () => {
+describe('ChartLegendContent and ChartTooltipContent React keys', () => {
   // `key={item.value}` keyed each chip by the series NAME, which two series may
   // legitimately share. The obvious test is vacuous — React renders both chips
   // regardless — so the only assertion that distinguishes the two is React's
   // duplicate-key warning, and a spy that never fires proves nothing without a
   // control that makes it fire.
+  //
+  // BOTH `key={index}` sites are covered here. They are one accepted decision
+  // (SonarQube S6479, argued at both sites in chart.tsx) and they need one
+  // guard each: a legend case cannot fail for a tooltip mutant, and the tooltip
+  // half went unguarded until a mutation pass put `key="dup"` on its rows and
+  // the whole file stayed green.
   const DUPLICATE_KEY_WARNING = /Encountered two children with the same key/
 
   // `item.value` is recharts' `name ?? dataKey`, NOT the config label — the
@@ -253,6 +257,37 @@ describe('ChartLegendContent React keys', () => {
       // Both chips render either way — that is why this is asserted on the
       // warning and not on the DOM.
       expect(screen.getAllByText('Same Name')).toHaveLength(2)
+      expect(
+        spy.mock.calls.filter((args) =>
+          args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
+        )
+      ).toHaveLength(0)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('two tooltip rows sharing a name do not collide on a React key', () => {
+    // The tooltip keys by `nameKey || item.name || item.dataKey`, so a shared
+    // `name` is what would collide there — and it is the same legitimate chart
+    // as above, read through the other component. The rows show the raw name
+    // here rather than a config label: the tooltip's lookup key is the NAME,
+    // which is not a config key.
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      render(
+        <ChartContainer config={CONFIG}>
+          <BarChart data={DATA}>
+            <XAxis dataKey="name" />
+            <ChartTooltip defaultIndex={0} content={<ChartTooltipContent />} />
+            <Bar dataKey="first" name={SHARED_NAME} fill="var(--color-first)" />
+            <Bar dataKey="second" name={SHARED_NAME} fill="var(--color-second)" />
+          </BarChart>
+        </ChartContainer>
+      )
+      // Positive control: both rows are really on screen, so the warning count
+      // below is measured over a tooltip that actually rendered two children.
+      expect(screen.getAllByText(SHARED_NAME)).toHaveLength(2)
       expect(
         spy.mock.calls.filter((args) =>
           args.some((a) => typeof a === 'string' && DUPLICATE_KEY_WARNING.test(a))
@@ -406,10 +441,27 @@ describe('every production <ChartLegend> opts out of recharts 3 sorting', () => 
   // symptom, so "it looks right" is not a check. If a future chart genuinely
   // WANTS recharts' sorting, change this pin deliberately rather than deleting
   // it — that is the whole point of it failing loudly.
-  const SOURCES: ReadonlyArray<readonly [string, string]> = [
-    ['SpendingTab.tsx', spendingTabSource],
-    ['SavingsTab.tsx', savingsTabSource],
-  ];
+  // Globbed, not listed. The previous version pinned two named files and then
+  // asserted "the pinned call sites are the only ones in the app" by counting
+  // legends INSIDE those same two files — which is true of any list, so a
+  // legend added to a third file (a new Reports tab, say) sailed past it. The
+  // glob is the fix: a new file is covered the moment it exists, and nobody has
+  // to remember to add it here.
+  //
+  // `.test.tsx` is excluded because this very file renders `<ChartLegend>` many
+  // times, deliberately without `itemSorter` in places, to test the component
+  // itself.
+  const APP_SOURCES = import.meta.glob('/src/**/*.tsx', {
+    query: '?raw',
+    import: 'default',
+    eager: true,
+  });
+
+  const SOURCES: ReadonlyArray<readonly [string, string]> = Object.entries(
+    APP_SOURCES
+  )
+    .filter(([path]) => !path.endsWith('.test.tsx'))
+    .sort(([a], [b]) => a.localeCompare(b));
 
   // `<ChartLegend>` always wraps a self-closing `<ChartLegendContent />`, and a
   // non-greedy match would stop at THAT `/>` rather than the outer one — which
@@ -420,42 +472,57 @@ describe('every production <ChartLegend> opts out of recharts 3 sorting', () => 
       .replace(/<ChartLegendContent[^>]*\/>/g, 'CONTENT')
       .match(/<ChartLegend[\s\S]*?\/>/g) ?? [];
 
-  test.each(SOURCES)('%s passes itemSorter on every ChartLegend', (_name, source) => {
-    const legends = outerLegends(source);
+  const CALL_SITES: ReadonlyArray<readonly [string, string]> = SOURCES.flatMap(
+    ([path, source]) =>
+      outerLegends(source).map((legend) => [path, legend] as const)
+  );
 
-    // Positive control: if the regex ever stops matching — a rename, a
-    // reformat, a move to another file — this is what catches it, rather than
-    // the test vacuously passing over an empty list.
-    expect(legends.length).toBeGreaterThan(0);
+  test('every <ChartLegend> in the app passes itemSorter', () => {
+    // Positive control, and the one thing the glob cannot prove on its own: it
+    // really found the charts. If `outerLegends` stops matching — a rename, a
+    // reformat — or the glob pattern goes stale, this fails here rather than
+    // passing over an empty list.
+    expect(CALL_SITES.length).toBeGreaterThan(0);
 
-    for (const legend of legends) {
-      expect(legend).toContain('itemSorter={null}');
+    for (const [path, legend] of CALL_SITES) {
+      expect(legend, path).toContain('itemSorter={null}');
     }
   });
 
-  test('the pinned call sites are the only ones in the app', () => {
-    // Guards the other half: a NEW <ChartLegend> added to some third file
-    // would not be covered by the pin above. Counting here means the new file
-    // has to be added to SOURCES deliberately.
-    const total = SOURCES.reduce((n, [, src]) => n + outerLegends(src).length, 0);
-    expect(total).toBe(3);
+  test('the glob really reaches the production charts', () => {
+    // Names the files that carry the legends today, so a glob that silently
+    // stopped matching `src/components/reports/**` (a moved directory, a
+    // changed pattern) cannot leave the test above vacuously green on a
+    // shorter list. It does NOT pin the count: a new chart in a new file is
+    // covered by the loop above automatically, which is the whole point of
+    // globbing rather than listing.
+    const files = new Set(CALL_SITES.map(([path]) => path.split('/').pop()));
+    expect(files).toContain('SpendingTab.tsx');
+    expect(files).toContain('SavingsTab.tsx');
   });
 });
 
 describe('ChartLegendContent placement', () => {
-  // recharts 3.10 deprecated `verticalAlign` in favour of `position`, so this
-  // padding branch reads `position` now. The default arm is what all three
-  // production legends hit — none of them positions the legend — and it has to
-  // keep landing on `pt-3`, which is where `verticalAlign`'s "bottom" default
-  // used to put it.
+  // The 12px gap has to sit on the side of the legend that FACES THE PLOT, for
+  // every way a caller can place it. recharts 3.10 deprecated `verticalAlign`
+  // in favour of `position` but did not remove it — `legendDefaultProps` still
+  // defaults it to "bottom" and `getDefaultPosition` still branches on it
+  // whenever `position` is unset — so BOTH props move the legend today and both
+  // arms have to be pinned. `position` wins when set, mirroring recharts' own
+  // precedence.
   //
-  // The `position="top"` arm is the half that proves the branch is wired to a
-  // prop recharts actually forwards: `<Legend>` spreads its resolved props onto
-  // the `content` element, so a prop it did NOT forward would leave this test
-  // reading `pt-3` and the migration would be silently dead.
+  // Every case below drives a real `<Legend>`, which is the other half of the
+  // claim: `<Legend>` spreads its resolved props onto the `content` element, so
+  // a prop it did NOT forward would leave the padding on the default arm and
+  // the branch would be silently dead.
   const CONFIG = { alpha: { label: 'Alpha', color: 'rgb(1, 1, 1)' } } satisfies ChartConfig
 
-  function renderLegend(position?: 'top' | 'bottom') {
+  type Placement = Pick<
+    React.ComponentProps<typeof ChartLegend>,
+    'position' | 'verticalAlign'
+  >
+
+  function renderLegend(placement: Placement = {}) {
     return render(
       <ChartContainer config={CONFIG}>
         <BarChart data={[{ name: 'Jan', alpha: 1 }]}>
@@ -463,7 +530,7 @@ describe('ChartLegendContent placement', () => {
           <ChartLegend
             content={<ChartLegendContent />}
             itemSorter={null}
-            position={position}
+            {...placement}
           />
           <Bar dataKey="alpha" fill="var(--color-alpha)" />
         </BarChart>
@@ -477,16 +544,54 @@ describe('ChartLegendContent placement', () => {
     return el
   }
 
-  test('an unpositioned legend pads on the side facing the plot', () => {
+  test('an unplaced legend pads on the side facing the plot', () => {
+    // What all three production legends render as.
     const { container } = renderLegend()
     expect(row(container)).toHaveClass('pt-3')
     expect(row(container)).not.toHaveClass('pb-3')
   })
 
-  test('position="top" flips the padding to the other side', () => {
-    const { container } = renderLegend('top')
+  test('the deprecated verticalAlign="top" still flips the padding', () => {
+    // recharts honours this prop, so we have to as well: reading `position`
+    // alone left a top-aligned legend with its gap on the top side.
+    const { container } = renderLegend({ verticalAlign: 'top' })
     expect(row(container)).toHaveClass('pb-3')
     expect(row(container)).not.toHaveClass('pt-3')
+  })
+
+  test('position="top" flips the padding to the other side', () => {
+    const { container } = renderLegend({ position: 'top' })
+    expect(row(container)).toHaveClass('pb-3')
+    expect(row(container)).not.toHaveClass('pt-3')
+  })
+
+  test('an insideTop position counts as top too', () => {
+    // Same top edge, just inside the plot area rather than above it.
+    const { container } = renderLegend({ position: 'insideTop' })
+    expect(row(container)).toHaveClass('pb-3')
+    expect(row(container)).not.toHaveClass('pt-3')
+  })
+
+  test('an { x, y } position is not top', () => {
+    // The object arm of the placement union. It cannot be compared to a string,
+    // and there is no edge it is anchored to, so it takes the default side —
+    // this is what `typeof position === "string"` is for, and without it the
+    // component throws on `includes` narrowing or silently mis-pads.
+    const { container } = renderLegend({ position: { x: 0, y: 0 } })
+    expect(row(container)).toHaveClass('pt-3')
+    expect(row(container)).not.toHaveClass('pb-3')
+  })
+
+  test('a set position wins over verticalAlign', () => {
+    // recharts resolves the conflict this way — `getDefaultPosition`, the only
+    // reader of `verticalAlign`, is skipped entirely once `position` is set —
+    // so the padding has to follow `position`, not the stale prop.
+    const { container } = renderLegend({
+      position: 'bottom',
+      verticalAlign: 'top',
+    })
+    expect(row(container)).toHaveClass('pt-3')
+    expect(row(container)).not.toHaveClass('pb-3')
   })
 })
 
@@ -519,5 +624,87 @@ describe('ChartContainer config context', () => {
     rerender(tree(SECOND))
     expect(screen.getByText('After Rename')).toBeInTheDocument()
     expect(screen.queryByText('Before Rename')).toBeNull()
+  })
+})
+
+describe('ChartContainer context identity', () => {
+  // The memo above pins the provider's dependency LIST; this pins the memo
+  // itself. Deleting it changes no markup — only how often every consumer under
+  // the container re-renders — so the only way to see it is to count renders.
+  //
+  // The counter has to live inside a consumer, and `ChartLegendContent` is the
+  // exported one. It renders `config[key].icon` as a fresh element on each of
+  // its own renders, so an icon component counts exactly those. `React.memo`
+  // around it is the wall: with no props of its own the probe cannot be
+  // re-rendered from above, so a re-render can only have come from the chart
+  // context handing out a new value.
+  const PAYLOAD = [{ value: 'Alpha', dataKey: 'alpha', color: 'rgb(1, 1, 1)' }]
+
+  function makeProbe() {
+    const counter = { renders: 0 }
+
+    function CountingIcon() {
+      counter.renders += 1
+      return <span data-testid="swatch" />
+    }
+
+    const config = {
+      alpha: { label: 'Alpha', color: 'rgb(1, 1, 1)', icon: CountingIcon },
+    } satisfies ChartConfig
+
+    const Probe = React.memo(function Probe() {
+      return <ChartLegendContent payload={PAYLOAD} />
+    })
+
+    return { counter, config, Probe }
+  }
+
+  function Harness({
+    config,
+    Probe,
+  }: {
+    config: ChartConfig
+    Probe: React.ComponentType
+  }) {
+    const [tick, setTick] = React.useState(0)
+    return (
+      <div>
+        <button type="button" onClick={() => setTick((n) => n + 1)}>
+          bump {tick}
+        </button>
+        <ChartContainer config={config}>
+          <Probe />
+        </ChartContainer>
+      </div>
+    )
+  }
+
+  test('a parent re-render does not re-render the chart consumers', () => {
+    const { counter, config, Probe } = makeProbe()
+    render(<Harness config={config} Probe={Probe} />)
+
+    // Positive control: the legend really rendered the icon, so the comparison
+    // below is not 0 against 0.
+    const afterMount = counter.renders
+    expect(afterMount).toBeGreaterThan(0)
+
+    for (let i = 0; i < 5; i += 1) {
+      fireEvent.click(screen.getByText(/^bump/))
+    }
+    // Positive control: the parent really re-rendered five times.
+    expect(screen.getByText('bump 5')).toBeInTheDocument()
+
+    expect(counter.renders).toBe(afterMount)
+  })
+
+  test('a changed config still reaches the chart consumers', () => {
+    // Keeps the test above honest: a probe that never re-renders at all would
+    // satisfy it too. A new config object has to get through.
+    const { counter, config, Probe } = makeProbe()
+    const { rerender } = render(<Harness config={config} Probe={Probe} />)
+    const afterMount = counter.renders
+
+    rerender(<Harness config={{ ...config }} Probe={Probe} />)
+    expect(counter.renders).toBeGreaterThan(afterMount)
   })
 })
