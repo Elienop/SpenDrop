@@ -537,10 +537,17 @@ function describeIdentityPart(part: unknown): string | null {
   // share `(d) => d.total` — so stringifying it would mint a key that looks
   // unique and is not. Collapsing it keeps the tie visible for the repeat
   // counter to resolve.
-  if (typeof part === "function" || part === undefined || part === null) {
-    return null
-  }
-  return String(part)
+  // Only primitives are kept. `String({})` is `"[object Object]"` for EVERY
+  // object, so coercing one would mint the same "unique" key for two different
+  // rows — the exact collision this helper exists to prevent, and what SonarQube
+  // S6551 flags. Recharts' own types make that unreachable today (`DataKey` is
+  // `string | number | ((obj) => …)` and `name` is a primitive), so this arm is
+  // a guard against a future widening rather than a live case: no test pins it,
+  // because faking an object into a typed payload would prove less than this
+  // comment does.
+  if (typeof part === "string") return part
+  if (typeof part === "number" || typeof part === "boolean") return String(part)
+  return null
 }
 
 // Helper to extract item config from a payload.

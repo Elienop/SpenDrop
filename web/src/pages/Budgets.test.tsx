@@ -1383,14 +1383,12 @@ describe('Budgets page', () => {
 
     test('a page with nothing unsaved does not cancel beforeunload', async () => {
       renderBudgets();
-      await waitFor(() =>
-        expect(
-          screen.getByLabelText(/Budget for April 2026/i),
-        ).toBeInTheDocument(),
-      );
-      await waitFor(() =>
-        expect(screen.getByLabelText(/Limit for Groceries/i)).toBeInTheDocument(),
-      );
+      expect(
+        await screen.findByLabelText(/Budget for April 2026/i),
+      ).toBeInTheDocument();
+      expect(
+        await screen.findByLabelText(/Limit for Groceries/i),
+      ).toBeInTheDocument();
 
       // Negative control. Without it a handler that cancelled unconditionally —
       // one that dropped its `dirtyCount === 0` guard — would satisfy both
@@ -1409,11 +1407,9 @@ describe('Budgets page', () => {
 
       await user.clear(april());
       await user.type(april(), '4000');
-      await waitFor(() =>
-        expect(
-          screen.getByRole('button', { name: /^Save Budgets \(1\)$/ }),
-        ).toBeInTheDocument(),
-      );
+      expect(
+        await screen.findByRole('button', { name: /^Save Budgets \(1\)$/ }),
+      ).toBeInTheDocument();
 
       expect(beforeUnloadWasCancelled()).toBe(true);
     });
@@ -1424,14 +1420,12 @@ describe('Budgets page', () => {
 
       const rent = () =>
         screen.getByLabelText(/Limit for Rent/i) as HTMLInputElement;
-      await waitFor(() => expect(rent()).toBeInTheDocument());
+      expect(await screen.findByLabelText(/Limit for Rent/i)).toBeInTheDocument();
 
       await user.type(rent(), '250');
-      await waitFor(() =>
-        expect(
-          screen.getByRole('button', { name: /^Save Category Limits \(1\)$/ }),
-        ).toBeInTheDocument(),
-      );
+      expect(
+        await screen.findByRole('button', { name: /^Save Category Limits \(1\)$/ }),
+      ).toBeInTheDocument();
 
       expect(beforeUnloadWasCancelled()).toBe(true);
     });

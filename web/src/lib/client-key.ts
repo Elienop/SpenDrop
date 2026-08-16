@@ -52,7 +52,7 @@ export function newClientKey(): string {
   if (typeof webCrypto?.getRandomValues !== 'function') {
     // Phrased so the assertion that pins it cannot be satisfied by the
     // TypeError a deleted guard would raise from the very next line.
-    throw new Error(
+    throw new TypeError(
       'newClientKey: no cryptographic random source — neither crypto.randomUUID ' +
         'nor crypto.getRandomValues is available, so no transaction idempotency ' +
         'key can be minted.',
