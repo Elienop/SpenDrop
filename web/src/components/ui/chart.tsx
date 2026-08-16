@@ -310,12 +310,12 @@ const ChartLegend = RechartsPrimitive.Legend
 // `"center"` — sits below or beside the plot. The `{ x, y }` object form is not
 // a string, so it never matches here and lands on the default arm; there is no
 // edge it is anchored to that could be read off it.
-const TOP_ANCHORED_LEGEND_POSITIONS: ReadonlyArray<string> = [
+const TOP_ANCHORED_LEGEND_POSITIONS: ReadonlySet<string> = new Set([
   "top",
   "insideTop",
   "insideTopLeft",
   "insideTopRight",
-]
+])
 
 const ChartLegendContent = React.forwardRef<
   HTMLDivElement,
@@ -390,7 +390,7 @@ const ChartLegendContent = React.forwardRef<
       position === undefined
         ? verticalAlign === "top"
         : typeof position === "string" &&
-          TOP_ANCHORED_LEGEND_POSITIONS.includes(position)
+          TOP_ANCHORED_LEGEND_POSITIONS.has(position)
 
     return (
       <div
