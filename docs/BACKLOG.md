@@ -261,6 +261,52 @@ formatter. **Effort:** small.
 remove button gives roughly a 10×14px target on phone; Backspace-removes-last is the only
 fallback. Same 44px `coarse:` floor discipline as the B9 batch. **Effort:** small.
 
+### B57 — the currency and category comboboxes have no accessible name of their own
+**Verified: reproduced** (2026-08-16, in-browser + rendered-tree probe, review of the
+`ui/**` Sonar branch). `AmountCurrencyInput.tsx` and `TransactionEntryRow.tsx` render
+`<Command><CommandInput placeholder="Search currency…"/>`. cmdk always emits a visually hidden
+`<label>` fed from `Command`'s `label` prop, which is unset — so it is empty, and the combobox's
+accessible name falls all the way through `aria-labelledby` → that empty label → the placeholder.
+Placeholder-as-name is the weakest rung: it is a hint, not a name, and it disappears as soon as
+the user types, so re-querying the focused control mid-typing announces a bare "combobox". Fix is
+one prop per site — `<Command label="Search currency">` / `"Search category"` — with no visual
+change. Pre-existing, unrelated to the branch that surfaced it. **Effort:** small.
+
+### B58 — cmdk filters the comboboxes on the currency CODE only
+**Verified: reproduced** (2026-08-16, live at :3535). Typing `leb` in the currency picker shows
+"No currency found" while `lbp` matches — cmdk scores against each item's `value`, which is the
+code, so the human-readable name ("Lebanese Pound") is unsearchable. Two members entering rows on
+a phone will type the name. Fix: give `CommandItem` a `value` that includes the name, or pass a
+custom `filter` to `Command`. **Effort:** small.
+
+### B59 — `FormControl` always points `aria-describedby` at a description element that usually does not exist
+**Verified: reproduced** (2026-08-16, Settings → Change password, live DOM). Stock shadcn shape,
+present since the primitive was added: `aria-describedby` lists `<id>-form-item-description`
+unconditionally, but `FormDescription` is rendered on very few fields — so most inputs reference a
+dangling id. Assistive tech is required to ignore missing ids, so the practical cost is low, but it
+is a lie in the accessibility tree on every form in the app (Login, Register, Settings, Savings,
+the entry row). Fix: make the id conditional on a rendered description, which needs the description's
+presence in context. **Effort:** small.
+
+### B60 — the Calendar primitive carries two selectors for slots nothing renders
+**Verified: read** (2026-08-16, UX review of the `ui/**` Sonar branch). The branch removed one such
+dead hook — `cmdk-input-wrapper`, an attribute cmdk never emits — and its sibling cases stayed:
+`calendar.tsx` styles `[[data-slot=card-content]_&]` and `[[data-slot=popover-content]_&]`, but
+`card.tsx` and `popover.tsx` emit no `data-slot` in this fork, so a Calendar inside a Card or a
+Popover keeps its own background instead of going transparent. No live symptom — `Calendar` and
+`ToggleGroup` have zero importers in `web/src` — which is exactly why it will rot quietly. Fix
+alongside any future shadcn-upstream resync, and generalise `command.test.tsx`'s "the selector names
+a slot this file renders" pin so it covers every primitive. **Effort:** small.
+
+### B61 — `AlertTitle` renders `<h5>` under `<h3>` and `<h2>` headings
+**Verified: read** (2026-08-16, same review). Five call sites (`Savings.tsx:237`,
+`Settings.tsx:504`, `:2133`, `:3345`, `:3987`); the Settings ones sit under an `<h3>` section title
+and a `<DialogTitle>` (`<h2>`), so the outline skips a level or two. Sonar's S6850 (which this
+branch cleared) only asks whether the heading has content; the level skip is the part a screen-reader
+user actually navigates. Options: make the level a prop, or drop the heading entirely — `Alert`
+already carries `role="alert"`, so the title does not need to be a heading to be announced.
+**Effort:** small.
+
 ## Queued stages
 
 *B10 (with B1 step 2 folded in) shipped 2026-08-14 on `feat/b10-signed-amounts`, merged via
@@ -319,15 +365,30 @@ PR #139 and released as v0.44.0 — see Closed.*
 - ~~**SonarQube: two exclusions in `sonar-project.properties` hide real code**~~ **Answered
   2026-08-16.** `web/src/components/ui/**`: **analyse it** — git shows 17 of the 32 primitives
   carry SpenDrop commits after their add (sheet/dialog heights, select, switch, table, chart,
-  sonner, the bespoke `password-input`), so "vendored" was half false; measured on a throwaway
-  scan: +74 findings (57 = deprecated `React.ElementRef` → `ComponentRef`, 4 context values
-  re-created per render, 3 nested components in calendar, 2 index keys, an empty-heading
-  `AlertTitle`, an unknown `cmdk-input-wrapper` attribute, two one-liners; 3 vanish under the
-  project profile), `ui/` itself 77% covered once the vitest collection exclude is lifted too,
-  overall coverage 86.0 → 85.7. Shipped on `chore/sonar-analyze-ui` with the findings fixed in
-  the same PR so the post-merge scan lands green. `.github/**`: **stays excluded** — this
-  server has no GitHub Actions analyzer (language list checked), so un-excluding buys nothing;
-  revisit when Community Build ships one.
+  sonner, dropdown-menu, the bespoke `password-input`), so "vendored" was half false; measured on
+  a throwaway scan: +74 findings (57 = deprecated `React.ElementRef` → `ComponentRef`, 4 context
+  values re-created per render, 3 nested components in calendar, 2 index keys, an empty-heading
+  `AlertTitle`, an unknown `cmdk-input-wrapper` attribute, three one-liners — recharts' deprecated
+  `verticalAlign` on the chart legend, `replace(/:/g)` → `replaceAll`, and an `Exclude<…, undefined>`
+  on an optional prop; 3 vanish under the project profile). On that pre-fix scan `ui/` measured 77%
+  covered once the vitest collection exclude was lifted too, dragging overall 86.0 → 85.7 — the
+  branch's own 441 lines of primitive tests put it back: branch-tip scan the same day reads `ui/`
+  **83.1%**, overall **85.9%**, 4,668 tests. Shipped on `chore/sonar-analyze-ui` with every finding
+  fixed except the two `S6479` index keys in `chart.tsx`, kept deliberately (a tooltip or legend
+  payload row has no identity that is both stable and unique — `name` is shared by design and a
+  `dataKey` may be a function; a colliding key is strictly worse than the index, and the "two series
+  sharing a name" test guards the reasoning). They want an individual Accept with that reason on the
+  server, the same pattern as the Go entry above. **Measured 2026-08-16, worth keeping: Sonar
+  backdates the issues in files that are new to analysis to their blame dates.** Two-scan probe
+  (throwaway project `spendrop-backdate-probe`, deleted after): `main` with `ui/` excluded, then the
+  branch with it included as the next version → 0 new-code issues, gate OK, the pre-existing `ui/`
+  findings dated 2026-04/08 rather than today. So the 2026-08-15 note that un-excluding a path
+  "surfaces pre-existing issues as *new* on the first scan after" was wrong, and a later un-exclusion
+  carries no gate risk on that account. `.github/**`: **stays excluded** — `api/languages/list` on this
+  server returns 27 analyzers and none of them reads GitHub Actions workflows, so the workflow
+  logic itself stays unanalysed either way; un-excluding would only add the generic `yaml`,
+  `secrets` and `docker` rules over four files. Revisit when Community Build ships a GitHub
+  Actions analyzer.
 
 ---
 
