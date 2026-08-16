@@ -559,6 +559,15 @@ describe('ChartLegendContent placement', () => {
     expect(row(container)).not.toHaveClass('pt-3')
   })
 
+  test('verticalAlign="middle" pads on the default side', () => {
+    // The third arm of `VerticalAlignmentType`, and the one a `!== "bottom"`
+    // test of the fallback would get wrong: a middle-aligned legend is beside
+    // the plot, not above it, so the gap stays on top exactly as "bottom" does.
+    const { container } = renderLegend({ verticalAlign: 'middle' })
+    expect(row(container)).toHaveClass('pt-3')
+    expect(row(container)).not.toHaveClass('pb-3')
+  })
+
   test('position="top" flips the padding to the other side', () => {
     const { container } = renderLegend({ position: 'top' })
     expect(row(container)).toHaveClass('pb-3')

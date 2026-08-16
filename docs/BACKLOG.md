@@ -372,7 +372,7 @@ PR #139 and released as v0.44.0 — see Closed.*
   `verticalAlign` on the chart legend, `replace(/:/g)` → `replaceAll`, and an `Exclude<…, undefined>`
   on an optional prop; 3 vanish under the project profile). On that pre-fix scan `ui/` measured 77%
   covered once the vitest collection exclude was lifted too, dragging overall 86.0 → 85.7 — the
-  branch's own 441 lines of primitive tests put it back: branch-tip scan the same day reads `ui/`
+  branch's own 1,168 net lines of primitive tests put it back: branch-tip scan the same day reads `ui/`
   **83.1%**, overall **85.9%**, 4,668 tests. Shipped on `chore/sonar-analyze-ui` with every finding
   fixed except the two `S6479` index keys in `chart.tsx`, kept deliberately (a tooltip or legend
   payload row has no identity that is both stable and unique — `name` is shared by design and a

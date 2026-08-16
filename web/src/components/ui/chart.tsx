@@ -305,9 +305,10 @@ const ChartLegend = RechartsPrimitive.Legend
 // placed in, so the gap separating it from the plot has to sit UNDER it.
 // `"top"` is the outside placement above the plot area; the three `insideTop*`
 // values anchor to the top edge with `verticalAnchor: "start"`, i.e. the legend
-// hangs downwards from there (recharts' `getCartesianPosition`). Every other
-// value — `"bottom"`, the `insideBottom*` trio, the left/right pair and
-// `"center"` — sits below or beside the plot. The `{ x, y }` object form is not
+// hangs downwards from there (recharts' `getCartesianPosition`). The other
+// nine members of the union — `"bottom"`, `"left"`, `"right"`, `"center"`, the
+// `insideBottom*` trio and `insideLeft`/`insideRight` — sit below or beside the
+// plot, where the gap belongs on top. The `{ x, y }` object form is not
 // a string, so it never matches here and lands on the default arm; there is no
 // edge it is anchored to that could be read off it.
 const TOP_ANCHORED_LEGEND_POSITIONS: ReadonlySet<string> = new Set([
