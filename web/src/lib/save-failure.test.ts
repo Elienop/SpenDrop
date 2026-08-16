@@ -2,6 +2,7 @@ import { describe, test, expect } from 'vitest';
 import { ApiError, NetworkError } from '@/api/client';
 import {
   isRetryableSaveFailure,
+  noClientKeyMessage,
   noRateMessage,
   saveFailureMessage,
 } from './save-failure';
@@ -54,5 +55,26 @@ describe('noRateMessage', () => {
   test('names the currency that has no rate', () => {
     expect(noRateMessage('LBP')).toMatch(/LBP/);
     expect(noRateMessage('LBP')).toMatch(/settings/i);
+  });
+});
+
+describe('noClientKeyMessage', () => {
+  test('states the entry was not saved, and names what stopped it', () => {
+    // Both halves matter. "Not saved" is the whole point — the user has to be
+    // able to tell this from a save that went through. Naming the browser is
+    // what keeps them from hunting a network problem that isn't there, the
+    // same reason `noRateMessage` names the currency.
+    expect(noClientKeyMessage()).toMatch(/not saved/i);
+    expect(noClientKeyMessage()).toMatch(/browser/i);
+  });
+
+  test('does not borrow the unknown-outcome copy', () => {
+    // `saveFailureMessage` says the outcome could not be confirmed and that a
+    // Retry is safe. Nothing was sent here, so both sentences would be false:
+    // there is no write in flight to confirm, and no Retry to be safe about.
+    const msg = noClientKeyMessage();
+    expect(msg).not.toMatch(/confirm the save/i);
+    expect(msg).not.toMatch(/duplicate/i);
+    expect(msg).not.toMatch(/\bretry\b/i);
   });
 });

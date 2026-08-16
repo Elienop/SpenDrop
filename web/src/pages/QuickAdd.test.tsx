@@ -1,4 +1,4 @@
-import { describe, test, expect, vi, beforeEach } from 'vitest';
+import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { createElement, type ReactNode } from 'react';
 import { ApiError, NetworkError } from '@/api/client';
 import { STORAGE_KEYS } from '@/lib/storage-keys';
+import { noClientKeyMessage } from '@/lib/save-failure';
 import type { UseDescriptionHistoryResult } from '@/hooks/useDescriptionHistory';
 import type { CreateTransactionInput } from '@/hooks/useTransactions';
 import type { Category, Currency, Transaction } from '../api/types';
@@ -887,6 +888,58 @@ describe('QuickAdd — submit failure (online, never queues)', () => {
     expect(toastError.mock.calls[0][0]).toMatch(/confirm the save/i);
     expect(toastError.mock.calls[0][0]).toMatch(/duplicate/i);
     expect(enqueue).not.toHaveBeenCalled();
+  });
+});
+
+// `newClientKey` throws rather than mint a weak idempotency key, and it is the
+// first thing `submit` does. The throw used to escape `void submit()`: loud in
+// the console, and on screen indistinguishable from a tap that did nothing.
+describe('QuickAdd — no idempotency key could be minted', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  test('says the entry was not saved instead of failing silently', async () => {
+    const user = userEvent.setup();
+    renderQuickAdd();
+
+    await screen.findByRole('button', { name: /groceries/i });
+    await user.type(screen.getByPlaceholderText(/lunch/i), 'groceries 43');
+
+    // Positive control for the negative assertions below: an entry that Add
+    // would really have sent. Without this, a disabled button would satisfy
+    // "nothing was posted" just as well as the guard does.
+    const addBtn = await screen.findByRole('button', { name: /^add$/i });
+    expect(addBtn).toBeEnabled();
+
+    // A `crypto` that cannot supply random bytes — the one shape
+    // `newClientKey` refuses to mint from (see client-key.test.ts). Stubbed
+    // after the render so only the tap runs on the crippled platform.
+    vi.stubGlobal('crypto', {});
+
+    await user.click(addBtn);
+
+    await waitFor(() => expect(toastError).toHaveBeenCalled());
+    const [message, opts] = toastError.mock.calls[0] as [
+      string,
+      ToastOpts | undefined,
+    ];
+    // Compared against the shared copy rather than a re-typed string: the
+    // wording itself is pinned in save-failure.test.ts, and what this surface
+    // has to prove is that it defers to it. A call site that grew its own
+    // sentence is exactly how the phone and the desktop entry row start
+    // telling the user two different stories about one failure.
+    expect(message).toBe(noClientKeyMessage());
+    // A bare toast, like the no-rate case: nothing left the device, so there
+    // is no Retry to hold it open for — and the failure slot's id is the very
+    // key that could not be minted.
+    expect(opts).toBeUndefined();
+
+    // The half that makes the toast worth anything: it is reporting a save
+    // that genuinely did not happen, by either route.
+    expect(apiPost).not.toHaveBeenCalled();
+    expect(enqueue).not.toHaveBeenCalled();
+    expect(toastSuccess).not.toHaveBeenCalled();
   });
 });
 
